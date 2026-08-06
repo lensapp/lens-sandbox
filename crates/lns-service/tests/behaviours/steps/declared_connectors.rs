@@ -102,7 +102,8 @@ fn launch(
         return;
     }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
-    let applied = resolve_applied_with_slots(&policy, &resolved.credentials, &rig.catalog);
+    let applied =
+        resolve_applied_with_slots(&policy, &resolved.credentials, &rig.catalog, &|_| false);
     policy
         .network
         .egress

@@ -185,6 +185,7 @@ pub struct CredentialSession {
     armed: Mutex<HashSet<String>>,
     slot_ids: HashSet<String>,
     grant_binding: Option<GrantBinding>,
+    connector_owners: Arc<HashMap<String, String>>,
     run_grants: Mutex<HashMap<String, GrantRecord>>,
     connect: ConnectEmitter,
     oauth_configs: HashMap<String, crate::oauth::OauthConfig>,
@@ -235,6 +236,7 @@ impl CredentialSession {
             armed: Mutex::new(HashSet::new()),
             slot_ids: HashSet::new(),
             grant_binding: None,
+            connector_owners: Arc::new(HashMap::new()),
             run_grants: Mutex::new(HashMap::new()),
             connect: Box::new(|_| {}),
             oauth_configs: HashMap::new(),
@@ -301,6 +303,12 @@ impl CredentialSession {
     /// Per-id user-facing labels (e.g. `some-oauth` → "GitHub") for connect prompts and the sign-in card; ids absent here fall back to the id itself.
     pub fn with_oauth_display_names(mut self, display_names: HashMap<String, String>) -> Self {
         self.oauth_display_names = display_names;
+        self
+    }
+
+    /// Which connector each provider id belongs to, so a `lns connector disconnect` — recorded against the connector — is recognized as cancelling a decision made for one of its sign-in methods.
+    pub fn with_connector_owners(mut self, owners: Arc<HashMap<String, String>>) -> Self {
+        self.connector_owners = owners;
         self
     }
 
@@ -381,7 +389,7 @@ impl CredentialSession {
         self.armed.lock().expect("armed mutex poisoned").clone()
     }
 
-    /// Reconcile the armed set against a reloaded policy without erasing this run's live consent: keep an id the reload still lists or that names a credential slot (a live connect isn't self-revoked by its own persist, and the policy file can't revoke an artifact slot), re-arm the ids the reloaded policy grants, and drop everything else (a `lns connector disconnect`) — so a reload can revoke arming but never re-arm a connector this workload never granted.
+    /// Reconcile the armed set against a reloaded policy without erasing this run's live consent: keep an id the reload still lists or that names a credential slot (a live connect isn't self-revoked by its own persist, and the policy file can't revoke an artifact slot), re-arm the ids the reloaded policy grants, and drop everything else (a `lns connector disconnect`) — so a reload can revoke arming but never re-arm a connector this workload never granted. `reloaded` arrives already expanded into the providers' own keyspace, because the policy names connectors rather than the sign-in method a value is bound under.
     pub fn reconcile_armed(&self, granted: &[String], reloaded: &[String]) {
         let reloaded_set: HashSet<&str> = reloaded.iter().map(String::as_str).collect();
         let mut armed = self.armed.lock().expect("armed mutex poisoned");
@@ -451,6 +459,13 @@ impl CredentialSession {
         Some(record)
     }
 
+    /// The id a forget is recorded against: the connector, not the sign-in method the user picked through it.
+    fn revocation_key<'a>(&'a self, provider: &'a str) -> &'a str {
+        self.connector_owners
+            .get(provider)
+            .map_or(provider, String::as_str)
+    }
+
     /// Pins the forget count a freshly-raised card is asked against, so a `lns connector disconnect` the developer did before it went up is a question this card answers rather than a cancellation of it; an unreadable sidecar leaves the previous count in place, which can only cancel.
     fn ask_against_current_revocations(&self, credential_id: &str) {
         let Some(binding) = &self.grant_binding else {
@@ -459,9 +474,10 @@ impl CredentialSession {
         let Ok(file) = binding.store.load() else {
             return;
         };
+        let connector = self.revocation_key(credential_id);
         binding.ask_against_revocations(
             credential_id,
-            file.revocations_of(&binding.project, credential_id),
+            file.revocations_of(&binding.project, connector),
         );
     }
 
@@ -471,9 +487,10 @@ impl CredentialSession {
             return;
         };
         let asked_against = binding.revocations_asked_against(&record.connector);
+        let connector = self.revocation_key(&record.connector).to_string();
         let mut forgotten_since = false;
         let outcome = binding.store.update(&mut |file| {
-            if file.revocations_of(&record.project, &record.connector) != asked_against {
+            if file.revocations_of(&record.project, &connector) != asked_against {
                 forgotten_since = true;
                 return false;
             }
@@ -733,22 +750,22 @@ impl CredentialSession {
     }
 
     /// Connects connector `id` outside the held-credential flow (e.g. accepting a network offer): a device sign-in for an oauth id, a straight route-allow for a plain connectable id; returns whether it is now connected.
-    pub async fn connect_connector_now(&self, id: &str) -> bool {
-        if self.is_signin(id) {
-            let ok = self.run_signin_connect(id).await == SignInOutcome::Connected;
+    pub async fn connect_connector_now(&self, provider: &str) -> bool {
+        if self.is_signin(provider) {
+            let ok = self.run_signin_connect(provider).await == SignInOutcome::Connected;
             if ok {
                 // The same connect arms the token, so any placeholder card already held for this connector is satisfied too — don't ask for it separately.
-                self.release_armed_holds(id);
+                self.release_armed_holds(provider);
             }
             return ok;
         }
-        if self.connectable.contains(id) {
-            self.grant_armed(id);
-            self.remember_grant(id, GrantVerdict::Allow);
-            (self.connect)(id);
+        if self.connectable.contains(provider) {
+            self.grant_armed(provider);
+            self.remember_grant(provider, GrantVerdict::Allow);
+            (self.connect)(provider);
             // The connect armed a value the wire expansion resolves (stored, oauth, or a host-detect that the host supplies), so a held value card asks an answered question; with nothing resolvable the card stays — that decision is still owed.
-            if self.has_resolvable_value(id) {
-                self.release_armed_holds(id);
+            if self.has_resolvable_value(provider) {
+                self.release_armed_holds(provider);
             }
             return true;
         }
@@ -1680,6 +1697,42 @@ mod tests {
                 .lookup("proj", &workload, "some-provider")
                 .is_some(),
             "a card raised after the forget is a new question, so answering it must land — otherwise one disconnect makes every later consent in this run un-rememberable, and the next run re-asks citing a disconnect the developer already undid"
+        );
+    }
+
+    #[test]
+    fn disconnecting_a_connector_mid_run_cancels_a_decision_made_for_one_of_its_sign_in_methods() {
+        let store = Arc::new(CapturingGrantStore::default());
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let method = DefProvider::new(lns_policy::providers::ProviderDef {
+            id: "some-provider:api-key".into(),
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some-placeholder-0000".into(),
+            injections: vec![lns_policy::providers::InjectionDef {
+                kind: lns_policy::providers::InjectionKind::BearerHeader,
+                domain: "api.some-provider.example".into(),
+                header: None,
+            }],
+        });
+        let session = grants_session(store.clone(), workload.clone(), vec![method])
+            .with_connector_owners(Arc::new(HashMap::from([(
+                "some-provider:api-key".to_string(),
+                "some-provider".to_string(),
+            )])));
+
+        session.submit_pending(pending("c1", "some-provider:api-key"), Instant::now());
+        forget_from_another_process(store.as_ref());
+        allow_stored(&session, "c1");
+
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .lookup("proj", &workload, "some-provider:api-key")
+                .is_none(),
+            "the developer disconnected the connector, not one of its sign-ins, so the forget must still cancel the card it interrupted"
         );
     }
 

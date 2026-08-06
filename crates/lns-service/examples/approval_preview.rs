@@ -4,7 +4,7 @@ use std::time::Duration;
 use eframe::egui;
 use lns_policy::connectors::TokenFallback;
 use lns_service::approval_flow::protocol::Treatment;
-use lns_service::approval_flow::session::PendingPrompt;
+use lns_service::approval_flow::session::{OfferMethodPrompt, OfferPrompt, PendingPrompt};
 use lns_service::approval_flow::window::{
     CredentialCardPrompt, SignInCard, Snapshot, StackItem, install_icon_font, install_system_fonts,
     lds_visuals, quiet_debug_overlays,
@@ -98,7 +98,7 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
     }
     let item = match action {
         CardAction::Decide { id, .. }
-        | CardAction::ConnectOffer { id }
+        | CardAction::ConnectOffer { id, .. }
         | CardAction::DeclineOffer { id }
         | CardAction::UseOfferToken { id, .. } => snapshot
             .pending
@@ -149,7 +149,6 @@ fn seed_one() -> Snapshot {
             host: "pypi.org".into(),
             action: "CONNECT pypi.org:443".into(),
             offer: None,
-            token_fallback: None,
             treatment: Treatment::Inspected,
         }],
         pending_credentials: vec![],
@@ -168,15 +167,21 @@ fn seed_all() -> Snapshot {
                 host: "pypi.org".into(),
                 action: "CONNECT pypi.org:443".into(),
                 offer: None,
-                token_fallback: None,
                 treatment: Treatment::Inspected,
             },
             PendingPrompt {
                 id: "net-offer".into(),
                 host: "openrouter.ai".into(),
                 action: "CONNECT openrouter.ai:443".into(),
-                offer: Some("OpenRouter".into()),
-                token_fallback: None,
+                offer: Some(OfferPrompt {
+                    connector_id: "openrouter".into(),
+                    display_name: "OpenRouter".into(),
+                    methods: vec![OfferMethodPrompt {
+                        id: "pkce".into(),
+                        display_name: "pkce".into(),
+                        token_fallback: None,
+                    }],
+                }),
                 treatment: Treatment::Inspected,
             },
         ],

@@ -29,24 +29,33 @@ pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
 /// Strips the allows that belong to a connector this workload has not decided yet, so a reload can't hand back what the launch withheld.
 pub type PolicyWithholder = Box<dyn Fn(&Policy) -> Policy + Send + Sync>;
 
+/// One way to sign in to an offered connector, paired with the per-machine store id that sign-in binds under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferMethod {
+    pub method_id: String,
+    pub provider_id: String,
+    pub display_name: String,
+    pub token_fallback: Option<TokenFallback>,
+}
+
 /// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
 pub struct OfferableConnector {
     pub id: String,
     pub display_name: String,
     pub patterns: Vec<String>,
-    pub token_fallback: Option<TokenFallback>,
+    pub methods: Vec<OfferMethod>,
 }
 
 /// Connects a connector interactively and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery. `connect_with_token` arms a pasted token instead of running the interactive sign-in.
 pub trait ConnectPort: Send + Sync {
-    fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
+    fn connect<'a>(&'a self, provider: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
     fn connect_with_token<'a>(
         &'a self,
-        id: &'a str,
+        provider: &'a str,
         value: String,
     ) -> futures_util::future::BoxFuture<'a, bool>;
     /// Remembers that this workload answered the connector's offer without taking it, so the next run stops asking.
-    fn decline(&self, id: &str);
+    fn decline(&self, connector: &str);
 }
 
 pub trait Notifier: Send + Sync {
@@ -62,15 +71,30 @@ pub trait Notifier: Send + Sync {
     fn clear_all_connecting(&self) {}
 }
 
+/// One sign-in the offer card can pick, named as the user sees it. The card never learns the store id behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferMethodPrompt {
+    pub id: String,
+    pub display_name: String,
+    /// Some when this sign-in declares a token fallback, so the card can also reveal "use a token instead".
+    pub token_fallback: Option<TokenFallback>,
+}
+
+/// The connect offer a held request carries: which connector claims the host, and the ways in the user can pick between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferPrompt {
+    pub connector_id: String,
+    pub display_name: String,
+    pub methods: Vec<OfferMethodPrompt>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPrompt {
     pub id: String,
     pub host: String,
     pub action: String,
-    /// Some(display name) when `host` matches a connectable connector, so the card offers to connect it before the plain allow/deny.
-    pub offer: Option<String>,
-    /// Some when the offered connector declares a token fallback, so the offer card can also reveal "use a token instead".
-    pub token_fallback: Option<TokenFallback>,
+    /// Some when `host` matches a connectable connector, so the card offers to connect it before the plain allow/deny.
+    pub offer: Option<OfferPrompt>,
     /// `Raw` when approving splices the connection through unread, which the card has to say out loud.
     pub treatment: Treatment,
 }
@@ -134,6 +158,21 @@ impl PendingEntry {
 struct OfferRef {
     connector_id: String,
     display_name: String,
+    methods: Vec<OfferMethod>,
+}
+
+impl OfferRef {
+    /// The store id the chosen sign-in binds under: the named method, or the only one when the card had no choice to present.
+    fn provider_for(&self, method: Option<&str>) -> Option<&str> {
+        match method {
+            Some(id) => self.methods.iter().find(|m| m.method_id == id),
+            None => match self.methods.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            },
+        }
+        .map(|m| m.provider_id.as_str())
+    }
 }
 
 pub struct ApprovalSession {
@@ -236,8 +275,8 @@ impl ApprovalSession {
             .find(|i| i.patterns.iter().any(|p| domain_matches(p, host)))
     }
 
-    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected — or declined — this run.
-    fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String, Option<TokenFallback>)> {
+    /// The offer to raise for `host`, or `None` when nothing matches or the connector is already connected — or declined — this run.
+    fn offer_for(&self, host: &str) -> Option<OfferRef> {
         let integ = self.offer_for_host(host)?;
         let already_connected = self
             .policy
@@ -251,12 +290,10 @@ impl ApprovalSession {
             .lock()
             .expect("declined mutex poisoned")
             .contains(&integ.id);
-        (!already_connected && !already_declined).then(|| {
-            (
-                integ.id.clone(),
-                integ.display_name.clone(),
-                integ.token_fallback.clone(),
-            )
+        (!already_connected && !already_declined).then(|| OfferRef {
+            connector_id: integ.id.clone(),
+            display_name: integ.display_name.clone(),
+            methods: integ.methods.clone(),
         })
     }
 
@@ -277,13 +314,9 @@ impl ApprovalSession {
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
         // Connecting a connector arms credential injection, which an opaque splice can never carry — and the offer card has no room for the RAW disclosure.
-        let matched = (req.treatment == Treatment::Inspected)
-            .then(|| self.offer_id_and_name_for(&req.host))
+        let offer_ref = (req.treatment == Treatment::Inspected)
+            .then(|| self.offer_for(&req.host))
             .flatten();
-        let offer_ref = matched.as_ref().map(|(id, name, _)| OfferRef {
-            connector_id: id.clone(),
-            display_name: name.clone(),
-        });
         // While a connect for this connector is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
         let coalesced = offer_ref
             .as_ref()
@@ -299,7 +332,7 @@ impl ApprovalSession {
                 action: req.action.clone(),
                 treatment: req.treatment,
                 deadline: now + self.timeout,
-                offer: offer_ref,
+                offer: offer_ref.clone(),
                 reason: req.reason.clone(),
             },
         );
@@ -307,16 +340,12 @@ impl ApprovalSession {
         if coalesced {
             return;
         }
-        let (offer, token_fallback) = match matched {
-            Some((_, name, fallback)) => (Some(name), fallback),
-            None => (None, None),
-        };
+        let offer = offer_ref;
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
             action: req.action,
-            offer,
-            token_fallback,
+            offer: offer.map(offer_prompt),
             treatment: req.treatment,
         });
     }
@@ -432,18 +461,32 @@ impl ApprovalSession {
     }
 
     /// Accepts a held request's connector offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
-    pub async fn connect_offer(&self, id: &str) -> DecisionOutcome {
-        self.connect_offer_with(id, None).await
+    pub async fn connect_offer(&self, id: &str, method: Option<&str>) -> DecisionOutcome {
+        self.connect_offer_with(id, method, None).await
     }
 
     /// Accepts a held request's connector offer by arming a pasted token instead of the interactive connect. See [`Self::connect_offer_with`].
-    pub async fn connect_offer_with_token(&self, id: &str, value: String) -> DecisionOutcome {
-        self.connect_offer_with(id, Some(value)).await
+    pub async fn connect_offer_with_token(
+        &self,
+        id: &str,
+        method: Option<&str>,
+        value: String,
+    ) -> DecisionOutcome {
+        self.connect_offer_with(id, method, Some(value)).await
     }
 
     /// Drives one connect for the offered connector and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same connector coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
-    async fn connect_offer_with(&self, id: &str, token: Option<String>) -> DecisionOutcome {
+    async fn connect_offer_with(
+        &self,
+        id: &str,
+        method: Option<&str>,
+        token: Option<String>,
+    ) -> DecisionOutcome {
         let Some(offer) = self.offer_of(id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        // A card that presented a choice must name one; without a provider there is nothing to bind, and guessing would pick a sign-in the user does not hold.
+        let Some(provider) = offer.provider_for(method).map(str::to_string) else {
             return DecisionOutcome::UnknownId;
         };
         if !self.begin_connecting(&offer.connector_id) {
@@ -457,12 +500,8 @@ impl ApprovalSession {
         }
         let connected = match self.connector.get() {
             Some(connector) => match token {
-                Some(value) => {
-                    connector
-                        .connect_with_token(&offer.connector_id, value)
-                        .await
-                }
-                None => connector.connect(&offer.connector_id).await,
+                Some(value) => connector.connect_with_token(&provider, value).await,
+                None => connector.connect(&provider).await,
             },
             None => false,
         };
@@ -711,6 +750,23 @@ impl ApprovalSession {
             self.notifier.dismiss(&request_id);
             self.send_decision_frame(&request_id, Decision::AllowOnce);
         }
+    }
+}
+
+/// The card's view of an offer: the sign-ins by the names the user reads, with the store ids left behind.
+fn offer_prompt(offer: OfferRef) -> OfferPrompt {
+    OfferPrompt {
+        connector_id: offer.connector_id,
+        display_name: offer.display_name,
+        methods: offer
+            .methods
+            .into_iter()
+            .map(|m| OfferMethodPrompt {
+                id: m.method_id,
+                display_name: m.display_name,
+                token_fallback: m.token_fallback,
+            })
+            .collect(),
     }
 }
 
@@ -1890,6 +1946,94 @@ pub(crate) mod tests {
         assert_eq!(deny.verdict, Verdict::Deny);
     }
 
+    #[tokio::test]
+    async fn an_offer_for_a_connector_reachable_two_ways_asks_which_sign_in() {
+        let (s, n, _rx) = offer_session(
+            vec![offerable_two_ways(
+                "some-provider",
+                "Some Provider",
+                "api.some-provider.example",
+            )],
+            None,
+        );
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        let presented = n.presented.lock().unwrap();
+        let offer = presented[0].offer.as_ref().expect("an offer");
+        assert_eq!(
+            offer
+                .methods
+                .iter()
+                .map(|m| m.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["API key", "Subscription"],
+            "the card must name every way in, or it would pick a sign-in the user may not hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_a_named_sign_in_connects_that_sign_ins_own_binding() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable_two_ways(
+                "some-provider",
+                "Some Provider",
+                "api.some-provider.example",
+            )],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        s.connect_offer("r1", Some("subscription")).await;
+
+        assert_eq!(
+            connector.connected.lock().unwrap().as_slice(),
+            &["some-provider:subscription".to_string()],
+            "the sign-in the user picked is what binds, so the connect must name its own key rather than the connector's"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_an_offer_that_presented_a_choice_without_naming_one_binds_nothing() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable_two_ways(
+                "some-provider",
+                "Some Provider",
+                "api.some-provider.example",
+            )],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        assert_eq!(
+            s.connect_offer("r1", None).await,
+            DecisionOutcome::UnknownId,
+            "guessing a sign-in would bind a credential the user never chose"
+        );
+        assert!(connector.connected.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepting_an_offer_naming_a_sign_in_the_catalog_dropped_binds_nothing() {
+        let connector = Arc::new(FakeConnector::new(true));
+        let (s, _n, _rx) = offer_session(
+            vec![offerable_two_ways(
+                "some-provider",
+                "Some Provider",
+                "api.some-provider.example",
+            )],
+            Some(connector.clone()),
+        );
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        assert_eq!(
+            s.connect_offer("r1", Some("no-longer-offered")).await,
+            DecisionOutcome::UnknownId
+        );
+        assert!(connector.connected.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn connect_connector_persists_only_the_id_but_emits_the_route_live() {
         let (s, _n, store, mut rx) = fixture();
@@ -1973,18 +2117,42 @@ pub(crate) mod tests {
             id: id.into(),
             display_name: name.into(),
             patterns: vec![pattern.into()],
-            token_fallback: None,
+            methods: vec![OfferMethod {
+                method_id: "token".into(),
+                provider_id: id.into(),
+                display_name: "token".into(),
+                token_fallback: None,
+            }],
         }
     }
 
     fn offerable_with_fallback(id: &str, name: &str, pattern: &str) -> OfferableConnector {
-        OfferableConnector {
-            token_fallback: Some(TokenFallback {
-                help: Some("https://example.com/pat".into()),
-                command: None,
-            }),
-            ..offerable(id, name, pattern)
-        }
+        let mut out = offerable(id, name, pattern);
+        out.methods[0].token_fallback = Some(TokenFallback {
+            help: Some("https://example.com/pat".into()),
+            command: None,
+        });
+        out
+    }
+
+    /// A connector reachable two ways, so the card must ask which sign-in the user holds.
+    fn offerable_two_ways(id: &str, name: &str, pattern: &str) -> OfferableConnector {
+        let mut out = offerable(id, name, pattern);
+        out.methods = vec![
+            OfferMethod {
+                method_id: "api-key".into(),
+                provider_id: format!("{id}:api-key"),
+                display_name: "API key".into(),
+                token_fallback: None,
+            },
+            OfferMethod {
+                method_id: "subscription".into(),
+                provider_id: format!("{id}:subscription"),
+                display_name: "Subscription".into(),
+                token_fallback: None,
+            },
+        ];
+        out
     }
 
     fn offer_session(
@@ -2015,7 +2183,10 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert_eq!(
-            n.presented.lock().unwrap()[0].offer.as_deref(),
+            n.presented.lock().unwrap()[0]
+                .offer
+                .as_ref()
+                .map(|o| o.display_name.as_str()),
             Some("GitHub"),
             "a held request to a connector domain offers to connect it"
         );
@@ -2169,9 +2340,15 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         let presented = n.presented.lock().unwrap();
-        assert_eq!(presented[0].offer.as_deref(), Some("GitHub"));
         assert_eq!(
-            presented[0].token_fallback,
+            presented[0].offer.as_ref().map(|o| o.display_name.as_str()),
+            Some("GitHub")
+        );
+        assert_eq!(
+            presented[0]
+                .offer
+                .as_ref()
+                .and_then(|o| o.methods[0].token_fallback.clone()),
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
                 command: None,
@@ -2187,7 +2364,13 @@ pub(crate) mod tests {
             None,
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        assert_eq!(n.presented.lock().unwrap()[0].token_fallback, None);
+        assert_eq!(
+            n.presented.lock().unwrap()[0]
+                .offer
+                .as_ref()
+                .and_then(|o| o.methods[0].token_fallback.clone()),
+            None
+        );
     }
 
     #[tokio::test]
@@ -2205,7 +2388,7 @@ pub(crate) mod tests {
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
         let outcome = s
-            .connect_offer_with_token("r1", "some-pasted-token".into())
+            .connect_offer_with_token("r1", None, "some-pasted-token".into())
             .await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
@@ -2228,7 +2411,7 @@ pub(crate) mod tests {
         let (s, _n, _rx) = offer_session(vec![], Some(connector.clone()));
         s.submit_pending(pending("r1", "example.com"), Instant::now());
         assert_eq!(
-            s.connect_offer_with_token("r1", "some-pasted-token".into())
+            s.connect_offer_with_token("r1", None, "some-pasted-token".into())
                 .await,
             DecisionOutcome::UnknownId
         );
@@ -2244,7 +2427,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        let outcome = s.connect_offer("r1").await;
+        let outcome = s.connect_offer("r1", None).await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert_eq!(
@@ -2265,7 +2448,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(
             decision_frame(&mut rx).decision,
@@ -2282,7 +2465,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
     }
@@ -2298,7 +2481,7 @@ pub(crate) mod tests {
         s.set_ledger_recorder(recorder.clone());
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         let events = recorder.events.lock().unwrap();
         assert_eq!(
@@ -2324,7 +2507,7 @@ pub(crate) mod tests {
         s.set_ledger_recorder(recorder.clone());
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         let events = recorder.events.lock().unwrap();
         assert_eq!(
@@ -2345,7 +2528,10 @@ pub(crate) mod tests {
         let (s, _n, mut rx) = offer_session(vec![], Some(connector.clone()));
         s.submit_pending(pending("r1", "example.com"), Instant::now());
 
-        assert_eq!(s.connect_offer("r1").await, DecisionOutcome::UnknownId);
+        assert_eq!(
+            s.connect_offer("r1", None).await,
+            DecisionOutcome::UnknownId
+        );
         assert!(
             connector.connected.lock().unwrap().is_empty(),
             "a plain network request must not be treated as an offer"
@@ -2362,7 +2548,10 @@ pub(crate) mod tests {
             vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
             None,
         );
-        assert_eq!(s.connect_offer("never").await, DecisionOutcome::UnknownId);
+        assert_eq!(
+            s.connect_offer("never", None).await,
+            DecisionOutcome::UnknownId
+        );
     }
 
     #[tokio::test]
@@ -2375,7 +2564,7 @@ pub(crate) mod tests {
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(
             connector.connected.lock().unwrap().as_slice(),
@@ -2406,7 +2595,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(
             n.connects_finished.lock().unwrap().as_slice(),
@@ -2424,7 +2613,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(
             n.connects_finished.lock().unwrap().as_slice(),
@@ -2441,7 +2630,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer("r1").await;
+        s.connect_offer("r1", None).await;
 
         assert_eq!(
             n.connects_finished.lock().unwrap().as_slice(),
@@ -2462,7 +2651,7 @@ pub(crate) mod tests {
         );
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
 
-        s.connect_offer_with_token("r1", "some-pasted-token".into())
+        s.connect_offer_with_token("r1", None, "some-pasted-token".into())
             .await;
 
         assert_eq!(
@@ -2500,7 +2689,7 @@ pub(crate) mod tests {
         s.begin_connecting("some-oauth");
         s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
 
-        let outcome = s.connect_offer("r2").await;
+        let outcome = s.connect_offer("r2", None).await;
 
         assert_eq!(outcome, DecisionOutcome::Resolved);
         assert!(

@@ -269,7 +269,12 @@ async fn run_credential_bind(id: &str) -> Response {
     };
     let Some(prompt) = bind_prompt(integ) else {
         return Response::CredentialBindFailed {
-            reason: format!("{id:?} is not a credential connector"),
+            reason: match integ.sole_method() {
+                Some(_) => format!("{id:?} is not a credential connector"),
+                None => format!(
+                    "{id:?} has several sign-in methods; connect it from the offer card, which asks which one"
+                ),
+            },
         };
     };
     // Fail fast instead of holding the CLI on a card a headless service can never show.
@@ -343,10 +348,17 @@ pub(crate) async fn run_connector_sign_in(
     )
     .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
-    let Some(oauth) = catalog
-        .iter()
-        .find(|i| i.id == id)
-        .and_then(|i| i.default_method())
+    let entry = catalog.iter().find(|i| i.id == id);
+    // A connector reachable several ways binds each sign-in under its own key, so signing in without naming one would store a token nothing reads.
+    if entry.is_some_and(|i| i.sole_method().is_none()) {
+        return Response::OauthSignInFailed {
+            reason: format!(
+                "{id:?} has several sign-in methods; connect it from the offer card, which asks which one"
+            ),
+        };
+    }
+    let Some(oauth) = entry
+        .and_then(|i| i.sole_method())
         .and_then(|m| m.oauth.as_ref())
     else {
         return Response::OauthSignInFailed {

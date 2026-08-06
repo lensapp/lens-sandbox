@@ -8,9 +8,9 @@ use crate::credential_flow::session::{
 };
 use crate::credential_flow::store::CredentialEntry;
 
-/// The connect-time value-decision card for a credential connector; an oauth id signs in instead, and a blockless entry has nothing to bind.
+/// The connect-time value-decision card for a credential connector; an oauth id signs in instead, a blockless entry has nothing to bind, and a connector reachable several ways has no one value to bind until the sign-in is picked.
 pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
-    let method = integ.default_method()?;
+    let method = integ.sole_method()?;
     if method.kind != AuthKind::Credential {
         return None;
     }
@@ -34,7 +34,7 @@ pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
 /// The provider the bind card detects a host value through — the same wiring a run would seed.
 pub fn bind_provider(integ: &Connector) -> Option<DefProvider> {
     let method = integ
-        .default_method()
+        .sole_method()
         .filter(|m| m.kind == AuthKind::Credential)?;
     Some(DefProvider::new(ProviderDef {
         id: integ.id.clone(),
@@ -144,6 +144,25 @@ mod tests {
         let mut blockless = credential_connector("some-blockless", "SOME_TOKEN");
         blockless.methods[0].credential = None;
         assert_eq!(bind_prompt(&blockless), None);
+    }
+
+    #[test]
+    fn binding_a_connector_reachable_two_ways_is_refused_rather_than_bound_under_a_dead_key() {
+        let mut two_ways = credential_connector("some-provider", "SOME_TOKEN");
+        two_ways.methods.push(SignInMethod::credential(
+            "subscription",
+            CredentialAuth {
+                env_var: "SOME_SUBSCRIPTION_TOKEN".into(),
+                placeholder: "some-provider-subscription-LNSPLACEHOLDER".into(),
+                injections: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            bind_prompt(&two_ways),
+            None,
+            "each sign-in binds under its own key, so binding the bare connector id would store a value nothing ever reads"
+        );
+        assert!(bind_provider(&two_ways).is_none());
     }
 
     #[test]

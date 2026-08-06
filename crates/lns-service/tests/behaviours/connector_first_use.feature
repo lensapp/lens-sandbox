@@ -76,3 +76,15 @@ Feature: a connector is offered on first use, whatever the policy already allows
     When the workload requests "api.unrelated.example"
     Then no offer is presented
     And the request proceeds under the network policy alone
+
+  Scenario: The offer card asks which sign-in method a connector reachable two ways uses
+    Given the catalog claims "api.some-provider.example" for connector "some-provider" reachable by "api-key" on "SOME_TOKEN" and "subscription" on "SOME_SUBSCRIPTION_TOKEN"
+    And the directory policy lists no connectors
+    When the workload requests "api.some-provider.example"
+    Then the approval window offers to connect "some-provider"
+    And the offer card lists the sign-in methods "api-key, subscription"
+
+  Scenario: A connector reachable two ways seeds neither placeholder until one is picked
+    Given the catalog claims "api.some-provider.example" for connector "some-provider" reachable by "api-key" on "SOME_TOKEN" and "subscription" on "SOME_SUBSCRIPTION_TOKEN"
+    And the directory policy connects "some-provider"
+    Then the workload environment carries neither "SOME_TOKEN" nor "SOME_SUBSCRIPTION_TOKEN"

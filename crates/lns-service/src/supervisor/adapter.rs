@@ -140,12 +140,14 @@ async fn decision_delivery_loop(
                 session.dismiss_request(&delivery.id);
             }
             // Accepting a connector offer drives a connect (async) rather than a per-request verdict.
-            RequestAction::ConnectConnector => {
-                session.connect_offer(&delivery.id).await;
+            RequestAction::ConnectConnector { method } => {
+                session.connect_offer(&delivery.id, method.as_deref()).await;
             }
             // A pasted token connects the connector without the interactive sign-in.
-            RequestAction::UseToken { value } => {
-                session.connect_offer_with_token(&delivery.id, value).await;
+            RequestAction::UseToken { method, value } => {
+                session
+                    .connect_offer_with_token(&delivery.id, method.as_deref(), value)
+                    .await;
             }
         }
     }
@@ -361,15 +363,31 @@ fn make_armed_reconciler(
     workload: WorkloadIdentity,
     grant_store: Arc<dyn GrantStore>,
     providers: Arc<Vec<DefProvider>>,
+    owners: Arc<HashMap<String, String>>,
 ) -> crate::approval_flow::session::ArmedReconciler {
     let weak = Arc::downgrade(credential_session);
     Box::new(move |connectors| {
         if let Some(cs) = weak.upgrade() {
-            let reloaded: HashSet<String> = connectors.iter().cloned().collect();
+            let reloaded: HashSet<&str> = connectors.iter().map(String::as_str).collect();
+            // The policy names connectors, never the sign-in method a value is bound under, so a reload is compared in the providers' own keyspace.
+            let reloaded_providers: HashSet<String> = providers
+                .iter()
+                .map(|p| p.id().to_string())
+                .filter(|id| reloaded.contains(owners.get(id).map_or(id.as_str(), String::as_str)))
+                .collect();
             // An unreadable sidecar arms nothing rather than falling back to a snapshot a revoke may since have invalidated.
             let grants = grant_store.load().unwrap_or_default();
-            let granted = gate_armed_by_grant(&reloaded, &providers, &project, &workload, &grants);
-            cs.reconcile_armed(&granted.into_iter().collect::<Vec<_>>(), connectors);
+            let granted = gate_armed_by_grant(
+                &reloaded_providers,
+                &providers,
+                &project,
+                &workload,
+                &grants,
+            );
+            cs.reconcile_armed(
+                &granted.into_iter().collect::<Vec<_>>(),
+                &reloaded_providers.into_iter().collect::<Vec<_>>(),
+            );
         }
     })
 }
@@ -427,14 +445,16 @@ fn make_connector_route_deriver(
     Box::new(move |ids| applied_connector_routes(ids, &catalog))
 }
 
-/// Connecting an un-connected catalog connector allows its routes on the approval session's live policy (and persists `connectors:`), so the held request proceeds without a relaunch.
+/// Connecting an un-connected catalog connector allows its routes on the approval session's live policy (and persists `connectors:`), so the held request proceeds without a relaunch. The policy records the connector, never the sign-in method the user picked — which auth you hold is per-machine state and has no place in a shared file.
 fn make_connect_emitter(
     session: Arc<ApprovalSession>,
     routes: Arc<HashMap<String, Vec<RouteRule>>>,
+    owners: Arc<HashMap<String, String>>,
 ) -> crate::credential_flow::session::ConnectEmitter {
-    Box::new(move |id| {
-        let rules = routes.get(id).cloned().unwrap_or_default();
-        session.connect_connector(id, rules);
+    Box::new(move |provider| {
+        let connector = owners.get(provider).map_or(provider, String::as_str);
+        let rules = routes.get(connector).cloned().unwrap_or_default();
+        session.connect_connector(connector, rules);
     })
 }
 
@@ -481,6 +501,25 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
+/// The artifact slot ids a reload must not disarm, named in the providers' own keyspace: a slot on a connector reachable several ways arms under the chosen sign-in's id, so naming the bare connector would let a reload withdraw it.
+fn slot_provider_ids(
+    slots: &[lns_artifact::spec::CredentialSlot],
+    catalog: &[lns_policy::connectors::Connector],
+    providers: &[DefProvider],
+    owners: &HashMap<String, String>,
+) -> HashSet<String> {
+    let slot_connectors: HashSet<&str> = slots
+        .iter()
+        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
+        .map(|slot| slot.name.as_str())
+        .collect();
+    providers
+        .iter()
+        .map(|p| p.id().to_string())
+        .filter(|id| slot_connectors.contains(owners.get(id).map_or(id.as_str(), String::as_str)))
+        .collect()
+}
+
 /// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), and the grant identity (`project`/`workload`) plus sidecar (`grant_store`) that a live consent persists to and a reload re-gates a reconnected connector against.
 struct CredentialConsent {
     armed: HashSet<String>,
@@ -499,20 +538,33 @@ struct OauthWiring {
     token_fallbacks: HashMap<String, lns_policy::connectors::TokenFallback>,
 }
 
+/// How a live connect reaches the policy: each connectable connector's held routes, and which connector each provider id belongs to.
+struct ConnectWiring {
+    routes: Arc<HashMap<String, Vec<RouteRule>>>,
+    owners: Arc<HashMap<String, String>>,
+}
+
+/// The per-machine credential file read once at launch, so the sign-in a connector's chosen method is bound to is resolved from the same state the credential session then owns.
+struct CredentialStateAtBoot {
+    path: PathBuf,
+    store: Arc<dyn CredentialStore>,
+    state: CredentialStateFile,
+}
+
 async fn start_credential_subsystem(
     session: Arc<ApprovalSession>,
     credential_frame_tx: tokio::sync::mpsc::UnboundedSender<HostFrame>,
     custom_providers: Arc<Vec<DefProvider>>,
     consent: CredentialConsent,
-    connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
+    connect: ConnectWiring,
+    credentials: CredentialStateAtBoot,
     oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
-    // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
-    let credentials_path = default_credentials_path();
-    let credential_store: Arc<dyn CredentialStore> =
-        Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
-    let mut initial_credential_state =
-        load_credentials_or_warn(credential_store.as_ref(), &credentials_path);
+    let CredentialStateAtBoot {
+        path: credentials_path,
+        store: credential_store,
+        state: mut initial_credential_state,
+    } = credentials;
     // Renew any oauth grant that expired since last use before the session arms it (the dominant case; a mid-run expiry falls back to the held-request re-prompt).
     crate::oauth::refresh_due_entries(
         &mut initial_credential_state,
@@ -535,7 +587,8 @@ async fn start_credential_subsystem(
         credential_frame_tx.clone(),
         custom_providers.clone(),
     );
-    let connect_emitter = make_connect_emitter(session.clone(), connectable_routes);
+    let ConnectWiring { routes, owners } = connect;
+    let connect_emitter = make_connect_emitter(session.clone(), routes, owners.clone());
     let reconciler_providers = custom_providers.clone();
     let credential_session = Arc::new(
         CredentialSession::with_policy_emitter(
@@ -575,6 +628,7 @@ async fn start_credential_subsystem(
             Box::new(crate::oauth::PkceChallenge::generate),
             crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
         )
+        .with_connector_owners(owners.clone())
         .with_oauth_display_names(oauth.display_names)
         .with_token_fallbacks(oauth.token_fallbacks),
     );
@@ -596,6 +650,7 @@ async fn start_credential_subsystem(
         consent.workload,
         consent.grant_store,
         reconciler_providers,
+        owners,
     ));
 
     let credential_watcher = CredentialWatcher::spawn(credentials_path, credential_session.clone())
@@ -630,7 +685,25 @@ pub(super) async fn start(
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
     let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
-    let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
+    // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
+    let grants_path = default_workload_grants_path();
+    let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
+    let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
+    let project = project_key(policy_path);
+    // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
+    let credentials_path = default_credentials_path();
+    let credential_store: Arc<dyn CredentialStore> =
+        Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
+    let credential_state = load_credentials_or_warn(credential_store.as_ref(), &credentials_path);
+    let applied = {
+        let chosen = crate::credential_flow::connectors::machine_holds_sign_in(
+            &credential_state,
+            &grants,
+            &project,
+            &workload,
+        );
+        resolve_applied_with_slots(&policy, sandbox_credentials, &catalog, &chosen)
+    };
     // Un-connected catalog connectors resolve as connectable — detect-only unless definition-declared — so their use offers a live connect.
     let declared_connectors = sandbox_policy
         .map(|p| p.connectors.clone())
@@ -648,6 +721,9 @@ pub(super) async fn start(
     let offerable =
         crate::credential_flow::connectors::offerable_connectors(&connectable, &catalog);
     let connectable_routes = Arc::new(connectable.routes);
+    let mut owners = applied.owner;
+    owners.extend(connectable.owner);
+    let connector_owners = Arc::new(owners);
     let run =
         crate::credential_flow::connectors::run_providers(applied.providers, connectable.providers);
     let connectable_ids = run.connectable_ids;
@@ -661,11 +737,6 @@ pub(super) async fn start(
     ));
     log::info!("Approvals", "window ready");
 
-    // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
-    let grants_path = default_workload_grants_path();
-    let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
-    let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
-    let project = project_key(policy_path);
     record_boot_sign_in_grants(
         BootSignIns {
             signed_in: &consent.signed_in,
@@ -680,11 +751,12 @@ pub(super) async fn start(
     );
     let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
     // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
-    let slot_ids: HashSet<String> = sandbox_credentials
-        .iter()
-        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
-        .map(|slot| slot.name.clone())
-        .collect();
+    let slot_ids: HashSet<String> = slot_provider_ids(
+        sandbox_credentials,
+        &catalog,
+        &run.providers,
+        &connector_owners,
+    );
     let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
 
@@ -738,17 +810,22 @@ pub(super) async fn start(
         .chain(connectable.pkce_configs.iter())
         .map(|(id, auth)| (id.clone(), crate::oauth::PkceConfig::from(auth)))
         .collect();
+    // Keyed per sign-in method, so a connector reachable more than one way shows the fallback belonging to the way the user picked rather than the first one listed.
     let oauth_display_names: HashMap<String, String> = catalog
         .iter()
-        .filter(|i| i.default_method().is_some_and(|m| m.oauth.is_some()))
-        .map(|i| (i.id.clone(), i.display_name().to_string()))
+        .flat_map(|i| {
+            i.methods
+                .iter()
+                .filter(|m| m.oauth.is_some())
+                .map(move |m| (i.provider_id_of(m), i.display_name().to_string()))
+        })
         .collect();
     let token_fallbacks: HashMap<String, lns_policy::connectors::TokenFallback> = catalog
         .iter()
-        .filter_map(|i| {
-            i.default_method()
-                .and_then(|m| m.token_fallback.clone())
-                .map(|tf| (i.id.clone(), tf))
+        .flat_map(|i| {
+            i.methods
+                .iter()
+                .filter_map(move |m| m.token_fallback.clone().map(|tf| (i.provider_id_of(m), tf)))
         })
         .collect();
     let (credential_session, credential_watcher) = start_credential_subsystem(
@@ -763,7 +840,15 @@ pub(super) async fn start(
             workload,
             grant_store,
         },
-        connectable_routes,
+        ConnectWiring {
+            routes: connectable_routes,
+            owners: connector_owners,
+        },
+        CredentialStateAtBoot {
+            path: credentials_path,
+            store: credential_store,
+            state: credential_state,
+        },
         OauthWiring {
             configs: oauth_configs,
             pkce_configs,
@@ -963,7 +1048,12 @@ mod tests {
                 id: "some-oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.some-oauth.example".into()],
-                token_fallback: None,
+                methods: vec![crate::approval_flow::session::OfferMethod {
+                    method_id: "device".into(),
+                    provider_id: "some-oauth".into(),
+                    display_name: "device".into(),
+                    token_fallback: None,
+                }],
             }]),
         );
         let connector = Arc::new(RecordingConnector::default());
@@ -982,7 +1072,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
         tx.send(DecisionDelivery {
             id: "r1".into(),
-            action: RequestAction::ConnectConnector,
+            action: RequestAction::ConnectConnector { method: None },
         })
         .unwrap();
         drop(tx);
@@ -1027,7 +1117,12 @@ mod tests {
                 id: "some-oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.some-oauth.example".into()],
-                token_fallback: None,
+                methods: vec![crate::approval_flow::session::OfferMethod {
+                    method_id: "device".into(),
+                    provider_id: "some-oauth".into(),
+                    display_name: "device".into(),
+                    token_fallback: None,
+                }],
             }]),
         );
         let connector = Arc::new(RecordingConnector::default());
@@ -1047,6 +1142,7 @@ mod tests {
         tx.send(DecisionDelivery {
             id: "r1".into(),
             action: RequestAction::UseToken {
+                method: None,
                 value: "some-pasted-token".into(),
             },
         })
@@ -1092,7 +1188,12 @@ mod tests {
                 id: "some-oauth".into(),
                 display_name: "GitHub".into(),
                 patterns: vec!["api.some-oauth.example".into()],
-                token_fallback: None,
+                methods: vec![crate::approval_flow::session::OfferMethod {
+                    method_id: "device".into(),
+                    provider_id: "some-oauth".into(),
+                    display_name: "device".into(),
+                    token_fallback: None,
+                }],
             }]),
         );
         let connector = Arc::new(RecordingConnector::default());
@@ -1742,6 +1843,7 @@ mod tests {
             workload.clone(),
             grant_store_holding(acme_grants(&workload)),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         reconcile(&["acme".to_string()]);
         assert_eq!(
@@ -1757,6 +1859,110 @@ mod tests {
         );
     }
 
+    /// A per-method provider and the grant that arms it, the shape a connector reachable several ways produces.
+    fn acme_method_custom() -> Arc<Vec<DefProvider>> {
+        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
+        Arc::new(vec![DefProvider::new(ProviderDef {
+            id: "acme:api-key".into(),
+            env_var: "ACME_API_KEY".into(),
+            placeholder: "acme_LNSPLACEHOLDER".into(),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: "api.acme.corp".into(),
+                header: None,
+            }],
+        })])
+    }
+
+    fn acme_method_grants(workload: &WorkloadIdentity) -> WorkloadGrantFile {
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            workload,
+            "acme:api-key",
+            "ACME_API_KEY",
+            vec!["api.acme.corp".into()],
+        ));
+        grants
+    }
+
+    #[test]
+    fn an_artifact_slot_on_a_connector_reachable_several_ways_is_named_by_its_chosen_sign_in() {
+        use lns_artifact::spec::CredentialSlot;
+        let catalog = vec![lns_policy::connectors::Connector {
+            id: "acme".into(),
+            name: None,
+            routes: Vec::new(),
+            methods: vec![
+                lns_policy::connectors::SignInMethod::credential(
+                    "api-key",
+                    lns_policy::connectors::CredentialAuth {
+                        env_var: "ACME_API_KEY".into(),
+                        placeholder: "acme_LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    },
+                ),
+                lns_policy::connectors::SignInMethod::credential(
+                    "subscription",
+                    lns_policy::connectors::CredentialAuth {
+                        env_var: "ACME_SUBSCRIPTION".into(),
+                        placeholder: "acme_sub_LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    },
+                ),
+            ],
+        }];
+        let slots = vec![CredentialSlot {
+            name: "acme".into(),
+            env: "REMAPPED".into(),
+            required: false,
+        }];
+        let providers = acme_method_custom();
+        let owners = HashMap::from([("acme:api-key".to_string(), "acme".to_string())]);
+
+        assert_eq!(
+            slot_provider_ids(&slots, &catalog, &providers, &owners),
+            HashSet::from(["acme:api-key".to_string()]),
+            "the slot arms under the sign-in it resolved to, so naming the bare connector would let a policy reload withdraw a credential the artifact requires"
+        );
+    }
+
+    #[test]
+    fn a_policy_reload_keeps_the_chosen_sign_in_of_a_connector_reachable_several_ways_armed() {
+        let (session, _frame_rx) = fixture_credential_session_armed(
+            acme_method_custom(),
+            HashSet::from(["acme:api-key".to_string()]),
+            HashSet::new(),
+        );
+        let workload = acme_workload();
+        let reconcile = make_armed_reconciler(
+            &session,
+            "proj".into(),
+            workload.clone(),
+            grant_store_holding(acme_method_grants(&workload)),
+            acme_method_custom(),
+            Arc::new(HashMap::from([(
+                "acme:api-key".to_string(),
+                "acme".to_string(),
+            )])),
+        );
+
+        // The policy never names a sign-in method, so a reload lists the bare connector id.
+        reconcile(&["acme".to_string()]);
+
+        assert_eq!(
+            session.armed_ids(),
+            HashSet::from(["acme:api-key".to_string()]),
+            "the policy names connectors, never methods, so a reload that still lists the connector must not withdraw the injection its chosen sign-in is arming"
+        );
+
+        reconcile(&[]);
+        assert!(
+            session.armed_ids().is_empty(),
+            "disconnecting the connector must still revoke the method it was reached through"
+        );
+    }
+
     #[test]
     fn make_armed_reconciler_does_not_arm_an_unconsented_reloaded_connector() {
         let (session, _frame_rx) =
@@ -1767,6 +1973,7 @@ mod tests {
             acme_workload(),
             grant_store_holding(WorkloadGrantFile::default()),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         reconcile(&["acme".to_string()]);
         assert!(
@@ -1787,6 +1994,7 @@ mod tests {
             workload,
             store.clone(),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         // `lns connector disconnect acme` forgets the grants and drops the id; the reload its write triggers disarms it.
         store
@@ -1813,6 +2021,7 @@ mod tests {
             acme_workload(),
             Arc::new(MemoryGrantStore::unreadable()),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         reconcile(&["acme".to_string()]);
         assert!(
@@ -1835,6 +2044,7 @@ mod tests {
             acme_workload(),
             grant_store_holding(WorkloadGrantFile::default()),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         // A live connect persists "acme" into the policy, which the watcher reloads; the arming just granted must not self-revoke even though no grant is recorded to disk yet.
         reconcile(&["acme".to_string()]);
@@ -1853,6 +2063,7 @@ mod tests {
             acme_workload(),
             grant_store_holding(WorkloadGrantFile::default()),
             acme_custom(),
+            Arc::new(HashMap::new()),
         );
         drop(session);
         reconcile(&["acme".to_string()]);
@@ -1875,6 +2086,7 @@ mod tests {
             workload.clone(),
             grant_store_holding(acme_grants(&workload)),
             acme_custom(),
+            Arc::new(HashMap::new()),
         ));
         // A reload whose policy no longer lists "acme" (a disconnect) must revoke its arming.
         session.apply_external_policy(Policy::default());
@@ -1913,7 +2125,8 @@ mod tests {
             "gitlab".to_string(),
             vec![lns_policy::RouteRule::allow_host("gitlab.com")],
         );
-        let connect = make_connect_emitter(session.clone(), Arc::new(routes));
+        let connect =
+            make_connect_emitter(session.clone(), Arc::new(routes), Arc::new(HashMap::new()));
         connect("gitlab");
         assert_eq!(session.current_policy().connectors, ["gitlab"]);
         assert!(
@@ -1932,7 +2145,11 @@ mod tests {
     #[test]
     fn make_connect_emitter_with_no_routes_for_an_id_still_connects_it() {
         let (session, _rx) = fixture_session();
-        let connect = make_connect_emitter(session.clone(), Arc::new(HashMap::new()));
+        let connect = make_connect_emitter(
+            session.clone(),
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+        );
         connect("gitlab");
         assert_eq!(session.current_policy().connectors, ["gitlab"]);
     }
@@ -2024,7 +2241,7 @@ mod tests {
             vec!["api.some-oauth.example".to_string()]
         );
         assert_eq!(
-            offerable[0].token_fallback,
+            offerable[0].methods[0].token_fallback,
             Some(TokenFallback {
                 help: Some("https://example.com/pat".into()),
                 command: None,

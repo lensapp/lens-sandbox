@@ -10,7 +10,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::PendingPrompt;
+use crate::approval_flow::session::{OfferPrompt, PendingPrompt};
 use crate::approval_flow::window::{
     self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
 };
@@ -482,16 +482,16 @@ impl eframe::App for TrayApp {
                 apply_dismissal(&self.window_state, &Dismissal::Credential { id });
                 ui.ctx().request_repaint();
             }
-            Some(CardAction::ConnectOffer { id }) => {
-                self.window_state.connect_offer(&id);
+            Some(CardAction::ConnectOffer { id, method }) => {
+                self.window_state.connect_offer(&id, method);
                 ui.ctx().request_repaint();
             }
             Some(CardAction::DeclineOffer { id }) => {
                 self.window_state.decline_offer(&id);
                 ui.ctx().request_repaint();
             }
-            Some(CardAction::UseOfferToken { id, value }) => {
-                self.window_state.use_offer_token(&id, value);
+            Some(CardAction::UseOfferToken { id, method, value }) => {
+                self.window_state.use_offer_token(&id, method, value);
                 ui.ctx().request_repaint();
             }
             Some(CardAction::UseTokenSignIn {
@@ -540,12 +540,14 @@ pub enum CardAction {
     },
     ConnectOffer {
         id: String,
+        method: Option<String>,
     },
     DeclineOffer {
         id: String,
     },
     UseOfferToken {
         id: String,
+        method: Option<String>,
         value: String,
     },
     UseTokenSignIn {
@@ -1249,9 +1251,9 @@ fn render_item(
         }
         StackItem::Network(i) => {
             let prompt = &snapshot.pending[i];
-            if let Some(display_name) = &prompt.offer {
+            if let Some(offer) = &prompt.offer {
                 let draft = token_drafts.entry(prompt.id.clone()).or_default();
-                render_offer_card(ui, prompt, display_name, draft, width)
+                render_offer_card(ui, prompt, offer, draft, width)
             } else {
                 let flag = remember.entry(prompt.id.clone()).or_default();
                 render_network_card(ui, prompt, flag, width)
@@ -1472,7 +1474,7 @@ fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
 fn render_offer_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
-    display_name: &str,
+    offer: &OfferPrompt,
     draft: &mut TokenDraft,
     width: f32,
 ) -> (Option<CardAction>, egui::Response) {
@@ -1486,7 +1488,7 @@ fn render_offer_card(
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
             ui.add_space(6.0);
             ui.label(
-                RichText::new(format!("Connect to {display_name}?"))
+                RichText::new(format!("Connect to {}?", offer.display_name))
                     .size(theme::FONT_TITLE)
                     .strong()
                     .color(window::TEXT_ACCENT),
@@ -1499,21 +1501,18 @@ fn render_offer_card(
             );
         },
         |ui| {
-            let mut action: Option<CardAction> = None;
-            ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], "Connect").clicked() {
-                    action = Some(CardAction::ConnectOffer { id: id.clone() });
-                }
-                if secondary_button(&mut cols[1], "Not now").clicked() {
-                    action = Some(CardAction::DeclineOffer { id: id.clone() });
-                }
-            });
+            let mut action = render_offer_choices(ui, &id, offer);
+            if action.is_none() && secondary_button(ui, "Not now").clicked() {
+                action = Some(CardAction::DeclineOffer { id: id.clone() });
+            }
             if action.is_none()
-                && let Some(fallback) = &prompt.token_fallback
+                && let Some(method) = offer.methods.first().filter(|_| offer.methods.len() == 1)
+                && let Some(fallback) = &method.token_fallback
             {
                 action = match render_token_fallback(ui, fallback, draft) {
                     Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseOfferToken {
                         id: id.clone(),
+                        method: None,
                         value,
                     }),
                     Some(TokenFallbackEvent::OpenHelp(url)) => {
@@ -1526,6 +1525,28 @@ fn render_offer_card(
         },
     );
     (out.inner, out.response)
+}
+
+/// The connect controls: one button per way in, so a service reachable more than one way never picks for the user. A connector with a single way in keeps the plain "Connect".
+fn render_offer_choices(ui: &mut egui::Ui, id: &str, offer: &OfferPrompt) -> Option<CardAction> {
+    if offer.methods.len() < 2 {
+        return primary_button(ui, "Connect")
+            .clicked()
+            .then(|| CardAction::ConnectOffer {
+                id: id.to_string(),
+                method: None,
+            });
+    }
+    let mut action = None;
+    for method in &offer.methods {
+        if primary_button(ui, &method.display_name).clicked() {
+            action = Some(CardAction::ConnectOffer {
+                id: id.to_string(),
+                method: Some(method.id.clone()),
+            });
+        }
+    }
+    action
 }
 
 fn render_credential_card(
@@ -2236,7 +2257,6 @@ mod tests {
                 host: "api.example.test".into(),
                 action: "CONNECT api.example.test:443".into(),
                 offer: None,
-                token_fallback: None,
                 treatment: Treatment::Inspected,
             }],
             pending_credentials: Vec::new(),
@@ -2279,6 +2299,66 @@ mod tests {
             connecting: Vec::new(),
             order: vec![StackItem::Credential(0)],
         }
+    }
+
+    /// One offer card for a connector reachable `methods` ways.
+    fn offer_card(methods: Vec<(&str, &str)>) -> Snapshot {
+        Snapshot {
+            pending: vec![PendingPrompt {
+                id: "n1".into(),
+                host: "api.some-provider.example".into(),
+                action: "CONNECT api.some-provider.example:443".into(),
+                offer: Some(OfferPrompt {
+                    connector_id: "some-provider".into(),
+                    display_name: "Some Provider".into(),
+                    methods: methods
+                        .into_iter()
+                        .map(
+                            |(id, name)| crate::approval_flow::session::OfferMethodPrompt {
+                                id: id.into(),
+                                display_name: name.into(),
+                                token_fallback: None,
+                            },
+                        )
+                        .collect(),
+                }),
+                treatment: Treatment::Inspected,
+            }],
+            pending_credentials: Vec::new(),
+            sign_ins: Vec::new(),
+            informs: Vec::new(),
+            connecting: Vec::new(),
+            order: vec![StackItem::Network(0)],
+        }
+    }
+
+    #[test]
+    fn an_offer_card_for_a_connector_reachable_two_ways_connects_the_sign_in_that_was_clicked() {
+        let card = offer_card(vec![
+            ("api-key", "API key"),
+            ("subscription", "Subscription"),
+        ]);
+        assert_eq!(
+            click_labelled_control(card, "Subscription", false),
+            Some(CardAction::ConnectOffer {
+                id: "n1".into(),
+                method: Some("subscription".into()),
+            }),
+            "each way in needs its own button, and the button must carry the sign-in it names"
+        );
+    }
+
+    #[test]
+    fn an_offer_card_for_a_connector_with_one_way_in_keeps_the_plain_connect_button() {
+        let card = offer_card(vec![("token", "token")]);
+        assert_eq!(
+            click_labelled_control(card, "Connect", false),
+            Some(CardAction::ConnectOffer {
+                id: "n1".into(),
+                method: None,
+            }),
+            "there is no choice to make, so the card must not name a sign-in the user was never shown"
+        );
     }
 
     fn card_with_deny_scope(scope: DenyScope) -> Snapshot {
@@ -2354,7 +2434,6 @@ mod tests {
                 host: "api.example.test".into(),
                 action: "CONNECT api.example.test:443".into(),
                 offer: None,
-                token_fallback: None,
                 treatment: Treatment::Inspected,
             },
             net_tx,
@@ -2438,8 +2517,11 @@ mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
-            offer: offer.map(str::to_string),
-            token_fallback: None,
+            offer: offer.map(|name| OfferPrompt {
+                connector_id: name.into(),
+                display_name: name.into(),
+                methods: Vec::new(),
+            }),
             treatment: Treatment::Inspected,
         };
         Snapshot {

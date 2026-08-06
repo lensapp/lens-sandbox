@@ -63,6 +63,92 @@ fn catalog_claims(w: &mut BehaviourWorld, host: String, id: String, env: String)
     });
 }
 
+#[given(
+    regex = r#"^the catalog claims "([^"]+)" for connector "([^"]+)" reachable by "([^"]+)" on "([^"]+)" and "([^"]+)" on "([^"]+)"$"#
+)]
+fn catalog_claims_two_ways(
+    w: &mut BehaviourWorld,
+    host: String,
+    id: String,
+    first: String,
+    first_env: String,
+    second: String,
+    second_env: String,
+) {
+    let method = |method_id: &str, env: &str| {
+        SignInMethod::credential(
+            method_id,
+            CredentialAuth {
+                env_var: env.into(),
+                placeholder: format!("{id}-{method_id}-LNSPLACEHOLDER"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: host.clone(),
+                    header: None,
+                }],
+            },
+        )
+    };
+    rig(w).catalog.push(Connector {
+        id: id.clone(),
+        name: None,
+        routes: vec![ConnectorRoute {
+            match_pattern: host.clone(),
+            transport: None,
+            scheme: None,
+            tls_terminate: false,
+            rules: Vec::new(),
+        }],
+        methods: vec![method(&first, &first_env), method(&second, &second_env)],
+    });
+}
+
+#[then(regex = r#"^the offer card lists the sign-in methods "([^"]+)"$"#)]
+fn offer_lists_methods(w: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let listed = rig(w).offered_methods.join(", ");
+    (listed == expected)
+        .then_some(())
+        .ok_or_else(|| format!("the card listed [{listed}], expected [{expected}]"))
+}
+
+#[then(regex = r#"^the workload environment carries neither "([^"]+)" nor "([^"]+)"$"#)]
+fn environment_carries_neither(
+    w: &mut BehaviourWorld,
+    first: String,
+    second: String,
+) -> Result<(), String> {
+    use lns_service::credential_flow::providers::Provider;
+    let rig = rig(w);
+    // The launch's own predicate, driven by the rig's machine state, so this asserts what a real boot would seed rather than a hardcoded answer.
+    let state = lns_policy::credentials::CredentialStateFile::new();
+    let workload = this_workload();
+    let chosen = lns_service::credential_flow::connectors::machine_holds_sign_in(
+        &state,
+        &rig.grants,
+        PROJECT,
+        &workload,
+    );
+    let applied = lns_service::credential_flow::connectors::resolve_applied_connectors(
+        &rig.overlay,
+        &rig.catalog,
+        &chosen,
+    );
+    let seeded: Vec<String> = applied
+        .providers
+        .iter()
+        .filter(|p| p.seeds_env())
+        .map(|p| p.env_var().to_string())
+        .collect();
+    let leaked: Vec<&String> = seeded
+        .iter()
+        .filter(|env| *env == &first || *env == &second)
+        .collect();
+    leaked
+        .is_empty()
+        .then_some(())
+        .ok_or_else(|| format!("expected neither {first} nor {second} seeded, got {seeded:?}"))
+}
+
 #[given("the directory policy lists no connectors")]
 fn policy_lists_no_connectors(w: &mut BehaviourWorld) {
     assert!(
@@ -195,7 +281,15 @@ fn workload_requests(w: &mut BehaviourWorld, host: String) {
     }));
     rig.running_policy = Some(running);
     rig.held = !presented.is_empty();
-    rig.offered = presented.iter().filter_map(|p| p.offer.clone()).collect();
+    rig.offered_methods = presented
+        .iter()
+        .filter_map(|p| p.offer.as_ref())
+        .flat_map(|o| o.methods.iter().map(|m| m.id.clone()))
+        .collect();
+    rig.offered = presented
+        .iter()
+        .filter_map(|p| p.offer.as_ref().map(|o| o.display_name.clone()))
+        .collect();
     rig.card = presented.first().map(|p| p.id.clone());
     rig.session = Some(session);
 }

@@ -85,7 +85,6 @@ pub(crate) mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             offer: None,
-            token_fallback: None,
             treatment: Treatment::Inspected,
         }
     }
@@ -184,9 +183,13 @@ pub(crate) mod tests {
     fn connect_finished_clears_the_connecting_placeholder() {
         let (n, state, _rx) = fixture(false);
         let mut offer = prompt("r1", "api.some-oauth.example");
-        offer.offer = Some("GitHub".into());
+        offer.offer = Some(crate::approval_flow::session::OfferPrompt {
+            connector_id: "some-oauth".into(),
+            display_name: "GitHub".into(),
+            methods: Vec::new(),
+        });
         n.present(&offer);
-        state.connect_offer("r1");
+        state.connect_offer("r1", None);
         assert_eq!(state.snapshot().connecting, vec!["GitHub".to_string()]);
         n.connect_finished("GitHub");
         assert!(
@@ -199,9 +202,13 @@ pub(crate) mod tests {
     fn clear_all_connecting_drops_every_placeholder() {
         let (n, state, _rx) = fixture(false);
         let mut offer = prompt("r1", "api.some-oauth.example");
-        offer.offer = Some("GitHub".into());
+        offer.offer = Some(crate::approval_flow::session::OfferPrompt {
+            connector_id: "some-oauth".into(),
+            display_name: "GitHub".into(),
+            methods: Vec::new(),
+        });
         n.present(&offer);
-        state.connect_offer("r1");
+        state.connect_offer("r1", None);
         assert_eq!(state.snapshot().connecting, vec!["GitHub".to_string()]);
         n.clear_all_connecting();
         assert!(state.snapshot().connecting.is_empty());

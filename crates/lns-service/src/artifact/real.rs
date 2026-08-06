@@ -156,6 +156,46 @@ pub(crate) fn refuse_unbound_required_credentials(
     Ok(())
 }
 
+/// Refuse a launch whose directory has connected a connector reachable several ways that this machine holds no sign-in for — nothing would authenticate its requests and no card could ask, so fail before any microVM boots. Directory state, so it applies to a plain `lns run` too.
+pub(crate) fn refuse_unchosen_connected_connectors(
+    policy_path: Option<&std::path::Path>,
+    workload: &lns_policy::grants::WorkloadIdentity,
+) -> Result<()> {
+    let Some(policy_path) = policy_path else {
+        return Ok(());
+    };
+    let policy = lns_policy::Policy::load_or_default(policy_path).unwrap_or_default();
+    if policy.connectors.is_empty() {
+        return Ok(());
+    }
+    let catalog = effective_machine_catalog();
+    let state = {
+        use crate::credential_flow::store::{
+            CredentialStore, JsonFileCredentialStore, default_credentials_path,
+        };
+        JsonFileCredentialStore::new(default_credentials_path())
+            .load()
+            .unwrap_or_default()
+    };
+    let grants = {
+        use lns_policy::grants::{GrantStore, JsonFileGrantStore, default_workload_grants_path};
+        JsonFileGrantStore::new(default_workload_grants_path())
+            .load()
+            .unwrap_or_default()
+    };
+    let project = lns_policy::grants::project_key(policy_path);
+    let chosen = crate::credential_flow::connectors::machine_holds_sign_in(
+        &state, &grants, &project, workload,
+    );
+    let unchosen = crate::credential_flow::connectors::unchosen_connected_connectors(
+        &policy, &catalog, &chosen,
+    );
+    if unchosen.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(crate::credential_flow::connectors::unchosen_connectors_refusal(&unchosen))
+}
+
 fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
     let user = lns_policy::connectors::Catalog::load_or_default(
         &lns_policy::connectors::default_connectors_path(),

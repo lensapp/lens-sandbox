@@ -91,6 +91,8 @@ async fn orchestrate(
         resolved_image,
         sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
     )?;
+    // Directory state, not definition state, so a plain `lns run` is gated too.
+    crate::artifact::real::refuse_unchosen_connected_connectors(policy.as_deref(), &workload)?;
     let mut signed_in = Vec::new();
     let mut revocations_at_gate = std::collections::HashMap::new();
     if let Some(plan) = &sandbox_plan {

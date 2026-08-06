@@ -12,6 +12,8 @@ pub struct FirstUseRig {
     pub running_policy: Option<Policy>,
     /// Connector ids the approval card offered for the request.
     pub offered: Vec<String>,
+    /// The sign-in methods the presented offer card listed, in the order the user reads them.
+    pub offered_methods: Vec<String>,
     pub held: bool,
     pub proceeded: bool,
     /// The session under test, kept so a later step can answer the card it raised.

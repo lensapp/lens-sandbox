@@ -169,11 +169,14 @@ impl WorkloadGrantFile {
         before != self.grants.len()
     }
 
-    /// Forgets a project's grants for one connector and counts the forget, so a grant decided before it — by a run that is still deciding when the forget lands — can be recognized as stale and dropped instead of resurrecting what was just forgotten.
+    /// Forgets a project's grants for one connector — including those its individual sign-in methods hold — and counts the forget, so a grant decided before it — by a run that is still deciding when the forget lands — can be recognized as stale and dropped instead of resurrecting what was just forgotten.
     pub fn revoke_project_connector(&mut self, project: &str, connector: &str) -> usize {
         let before = self.grants.len();
-        self.grants
-            .retain(|g| !(g.project == project && g.connector == connector));
+        let method_prefix = format!("{connector}:");
+        self.grants.retain(|g| {
+            !(g.project == project
+                && (g.connector == connector || g.connector.starts_with(&method_prefix)))
+        });
         match self
             .revocations
             .iter_mut()
@@ -684,6 +687,36 @@ mod tests {
         assert!(
             file.lookup("/other", &def("/other"), "some-provider")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn revoking_a_connector_also_drops_the_grants_its_sign_in_methods_hold() {
+        let mut file = WorkloadGrantFile::default();
+        file.upsert(GrantRecord::allow(
+            "/proj",
+            &def("/proj"),
+            "some-provider:api-key",
+            "SOME_TOKEN",
+            vec![],
+        ));
+        file.upsert(GrantRecord::allow(
+            "/proj",
+            &def("/proj"),
+            "some-provider-elsewhere",
+            "SOME_OTHER_TOKEN",
+            vec![],
+        ));
+
+        let removed = file.revoke_project_connector("/proj", "some-provider");
+        assert_eq!(
+            removed, 1,
+            "a method's grant is a grant for the connector, so revoking the connector must forget it too"
+        );
+        assert!(
+            file.lookup("/proj", &def("/proj"), "some-provider-elsewhere")
+                .is_some(),
+            "the prefix sweep must stop at the method separator, or it would forget an unrelated connector whose id merely starts the same"
         );
     }
 

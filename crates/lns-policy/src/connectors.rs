@@ -153,6 +153,11 @@ impl SignInMethod {
         self
     }
 
+    /// The user-facing label for the button that picks this sign-in; falls back to the id.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
     pub fn env_var(&self) -> &str {
         match self.kind {
             AuthKind::Credential => self.credential.as_ref().map(|c| c.env_var.as_str()),
@@ -235,9 +240,12 @@ impl Connector {
         }
     }
 
-    /// The method to act on where no choice has been made — the first listed. A connector orders its methods most-expected first.
-    pub fn default_method(&self) -> Option<&SignInMethod> {
-        self.methods.first()
+    /// The per-machine store key a sign-in method binds under: the bare connector id when it is the only way in, so every value and grant already bound keeps working.
+    pub fn provider_id_of(&self, method: &SignInMethod) -> String {
+        match self.methods.as_slice() {
+            [_only] => self.id.clone(),
+            _ => format!("{}:{}", self.id, method.id),
+        }
     }
 
     /// A connector needs at least one way in, every method must be well-formed, and no two methods may write one env var — a tool reading that variable could not tell which sign-in it got.
@@ -754,6 +762,51 @@ connectors:
         );
         i.name = Some("Acme Corp".into());
         assert_eq!(i.display_name(), "Acme Corp");
+    }
+
+    #[test]
+    fn a_method_display_name_prefers_an_explicit_name_and_falls_back_to_its_id() {
+        let mut m = SignInMethod::credential(
+            "api-key",
+            credential("ACME_API_KEY", "acme_LNSPLACEHOLDER0000", "api.acme.corp"),
+        );
+        assert_eq!(m.display_name(), "api-key");
+        m.name = Some("API key".into());
+        assert_eq!(m.display_name(), "API key");
+    }
+
+    #[test]
+    fn a_sole_method_keys_under_the_bare_connector_id() {
+        let connector = sample_connector();
+        let method = connector.sole_method().expect("one method");
+        assert_eq!(
+            connector.provider_id_of(method),
+            "acme",
+            "every value and grant already bound under the bare id must keep working, so a connector with one way in must not gain a suffix"
+        );
+    }
+
+    #[test]
+    fn each_of_several_methods_keys_under_its_own_suffixed_id() {
+        let mut connector = sample_connector();
+        connector.methods.push(SignInMethod::credential(
+            "other",
+            credential(
+                "ACME_OTHER_TOKEN",
+                "acme_LNSPLACEHOLDER0001",
+                "api.acme.corp",
+            ),
+        ));
+        let keys: Vec<String> = connector
+            .methods
+            .iter()
+            .map(|m| connector.provider_id_of(m))
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["acme:api-key".to_string(), "acme:other".to_string()],
+            "the method must be part of the machine store key, or the two sign-ins would overwrite each other's value"
+        );
     }
 
     #[test]

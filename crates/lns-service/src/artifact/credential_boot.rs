@@ -2,6 +2,8 @@ use lns_artifact::spec::CredentialSlot;
 use lns_policy::connectors::{AuthKind, Connector};
 use lns_policy::credentials::{CredentialStateFile, has_armed_entry};
 
+use crate::credential_flow::connectors::held_method;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub placeholder: String,
@@ -40,6 +42,15 @@ pub fn plan_slot(slot: &CredentialSlot, binding: Option<Binding>) -> SlotPlan {
     }
 }
 
+/// A sign-in counts as held here only when a value is actually bound on this machine, because a required slot demands a value rather than a permission.
+fn bound_value(state: &CredentialStateFile) -> impl Fn(&str) -> bool + '_ {
+    move |provider| {
+        state
+            .get(provider)
+            .is_some_and(|entry| !matches!(entry, lns_policy::credentials::CredentialEntry::Deny))
+    }
+}
+
 /// Plan each launch-gated id (a definition's required credential slots): an `oauth` id with no armed machine grant blocks the boot on a required connect (the sign-in), while a credential id stays armed — its consent gate is the reactive per-machine value decision at first use. Ids the catalog lacks are the unknown-id refusal's job, not this gate's.
 pub fn plan_declared_connectors(
     declared: &[String],
@@ -49,14 +60,13 @@ pub fn plan_declared_connectors(
     declared
         .iter()
         .filter_map(|id| catalog.iter().find(|integ| &integ.id == id))
-        .map(|integ| {
-            let method = integ.default_method();
-            let env = method.map(|m| m.env_var().to_string()).unwrap_or_default();
-            let placeholder = method
-                .map(|m| m.placeholder().to_string())
-                .unwrap_or_default();
-            let signs_in = method.is_some_and(|m| m.kind == AuthKind::Oauth);
-            if signs_in && !has_armed_entry(state, &integ.id) {
+        // A connector the machine holds no sign-in for wires no provider, so it must be reported neither armed nor connectable — certifying it would start a workload whose credential is inert.
+        .filter_map(|integ| held_method(integ, &bound_value(state)).map(|h| (integ, h)))
+        .map(|(integ, held)| {
+            let env = held.method.env_var().to_string();
+            let placeholder = held.method.placeholder().to_string();
+            let signs_in = held.method.kind == AuthKind::Oauth;
+            if signs_in && !has_armed_entry(state, &held.provider_id) {
                 SlotPlan::Connect(ConnectPrompt {
                     connector: integ.id.clone(),
                     env,
@@ -117,8 +127,19 @@ pub fn sign_in_gate_ids(slots: &[CredentialSlot]) -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequiredSlotFailure {
-    Unbound { connector: String, env: String },
-    Denied { connector: String, env: String },
+    Unbound {
+        connector: String,
+        env: String,
+    },
+    Denied {
+        connector: String,
+        env: String,
+    },
+    /// A connector reachable several ways, none of them held: `lns connector connect` refuses it, so the only recovery is the first-use card.
+    NoSignInHeld {
+        connector: String,
+        env: String,
+    },
 }
 
 impl RequiredSlotFailure {
@@ -133,6 +154,11 @@ impl RequiredSlotFailure {
                 "this sandbox requires the \"{connector}\" credential, injected as {env}, \
                  and you have denied it on this machine; change the decision with \
                  `lns connector connect {connector}`, then run again"
+            ),
+            RequiredSlotFailure::NoSignInHeld { connector, env } => format!(
+                "this sandbox requires the \"{connector}\" credential, injected as {env}, \
+                 and this machine holds no sign-in for it; \"{connector}\" is reachable several ways, \
+                 so connect it from the offer card, which asks which sign-in to use"
             ),
         }
     }
@@ -156,14 +182,24 @@ pub fn gate_required_slots(
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
             continue;
         };
-        if integ
-            .default_method()
-            .is_some_and(|m| m.kind == AuthKind::Oauth)
+        let held = held_method(integ, &bound_value(state));
+        if held
+            .as_ref()
+            .is_some_and(|h| h.method.kind == AuthKind::Oauth)
         {
             continue;
         }
-        if binds_for_launch(state, &slot.name) {
+        if held
+            .as_ref()
+            .is_some_and(|h| binds_for_launch(state, &h.provider_id))
+        {
             continue;
+        }
+        if held.is_none() {
+            return Err(RequiredSlotFailure::NoSignInHeld {
+                connector: slot.name.clone(),
+                env: slot.env.clone(),
+            });
         }
         let failure = match state.get(&slot.name) {
             Some(lns_policy::credentials::CredentialEntry::Deny) => RequiredSlotFailure::Denied {
@@ -218,6 +254,81 @@ mod tests {
                 },
             )],
         }
+    }
+
+    /// A connector reachable two ways, so the machine must hold one of them before a slot can be filled.
+    fn two_method_connector(id: &str) -> Connector {
+        let mut out = credential_connector(id, "SOME_TOKEN");
+        out.methods[0].id = "api-key".into();
+        out.methods.push(SignInMethod::credential(
+            "subscription",
+            lns_policy::connectors::CredentialAuth {
+                env_var: "SOME_SUBSCRIPTION_TOKEN".into(),
+                placeholder: format!("{id}-subscription-LNSPLACEHOLDER"),
+                injections: Vec::new(),
+            },
+        ));
+        out
+    }
+
+    #[test]
+    fn a_required_slot_on_a_connector_reachable_two_ways_with_no_bound_value_fails_the_launch() {
+        let failure = gate_required_slots(
+            &[slot(true)],
+            &[two_method_connector("some-provider")],
+            &CredentialStateFile::new(),
+        )
+        .expect_err("a required slot with no value must refuse the launch");
+        assert_eq!(
+            failure,
+            RequiredSlotFailure::NoSignInHeld {
+                connector: "some-provider".into(),
+                env: "SOME_TOKEN".into(),
+            },
+            "no sign-in is held, so the workload must never start believing its required credential will arrive"
+        );
+        let message = failure.as_message();
+        assert!(
+            !message.contains("lns connector connect"),
+            "that command refuses a connector reachable several ways, so naming it would send the user to a dead end: {message}"
+        );
+        assert!(
+            message.contains("offer card"),
+            "the refusal must name the one recovery that works: {message}"
+        );
+    }
+
+    #[test]
+    fn a_required_slot_is_satisfied_by_a_value_bound_under_the_held_methods_own_key() {
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "some-provider:subscription".into(),
+            lns_policy::credentials::CredentialEntry::Stored {
+                value: "some-secret".into(),
+            },
+        );
+        assert!(
+            gate_required_slots(
+                &[slot(true)],
+                &[two_method_connector("some-provider")],
+                &state
+            )
+            .is_ok(),
+            "the value is bound under the sign-in that holds it, so the launch must proceed"
+        );
+    }
+
+    #[test]
+    fn no_armed_plan_is_reported_for_a_connector_the_machine_holds_no_sign_in_for() {
+        let plans = plan_declared_connectors(
+            &["some-provider".to_string()],
+            &[two_method_connector("some-provider")],
+            &CredentialStateFile::new(),
+        );
+        assert!(
+            plans.is_empty(),
+            "nothing was wired, so certifying it armed would start a workload whose credential is inert: {plans:?}"
+        );
     }
 
     fn credential_connector(id: &str, env: &str) -> Connector {

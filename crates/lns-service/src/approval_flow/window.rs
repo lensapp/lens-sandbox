@@ -24,8 +24,12 @@ pub enum RequestAction {
     Decide(Decision),
     /// A closed card: fail the held request, but record nothing — the developer made no decision.
     Dismiss,
-    ConnectConnector,
+    /// `method` names the sign-in the user picked; `None` where the connector had only one to offer.
+    ConnectConnector {
+        method: Option<String>,
+    },
     UseToken {
+        method: Option<String>,
         value: String,
     },
 }
@@ -342,13 +346,13 @@ impl WindowState {
     }
 
     /// Accepts the connector offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
-    pub fn connect_offer(&self, id: &str) -> bool {
-        self.route_offer(id, RequestAction::ConnectConnector)
+    pub fn connect_offer(&self, id: &str, method: Option<String>) -> bool {
+        self.route_offer(id, RequestAction::ConnectConnector { method })
     }
 
     /// Accepts the connector offer by connecting it with a pasted token. See [`Self::route_offer`].
-    pub fn use_offer_token(&self, id: &str, value: String) -> bool {
-        self.route_offer(id, RequestAction::UseToken { value })
+    pub fn use_offer_token(&self, id: &str, method: Option<String>, value: String) -> bool {
+        self.route_offer(id, RequestAction::UseToken { method, value })
     }
 
     /// Routes one connect action for the clicked request and immediately drops every other offer card for the same connector, so no sibling card flashes up before the in-flight connect releases them all. The clicked card's slot is kept by a connecting placeholder until the connect resolves.
@@ -363,11 +367,13 @@ impl WindowState {
             id: id.to_string(),
             action,
         });
-        if let Some(name) = offer {
-            g.pending
-                .retain(|e| e.prompt.offer.as_deref() != Some(name.as_str()));
+        if let Some(offer) = offer {
+            g.pending.retain(|e| {
+                e.prompt.offer.as_ref().map(|o| o.connector_id.as_str())
+                    != Some(offer.connector_id.as_str())
+            });
             g.connecting.push(ConnectingEntry {
-                display_name: name,
+                display_name: offer.display_name,
                 seq: entry.seq,
             });
         }
@@ -390,19 +396,21 @@ impl WindowState {
     /// Declines the connector offer: clears the offer on every held request for that connector so each falls back to the plain allow/deny (rather than re-offering via a sibling card) without resolving them; returns whether an offer was present to clear.
     pub fn decline_offer(&self, id: &str) -> bool {
         let mut g = self.lock();
-        let Some(name) = g
+        let Some(connector_id) = g
             .pending
             .iter()
             .find(|e| e.prompt.id == id)
-            .and_then(|e| e.prompt.offer.clone())
+            .and_then(|e| e.prompt.offer.as_ref())
+            .map(|o| o.connector_id.clone())
         else {
             return false;
         };
-        for entry in g
-            .pending
-            .iter_mut()
-            .filter(|e| e.prompt.offer.as_deref() == Some(name.as_str()))
-        {
+        for entry in g.pending.iter_mut().filter(|e| {
+            e.prompt
+                .offer
+                .as_ref()
+                .is_some_and(|o| o.connector_id == connector_id)
+        }) {
             entry.prompt.offer = None;
         }
         true
@@ -642,18 +650,17 @@ mod tests {
             host: host.into(),
             action: format!("CONNECT {host}:443"),
             offer: None,
-            token_fallback: None,
             treatment: Treatment::Inspected,
         }
     }
 
     fn cred_prompt(id: &str, credential_id: &str) -> CredentialPendingPrompt {
         CredentialPendingPrompt {
+            token_fallback: None,
             id: id.into(),
             credential_id: credential_id.into(),
             action: format!("use of {credential_id} placeholder"),
             oauth_display_name: None,
-            token_fallback: None,
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
@@ -817,8 +824,11 @@ mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
-            offer: Some(name.into()),
-            token_fallback: None,
+            offer: Some(crate::approval_flow::session::OfferPrompt {
+                connector_id: name.into(),
+                display_name: name.into(),
+                methods: Vec::new(),
+            }),
             treatment: Treatment::Inspected,
         }
     }
@@ -828,11 +838,11 @@ mod tests {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.connect_offer("r1"));
+        assert!(s.connect_offer("r1", None));
         assert_eq!(s.pending_count(), 0, "accepting the offer clears the card");
         let got = rx.try_recv().expect("delivery");
         assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectConnector);
+        assert_eq!(got.action, RequestAction::ConnectConnector { method: None });
     }
 
     #[test]
@@ -844,7 +854,7 @@ mod tests {
             tx.clone(),
         );
         s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.connect_offer("r1"));
+        assert!(s.connect_offer("r1", None));
         assert_eq!(
             s.pending_count(),
             0,
@@ -852,7 +862,7 @@ mod tests {
         );
         let got = rx.try_recv().expect("delivery");
         assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectConnector);
+        assert_eq!(got.action, RequestAction::ConnectConnector { method: None });
         assert!(
             rx.try_recv().is_err(),
             "only one connect is routed; the in-flight connect releases the siblings"
@@ -868,7 +878,7 @@ mod tests {
             tx.clone(),
         );
         s.insert_pending(prompt("r2", "example.com"), tx);
-        assert!(s.connect_offer("r1"));
+        assert!(s.connect_offer("r1", None));
         let snap = s.snapshot();
         assert_eq!(snap.pending.len(), 1);
         assert_eq!(
@@ -882,7 +892,7 @@ mod tests {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(!s.connect_offer("nope"));
+        assert!(!s.connect_offer("nope", None));
         assert!(rx.try_recv().is_err());
     }
 
@@ -895,7 +905,7 @@ mod tests {
             tx.clone(),
         );
         s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.use_offer_token("r1", "some-pasted-token".into()));
+        assert!(s.use_offer_token("r1", None, "some-pasted-token".into()));
         assert_eq!(
             s.pending_count(),
             0,
@@ -906,6 +916,7 @@ mod tests {
         assert_eq!(
             got.action,
             RequestAction::UseToken {
+                method: None,
                 value: "some-pasted-token".into()
             }
         );
@@ -917,7 +928,7 @@ mod tests {
         let s = WindowState::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(!s.use_offer_token("nope", "some-pasted-token".into()));
+        assert!(!s.use_offer_token("nope", None, "some-pasted-token".into()));
         assert!(rx.try_recv().is_err());
     }
 
@@ -1134,11 +1145,11 @@ mod tests {
 
     fn sign_in_card(credential_id: &str) -> SignInCard {
         SignInCard {
+            token_fallback: None,
             credential_id: credential_id.into(),
             display_name: "GitHub".into(),
             user_code: Some("WXYZ-1234".into()),
             verification_uri: "https://some-oauth.example/login/device".into(),
-            token_fallback: None,
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
@@ -1245,7 +1256,7 @@ mod tests {
             tx.clone(),
         );
         s.insert_pending(prompt("r2", "example.com"), tx);
-        assert!(s.connect_offer("r1"));
+        assert!(s.connect_offer("r1", None));
         let snap = s.snapshot();
         assert_eq!(snap.connecting, vec!["GitHub".to_string()]);
         assert_eq!(
@@ -1260,7 +1271,7 @@ mod tests {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.use_offer_token("r1", "some-pasted-token".into()));
+        assert!(s.use_offer_token("r1", None, "some-pasted-token".into()));
         assert_eq!(s.snapshot().connecting, vec!["GitHub".to_string()]);
     }
 
@@ -1282,7 +1293,7 @@ mod tests {
             tx.clone(),
         );
         s.insert_pending(prompt("r2", "example.com"), tx);
-        s.connect_offer("r1");
+        s.connect_offer("r1", None);
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
         s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
         let snap = s.snapshot();
@@ -1322,8 +1333,8 @@ mod tests {
             offer_prompt("r2", "api.other-oauth.example", "Other Service"),
             tx,
         );
-        s.connect_offer("r1");
-        s.connect_offer("r2");
+        s.connect_offer("r1", None);
+        s.connect_offer("r2", None);
         s.clear_connecting("GitHub");
         assert_eq!(s.snapshot().connecting, vec!["Other Service".to_string()]);
     }
@@ -1333,7 +1344,7 @@ mod tests {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        s.connect_offer("r1");
+        s.connect_offer("r1", None);
         s.clear_connecting("Other Service");
         assert_eq!(s.snapshot().connecting, vec!["GitHub".to_string()]);
     }
@@ -1350,8 +1361,8 @@ mod tests {
             offer_prompt("r2", "api.other-oauth.example", "Other Service"),
             tx,
         );
-        s.connect_offer("r1");
-        s.connect_offer("r2");
+        s.connect_offer("r1", None);
+        s.connect_offer("r2", None);
         s.clear_all_connecting();
         assert!(
             s.snapshot().connecting.is_empty(),
@@ -1361,11 +1372,11 @@ mod tests {
 
     fn oauth_cred_prompt(id: &str, name: &str) -> CredentialPendingPrompt {
         CredentialPendingPrompt {
+            token_fallback: None,
             id: id.into(),
             credential_id: "some-oauth".into(),
             action: "use of some-oauth placeholder".into(),
             oauth_display_name: Some(name.into()),
-            token_fallback: None,
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,

@@ -140,6 +140,15 @@ held and the card appears. Your rule then applies exactly as written:
 A connector you have already connected is never re-offered, and an allow rule
 for a domain no connector claims is never withheld.
 
+Where a connector accepts more than one kind of credential, the card asks which
+one you hold — one button per [sign-in method](#sign-in-methods) instead of a
+single **Connect**. Until you pick one, none of that connector's environment
+variables is seeded, because seeding one would choose for you and seeding both
+would claim a sign-in state no real login produces. Your choice is per-machine —
+it records which credential you hold, so it stays out of the shareable
+`lns-policy.yaml` — and the variable for the method you picked appears at the
+next launch.
+
 ## The catalog file
 
 The bundled and user catalogs share one schema, so an entry is portable between them:
@@ -185,6 +194,12 @@ Two rules keep a connector honest, and the catalog refuses to load if either bre
 - A connector must declare at least one method, or nothing could ever connect it.
 - No two methods may write the same environment variable, because a workload reading
   that variable could not tell which sign-in it got.
+
+A connector with one method binds its value under the connector id; one with several
+binds each method separately, so holding an API key and a subscription token at the
+same time is fine and neither overwrites the other. `lns connector connect <id>` binds
+the single-method case only — for a connector with a choice to make, connect it from
+the first-use card, which is where the choice is presented.
 
 Each method's `kind` is `credential` or `oauth`. An `oauth` method authenticates by an
 interactive **sign-in** the background service drives for you — `lns connector

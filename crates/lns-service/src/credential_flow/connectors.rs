@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use lns_policy::connectors::{Connector, OauthAuth, OauthFlow};
+use lns_policy::connectors::{Connector, OauthAuth, OauthFlow, SignInMethod};
 use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule};
@@ -14,6 +14,8 @@ pub struct AppliedConnectors {
     pub routes: Vec<RouteRule>,
     pub oauth_configs: HashMap<String, OauthAuth>,
     pub pkce_configs: HashMap<String, OauthAuth>,
+    /// Which connector each provider id belongs to, so a connect persists the connector rather than the sign-in method the user picked.
+    pub owner: HashMap<String, String>,
 }
 
 /// Catalog connectors that aren't yet connected, with their routes held ready to allow live on connect, and device-flow / pkce configs for a sign-in dance on connect; a definition-declared entry seeds its placeholder env so the workload attempts its first request, while the rest stay detect-only.
@@ -23,45 +25,175 @@ pub struct ConnectableConnectors {
     pub routes: HashMap<String, Vec<RouteRule>>,
     pub oauth_configs: HashMap<String, OauthAuth>,
     pub pkce_configs: HashMap<String, OauthAuth>,
+    /// Which connector each provider id belongs to, so a connect persists the connector rather than the sign-in method the user picked.
+    pub owner: HashMap<String, String>,
 }
 
-/// The env/placeholder/injection wiring a connector seeds, taken from whichever block its authKind carries.
-fn wire_provider_def(integ: &Connector) -> Option<ProviderDef> {
-    let method = integ.default_method()?;
-    Some(ProviderDef {
-        id: integ.id.clone(),
+/// The env/placeholder/injection wiring one sign-in method seeds, keyed by the store id that method binds under.
+fn method_provider_def(integ: &Connector, method: &SignInMethod) -> ProviderDef {
+    ProviderDef {
+        id: integ.provider_id_of(method),
         env_var: method.env_var().to_string(),
         placeholder: method.placeholder().to_string(),
         injections: method.injections().to_vec(),
-    })
+    }
+}
+
+/// The wiring a connector seeds where no choice has been made — its only method. A connector reachable several ways has no single answer, so nothing seeds until the user picks one.
+fn wire_provider_def(integ: &Connector) -> Option<ProviderDef> {
+    integ
+        .sole_method()
+        .map(|method| method_provider_def(integ, method))
 }
 
 fn wire_provider(integ: &Connector) -> Option<DefProvider> {
     wire_provider_def(integ).map(DefProvider::new)
 }
 
+/// One wire provider per sign-in method. `seeds` reaches the workload env only for a connector with a single way in; a method the user has not chosen stays detect-only, so its placeholder is recognized on the wire but never seeded.
+fn wire_providers(integ: &Connector, seeds: bool) -> Vec<DefProvider> {
+    let sole = integ.sole_method().is_some();
+    integ
+        .methods
+        .iter()
+        .map(|method| {
+            let provider = DefProvider::new(method_provider_def(integ, method));
+            if seeds && sole {
+                provider
+            } else {
+                provider.detect_only()
+            }
+        })
+        .collect()
+}
+
+/// True when the machine (or this workload) holds a sign-in bound under this provider id — a stored value, an oauth token, or a host-detect choice, but never a refusal. A method picked on the offer card records only a grant, because nothing was seeded for a value card to answer.
+pub fn machine_holds_sign_in<'a>(
+    state: &'a lns_policy::credentials::CredentialStateFile,
+    grants: &'a WorkloadGrantFile,
+    project: &'a str,
+    workload: &'a WorkloadIdentity,
+) -> impl Fn(&str) -> bool + 'a {
+    move |provider| {
+        state
+            .get(provider)
+            .is_some_and(|entry| !matches!(entry, lns_policy::credentials::CredentialEntry::Deny))
+            || grants
+                .lookup(project, workload, provider)
+                .is_some_and(|g| g.verdict == GrantVerdict::Allow)
+    }
+}
+
+/// A sign-in this machine holds, paired with the key its value and grant actually sit under.
+pub(crate) struct HeldSignIn<'a> {
+    pub method: &'a SignInMethod,
+    /// The bare connector id for a binding made before the connector grew a second way in, so the value and grant already stored keep resolving.
+    pub provider_id: String,
+}
+
+/// The sign-in this machine actually holds: the only way in, the one whose provider id is chosen, or — for a binding made before the connector grew a second way in, which sits under the bare connector id — the one the catalog still lists first.
+pub(crate) fn held_method<'a>(
+    integ: &'a Connector,
+    chosen: MethodChosen<'_>,
+) -> Option<HeldSignIn<'a>> {
+    if let Some(method) = integ.sole_method() {
+        return Some(HeldSignIn {
+            method,
+            provider_id: integ.provider_id_of(method),
+        });
+    }
+    if let Some(method) = integ
+        .methods
+        .iter()
+        .find(|m| chosen(&integ.provider_id_of(m)))
+    {
+        return Some(HeldSignIn {
+            method,
+            provider_id: integ.provider_id_of(method),
+        });
+    }
+    chosen(&integ.id)
+        .then(|| integ.methods.first())
+        .flatten()
+        .map(|method| HeldSignIn {
+            method,
+            provider_id: integ.id.clone(),
+        })
+}
+
+/// Repeats the held sign-in's configs under the key its value actually sits under, so a binding made before the connector grew a second way in can still drive its sign-in and token refresh.
+fn alias_legacy_signin_configs(
+    integ: &Connector,
+    held: &HeldSignIn<'_>,
+    out: &mut AppliedConnectors,
+) {
+    if held.provider_id == integ.provider_id_of(held.method) {
+        return;
+    }
+    let per_method = integ.provider_id_of(held.method);
+    if let Some(cfg) = out.oauth_configs.get(&per_method).cloned() {
+        out.oauth_configs.insert(held.provider_id.clone(), cfg);
+    }
+    if let Some(cfg) = out.pkce_configs.get(&per_method).cloned() {
+        out.pkce_configs.insert(held.provider_id.clone(), cfg);
+    }
+    out.owner.insert(held.provider_id.clone(), integ.id.clone());
+}
+
+/// The providers a connected connector puts on the wire: the method it holds a sign-in for, or — while the choice is still open — every method detect-only, so the domain stays gated and host detection still works without seeding anything.
+fn applied_providers(integ: &Connector, chosen: MethodChosen<'_>) -> Vec<DefProvider> {
+    match held_method(integ, chosen) {
+        Some(held) => vec![DefProvider::new(ProviderDef {
+            id: held.provider_id,
+            ..method_provider_def(integ, held.method)
+        })],
+        None => wire_providers(integ, false),
+    }
+}
+
 /// The oauth block usable for a device sign-in: the device flow with a client_id baked in (community builds ship none, so they fall back to the token paste).
-fn signin_oauth(integ: &Connector) -> Option<&OauthAuth> {
-    integ.default_method()?.oauth.as_ref().filter(|o| {
+fn signin_oauth(method: &SignInMethod) -> Option<&OauthAuth> {
+    method.oauth.as_ref().filter(|o| {
         o.flow == OauthFlow::Device && o.client_id.as_deref().is_some_and(|c| !c.is_empty())
     })
 }
 
 /// The oauth block usable for a pkce browser sign-in: the pkce flow with an authorization endpoint to redirect through.
-fn signin_pkce(integ: &Connector) -> Option<&OauthAuth> {
-    integ
-        .default_method()?
+fn signin_pkce(method: &SignInMethod) -> Option<&OauthAuth> {
+    method
         .oauth
         .as_ref()
         .filter(|o| o.flow == OauthFlow::Pkce && o.authorization_endpoint.is_some())
 }
 
-/// The env var and injection domains a connector discloses on its consent card, or `None` when its authKind carries no usable block.
+/// Records every sign-in config a connector's methods offer, each under the store id its method binds to, so a non-first oauth method is reachable too.
+fn collect_signin_configs(
+    integ: &Connector,
+    owner: &mut HashMap<String, String>,
+    oauth_configs: &mut HashMap<String, OauthAuth>,
+    pkce_configs: &mut HashMap<String, OauthAuth>,
+) {
+    for method in &integ.methods {
+        let provider_id = integ.provider_id_of(method);
+        owner.insert(provider_id.clone(), integ.id.clone());
+        if let Some(o) = signin_oauth(method) {
+            oauth_configs.insert(provider_id.clone(), o.clone());
+        }
+        if let Some(o) = signin_pkce(method) {
+            pkce_configs.insert(provider_id, o.clone());
+        }
+    }
+}
+
+/// True when this provider id is the sign-in the machine (or this workload) actually holds, so a connected connector reachable several ways seeds only the method the user picked.
+pub type MethodChosen<'a> = &'a dyn Fn(&str) -> bool;
+
+/// The env var and injection domains a connector discloses on its consent card. A connector reachable several ways discloses none — no one env var describes it — so a decision about it is recorded against the connector alone.
 pub fn disclosure_of(integ: &Connector) -> Option<(String, Vec<String>)> {
     wire_provider(integ).map(|p| p.disclosure_snapshot())
 }
 
-/// A connector this workload has already answered for, either way: a grant recorded against the same disclosure the card showed. A redefined connector is a different question, so neither a yes nor a no carries over to a new shape.
+/// A connector this workload has already answered for, either way: a grant recorded against the same disclosure the card showed. A redefined connector is a different question, so neither a yes nor a no carries over to a new shape — but a grant that disclosed nothing has no shape to drift, and answers the connector as a whole.
 fn is_decided(
     integ: &Connector,
     project: &str,
@@ -71,8 +203,9 @@ fn is_decided(
     let Some(grant) = grants.lookup(project, workload, &integ.id) else {
         return false;
     };
-    disclosure_of(integ)
-        .is_some_and(|(env_var, domains)| grant.matches_disclosure(&env_var, &domains))
+    grant.has_no_disclosure()
+        || disclosure_of(integ)
+            .is_some_and(|(env_var, domains)| grant.matches_disclosure(&env_var, &domains))
 }
 
 /// The policy a launch actually runs: the user's own rules minus the allows that would let a request past a connector nobody has decided yet, so the first request to a claimed domain is held and the connect offer gets its chance. Once the connector is connected or decided either way, the withheld rule applies as written. Only an `offerable` connector can withhold anything — a connector with no path to a card could never release the rule again.
@@ -102,7 +235,7 @@ pub fn withhold_undecided_connector_allows(
     out
 }
 
-/// Pairs each connectable connector's id with its catalog display name and route patterns, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
+/// Pairs each connectable connector's id with its catalog display name, route patterns, and the sign-ins it offers, so a held request to one of those domains can offer to connect it instead of asking about the bare host.
 pub fn offerable_connectors(
     connectable: &ConnectableConnectors,
     catalog: &[Connector],
@@ -118,10 +251,22 @@ pub fn offerable_connectors(
                     .map(|i| i.display_name().to_string())
                     .unwrap_or_else(|| id.clone()),
                 patterns: routes.iter().map(|r| r.match_pattern.clone()).collect(),
-                token_fallback: entry
-                    .and_then(|i| i.default_method())
-                    .and_then(|m| m.token_fallback.clone()),
+                methods: entry.map(offer_methods).unwrap_or_default(),
             }
+        })
+        .collect()
+}
+
+/// Every sign-in a connector offers, each paired with the per-machine store id it binds under.
+fn offer_methods(integ: &Connector) -> Vec<crate::approval_flow::session::OfferMethod> {
+    integ
+        .methods
+        .iter()
+        .map(|method| crate::approval_flow::session::OfferMethod {
+            method_id: method.id.clone(),
+            provider_id: integ.provider_id_of(method),
+            display_name: method.display_name().to_string(),
+            token_fallback: method.token_fallback.clone(),
         })
         .collect()
 }
@@ -159,8 +304,41 @@ pub fn unknown_connectors_refusal(unknown: &[String]) -> String {
     )
 }
 
+/// Connected connectors reachable several ways that this machine holds no sign-in for. Each wires no provider, so nothing seeds a placeholder and — being connected, its routes already allowed — no card can ever be raised: every request would leave unauthenticated in silence.
+pub fn unchosen_connected_connectors(
+    policy: &Policy,
+    catalog: &[Connector],
+    chosen: MethodChosen<'_>,
+) -> Vec<String> {
+    catalog
+        .iter()
+        .filter(|integ| policy.connectors.iter().any(|id| id == &integ.id))
+        .filter(|integ| integ.sole_method().is_none())
+        .filter(|integ| held_method(integ, chosen).is_none())
+        .map(|integ| integ.id.clone())
+        .collect()
+}
+
+/// The launch-refusal message for a connected connector no sign-in is held for, pointing at the one recovery that works: disconnecting makes it connectable again, and its first use then asks which sign-in.
+pub fn unchosen_connectors_refusal(ids: &[String]) -> String {
+    let list = ids
+        .iter()
+        .map(|id| format!("\"{id}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "connector {list} is connected but this machine holds no sign-in for it, so nothing would authenticate its requests; \
+         run `lns connector disconnect {}` and the next request to its domain will ask which sign-in to use",
+        ids.first().map(String::as_str).unwrap_or_default()
+    )
+}
+
 /// Resolves the policy's applied connector ids against the effective catalog.
-pub fn resolve_applied_connectors(policy: &Policy, catalog: &[Connector]) -> AppliedConnectors {
+pub fn resolve_applied_connectors(
+    policy: &Policy,
+    catalog: &[Connector],
+    chosen: MethodChosen<'_>,
+) -> AppliedConnectors {
     let applied: HashSet<&str> = policy.connectors.iter().map(String::as_str).collect();
 
     let mut out = AppliedConnectors {
@@ -171,14 +349,15 @@ pub fn resolve_applied_connectors(policy: &Policy, catalog: &[Connector]) -> App
         if !applied.contains(integ.id.as_str()) {
             continue;
         }
-        if let Some(p) = wire_provider(integ) {
-            out.providers.push(p);
-        }
-        if let Some(o) = signin_oauth(integ) {
-            out.oauth_configs.insert(integ.id.clone(), o.clone());
-        }
-        if let Some(o) = signin_pkce(integ) {
-            out.pkce_configs.insert(integ.id.clone(), o.clone());
+        out.providers.extend(applied_providers(integ, chosen));
+        collect_signin_configs(
+            integ,
+            &mut out.owner,
+            &mut out.oauth_configs,
+            &mut out.pkce_configs,
+        );
+        if let Some(held) = held_method(integ, chosen) {
+            alias_legacy_signin_configs(integ, &held, &mut out);
         }
     }
     out
@@ -189,31 +368,36 @@ pub fn resolve_applied_with_slots(
     policy: &Policy,
     slots: &[lns_artifact::spec::CredentialSlot],
     catalog: &[Connector],
+    chosen: MethodChosen<'_>,
 ) -> AppliedConnectors {
     let slot_ids: HashSet<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     let mut base = policy.clone();
     base.connectors.retain(|id| !slot_ids.contains(id.as_str()));
-    let mut out = resolve_applied_connectors(&base, catalog);
+    let mut out = resolve_applied_connectors(&base, catalog, chosen);
     let ceiling_denies = crate::artifact::policy::is_closed(policy);
     for slot in slots {
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
             continue;
         };
-        if let Some(mut def) = wire_provider_def(integ) {
-            def.env_var = slot.env.clone();
-            out.providers.push(DefProvider::new(def));
-        }
+        // One slot carries one env name, so only the method this machine holds a sign-in for can fill it.
+        let Some(held) = held_method(integ, chosen) else {
+            continue;
+        };
+        let mut def = method_provider_def(integ, held.method);
+        def.id = held.provider_id;
+        def.env_var = slot.env.clone();
+        out.providers.push(DefProvider::new(def));
         // A slot is artifact-declared, so its route must not widen the user's lockdown.
         if !ceiling_denies {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));
         }
-        if let Some(o) = signin_oauth(integ) {
-            out.oauth_configs.insert(integ.id.clone(), o.clone());
-        }
-        if let Some(o) = signin_pkce(integ) {
-            out.pkce_configs.insert(integ.id.clone(), o.clone());
-        }
+        collect_signin_configs(
+            integ,
+            &mut out.owner,
+            &mut out.oauth_configs,
+            &mut out.pkce_configs,
+        );
     }
     out
 }
@@ -362,20 +546,22 @@ fn resolve_connectable_with_declared(
         if collides {
             continue;
         }
-        if let Some(p) = wire_provider(integ) {
-            let seeds = declared.iter().any(|id| id == &integ.id);
-            out.providers.push(if seeds { p } else { p.detect_only() });
-            out.routes.insert(
-                integ.id.clone(),
-                integ.routes.iter().map(|r| r.to_route_rule()).collect(),
-            );
-            if let Some(o) = signin_oauth(integ) {
-                out.oauth_configs.insert(integ.id.clone(), o.clone());
-            }
-            if let Some(o) = signin_pkce(integ) {
-                out.pkce_configs.insert(integ.id.clone(), o.clone());
-            }
+        let seeds = declared.iter().any(|id| id == &integ.id);
+        let providers = wire_providers(integ, seeds);
+        if providers.is_empty() {
+            continue;
         }
+        out.providers.extend(providers);
+        out.routes.insert(
+            integ.id.clone(),
+            integ.routes.iter().map(|r| r.to_route_rule()).collect(),
+        );
+        collect_signin_configs(
+            integ,
+            &mut out.owner,
+            &mut out.oauth_configs,
+            &mut out.pkce_configs,
+        );
     }
     out
 }
@@ -416,6 +602,11 @@ mod tests {
         }
     }
 
+    /// A machine holding no sign-in at all; a connector with one way in ignores this, so it is the honest default for a single-method fixture.
+    fn nothing_chosen(_provider: &str) -> bool {
+        false
+    }
+
     fn policy_applying(ids: &[&str]) -> Policy {
         Policy {
             connectors: ids.iter().map(|s| s.to_string()).collect(),
@@ -453,7 +644,8 @@ mod tests {
     #[test]
     fn resolves_an_applied_credential_connector_into_a_provider_and_its_routes() {
         let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let out = resolve_applied_connectors(&policy_applying(&["gitlab"]), &catalog);
+        let out =
+            resolve_applied_connectors(&policy_applying(&["gitlab"]), &catalog, &nothing_chosen);
         assert_eq!(out.providers.len(), 1);
         assert_eq!(out.providers[0].id(), "gitlab");
         assert_eq!(out.providers[0].env_var(), "GITLAB_TOKEN");
@@ -463,10 +655,14 @@ mod tests {
     }
 
     fn provider_of(id: &str, env: &str, domain: &str) -> DefProvider {
-        resolve_applied_connectors(&policy_applying(&[id]), &[cred_connector(id, env, domain)])
-            .providers
-            .pop()
-            .expect("one provider")
+        resolve_applied_connectors(
+            &policy_applying(&[id]),
+            &[cred_connector(id, env, domain)],
+            &nothing_chosen,
+        )
+        .providers
+        .pop()
+        .expect("one provider")
     }
 
     fn allow_grants(
@@ -682,7 +878,9 @@ mod tests {
             "api.some-oauth.example",
         )];
         let slots = vec![slot("some-oauth", "REMAPPED_TOKEN", true)];
-        let providers = resolve_applied_with_slots(&Policy::default(), &slots, &catalog).providers;
+        let providers =
+            resolve_applied_with_slots(&Policy::default(), &slots, &catalog, &nothing_chosen)
+                .providers;
         let workload = WorkloadIdentity::Definition {
             dir: "/proj".into(),
         };
@@ -742,7 +940,7 @@ mod tests {
     #[test]
     fn skips_a_catalog_connector_that_is_not_applied() {
         let catalog = vec![cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com")];
-        let out = resolve_applied_connectors(&policy_applying(&[]), &catalog);
+        let out = resolve_applied_connectors(&policy_applying(&[]), &catalog, &nothing_chosen);
         assert!(out.providers.is_empty());
         assert!(out.routes.is_empty());
     }
@@ -799,6 +997,495 @@ mod tests {
         }
     }
 
+    /// A connector reachable two ways, each with its own env var — the shape a user must choose between.
+    fn two_method_connector(id: &str, domain: &str) -> Connector {
+        let mut connector = cred_connector(id, "SOME_TOKEN", domain);
+        connector.methods[0].id = "api-key".into();
+        connector.methods.push(SignInMethod::credential(
+            "subscription",
+            CredentialAuth {
+                env_var: "SOME_SUBSCRIPTION_TOKEN".into(),
+                placeholder: format!("lns-{id}-subscription-placeholder"),
+                injections: vec![InjectionDef {
+                    kind: InjectionKind::BearerHeader,
+                    domain: domain.into(),
+                    header: None,
+                }],
+            },
+        ));
+        connector
+    }
+
+    #[test]
+    fn declining_a_connector_reachable_two_ways_is_remembered_although_no_env_var_describes_it() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::deny(
+            "/proj",
+            &workload,
+            "some-provider",
+            "",
+            Vec::new(),
+        ));
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::allow_host("api.some-provider.example"));
+
+        let out = withhold_undecided_connector_allows(
+            &policy,
+            &catalog,
+            &HashSet::from(["some-provider".to_string()]),
+            "/proj",
+            &workload,
+            &grants,
+        );
+        assert_eq!(
+            out.network.egress.http.len(),
+            1,
+            "a connector reachable several ways discloses no single env var, so its refusal records none; reading that as undecided would hold the domain against the user's own rule for ever"
+        );
+    }
+
+    #[test]
+    fn a_connected_connector_reachable_two_ways_seeds_nothing_until_a_method_is_chosen() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &catalog,
+            &nothing_chosen,
+        );
+
+        let seeded: Vec<&str> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| p.env_var())
+            .collect();
+        assert!(
+            seeded.is_empty(),
+            "connecting the connector does not answer which way in the user holds, so no env var may be seeded yet: {seeded:?}"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_counts_as_chosen_when_the_machine_holds_a_value_or_this_workload_granted_it() {
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut state = lns_policy::credentials::CredentialStateFile::new();
+        state.insert(
+            "some-provider:api-key".into(),
+            lns_policy::credentials::CredentialEntry::HostDetect,
+        );
+        state.insert(
+            "some-provider:refused".into(),
+            lns_policy::credentials::CredentialEntry::Deny,
+        );
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "/proj",
+            &workload,
+            "some-provider:subscription",
+            "SOME_SUBSCRIPTION_TOKEN",
+            vec![],
+        ));
+
+        let chosen = machine_holds_sign_in(&state, &grants, "/proj", &workload);
+
+        assert!(
+            chosen("some-provider:api-key"),
+            "choosing to use the host's own value is still a choice, so that sign-in seeds on the next launch"
+        );
+        assert!(
+            chosen("some-provider:subscription"),
+            "picking a sign-in on the offer card records only a grant — nothing was seeded for a value card to answer — so the grant alone must count, or the choice would evaporate"
+        );
+        assert!(
+            !chosen("some-provider:refused"),
+            "a refusal is not a sign-in the machine holds"
+        );
+        assert!(!chosen("some-provider:never-touched"));
+    }
+
+    #[test]
+    fn a_connected_connector_no_sign_in_is_held_for_names_itself_for_refusal() {
+        let catalog = vec![
+            two_method_connector("some-provider", "api.some-provider.example"),
+            cred_connector(
+                "other-provider",
+                "OTHER_TOKEN",
+                "api.other-provider.example",
+            ),
+        ];
+        let policy = policy_applying(&["some-provider", "other-provider"]);
+
+        assert_eq!(
+            unchosen_connected_connectors(&policy, &catalog, &nothing_chosen),
+            vec!["some-provider".to_string()],
+            "a connector with one way in is never in this state, and one whose sign-in is held is fine — only the silent case may refuse a launch"
+        );
+        assert!(
+            unchosen_connected_connectors(&policy, &catalog, &|provider| provider
+                == "some-provider:api-key")
+            .is_empty(),
+            "once a sign-in is held there is a value to inject, so the launch must proceed"
+        );
+    }
+
+    #[test]
+    fn the_refusal_points_at_disconnecting_so_first_use_can_ask_which_sign_in() {
+        let message = unchosen_connectors_refusal(&["some-provider".to_string()]);
+        assert!(
+            message.contains("lns connector disconnect some-provider"),
+            "the fix must name the one recovery that works — `lns connector connect` refuses a connector reachable several ways, so pointing there would be a dead end: {message}"
+        );
+    }
+
+    #[test]
+    fn a_slot_naming_a_connector_reachable_two_ways_remaps_the_held_methods_env() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-provider", "REMAPPED_TOKEN", true)],
+            &catalog,
+            &|provider| provider == "some-provider:subscription",
+        );
+        let wired: Vec<(&str, &str)> = out
+            .providers
+            .iter()
+            .map(|p| (p.id(), p.env_var()))
+            .collect();
+        assert_eq!(
+            wired,
+            vec![("some-provider:subscription", "REMAPPED_TOKEN")],
+            "the slot renames the env var but the value still comes from the sign-in the machine holds"
+        );
+    }
+
+    #[test]
+    fn a_slot_wires_nothing_when_the_machine_holds_no_sign_in_for_the_connector() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_with_slots(
+            &policy_applying(&[]),
+            &[slot("some-provider", "REMAPPED_TOKEN", true)],
+            &catalog,
+            &nothing_chosen,
+        );
+        assert!(
+            out.providers.is_empty(),
+            "there is no value to inject, so wiring a provider would advertise a credential the workload never gets"
+        );
+    }
+
+    #[test]
+    fn a_value_bound_before_the_connector_grew_a_second_method_still_chooses_that_method() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        // What every release before sign-in methods wrote: one value under the bare connector id.
+        let out = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &catalog,
+            &|provider| provider == "some-provider",
+        );
+
+        let seeded: Vec<(&str, &str)> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| (p.id(), p.env_var()))
+            .collect();
+        assert_eq!(
+            seeded,
+            vec![("some-provider", "SOME_TOKEN")],
+            "the legacy binding sits under the bare id, so the provider must keep that key — keying it per-method would seed the placeholder while the stored value resolved to nothing"
+        );
+    }
+
+    #[test]
+    fn a_legacy_binding_on_an_oauth_first_method_still_finds_its_sign_in_config() {
+        let mut connector =
+            oauth_connector("some-oauth", "SOME_OAUTH_TOKEN", "api.some-oauth.example");
+        connector.methods.push(SignInMethod::credential(
+            "token",
+            CredentialAuth {
+                env_var: "SOME_PASTED_TOKEN".into(),
+                placeholder: "some-oauth-token-LNSPLACEHOLDER".into(),
+                injections: Vec::new(),
+            },
+        ));
+        let catalog = vec![connector];
+
+        let out =
+            resolve_applied_connectors(&policy_applying(&["some-oauth"]), &catalog, &|provider| {
+                provider == "some-oauth"
+            });
+
+        let provider_id = out.providers[0].id().to_string();
+        assert_eq!(
+            provider_id, "some-oauth",
+            "the legacy binding keys under the bare id"
+        );
+        let keys: Vec<&String> = out.oauth_configs.keys().collect();
+        assert!(
+            out.oauth_configs.contains_key(&provider_id),
+            "the sign-in config must be reachable under the same key the provider resolved to, or the device flow and its token refresh are silently lost: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_binding_on_a_pkce_first_method_still_finds_its_browser_sign_in_config() {
+        let mut connector = pkce_connector("some-pkce", "SOME_PKCE_TOKEN", "api.some-pkce.example");
+        connector.methods.push(SignInMethod::credential(
+            "token",
+            CredentialAuth {
+                env_var: "SOME_PASTED_TOKEN".into(),
+                placeholder: "some-pkce-token-LNSPLACEHOLDER".into(),
+                injections: Vec::new(),
+            },
+        ));
+        let catalog = vec![connector];
+
+        let out =
+            resolve_applied_connectors(&policy_applying(&["some-pkce"]), &catalog, &|provider| {
+                provider == "some-pkce"
+            });
+
+        let keys: Vec<&String> = out.pkce_configs.keys().collect();
+        assert!(
+            out.pkce_configs.contains_key("some-pkce"),
+            "the browser redirect is configured per method, so without the alias a legacy binding could never complete its sign-in: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_value_bound_before_the_connector_grew_a_second_method_still_arms_and_injects() {
+        use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
+        use lns_policy::credentials::{CredentialEntry, CredentialStateFile};
+
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        // Exactly what a release before sign-in methods wrote: value and grant both under the bare connector id.
+        let mut state = CredentialStateFile::new();
+        state.insert(
+            "some-provider".into(),
+            CredentialEntry::Stored {
+                value: "some-secret".into(),
+            },
+        );
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "/proj",
+            &workload,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".to_string()],
+        ));
+        let chosen = |provider: &str| {
+            state
+                .get(provider)
+                .is_some_and(|e| !matches!(e, CredentialEntry::Deny))
+        };
+
+        let applied =
+            resolve_applied_connectors(&policy_applying(&["some-provider"]), &catalog, &chosen);
+        let run = run_providers(applied.providers, Vec::new());
+        let armed = gate_armed_by_grant(&run.armed, &run.providers, "/proj", &workload, &grants);
+        assert_eq!(
+            armed,
+            HashSet::from(["some-provider".to_string()]),
+            "the grant the user already gave must still arm the connector, or the upgrade silently revokes their consent"
+        );
+
+        let wire = expand_credentials_for_wire_with_custom(&state, &run.providers, &armed);
+        assert!(
+            wire.iter().any(|c| !c.injections.is_empty()),
+            "the stored value must still reach the wire, or every request leaves unauthenticated while the tool believes it is signed in"
+        );
+    }
+
+    #[test]
+    fn an_explicit_method_choice_beats_the_value_bound_under_the_bare_id() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &catalog,
+            &|provider| provider == "some-provider" || provider == "some-provider:subscription",
+        );
+
+        let seeded: Vec<&str> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| p.id())
+            .collect();
+        assert_eq!(
+            seeded,
+            vec!["some-provider:subscription"],
+            "a sign-in the user picked outright must win over the one inferred from a legacy binding"
+        );
+    }
+
+    #[test]
+    fn a_connected_connector_seeds_only_the_sign_in_method_the_machine_holds() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &catalog,
+            &|provider| provider == "some-provider:subscription",
+        );
+
+        let seeded: Vec<(&str, &str)> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| (p.id(), p.env_var()))
+            .collect();
+        assert_eq!(
+            seeded,
+            vec![("some-provider:subscription", "SOME_SUBSCRIPTION_TOKEN")],
+            "the chosen method's env var is what the tool branches on to see it is signed in, and the method not chosen must not appear at all"
+        );
+        assert_eq!(
+            out.providers.len(),
+            1,
+            "a method the user did not choose has no business on the wire once another is bound"
+        );
+    }
+
+    #[test]
+    fn a_connected_connector_with_one_way_in_ignores_the_choice_predicate() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let out = resolve_applied_connectors(
+            &policy_applying(&["some-provider"]),
+            &catalog,
+            &nothing_chosen,
+        );
+        let seeded: Vec<&str> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| p.id())
+            .collect();
+        assert_eq!(
+            seeded,
+            vec!["some-provider"],
+            "there is no choice to make, so a connector with one way in must keep seeding exactly as before this existed"
+        );
+    }
+
+    #[test]
+    fn a_catalog_entry_with_no_way_in_is_skipped_rather_than_offered_unconnectably() {
+        let mut methodless =
+            cred_connector("some-provider", "SOME_TOKEN", "api.some-provider.example");
+        methodless.methods.clear();
+        let out = resolve_connectable_connectors(&Policy::default(), &[methodless]);
+        assert!(
+            out.routes.is_empty() && out.providers.is_empty(),
+            "nothing could ever connect it, so offering it would hold the domain against a card that can never be answered"
+        );
+    }
+
+    #[test]
+    fn a_connector_reachable_two_ways_seeds_neither_env_var_until_the_user_picks_one() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_connectable_with_declared(
+            &Policy::default(),
+            &["some-provider".to_string()],
+            &catalog,
+        );
+
+        let seeded: Vec<&str> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| p.env_var())
+            .collect();
+        assert!(
+            seeded.is_empty(),
+            "seeding one env var picks the sign-in for the user and seeding both fakes a login state no real sign-in produces, so neither may reach the workload: {seeded:?}"
+        );
+    }
+
+    #[test]
+    fn a_connector_reachable_two_ways_still_wires_each_method_so_it_can_be_offered() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let out = resolve_connectable_connectors(&Policy::default(), &catalog);
+
+        let mut ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["some-provider:api-key", "some-provider:subscription"],
+            "each method needs its own wire provider under its own store key, or the MITM could not recognize its placeholder and the choice could not be bound"
+        );
+        assert!(
+            out.routes.contains_key("some-provider"),
+            "without its routes the connector is not offerable, so the first request to its domain could never raise the card"
+        );
+    }
+
+    #[test]
+    fn a_connector_with_one_way_in_still_seeds_its_placeholder_when_the_definition_declares_it() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.some-provider.example",
+        )];
+        let out = resolve_connectable_with_declared(
+            &Policy::default(),
+            &["some-provider".to_string()],
+            &catalog,
+        );
+        let seeded: Vec<&str> = out
+            .providers
+            .iter()
+            .filter(|p| p.seeds_env())
+            .map(|p| p.id())
+            .collect();
+        assert_eq!(
+            seeded,
+            vec!["some-provider"],
+            "a connector with one way in has no choice to make, so declaring it must keep seeding under the bare id every stored value is already bound to"
+        );
+    }
+
     fn pkce_connector(id: &str, env_var: &str, domain: &str) -> Connector {
         Connector {
             id: id.into(),
@@ -841,7 +1528,8 @@ mod tests {
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
+        let out =
+            resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog, &nothing_chosen);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(
             ids,
@@ -865,7 +1553,11 @@ mod tests {
             cred_connector("gitlab", "GITLAB_TOKEN", "gitlab.com"),
             cred_connector("huggingface", "HF_TOKEN", "huggingface.co"),
         ];
-        let out = resolve_applied_connectors(&policy_applying(&["huggingface"]), &catalog);
+        let out = resolve_applied_connectors(
+            &policy_applying(&["huggingface"]),
+            &catalog,
+            &nothing_chosen,
+        );
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(ids, ["huggingface"]);
     }
@@ -888,6 +1580,7 @@ mod tests {
                 "SOME_TOKEN",
                 "api.example.test",
             )],
+            &nothing_chosen,
         );
         let connectable = resolve_connectable_connectors(
             &policy_applying(&[]),
@@ -1083,7 +1776,8 @@ mod tests {
             "SOMEPKCE_TOKEN",
             "api.somepkce.com",
         )];
-        let out = resolve_applied_connectors(&policy_applying(&["somepkce"]), &catalog);
+        let out =
+            resolve_applied_connectors(&policy_applying(&["somepkce"]), &catalog, &nothing_chosen);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(ids, ["somepkce"], "a pkce connector seeds its placeholder");
         assert_eq!(out.routes.len(), 1, "its routes apply");
@@ -1104,7 +1798,8 @@ mod tests {
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
+        let out =
+            resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog, &nothing_chosen);
         assert!(out.oauth_configs.contains_key("somesaas"));
         assert!(
             out.pkce_configs.is_empty(),
@@ -1143,7 +1838,8 @@ mod tests {
             "SOMESAAS_TOKEN",
             "api.somesaas.com",
         )];
-        let out = resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog);
+        let out =
+            resolve_applied_connectors(&policy_applying(&["somesaas"]), &catalog, &nothing_chosen);
         let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         assert_eq!(
             ids,
@@ -1176,6 +1872,7 @@ mod tests {
             &policy_applying(&[]),
             &[slot("some-provider", "PROVIDER_KEY", false)],
             &catalog,
+            &nothing_chosen,
         );
         assert_eq!(out.providers.len(), 1);
         assert_eq!(out.providers[0].id(), "some-provider");
@@ -1208,6 +1905,7 @@ mod tests {
             &policy_applying(&["some-provider"]),
             &[slot("some-provider", "PROVIDER_KEY", true)],
             &catalog,
+            &nothing_chosen,
         );
         assert_eq!(
             out.providers.len(),
@@ -1227,6 +1925,7 @@ mod tests {
             &policy_applying(&["other-provider"]),
             &[slot("some-provider", "SOME_TOKEN", false)],
             &catalog,
+            &nothing_chosen,
         );
         let mut ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
         ids.sort_unstable();
@@ -1239,6 +1938,7 @@ mod tests {
             &policy_applying(&[]),
             &[slot("some-unknown", "SOME_TOKEN", true)],
             &[],
+            &nothing_chosen,
         );
         assert!(
             out.providers.is_empty(),
@@ -1258,6 +1958,7 @@ mod tests {
             &policy_applying(&[]),
             &[slot("some-oauth", "OAUTH_KEY", true)],
             &catalog,
+            &nothing_chosen,
         );
         assert_eq!(out.providers[0].env_var(), "OAUTH_KEY");
         assert!(
@@ -1277,6 +1978,7 @@ mod tests {
             &policy_applying(&[]),
             &[slot("somepkce", "SOMEPKCE_TOKEN", false)],
             &catalog,
+            &nothing_chosen,
         );
         assert!(out.pkce_configs.contains_key("somepkce"));
         assert!(out.oauth_configs.is_empty());
