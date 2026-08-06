@@ -47,7 +47,9 @@ pub enum SandboxCommand {
     Ls(LsArgs),
     #[command(about = "Run a sandbox in a microVM (the top-level `lns run`).")]
     Run(Box<RunArgs>),
-    #[command(about = "Open a new session (`docker exec`-style) against a running run.")]
+    #[command(
+        about = "Run one non-interactive command against a running run (`docker exec`-style); use `lns attach` for its terminal."
+    )]
     Exec(ExecArgs),
     #[command(about = "Send a signal to a running run (`docker kill`-style).")]
     Kill(KillArgs),
@@ -1112,6 +1114,7 @@ where
         stdout,
         stderr,
         false,
+        crate::service::StdinForwarding::ToRun,
     )
     .await
 }

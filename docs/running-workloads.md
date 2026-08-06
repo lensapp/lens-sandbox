@@ -743,13 +743,17 @@ Every verb takes a run's **name** as readily as its numeric id — `lns stop
 reviewer` and `lns stop 7` are equivalent. `exec` is also reachable as the bare
 `lns exec`.
 
-### Exec — another session inside a run
+### Exec — another command inside a run
 
-`lns exec 7 -- bash` opens a second session, like `docker exec`. The run id is
-shown by `lns run -d` and `lns ps`. `-i`, `-t`, and `--detach-keys` work as they do
-for `lns run`; detaching from an exec session closes only that session — the run
-and any other sessions keep going. This is also how you open a debugging shell
-alongside a misbehaving workload without disturbing it.
+`lns exec 7 -- ls /workspace` runs one command in a second session, like
+`docker exec`. The run id is shown by `lns run -d` and `lns ps`. `--detach-keys`
+works as it does for `lns run`; detaching from an exec session closes only that
+session — the run and any other sessions keep going.
+
+The session is **non-interactive**: `-i` and `-t` are refused, because an exec
+session has no way yet to route your keystrokes to itself rather than to the run's
+own workload. So `lns exec 7 -- bash` gets you a shell with closed stdin, which
+exits at once. To reach a live terminal inside the run, use `lns attach`.
 
 ### Stopping vs killing
 

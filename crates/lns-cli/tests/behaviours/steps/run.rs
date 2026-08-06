@@ -617,6 +617,7 @@ async fn drive_attached_frames(world: &mut BehaviourWorld, frames: Vec<Vec<u8>>)
         &mut stdout,
         &mut status,
         false,
+        lns_cli::service::StdinForwarding::ToRun,
     )
     .await
     .expect("drive_attached_session_with_writers");
