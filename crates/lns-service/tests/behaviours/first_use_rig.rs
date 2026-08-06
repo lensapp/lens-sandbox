@@ -10,6 +10,8 @@ pub struct FirstUseRig {
     pub grants: WorkloadGrantFile,
     /// The policy the launch composed, after withholding the allows of any undecided connector.
     pub running_policy: Option<Policy>,
+    /// Connectors a mid-run policy write connected, so the launch-time offerable snapshot still names them.
+    pub connected_mid_run: Vec<String>,
     /// Connector ids the approval card offered for the request.
     pub offered: Vec<String>,
     /// The sign-in methods the presented offer card listed, in the order the user reads them.

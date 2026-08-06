@@ -88,3 +88,11 @@ Feature: a connector is offered on first use, whatever the policy already allows
     Given the catalog claims "api.some-provider.example" for connector "some-provider" reachable by "api-key" on "SOME_TOKEN" and "subscription" on "SOME_SUBSCRIPTION_TOKEN"
     And the directory policy connects "some-provider"
     Then the workload environment carries neither "SOME_TOKEN" nor "SOME_SUBSCRIPTION_TOKEN"
+
+  Scenario: A policy reload that connects a connector with no sign-in still offers it
+    Given the catalog claims "api.some-provider.example" for connector "some-provider" reachable by "api-key" on "SOME_TOKEN" and "subscription" on "SOME_SUBSCRIPTION_TOKEN"
+    And the directory policy allows "api.some-provider.example"
+    And the policy is reloaded connecting "some-provider"
+    When the workload requests "api.some-provider.example"
+    Then the approval window offers to connect "some-provider"
+    And the offer card lists the sign-in methods "api-key, subscription"

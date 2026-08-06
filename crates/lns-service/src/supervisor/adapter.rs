@@ -421,6 +421,36 @@ fn make_policy_emitter(
     })
 }
 
+/// The per-machine sign-in state a reload-time decision reads: both the credential values and the grant sidecar, re-read each call so a decision landed earlier in this run takes effect immediately. An unreadable file reads as "nothing held", which can only over-ask, never over-allow.
+fn sign_in_state_now(
+    credential_store: &dyn CredentialStore,
+    grant_store: &dyn GrantStore,
+) -> (CredentialStateFile, WorkloadGrantFile) {
+    (
+        credential_store.load().unwrap_or_default(),
+        grant_store.load().unwrap_or_default(),
+    )
+}
+
+/// The connected connectors this machine holds no sign-in for, recomputed per card so being listed in `connectors:` stops suppressing an offer the user still has to answer.
+fn make_unchosen_connectors(
+    catalog: Vec<lns_policy::connectors::Connector>,
+    project: String,
+    workload: WorkloadIdentity,
+    grant_store: Arc<dyn GrantStore>,
+    credential_store: Arc<dyn CredentialStore>,
+) -> crate::approval_flow::session::UnchosenConnectors {
+    Box::new(move |policy| {
+        let (state, grants) = sign_in_state_now(credential_store.as_ref(), grant_store.as_ref());
+        let chosen = crate::credential_flow::connectors::machine_holds_sign_in(
+            &state, &grants, &project, &workload,
+        );
+        crate::credential_flow::connectors::unchosen_connected_connectors(policy, &catalog, &chosen)
+            .into_iter()
+            .collect()
+    })
+}
+
 /// A watcher reload re-reads the user's own allows from disk, so the launch's withholding is re-applied here too — otherwise a reload mid-run hands back the allow that would swallow an undecided connector's first-use offer. Each call re-reads the sidecar, so a decline landed earlier in this run stops withholding immediately instead of waiting for a relaunch.
 fn make_policy_withholder(
     catalog: Vec<lns_policy::connectors::Connector>,
@@ -428,12 +458,15 @@ fn make_policy_withholder(
     project: String,
     workload: WorkloadIdentity,
     grant_store: Arc<dyn GrantStore>,
+    credential_store: Arc<dyn CredentialStore>,
 ) -> crate::approval_flow::session::PolicyWithholder {
     Box::new(move |policy| {
-        // An unreadable sidecar withholds as if nothing were decided, so a lost read can never leak a domain past its offer.
-        let grants = grant_store.load().unwrap_or_default();
+        let (state, grants) = sign_in_state_now(credential_store.as_ref(), grant_store.as_ref());
+        let chosen = crate::credential_flow::connectors::machine_holds_sign_in(
+            &state, &grants, &project, &workload,
+        );
         crate::credential_flow::connectors::withhold_undecided_connector_allows(
-            policy, &catalog, &offerable, &project, &workload, &grants,
+            policy, &catalog, &offerable, &project, &workload, &grants, &chosen,
         )
     })
 }
@@ -769,6 +802,12 @@ pub(super) async fn start(
         &project,
         &workload,
         &grants,
+        &crate::credential_flow::connectors::machine_holds_sign_in(
+            &credential_state,
+            &grants,
+            &project,
+            &workload,
+        ),
     );
 
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
@@ -779,12 +818,20 @@ pub(super) async fn start(
             .with_offers(offerable),
     );
 
+    session.set_unchosen_connectors(make_unchosen_connectors(
+        catalog.clone(),
+        project.clone(),
+        workload.clone(),
+        grant_store.clone(),
+        credential_store.clone(),
+    ));
     session.set_policy_withholder(make_policy_withholder(
         catalog.clone(),
         offerable_ids,
         project.clone(),
         workload.clone(),
         grant_store.clone(),
+        credential_store.clone(),
     ));
     session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
     if let Some(baseline) = sandbox_policy {
@@ -1927,6 +1974,82 @@ mod tests {
         );
     }
 
+    /// A two-method connector, the shape whose sign-in the user must pick.
+    fn two_method_catalog() -> Vec<lns_policy::connectors::Connector> {
+        vec![lns_policy::connectors::Connector {
+            id: "acme".into(),
+            name: None,
+            routes: Vec::new(),
+            methods: vec![
+                lns_policy::connectors::SignInMethod::credential(
+                    "api-key",
+                    lns_policy::connectors::CredentialAuth {
+                        env_var: "ACME_API_KEY".into(),
+                        placeholder: "acme_LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    },
+                ),
+                lns_policy::connectors::SignInMethod::credential(
+                    "subscription",
+                    lns_policy::connectors::CredentialAuth {
+                        env_var: "ACME_SUBSCRIPTION".into(),
+                        placeholder: "acme_sub_LNSPLACEHOLDER".into(),
+                        injections: Vec::new(),
+                    },
+                ),
+            ],
+        }]
+    }
+
+    fn connected_acme() -> Policy {
+        let mut policy = Policy::default();
+        policy.connect("acme");
+        policy
+    }
+
+    #[test]
+    fn the_unchosen_set_names_a_connected_connector_whose_sign_in_is_not_held() {
+        let workload = acme_workload();
+        let (credential_store, _dir) = tempfile_credential_store();
+        let unchosen = make_unchosen_connectors(
+            two_method_catalog(),
+            "proj".into(),
+            workload.clone(),
+            grant_store_holding(WorkloadGrantFile::default()),
+            credential_store,
+        );
+        assert_eq!(
+            unchosen(&connected_acme()),
+            HashSet::from(["acme".to_string()]),
+            "listing a connector it cannot authenticate must not suppress the card that asks which sign-in to use"
+        );
+    }
+
+    #[test]
+    fn the_unchosen_set_drops_a_connector_whose_sign_in_this_workload_granted() {
+        let workload = acme_workload();
+        let mut grants = WorkloadGrantFile::default();
+        grants.upsert(GrantRecord::allow(
+            "proj",
+            &workload,
+            "acme:api-key",
+            "ACME_API_KEY",
+            vec![],
+        ));
+        let (credential_store, _dir) = tempfile_credential_store();
+        let unchosen = make_unchosen_connectors(
+            two_method_catalog(),
+            "proj".into(),
+            workload.clone(),
+            grant_store_holding(grants),
+            credential_store,
+        );
+        assert!(
+            unchosen(&connected_acme()).is_empty(),
+            "the sign-in is held, so re-offering it would ask a question the user already answered"
+        );
+    }
+
     #[test]
     fn a_policy_reload_keeps_the_chosen_sign_in_of_a_connector_reachable_several_ways_armed() {
         let (session, _frame_rx) = fixture_credential_session_armed(
@@ -2384,6 +2507,7 @@ mod tests {
             "proj".into(),
             workload.clone(),
             store.clone(),
+            tempfile_credential_store().0,
         );
         let mut policy = Policy::default();
         policy.add_rule(RouteRule::allow_host("api.acme.corp"));

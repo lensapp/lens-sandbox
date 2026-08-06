@@ -29,6 +29,9 @@ pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
 /// Strips the allows that belong to a connector this workload has not decided yet, so a reload can't hand back what the launch withheld.
 pub type PolicyWithholder = Box<dyn Fn(&Policy) -> Policy + Send + Sync>;
 
+/// The connected connectors this machine holds no sign-in for, so being listed in `connectors:` does not suppress their offer card.
+pub type UnchosenConnectors = Box<dyn Fn(&Policy) -> HashSet<String> + Send + Sync>;
+
 /// One way to sign in to an offered connector, paired with the per-machine store id that sign-in binds under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferMethod {
@@ -187,6 +190,7 @@ pub struct ApprovalSession {
     /// Connectors this run has a standing no for, so a second request to the same domain is not offered again.
     declined: Mutex<HashSet<String>>,
     policy_withholder: OnceLock<PolicyWithholder>,
+    unchosen_connectors: OnceLock<UnchosenConnectors>,
     armed_reconciler: OnceLock<ArmedReconciler>,
     offerable: Vec<OfferableConnector>,
     connector: OnceLock<Arc<dyn ConnectPort>>,
@@ -220,6 +224,7 @@ impl ApprovalSession {
             connector_routes: OnceLock::new(),
             declined: Mutex::new(HashSet::new()),
             policy_withholder: OnceLock::new(),
+            unchosen_connectors: OnceLock::new(),
             armed_reconciler: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
@@ -243,6 +248,11 @@ impl ApprovalSession {
     /// Installs the armed-reconciler once at boot so a watcher reload revokes a disconnected connector's arming; idempotent, the first wins.
     pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
         let _ = self.armed_reconciler.set(reconciler);
+    }
+
+    /// Installs the unchosen-connector lookup once at boot, so a connector connected mid-run with no sign-in held is still offered rather than silently allowed; idempotent, the first wins.
+    pub fn set_unchosen_connectors(&self, unchosen: UnchosenConnectors) {
+        let _ = self.unchosen_connectors.set(unchosen);
     }
 
     /// Installs the launch's withholder once at boot so every later reload re-applies it; idempotent, the first wins.
@@ -278,13 +288,15 @@ impl ApprovalSession {
     /// The offer to raise for `host`, or `None` when nothing matches or the connector is already connected — or declined — this run.
     fn offer_for(&self, host: &str) -> Option<OfferRef> {
         let integ = self.offer_for_host(host)?;
-        let already_connected = self
-            .policy
-            .lock()
-            .expect("policy mutex poisoned")
-            .connectors
-            .iter()
-            .any(|i| i == &integ.id);
+        let already_connected = {
+            let policy = self.policy.lock().expect("policy mutex poisoned");
+            policy.connectors.iter().any(|i| i == &integ.id)
+                // A connector no sign-in is held for cannot authenticate, so listing it must not suppress the card that asks which sign-in to use.
+                && !self
+                    .unchosen_connectors
+                    .get()
+                    .is_some_and(|unchosen| unchosen(&policy).contains(&integ.id))
+        };
         let already_declined = self
             .declined
             .lock()
@@ -2727,6 +2739,38 @@ pub(crate) mod tests {
             notifier.presented.lock().unwrap()[0].offer,
             None,
             "a connected connector is not re-offered"
+        );
+    }
+
+    #[test]
+    fn a_connected_connector_no_sign_in_is_held_for_is_still_offered() {
+        let mut policy = Policy::default();
+        policy.connect("some-provider");
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = ApprovalSession::new(policy, notifier.clone(), store, tx, TEST_TIMEOUT)
+            .with_offers(vec![offerable_two_ways(
+                "some-provider",
+                "Some Provider",
+                "api.some-provider.example",
+            )]);
+        // A policy write connected it mid-run; no sign-in is held, so nothing seeds and no value card can fire.
+        s.set_unchosen_connectors(Box::new(|_policy| {
+            HashSet::from(["some-provider".to_string()])
+        }));
+
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        let presented = notifier.presented.lock().unwrap();
+        let offer = presented[0]
+            .offer
+            .as_ref()
+            .expect("a connector that cannot authenticate must still be offered");
+        assert_eq!(
+            offer.methods.len(),
+            2,
+            "the card must still ask which sign-in, or the user gets a plain destination prompt for a credential decision"
         );
     }
 

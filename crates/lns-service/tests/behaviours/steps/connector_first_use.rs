@@ -162,6 +162,13 @@ fn policy_allows(w: &mut BehaviourWorld, host: String) {
     rig(w).overlay.add_rule(RouteRule::allow_host(&host));
 }
 
+#[given(regex = r#"^the policy is reloaded connecting "([^"]+)"$"#)]
+fn policy_reloaded_connecting(w: &mut BehaviourWorld, id: String) {
+    let rig = rig(w);
+    rig.overlay.connect(&id);
+    rig.connected_mid_run.push(id);
+}
+
 #[given(regex = r#"^the directory policy connects "([^"]+)"$"#)]
 fn policy_connects(w: &mut BehaviourWorld, id: String) {
     rig(w).overlay.connectors.push(id);
@@ -231,9 +238,22 @@ fn workload_requests(w: &mut BehaviourWorld, host: String) {
                 &rig.overlay.connectors,
                 &rig.catalog,
             ));
-        let connectable = resolve_connectable_connectors(&rig.overlay, &rig.catalog);
+        // The offerable set is a launch-time snapshot, so a connector connected since is still in it.
+        let mut at_boot = rig.overlay.clone();
+        at_boot
+            .connectors
+            .retain(|id| !rig.connected_mid_run.contains(id));
+        let connectable = resolve_connectable_connectors(&at_boot, &rig.catalog);
         let offers = offerable_connectors(&connectable, &rig.catalog);
         let offerable_ids = offers.iter().map(|o| o.id.clone()).collect();
+        let state = lns_policy::credentials::CredentialStateFile::new();
+        let workload = this_workload();
+        let chosen = lns_service::credential_flow::connectors::machine_holds_sign_in(
+            &state,
+            &rig.grants,
+            PROJECT,
+            &workload,
+        );
         let running = withhold_undecided_connector_allows(
             &composed,
             &rig.catalog,
@@ -241,6 +261,7 @@ fn workload_requests(w: &mut BehaviourWorld, host: String) {
             PROJECT,
             &this_workload(),
             &rig.grants,
+            &chosen,
         );
         (running, offers)
     };
@@ -264,6 +285,25 @@ fn workload_requests(w: &mut BehaviourWorld, host: String) {
         )
         .with_offers(offers),
     );
+    let unchosen_catalog = rig(w).catalog.clone();
+    let unchosen_grants = rig(w).grants.clone();
+    session.set_unchosen_connectors(Box::new(move |policy| {
+        let state = lns_policy::credentials::CredentialStateFile::new();
+        let workload = this_workload();
+        let chosen = lns_service::credential_flow::connectors::machine_holds_sign_in(
+            &state,
+            &unchosen_grants,
+            PROJECT,
+            &workload,
+        );
+        lns_service::credential_flow::connectors::unchosen_connected_connectors(
+            policy,
+            &unchosen_catalog,
+            &chosen,
+        )
+        .into_iter()
+        .collect()
+    }));
     session.submit_pending(
         RequestPending {
             id: "req-1".into(),

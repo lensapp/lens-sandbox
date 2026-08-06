@@ -208,6 +208,15 @@ fn is_decided(
             .is_some_and(|(env_var, domains)| grant.matches_disclosure(&env_var, &domains))
 }
 
+/// A connector the policy connects and this machine holds a sign-in for keeps its routes: its value card still carries the decision, and a hand edit writes no grant to prove one with. A connector no sign-in is held for can never authenticate, so its routes wait for the card instead. `held_method` is unconditionally `Some` for a single-method connector, so one can never be withheld here whatever the store says.
+fn is_connected_with_a_sign_in(
+    integ: &Connector,
+    policy: &Policy,
+    chosen: MethodChosen<'_>,
+) -> bool {
+    policy.connectors.iter().any(|id| id == &integ.id) && held_method(integ, chosen).is_some()
+}
+
 /// The policy a launch actually runs: the user's own rules minus the allows that would let a request past a connector nobody has decided yet, so the first request to a claimed domain is held and the connect offer gets its chance. Once the connector is connected or decided either way, the withheld rule applies as written. Only an `offerable` connector can withhold anything — a connector with no path to a card could never release the rule again.
 pub fn withhold_undecided_connector_allows(
     policy: &Policy,
@@ -216,12 +225,12 @@ pub fn withhold_undecided_connector_allows(
     project: &str,
     workload: &WorkloadIdentity,
     grants: &WorkloadGrantFile,
+    chosen: MethodChosen<'_>,
 ) -> Policy {
     let undecided: Vec<&str> = catalog
         .iter()
         .filter(|integ| offerable.contains(&integ.id))
-        // `offerable` is a launch-time snapshot, so a connector connected since — by a policy edit, which writes no grant — is still in it.
-        .filter(|integ| !policy.connectors.iter().any(|id| id == &integ.id))
+        .filter(|integ| !is_connected_with_a_sign_in(integ, policy, chosen))
         .filter(|integ| !is_decided(integ, project, workload, grants))
         .flat_map(claimed_domains)
         .collect();
@@ -632,6 +641,7 @@ mod tests {
             "proj",
             &workload,
             &WorkloadGrantFile::default(),
+            &nothing_chosen,
         );
 
         assert_eq!(
@@ -1043,6 +1053,7 @@ mod tests {
             "/proj",
             &workload,
             &grants,
+            &nothing_chosen,
         );
         assert_eq!(
             out.network.egress.http.len(),
@@ -1113,6 +1124,64 @@ mod tests {
             "a refusal is not a sign-in the machine holds"
         );
         assert!(!chosen("some-provider:never-touched"));
+    }
+
+    #[test]
+    fn a_connected_connector_no_sign_in_is_held_for_still_withholds_its_route() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        // A policy write mid-run connects it; nothing seeds, so no value card can ever fire for it.
+        let mut policy = policy_applying(&["some-provider"]);
+        policy.add_rule(RouteRule::allow_host("api.some-provider.example"));
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+
+        let out = withhold_undecided_connector_allows(
+            &policy,
+            &catalog,
+            &HashSet::from(["some-provider".to_string()]),
+            "/proj",
+            &workload,
+            &WorkloadGrantFile::default(),
+            &nothing_chosen,
+        );
+
+        assert!(
+            out.network.egress.http.is_empty(),
+            "the connector can never authenticate, so its route must wait for the card rather than letting requests leave unauthenticated"
+        );
+    }
+
+    #[test]
+    fn a_connected_connector_whose_sign_in_is_held_keeps_its_routes() {
+        let catalog = vec![two_method_connector(
+            "some-provider",
+            "api.some-provider.example",
+        )];
+        let mut policy = policy_applying(&["some-provider"]);
+        policy.add_rule(RouteRule::allow_host("api.some-provider.example"));
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+
+        let out = withhold_undecided_connector_allows(
+            &policy,
+            &catalog,
+            &HashSet::from(["some-provider".to_string()]),
+            "/proj",
+            &workload,
+            &WorkloadGrantFile::default(),
+            &|provider| provider == "some-provider:api-key",
+        );
+
+        assert_eq!(
+            out.network.egress.http.len(),
+            1,
+            "the sign-in is held, so its value card carries the decision and withholding the route would only strand a working connector"
+        );
     }
 
     #[test]
