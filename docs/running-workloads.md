@@ -522,8 +522,9 @@ lns run -v /etc/myapp:/config:ro ghcr.io/acme/app   # read-only
 
 The format is `/host/path:/absolute/target[:ro]`. The source must be an absolute
 path that already exists (a missing path is refused, not silently created — the one
-deliberate divergence from `docker run`). Binds default to read-write; append `:ro`
-for read-only. Disambiguation is by shape: a leading `/` is a host bind, anything
+deliberate divergence from `docker run`) and it must be a **directory**. To give the
+workload a single host file, bind the directory that holds it. Binds default to
+read-write; append `:ro` for read-only. Disambiguation is by shape: a leading `/` is a host bind, anything
 else is a named volume, so `-v build-cache:/cache` is still a volume.
 
 #### Secrets in a bind

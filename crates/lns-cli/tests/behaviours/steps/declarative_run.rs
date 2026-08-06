@@ -141,6 +141,10 @@ impl DirScan for FakeDir {
         !self.missing
     }
 
+    fn is_dir(&self, _path: &Path) -> bool {
+        !self.missing
+    }
+
     fn entries(&self, _dir: &Path) -> Vec<String> {
         self.entries.clone()
     }

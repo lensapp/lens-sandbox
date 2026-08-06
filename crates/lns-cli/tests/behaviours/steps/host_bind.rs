@@ -70,10 +70,14 @@ struct FakeDir {
     entries: Vec<String>,
     lensignore: Option<String>,
     missing: bool,
+    not_a_dir: bool,
 }
 impl DirScan for FakeDir {
     fn exists(&self, _path: &Path) -> bool {
         !self.missing
+    }
+    fn is_dir(&self, _path: &Path) -> bool {
+        !self.missing && !self.not_a_dir
     }
     fn entries(&self, _dir: &Path) -> Vec<String> {
         self.entries.clone()
@@ -112,6 +116,7 @@ fn dir_from(world: &BehaviourWorld) -> FakeDir {
         entries: world.host_bind.entries.clone(),
         lensignore: world.host_bind.lensignore.clone(),
         missing: world.host_bind.missing,
+        not_a_dir: world.host_bind.not_a_dir,
     }
 }
 
@@ -167,6 +172,11 @@ fn resolved_binds(world: &BehaviourWorld) -> Result<&[ResolvedBind], String> {
 #[given(regex = r#"^the host path "([^"]+)" does not exist$"#)]
 fn host_path_missing(world: &mut BehaviourWorld, _path: String) {
     world.host_bind.missing = true;
+}
+
+#[given(regex = r#"^the host path "([^"]+)" is a file, not a directory$"#)]
+fn host_path_is_a_file(world: &mut BehaviourWorld, _path: String) {
+    world.host_bind.not_a_dir = true;
 }
 
 #[given(regex = r#"^the host directory "([^"]+)" contains no secret-shaped files$"#)]

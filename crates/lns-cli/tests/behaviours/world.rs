@@ -57,6 +57,7 @@ pub struct HostBindRig {
     pub entries: Vec<String>,
     pub lensignore: Option<String>,
     pub missing: bool,
+    pub not_a_dir: bool,
     pub decisions: std::collections::HashMap<String, SecretDisposition>,
     pub answer: Option<String>,
     pub outcome: Option<HostBindOutcome>,
