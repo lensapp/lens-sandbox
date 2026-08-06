@@ -37,6 +37,11 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     When the user runs `lns run -v /Users/me/typo:/work alpine` interactively
     Then the command fails with "host path does not exist"
 
+  Scenario: A single-file host source is refused before the run starts
+    Given the host path "/Users/me/.gitconfig" is a file, not a directory
+    When the user runs `lns run -v /Users/me/.gitconfig:/etc/gitconfig:ro alpine` interactively
+    Then the command fails with "must be a directory"
+
   Scenario: A clean bind with no secret-shaped files runs without prompting
     Given the host directory "/Users/me/proj" contains no secret-shaped files
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively

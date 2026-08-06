@@ -6,6 +6,7 @@ use lns_policy::host_bind_decisions::{HostBindDecisionStore, SecretDisposition};
 
 pub trait DirScan {
     fn exists(&self, path: &Path) -> bool;
+    fn is_dir(&self, path: &Path) -> bool;
     fn entries(&self, dir: &Path) -> Vec<String>;
     fn read_to_string(&self, path: &Path) -> Option<String>;
 }
@@ -15,6 +16,10 @@ pub struct RealDirScan;
 impl DirScan for RealDirScan {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
     }
 
     fn entries(&self, dir: &Path) -> Vec<String> {
@@ -128,6 +133,12 @@ pub fn resolve_binds(
         if !scan.exists(root) {
             bail!("host path does not exist: {}", spec.host_source);
         }
+        if !scan.is_dir(root) {
+            bail!(
+                "host bind source must be a directory: {} — bind its parent directory instead",
+                spec.host_source
+            );
+        }
         let ignore = lensignore_patterns(scan, root);
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
@@ -223,6 +234,9 @@ mod tests {
     impl DirScan for FakeDir {
         fn exists(&self, path: &Path) -> bool {
             !self.missing.contains(&path.to_string_lossy().into_owned())
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.exists(path)
         }
         fn entries(&self, _dir: &Path) -> Vec<String> {
             self.entries.clone()
@@ -410,6 +424,11 @@ mod tests {
         let scan = RealDirScan;
         assert!(scan.exists(&dir.path().join(".env")));
         assert!(!scan.exists(&dir.path().join("absent")));
+        assert!(scan.is_dir(dir.path()));
+        assert!(
+            !scan.is_dir(&dir.path().join(".env")),
+            "a regular file is not a directory the guest can share"
+        );
         assert!(scan.entries(dir.path()).contains(&".env".to_string()));
         assert_eq!(
             scan.read_to_string(&dir.path().join(".lensignore")),
