@@ -453,6 +453,8 @@ async fn orchestrate(
             }))
             .await;
     }
+    // What an `lns exec` into this run may re-apply: a var the definition already owns kept its own value here, and exec composes against an empty env, so only what took effect travels.
+    let applied_tools = tool_runtime.as_applied(&composed.env);
     let env: Vec<String> = composed.env;
 
     let params = vm::session_client::SessionParams {
@@ -500,7 +502,11 @@ async fn orchestrate(
         "microVM   ({:.2}s)",
         boot_start.elapsed().as_secs_f64()
     );
-    crate::run_registry::set_connector_with_tools(&run_id, connector.clone(), tool_runtime.clone());
+    crate::run_registry::set_connector_with_tools(
+        &run_id,
+        connector.clone(),
+        applied_tools.clone(),
+    );
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
     log::progress("Connecting", "session", 0, 0);

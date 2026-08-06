@@ -40,6 +40,8 @@ pub struct E2eWorld {
     pub project_image: Option<String>,
     /// Raises the per-run budget for a tool whose upstream payload is far larger than the usual one.
     pub run_budget: Option<std::time::Duration>,
+    /// Destinations the definition's own policy allows, so a scenario whose workload really fetches something is not left at an approval prompt.
+    pub project_egress: Vec<String>,
 }
 
 impl E2eWorld {

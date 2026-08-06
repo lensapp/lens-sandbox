@@ -10,7 +10,10 @@ Feature: declared developer tools reach a real guest
   too: only a real guest proves the tree carries its payload and the env that
   finds it. That one declares a glibc base image, because rustup publishes no
   musl host toolchain, and a longer budget, because its payload is a whole
-  compiler rather than a single binary.
+  compiler rather than a single binary. It builds rather than printing a
+  version, because the tool also has to *write* inside its own tree: cargo puts
+  its package-cache lock and registry under a CARGO_HOME the engine placed
+  there, and `rustc --version` passes even when that directory is read-only.
 
   Scenario: A declared tool is available to the workload
     Given the Lens Sandbox service is running
@@ -46,8 +49,9 @@ Feature: declared developer tools reach a real guest
     Given the Lens Sandbox service is running
     And a lns.yaml declaring tools ["rust@1.95.0"] over a glibc base image
     And a provisioning budget of 15 minutes
-    When the sandbox runs "rustc --version"
-    Then it prints a rustc 1.95.0 version
+    And the sandbox may reach the crates.io hosts
+    When the sandbox builds a rust library that has one dependency
+    Then the build succeeds
 
   Scenario: A declared tool wins over the base image's copy
     Given the Lens Sandbox service is running
