@@ -55,21 +55,18 @@ const MAX_MEM_MIB: usize = 256 * 1024;
 
 fn quantity_to_mib(quantity: &Quantity) -> Option<usize> {
     let mib = match quantity {
-        Quantity::Int(n) => usize::try_from(*n).ok()?,
-        Quantity::Text(text) => parse_mem_text(text)?,
+        Quantity::Int(n) => usize::try_from(*n).ok(),
+        Quantity::Text(text) => lns_artifact::memory::parse_mib(text).ok(),
     };
-    (1..=MAX_MEM_MIB).contains(&mib).then_some(mib)
-}
-
-fn parse_mem_text(text: &str) -> Option<usize> {
-    let text = text.trim();
-    if let Some(gib) = text.strip_suffix("Gi") {
-        return gib.trim().parse::<usize>().ok()?.checked_mul(1024);
+    match mib {
+        Some(mib) if (1..=MAX_MEM_MIB).contains(&mib) => Some(mib),
+        _ => {
+            crate::log::warn!(
+                "memory request {quantity:?} is not a size this host will grant; using the default instead"
+            );
+            None
+        }
     }
-    if let Some(mib) = text.strip_suffix("Mi") {
-        return mib.trim().parse::<usize>().ok();
-    }
-    text.parse::<usize>().ok()
 }
 
 #[cfg(test)]
@@ -126,6 +123,89 @@ mod tests {
             resolve_size(Some(&plain), &ResourceOverrides::default(), DEFAULTS).mem_mib,
             640
         );
+    }
+
+    #[derive(Default)]
+    struct MessageCapture(std::sync::Mutex<Vec<String>>);
+
+    struct MessageLayer(std::sync::Arc<MessageCapture>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message<'a>(&'a mut String);
+            impl tracing::field::Visit for Message<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = String::new();
+            event.record(&mut Message(&mut message));
+            self.0.0.lock().unwrap().push(message);
+        }
+    }
+
+    fn captured_messages(f: impl FnOnce()) -> Vec<String> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = std::sync::Arc::new(MessageCapture::default());
+        let subscriber =
+            tracing_subscriber::registry().with(MessageLayer(std::sync::Arc::clone(&capture)));
+        tracing::subscriber::with_default(subscriber, f);
+        capture.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_memory_request_this_host_will_not_grant_is_said_out_loud() {
+        let over_ceiling = Resources {
+            cpu: None,
+            memory: Some(Quantity::Text("999999Gi".into())),
+        };
+        let messages = captured_messages(|| {
+            assert_eq!(
+                resolve_size(Some(&over_ceiling), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+                DEFAULTS.mem_mib
+            );
+        });
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("not a size this host will grant")),
+            "an ignored memory request must not be silent; got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_definition_reads_every_size_the_mem_flag_accepts() {
+        for (text, mem_mib) in [
+            ("38Gi", 38912),
+            ("38gi", 38912),
+            ("38GiB", 38912),
+            ("2g", 2048),
+            ("2GB", 2048),
+            ("512m", 512),
+            ("768Mi", 768),
+            ("1024k", 1),
+            ("640", 640),
+        ] {
+            let res = Resources {
+                cpu: None,
+                memory: Some(Quantity::Text(text.into())),
+            };
+            assert_eq!(
+                resolve_size(Some(&res), &ResourceOverrides::default(), DEFAULTS).mem_mib,
+                mem_mib,
+                "memory: {text}"
+            );
+        }
     }
 
     #[test]

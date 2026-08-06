@@ -492,34 +492,8 @@ fn user_spec_uid(spec: &str) -> Option<u32> {
         .ok()
 }
 
-const MIB: u128 = 1024 * 1024;
-
 pub(crate) fn parse_mem_arg(s: &str) -> Result<usize, String> {
-    let lower = s.trim().to_ascii_lowercase();
-    let digits_end = lower
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(lower.len());
-    let (digits, suffix) = lower.split_at(digits_end);
-    let value: u128 = digits
-        .parse()
-        .map_err(|_| format!("invalid memory size `{s}`: expected MiB, e.g. `512`, or `2g`"))?;
-    let mib = match suffix {
-        "" | "m" | "mb" | "mib" => value,
-        "b" => value.div_ceil(MIB),
-        "k" | "kb" | "kib" => value.div_ceil(1024),
-        "g" | "gb" | "gib" => value
-            .checked_mul(1024)
-            .ok_or_else(|| format!("memory size `{s}` is out of range"))?,
-        _ => {
-            return Err(format!(
-                "invalid memory size `{s}`: unknown unit `{suffix}` (use b, k, m, or g)"
-            ));
-        }
-    };
-    if mib == 0 {
-        return Err(format!("invalid memory size `{s}`: must be at least 1 MiB"));
-    }
-    usize::try_from(mib).map_err(|_| format!("memory size `{s}` is out of range"))
+    lns_artifact::memory::parse_mib(s).map_err(|e| e.to_string())
 }
 
 pub(crate) fn parse_publish_arg(s: &str) -> Result<PortPublish, String> {
@@ -876,56 +850,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_mem_arg_bare_number_is_mib() {
+    fn parse_mem_arg_reads_the_same_grammar_a_definition_writes() {
         assert_eq!(parse_mem_arg("512").unwrap(), 512);
-    }
-
-    #[test]
-    fn parse_mem_arg_m_suffixes_are_mib_passthrough() {
-        for spec in ["512m", "512mb", "512mib", "512M", "512MiB"] {
-            assert_eq!(parse_mem_arg(spec).unwrap(), 512, "spec: {spec}");
-        }
-    }
-
-    #[test]
-    fn parse_mem_arg_g_suffixes_scale_to_mib() {
-        for spec in ["2g", "2gb", "2gib", "2G"] {
-            assert_eq!(parse_mem_arg(spec).unwrap(), 2048, "spec: {spec}");
-        }
-    }
-
-    #[test]
-    fn parse_mem_arg_k_and_b_round_up_to_a_whole_mib() {
-        assert_eq!(parse_mem_arg("1024k").unwrap(), 1);
-        assert_eq!(parse_mem_arg("1500k").unwrap(), 2);
-        assert_eq!(parse_mem_arg("1b").unwrap(), 1);
-        assert_eq!(parse_mem_arg("1048577b").unwrap(), 2);
-    }
-
-    #[test]
-    fn parse_mem_arg_rejects_zero() {
-        for spec in ["0", "0g", "0b"] {
-            let err = parse_mem_arg(spec).unwrap_err();
-            assert!(err.contains("at least 1 MiB"), "spec {spec}: {err}");
-        }
-    }
-
-    #[test]
-    fn parse_mem_arg_rejects_an_unknown_unit() {
+        assert_eq!(parse_mem_arg("38Gi").unwrap(), 38912);
         let err = parse_mem_arg("12parsecs").unwrap_err();
         assert!(err.contains("unknown unit"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_mem_arg_rejects_a_unit_with_no_number() {
-        let err = parse_mem_arg("g").unwrap_err();
-        assert!(err.contains("expected MiB"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_mem_arg_rejects_a_size_beyond_usize() {
-        let err = parse_mem_arg(&format!("{}g", u128::from(u64::MAX))).unwrap_err();
-        assert!(err.contains("out of range"), "got: {err}");
     }
 
     #[test]
