@@ -6,7 +6,7 @@ use lns_cli::command::parse_args;
 use lns_cli::run::declarative::{Defaults, compose_ports};
 use lns_cli::run::summary::print_run_summary;
 
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, TEST_HOST};
 
 fn ports_yaml(ports: &str) -> String {
     let entries: String = ports
@@ -109,13 +109,13 @@ fn published_sandbox_declaring_ports(world: &mut BehaviourWorld, ports: String) 
 
 #[when("the local sandbox is run with no port flags")]
 fn local_run_no_flags(world: &mut BehaviourWorld) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     summarize(world, &defaults, "", true);
 }
 
 #[when(regex = r"^the local sandbox is run with `([^`]+)`$")]
 fn local_run_with_flags(world: &mut BehaviourWorld, flags: String) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     summarize(world, &defaults, &flags, true);
 }
 

@@ -1,4 +1,11 @@
 use crate::runner::CliRun;
+
+/// A fixed host, so a scenario's expectations do not depend on the machine running it — and so no step has to probe, which would spawn a process.
+pub const TEST_HOST: lns_artifact::resources::HostCapacity =
+    lns_artifact::resources::HostCapacity {
+        cpus: 10,
+        mem_mib: 16384,
+    };
 use cucumber::World;
 use lns_cli::update_check::StatusReader;
 use lns_ipc::UpdateStatus;

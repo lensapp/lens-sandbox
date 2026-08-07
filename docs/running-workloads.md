@@ -67,7 +67,7 @@ The `spec` fields:
 | `policy`       | The network policy — the `egress.http` and `egress.tcp` rule tables (see [Policy](policy.md)). |
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names a connector (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns connector connect` (see [Credentials](credentials.md#value-decisions)). |
-| `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix); per-run `--cpus` / `--mem` flags win. |
+| `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
@@ -252,6 +252,25 @@ lns run -m 38Gi ghcr.io/acme/builder           # the unit a definition uses
 ```
 
 Every suffix is binary: `2g`, `2gb`, `2Gi` and `2GiB` all mean 2048 MiB.
+
+A definition can also size itself as a **share of the host**, so a published
+sandbox is sensible on whatever machine runs it:
+
+```yaml
+spec:
+  resources:
+    cpu: 80%
+    memory: 80%
+```
+
+The share is of the host's **total** cores and RAM, not what happens to be free,
+so the same definition sizes identically on every run of one machine and
+`lns inspect` records a size that reproduces. A share is a request, so it is
+lifted to the built-in 1 vCPU / 512 MiB when the arithmetic lands below that —
+a small machine still boots. It is still capped by the same ceiling an absolute
+size is, so `100%` on a very large host cannot starve it. When the host reading
+is unavailable the share is ignored and the built-in default applies, with a
+warning naming the field.
 
 ### Working directory
 

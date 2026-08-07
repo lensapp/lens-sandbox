@@ -27,9 +27,13 @@ pub struct Defaults {
 }
 
 impl Defaults {
-    pub fn from_definition(definition: &lns_artifact::sandbox::Definition) -> Self {
+    pub fn from_definition(
+        definition: &lns_artifact::sandbox::Definition,
+        host: Option<lns_artifact::resources::HostCapacity>,
+    ) -> Self {
         let (size, _) = lns_artifact::resources::DeclaredSize::from_resources(
             definition.spec.resources.as_ref(),
+            host,
         );
         Self {
             size,

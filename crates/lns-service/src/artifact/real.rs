@@ -321,6 +321,7 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
         manifest.artifact_type.as_deref(),
         &manifest.config.media_type,
         &config_json,
+        lns_artifact::resources::host::probe(),
     )
 }
 

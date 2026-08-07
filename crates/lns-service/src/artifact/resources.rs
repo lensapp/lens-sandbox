@@ -5,11 +5,12 @@ pub fn resolve_size(
     sandbox: Option<&Resources>,
     overrides: &ResourceOverrides,
     defaults: VmSize,
+    host: Option<lns_artifact::resources::HostCapacity>,
 ) -> VmSize {
-    let (declared, ignored) = DeclaredSize::from_resources(sandbox);
+    let (declared, ignored) = DeclaredSize::from_resources(sandbox, host);
     for field in ignored {
         crate::log::warn!(
-            "resources.{field} is not a size this host will grant; using the default instead"
+            "resources.{field} is not a size this host can grant or read; using the default instead"
         );
     }
     resolve_declared(declared, overrides, defaults)
@@ -70,7 +71,8 @@ mod tests {
                 resolve_size(
                     Some(&over_ceiling),
                     &ResourceOverrides::default(),
-                    DEFAULT_VM_SIZE
+                    DEFAULT_VM_SIZE,
+                    None,
                 ),
                 DEFAULT_VM_SIZE
             );
@@ -79,7 +81,7 @@ mod tests {
             assert!(
                 messages
                     .iter()
-                    .any(|m| m.contains(&format!("{field} is not a size this host will grant"))),
+                    .any(|m| m.contains(&format!("{field} is not a size this host can grant"))),
                 "an ignored {field} must not be silent; got: {messages:?}"
             );
         }
@@ -96,7 +98,8 @@ mod tests {
                 resolve_size(
                     Some(&honoured),
                     &ResourceOverrides::default(),
-                    DEFAULT_VM_SIZE
+                    DEFAULT_VM_SIZE,
+                    None,
                 ),
                 VmSize {
                     cpus: 3,

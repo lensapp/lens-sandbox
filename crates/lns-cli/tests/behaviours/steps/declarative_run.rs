@@ -7,7 +7,7 @@ use lns_cli::run::declarative::{Defaults, resolve};
 use lns_cli::run::host_bind::{DirScan, resolve_binds};
 use lns_policy::host_bind_decisions::{HostBindDecisionFile, HostBindDecisionStore};
 
-use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView};
+use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, TEST_HOST};
 
 fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
     let yaml = world
@@ -89,6 +89,11 @@ fn declares_resources(world: &mut BehaviourWorld) {
     install_definition(world, "  resources:\n    cpu: 3\n    memory: 6Gi\n");
 }
 
+#[given(regex = r"^an lns.yaml declaring 80% of this host$")]
+fn declares_a_share(world: &mut BehaviourWorld) {
+    install_definition(world, "  resources:\n    cpu: 80%\n    memory: 80%\n");
+}
+
 #[given(regex = r"^an lns.yaml declaring no resources$")]
 fn declares_no_resources(world: &mut BehaviourWorld) {
     install_definition(world, "");
@@ -105,13 +110,13 @@ fn install_definition(world: &mut BehaviourWorld, extra_spec: &str) {
 
 #[when(regex = r"^the local run summary is composed with no resource flags$")]
 fn compose_local_summary(world: &mut BehaviourWorld) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     compose_summary(world, defaults, "");
 }
 
 #[when(regex = r#"^the local run summary is composed with "([^"]+)"$"#)]
 fn compose_local_summary_with(world: &mut BehaviourWorld, flags: String) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     compose_summary(world, defaults, &flags);
 }
 
@@ -140,13 +145,13 @@ fn compose_summary(world: &mut BehaviourWorld, defaults: Defaults, flags: &str) 
 
 #[when("the local sandbox launch settings are resolved with no overrides")]
 fn resolve_local_without_overrides(world: &mut BehaviourWorld) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     resolve_defaults(world, &defaults, Path::new("/work"), "");
 }
 
 #[when(regex = r#"^the local sandbox launch settings are resolved with "([^"]+)"$"#)]
 fn resolve_local_with_overrides(world: &mut BehaviourWorld, flags: String) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     resolve_defaults(world, &defaults, Path::new("/work"), &flags);
 }
 
@@ -158,8 +163,10 @@ fn resolve_published(world: &mut BehaviourWorld, project: String) {
 
 /// The view the service projects for a pulled sandbox, so a published run's defaults come from the same shape a real preflight returns.
 fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxView {
-    let (declared, _) =
-        lns_artifact::resources::DeclaredSize::from_resources(def.spec.resources.as_ref());
+    let (declared, _) = lns_artifact::resources::DeclaredSize::from_resources(
+        def.spec.resources.as_ref(),
+        Some(TEST_HOST),
+    );
     lns_ipc::SandboxView {
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
@@ -234,7 +241,7 @@ impl HostBindDecisionStore for FakeStore {
 
 #[when("the declarative host binds are resolved interactively")]
 fn resolve_declarative_binds(world: &mut BehaviourWorld) {
-    let defaults = Defaults::from_definition(&definition(world));
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     let resolved = resolve(&defaults, Path::new("/work"), None, Vec::new()).unwrap();
     let bind_specs = lns_cli::cli::split_mounts(&resolved.mounts).1;
     let dir = FakeDir {

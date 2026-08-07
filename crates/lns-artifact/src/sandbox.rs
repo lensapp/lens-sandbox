@@ -418,6 +418,7 @@ fn is_valid_env_key(key: &str) -> bool {
 fn cpu_is_positive(quantity: &spec::Quantity) -> bool {
     match quantity {
         spec::Quantity::Int(n) => *n >= 1,
+        spec::Quantity::Text(text) if crate::resources::parse_percent(text).is_some() => true,
         spec::Quantity::Text(text) => {
             let digits = text
                 .trim()
@@ -439,6 +440,8 @@ fn validate_resources(resources: &Resources) -> Result<()> {
         Some(memory @ spec::Quantity::Int(n)) if *n < 1 => {
             bail!("resources.memory {memory:?} must be a positive count or size")
         }
+        // A share resolves against the host at launch, so there is nothing to read here beyond its shape.
+        Some(spec::Quantity::Text(text)) if crate::resources::parse_percent(text).is_some() => {}
         Some(spec::Quantity::Text(text)) => {
             crate::memory::parse_mib(text).context("resources.memory")?;
         }
@@ -931,6 +934,23 @@ mod tests {
         parse(&def_json(r#"{"image":"x:1","resources":{"memory":"2g"}}"#)).unwrap();
         parse(&def_json(r#"{"image":"x:1","resources":{"memory":512}}"#)).unwrap();
         parse(&def_json(r#"{"image":"x:1","resources":{"cpu":4}}"#)).unwrap();
+        parse(&def_json(
+            r#"{"image":"x:1","resources":{"cpu":"80%","memory":"80%"}}"#,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_resource_request_outside_one_to_a_hundred() {
+        for spec in [
+            r#"{"image":"x:1","resources":{"memory":"0%"}}"#,
+            r#"{"image":"x:1","resources":{"memory":"101%"}}"#,
+            r#"{"image":"x:1","resources":{"memory":"%"}}"#,
+            r#"{"image":"x:1","resources":{"cpu":"0%"}}"#,
+            r#"{"image":"x:1","resources":{"cpu":"101%"}}"#,
+        ] {
+            parse(&def_json(spec)).unwrap_err();
+        }
     }
 
     #[test]
