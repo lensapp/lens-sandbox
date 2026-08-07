@@ -139,7 +139,13 @@ pub fn resolve_binds(
                 spec.host_source
             );
         }
-        let ignore = lensignore_patterns(scan, root);
+        // One de-duplicated set: two masks over one guest path would stack, and an author exclude must drop silently rather than become a per-machine decision.
+        let mut ignore = lensignore_patterns(scan, root);
+        for entry in &spec.exclude {
+            if !ignore.contains(entry) {
+                ignore.push(entry.clone());
+            }
+        }
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
         for path in ignored_paths_present(scan, root, &ignore)? {
@@ -269,6 +275,7 @@ mod tests {
             host_source: src.into(),
             target: target.into(),
             read_only: false,
+            exclude: Vec::new(),
         }
     }
 
@@ -436,6 +443,66 @@ mod tests {
         );
         assert_eq!(scan.read_to_string(&dir.path().join("absent")), None);
         assert!(scan.entries(Path::new("/no/such/dir")).is_empty());
+    }
+
+    fn bind_excluding(src: &str, target: &str, exclude: &[&str]) -> lns_ipc::BindSpec {
+        lns_ipc::BindSpec {
+            exclude: exclude.iter().map(|e| e.to_string()).collect(),
+            ..bind(src, target)
+        }
+    }
+
+    #[test]
+    fn an_exclude_and_a_lensignore_naming_the_same_path_drop_it_once() {
+        let dir = FakeDir {
+            entries: vec![".cargo".into()],
+            files: HashMap::from([("/proj/.lensignore".to_string(), ".cargo\n".to_string())]),
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+
+        let (out, prompt) = resolve(
+            &[bind_excluding("/proj", "/work", &[".cargo"])],
+            &dir,
+            &store,
+            true,
+            "",
+        );
+
+        assert_eq!(
+            out.unwrap()[0].dropped,
+            [".cargo"],
+            "two masks over one guest path would stack"
+        );
+        assert!(
+            prompt.is_empty(),
+            "an author exclude must not prompt: {prompt:?}"
+        );
+        assert_eq!(
+            *store.saves.lock().unwrap(),
+            0,
+            "an exclude is the author's rule, not a per-machine decision"
+        );
+    }
+
+    #[test]
+    fn an_exclude_for_a_path_that_is_not_there_is_a_no_op() {
+        let dir = FakeDir {
+            entries: vec!["src".into()],
+            missing: vec!["/proj/.cargo".to_string()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+
+        let (out, _) = resolve(
+            &[bind_excluding("/proj", "/work", &[".cargo"])],
+            &dir,
+            &store,
+            true,
+            "",
+        );
+
+        assert!(out.unwrap()[0].dropped.is_empty());
     }
 
     #[test]

@@ -348,6 +348,9 @@ pub struct SandboxMount {
     pub source: String,
     pub target: String,
     pub read_only: bool,
+    /// Subpaths a published bind excluded, so a pulled sandbox's declared exclusions are visible and applied.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +629,8 @@ pub struct BindSpec {
     pub host_source: String,
     pub target: String,
     pub read_only: bool,
+    /// Subpaths the definition excluded, unioned with any `.lensignore` before the secret scan.
+    pub exclude: Vec<String>,
 }
 
 impl BindSpec {
@@ -644,6 +649,8 @@ impl BindSpec {
             host_source: source.to_string(),
             target: target.to_string(),
             read_only,
+            // A `-v` carries no exclude; the definition is the author surface for that.
+            exclude: Vec::new(),
         })
     }
 }
@@ -1368,6 +1375,7 @@ mod tests {
                 source: ".".into(),
                 target: "/workspace".into(),
                 read_only: true,
+                exclude: Vec::new(),
             }],
             ports: vec![
                 SandboxPort {
@@ -1541,6 +1549,7 @@ mod tests {
                 host_source: "/Users/me/proj".into(),
                 target: "/work".into(),
                 read_only: false,
+                exclude: Vec::new(),
             })
         );
     }

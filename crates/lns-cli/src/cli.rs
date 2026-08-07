@@ -736,6 +736,7 @@ mod tests {
                 host_source: "/Users/me/project".into(),
                 target: "/work".into(),
                 read_only: true,
+                exclude: Vec::new(),
             })
         );
     }
@@ -800,6 +801,7 @@ mod tests {
                 host_source: "/tmp/a=b".into(),
                 target: "/work".into(),
                 read_only: false,
+                exclude: Vec::new(),
             })
         );
     }

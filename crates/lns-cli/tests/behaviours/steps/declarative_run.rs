@@ -32,6 +32,16 @@ fn definition_with_settings(world: &mut BehaviourWorld) {
         .insert("/work/lns.yaml".into(), declarative_yaml("."));
 }
 
+#[given(regex = r#"^an lns.yaml declaring a bind excluding "([^"]+)"$"#)]
+fn definition_with_bind_exclude(world: &mut BehaviourWorld, exclude: String) {
+    world.author_files.insert(
+        "/work/lns.yaml".into(),
+        format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      exclude:\n        - '{exclude}'\n"
+        ),
+    );
+}
+
 #[given(regex = r#"^an lns.yaml declaring a bind source "([^"]+)"$"#)]
 fn definition_with_bind_source(world: &mut BehaviourWorld, source: String) {
     world.author_files.insert(
@@ -186,6 +196,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
                 source: volume.source().to_string(),
                 target: volume.target.clone(),
                 read_only: volume.read_only(),
+                exclude: volume.exclude().to_vec(),
             })
             .collect(),
         ports: Vec::new(),
@@ -239,9 +250,19 @@ impl HostBindDecisionStore for FakeStore {
     }
 }
 
+#[when("the published host binds are resolved interactively")]
+fn resolve_published_binds(world: &mut BehaviourWorld) {
+    let defaults = Defaults::from_view(&published_view(&definition(world)));
+    resolve_binds_with(world, defaults);
+}
+
 #[when("the declarative host binds are resolved interactively")]
 fn resolve_declarative_binds(world: &mut BehaviourWorld) {
     let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
+    resolve_binds_with(world, defaults);
+}
+
+fn resolve_binds_with(world: &mut BehaviourWorld, defaults: Defaults) {
     let resolved = resolve(&defaults, Path::new("/work"), None, Vec::new()).unwrap();
     let bind_specs = lns_cli::cli::split_mounts(&resolved.mounts).1;
     let dir = FakeDir {
