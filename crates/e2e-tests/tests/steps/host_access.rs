@@ -15,6 +15,9 @@ fn host_agent_with_key(world: &mut E2eWorld) {
     )
     .expect("agent conf");
 
+    // Launched before the key is generated, because generation itself goes through the agent.
+    run_gpgconf(&gnupg, &["--launch", "gpg-agent"]);
+
     let params = gnupg.join("keyparams");
     std::fs::write(
         &params,
@@ -36,8 +39,6 @@ fn host_agent_with_key(world: &mut E2eWorld) {
     )
     .expect("host gitconfig");
 
-    // Start the agent so its extra socket exists before the run locates it.
-    run_gpgconf(&gnupg, &["--launch", "gpg-agent"]);
     world.project_host_access.push("git-signing".into());
 }
 
@@ -55,6 +56,13 @@ fn output_of(program: &str, gnupg: &std::path::Path, args: &[&str]) -> String {
         .env("GNUPGHOME", gnupg)
         .output()
         .unwrap_or_else(|e| panic!("{program} must be installed to run this scenario: {e}"));
+    // A host that refuses to start a gpg-agent (a sandboxed macOS session does) fails here, not later with an opaque "no key".
+    assert!(
+        out.status.success(),
+        "{program} {args:?} failed ({}): {}\nthis scenario needs to start its own gpg-agent in a throwaway GNUPGHOME; a host that refuses that cannot run it",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -67,11 +75,20 @@ fn key_id(gnupg: &std::path::Path) -> String {
         .expect("the generated key must be listed")
 }
 
+/// The pinned alpine base ships no gnupg, so a signing scenario installs it first and needs the alpine CDN reachable.
+fn allow_gnupg_install(world: &mut E2eWorld) {
+    let host = "dl-cdn.alpinelinux.org";
+    if !world.project_egress.iter().any(|h| h == host) {
+        world.project_egress.push(host.into());
+    }
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" with host access "([^"]+)"$"#)]
 fn run_with_host_access(world: &mut E2eWorld, cmd_line: String, id: String) {
     if !world.project_host_access.contains(&id) {
         world.project_host_access.push(id);
     }
+    allow_gnupg_install(world);
     super::microvm::run_microvm_public(world, vec!["--yes".into()], &cmd_line);
 }
 
@@ -82,6 +99,7 @@ fn run_with_host_access_as_user(world: &mut E2eWorld, cmd_line: String, user: St
     if !world.project_host_access.contains(&id) {
         world.project_host_access.push(id);
     }
+    allow_gnupg_install(world);
     super::microvm::run_microvm_public(world, vec!["--yes".into(), "-u".into(), user], &cmd_line);
 }
 
@@ -90,10 +108,12 @@ fn detached_run_with_host_access(world: &mut E2eWorld, id: String) {
     if !world.project_host_access.contains(&id) {
         world.project_host_access.push(id);
     }
+    allow_gnupg_install(world);
+    // The marker lets the later exec tell "gpg is missing" from "signing failed", and lets it wait out an install that a detached run does not block on.
     super::microvm::run_microvm_public(
         world,
         vec!["--yes".into(), "-d".into()],
-        "/bin/sh -c 'sleep 120'",
+        "/bin/sh -c 'apk add --no-cache gnupg >/dev/null && touch /tmp/gpg-ready; sleep 120'",
     );
     let run = world
         .last_run_id
@@ -112,7 +132,8 @@ fn host_agent_stops(world: &mut E2eWorld) {
 fn workload_attempts_signature(world: &mut E2eWorld) {
     super::microvm::exec_in_last_run(
         world,
-        "/bin/sh -c 'echo m > /tmp/m; gpg --batch --yes --detach-sign /tmp/m; echo rc=$?'",
+        "/bin/sh -c 'i=0; while [ ! -f /tmp/gpg-ready ] && [ $i -lt 60 ]; do i=$((i+1)); sleep 1; done; \
+         if [ ! -f /tmp/gpg-ready ]; then echo GPG_MISSING; else echo m > /tmp/m; gpg --batch --yes --detach-sign /tmp/m; echo rc=$?; fi'",
     );
 }
 
@@ -123,7 +144,11 @@ fn signature_attempt_fails(world: &mut E2eWorld) {
         .as_ref()
         .map(|r| format!("{}{}", r.stdout, r.stderr))
         .unwrap_or_default();
-    // Assert the marker arrived first: a bare "no rc=0" passes vacuously when the exec never ran.
+    // Assert gpg was there and the attempt ran: a bare "no rc=0" passes vacuously on a guest with no gpg at all.
+    assert!(
+        !output.contains("GPG_MISSING"),
+        "gnupg must be installed in the guest, or this scenario proves nothing: {output}"
+    );
     assert!(
         output.contains("rc="),
         "the signing attempt must actually have run: {output}"
