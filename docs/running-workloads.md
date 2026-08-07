@@ -68,7 +68,7 @@ The `spec` fields:
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names a connector (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns connector connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
-| `volumes`      | Named volumes and host binds mounted into the guest; see [Declarative mounts](#declarative-mounts). |
+| `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
@@ -619,6 +619,36 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
 
 The run summary lists each bind, its mode, and the disposition of every detected
 secret (`kept (exposed)` / `dropped`).
+
+#### Excluding subpaths from a bind
+
+Binding a directory does not force you to expose all of it. A bind volume takes an
+`exclude` list of paths relative to its root, so a definition can share a parent
+directory while holding back the parts a workload must not see:
+
+```yaml
+spec:
+  volumes:
+    - type: bind
+      source: /Users/you/dev     # an absolute path; `~` is not expanded
+      target: /work
+      exclude:
+        - .cargo          # host toolchains the guest must not use
+        - .rustup
+        - lns-sandboxes   # other sandboxes' state, sockets included
+```
+
+Directories and nested paths both work, an entry must stay inside the bind (no
+leading `/`, no `..`), and an entry for a path that isn't there is a no-op. There is
+no prompt: an exclude is the author's rule, not a per-machine decision, so it is
+never written to the KEEP/DROP store. A `.lensignore` in the bind root does the same
+job for a rule you don't want in the definition; naming a path in both drops it once.
+
+The semantic is **masked, not absent**. An excluded directory appears in the guest as
+an existing, empty, unwritable directory, and an excluded file reads as empty rather
+than missing. A tool that probes for `~/.cargo` will find it — and find nothing in
+it. virtio-fs shares the whole tree, so masking is the lever available; if a workload
+must not know a path exists at all, bind a narrower source instead.
 
 Declarative binds use this exact scan, prompt, remembered KEEP/DROP decision,
 masking, validation, and audit path. A published sandbox is inspected and pinned

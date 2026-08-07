@@ -600,6 +600,7 @@ mod tests {
             host_source: "/Users/me/proj".into(),
             target: "/work".into(),
             read_only: false,
+            exclude: Vec::new(),
         })];
         let s = summary_of(
             &args,
@@ -620,6 +621,7 @@ mod tests {
             host_source: "/Users/me/cfg".into(),
             target: "/cfg".into(),
             read_only: true,
+            exclude: Vec::new(),
         })];
         let s = summary_of(
             &args,

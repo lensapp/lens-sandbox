@@ -71,9 +71,16 @@ pub struct Volume {
     pub target: String,
     #[serde(default)]
     read_only: bool,
+    /// Subpaths of a bind the workload must not see, relative to the bind root; masked in the guest exactly as a `.lensignore` entry is.
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 impl Volume {
+    pub fn exclude(&self) -> &[String] {
+        &self.exclude
+    }
+
     pub fn source(&self) -> &str {
         self.source
             .as_deref()
@@ -451,6 +458,12 @@ fn validate_resources(resources: &Resources) -> Result<()> {
 }
 
 fn validate_volume(volume: &Volume) -> Result<()> {
+    if !volume.exclude.is_empty() && !volume.is_bind() {
+        bail!("exclude applies to a bind volume only; a named volume has no host subpaths to hide");
+    }
+    for entry in &volume.exclude {
+        validate_bind_relative_path(entry)?;
+    }
     match volume.volume_type {
         Some(VolumeType::Bind) => {
             if volume.name.is_some() {
@@ -471,6 +484,32 @@ fn validate_volume(volume: &Volume) -> Result<()> {
             validate_volume_name(volume.name.as_deref().unwrap_or_default())
         }
     }
+}
+
+/// An exclude names a path inside the bind, and it reaches the guest as a kernel-cmdline token, so anything that could escape the bind or split the line is refused here.
+fn validate_bind_relative_path(entry: &str) -> Result<()> {
+    if entry.is_empty() {
+        bail!("exclude entry must not be empty");
+    }
+    if entry.starts_with('/') {
+        bail!("invalid exclude {entry:?}: must be relative to the bind, not absolute");
+    }
+    // An empty segment covers a trailing slash and `a//b`: the gitignore habit `\".cargo/\"` would stat with the slash, miss, and leave the path the author excluded fully exposed.
+    if entry
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        bail!("invalid exclude {entry:?}: must not contain empty, `.`, or `..` path segments");
+    }
+    if entry
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
+    {
+        bail!(
+            "invalid exclude {entry:?}: must be free of whitespace, quotes, and control characters"
+        );
+    }
+    Ok(())
 }
 
 fn validate_bind_source(source: &str) -> Result<()> {
@@ -917,6 +956,52 @@ mod tests {
                 "the value reaches the guest on the space-joined kernel cmdline, so it must be screened here — spec {spec}: got {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn parse_accepts_an_exclude_list_on_a_bind_volume() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":".","target":"/workspace","exclude":[".cargo","tmp/scratch"]}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.volumes[0].exclude(), [".cargo", "tmp/scratch"]);
+    }
+
+    #[test]
+    fn parse_rejects_an_exclude_that_could_escape_the_bind_or_split_the_cmdline() {
+        for entry in [
+            "../secrets",
+            "/etc/shadow",
+            "a/../../etc",
+            "./x",
+            "",
+            "two words",
+            "quo\"te",
+            ".cargo/",
+            "a//b",
+        ] {
+            let spec = format!(
+                r#"{{"image":"x:1","volumes":[{{"type":"bind","source":".","target":"/workspace","exclude":[{}]}}]}}"#,
+                serde_json::to_string(entry).unwrap()
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("exclude"),
+                "entry {entry:?}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_an_exclude_on_a_named_volume() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"volume","source":"cache","target":"/cache","exclude":[".git"]}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("bind volume only"),
+            "got {err:#}"
+        );
     }
 
     #[test]

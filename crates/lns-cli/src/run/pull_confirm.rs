@@ -126,6 +126,7 @@ mod tests {
             host_source: host_source.into(),
             target: "/work".into(),
             read_only,
+            exclude: Vec::new(),
         }
     }
 
@@ -183,6 +184,7 @@ mod tests {
             host_source: source.into(),
             target: target.into(),
             read_only: false,
+            exclude: Vec::new(),
         })
     }
 

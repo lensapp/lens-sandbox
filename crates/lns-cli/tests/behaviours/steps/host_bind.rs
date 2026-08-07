@@ -312,6 +312,7 @@ fn later_run_no_prompt(world: &mut BehaviourWorld) -> Result<(), String> {
             host_source: m.host_source.clone(),
             target: m.target.clone(),
             read_only: m.read_only,
+            exclude: Vec::new(),
         })
         .collect();
     let dir = dir_from(world);

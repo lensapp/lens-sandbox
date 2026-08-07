@@ -30,6 +30,20 @@ Feature: applying declarative sandbox launch settings
     Then the resolved workdir is "/workspace"
     And the resolved host binds are exactly "/consumer/project -> /workspace"
 
+  Scenario: a declared exclude drops the subpath with no prompt
+    Given an lns.yaml declaring a bind excluding ".cargo"
+    And the host directory "/work" contains ".cargo"
+    When the declarative host binds are resolved interactively
+    Then ".cargo" is dropped from the bind
+    And no KEEP or DROP prompt is shown
+
+  Scenario: a published sandbox's declared exclude drops the subpath too
+    Given an lns.yaml declaring a bind excluding ".cargo"
+    And the host directory "/work" contains ".cargo"
+    When the published host binds are resolved interactively
+    Then ".cargo" is dropped from the bind
+    And no KEEP or DROP prompt is shown
+
   Scenario: bind source text is not shell or environment interpolated
     Given an lns.yaml declaring a bind source "$PWD"
     When the local sandbox launch settings are resolved with no overrides

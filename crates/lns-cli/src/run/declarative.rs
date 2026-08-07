@@ -10,6 +10,7 @@ pub struct MountDefault {
     pub source: String,
     pub target: String,
     pub read_only: bool,
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,7 @@ impl Defaults {
                     source: volume.source().to_string(),
                     target: volume.target.clone(),
                     read_only: volume.read_only(),
+                    exclude: volume.exclude().to_vec(),
                 })
                 .collect(),
             ports: definition
@@ -76,6 +78,7 @@ impl Defaults {
                     source: mount.source.clone(),
                     target: mount.target.clone(),
                     read_only: mount.read_only,
+                    exclude: mount.exclude.clone(),
                 })
                 .collect(),
             ports: view
@@ -187,6 +190,7 @@ fn resolve_mount(mount: &MountDefault, project_dir: &Path) -> Result<lns_ipc::Mo
             host_source: source,
             target: mount.target.clone(),
             read_only: mount.read_only,
+            exclude: mount.exclude.clone(),
         }));
     }
     lns_ipc::validate_volume_name(&mount.source).map_err(anyhow::Error::msg)?;

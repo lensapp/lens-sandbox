@@ -1139,6 +1139,7 @@ mod tests {
                     source: ".".into(),
                     target: "/workspace".into(),
                     read_only: false,
+                    exclude: Vec::new(),
                 }],
                 ports: Vec::new(),
                 filesets: vec![lns_ipc::SandboxFileset {

@@ -64,6 +64,7 @@ pub(crate) fn project_inspection(
                             source: volume.source().to_string(),
                             target: volume.target.clone(),
                             read_only: volume.read_only(),
+                            exclude: volume.exclude().to_vec(),
                         })
                         .collect(),
                     ports: declared_view_ports(&def.spec.ports)?,
@@ -209,13 +210,22 @@ mod tests {
         mem_mib: Option<usize>,
         user: Option<&str>,
     ) -> ArtifactInspection {
+        sandbox_view_with(cpus, mem_mib, user, Vec::new())
+    }
+
+    fn sandbox_view_with(
+        cpus: Option<u8>,
+        mem_mib: Option<usize>,
+        user: Option<&str>,
+        mounts: Vec<SandboxMount>,
+    ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
             workdir: None,
             user: user.map(str::to_string),
-            mounts: Vec::new(),
+            mounts,
             ports: Vec::new(),
             filesets: Vec::new(),
             connectors: Vec::new(),
@@ -278,6 +288,29 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_projects_the_subpaths_its_bind_excluded() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":".","target":"/workspace","exclude":[".cargo","tmp/scratch"]}]}}"#
+            )
+            .unwrap(),
+            sandbox_view_with(
+                None,
+                None,
+                None,
+                vec![SandboxMount {
+                    kind: SandboxMountKind::Bind,
+                    source: ".".into(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                    exclude: vec![".cargo".into(), "tmp/scratch".into()],
+                }]
+            ),
+            "a pulled sandbox whose exclusions are dropped here publishes masks that never apply"
+        );
+    }
+
+    #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
         let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"egress":{"http":[{"match":"*","verdict":"allow"}]}}}}"#;
 
@@ -297,12 +330,14 @@ mod tests {
                         source: ".".into(),
                         target: "/workspace".into(),
                         read_only: false,
+                        exclude: Vec::new(),
                     },
                     SandboxMount {
                         kind: SandboxMountKind::Volume,
                         source: "cache".into(),
                         target: "/root/.cache".into(),
                         read_only: true,
+                        exclude: Vec::new(),
                     },
                 ],
                 ports: vec![
