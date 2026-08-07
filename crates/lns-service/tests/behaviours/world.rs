@@ -38,6 +38,8 @@ pub struct BehaviourWorld {
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
     pub resolved_workdir: Option<Option<String>>,
     pub user_env: Vec<String>,
+    /// `spec.env` entries, merged ahead of `-e` exactly as `sandbox_launch` merges them.
+    pub definition_env: Vec<String>,
     /// Env vars a connected connector manages for the run; `-e` overrides of these are refused.
     pub managed_vars: Vec<String>,
 

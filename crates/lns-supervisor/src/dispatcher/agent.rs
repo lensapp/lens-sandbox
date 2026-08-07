@@ -205,15 +205,40 @@ fn build_agent_env(
         full_env.insert("http_proxy".into(), local_proxy);
     }
 
-    if let Some(creds) = creds {
-        full_env.insert("HOME".into(), creds.home().into());
-        full_env.insert("USER".into(), creds.user().into());
+    if let Some(home) = effective_home(env, creds) {
+        full_env.insert("HOME".into(), home);
+    }
+    if let Some(user) = effective_value(env, DECLARED_USER, creds.map(SandboxCredentials::user)) {
+        full_env.insert("USER".into(), user);
     }
 
     // Scrub after all layering so no source can reintroduce internal vars
     lens_sandbox_core::privilege::scrub_internal_vars(&mut full_env);
 
     full_env
+}
+
+const DECLARED_HOME: &str = "LENS_SANDBOX_WORKLOAD_HOME";
+const DECLARED_USER: &str = "LENS_SANDBOX_WORKLOAD_USER";
+
+fn effective_home(
+    env: &HashMap<String, String>,
+    creds: Option<&SandboxCredentials>,
+) -> Option<String> {
+    effective_value(env, DECLARED_HOME, creds.map(SandboxCredentials::home))
+}
+
+/// The service delivers the marker through the process env the broker execs us with, not the policy frame, so both sources are read before the scrub drops the prefix.
+fn effective_value(
+    env: &HashMap<String, String>,
+    declared_key: &str,
+    from_creds: Option<&str>,
+) -> Option<String> {
+    env.get(declared_key)
+        .cloned()
+        .or_else(|| std::env::var(declared_key).ok())
+        .filter(|declared| !declared.is_empty())
+        .or_else(|| from_creds.map(str::to_string))
 }
 
 /// Resolve the agent cwd: explicit `WORKSPACE_PATH`, else the post-setuid home, else ".".
@@ -237,7 +262,7 @@ pub(crate) fn agent_child_spec(
         argv: vec!["sh".into(), "-c".into(), config.agent_command.clone()],
         cwd: Some(resolve_cwd(
             config.workspace_path.as_deref(),
-            creds.map(|c| c.home()),
+            effective_home(env, creds).as_deref(),
         )),
         env: build_agent_env(config, creds, env),
         creds: crate::run_as::setuid_creds(creds),
@@ -382,6 +407,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn build_agent_env_inserts_home_and_user_from_creds() {
         // The Some(creds) arm must layer HOME/USER and survive the post-layering scrub.
         let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
@@ -392,6 +418,87 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn a_declared_home_outranks_the_run_as_users_passwd_home() {
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let config = make_agent_config();
+        let declared = HashMap::from([
+            (
+                "LENS_SANDBOX_WORKLOAD_HOME".to_string(),
+                "/home/sandbox".to_string(),
+            ),
+            (
+                "LENS_SANDBOX_WORKLOAD_USER".to_string(),
+                "builder".to_string(),
+            ),
+        ]);
+
+        let env = build_agent_env(&config, Some(&creds), &declared);
+
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/home/sandbox"));
+        assert_eq!(env.get("USER").map(String::as_str), Some("builder"));
+        assert!(
+            !env.keys().any(|k| k.starts_with("LENS_SANDBOX_")),
+            "the marker must never reach the workload"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_declared_home_is_also_the_agent_cwd_fallback() {
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let mut config = make_agent_config();
+        config.workspace_path = None;
+        let declared = HashMap::from([(
+            "LENS_SANDBOX_WORKLOAD_HOME".to_string(),
+            "/home/sandbox".to_string(),
+        )]);
+
+        let spec = agent_child_spec(&config, Some(&creds), &declared);
+
+        assert_eq!(spec.cwd.as_deref(), Some("/home/sandbox"));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_marker_is_read_from_the_env_the_broker_execs_us_with() {
+        // SAFETY: serialized via #[serial(env)]; no other thread reads env during this body.
+        unsafe {
+            std::env::set_var("LENS_SANDBOX_WORKLOAD_HOME", "/home/sandbox");
+        }
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let mut config = make_agent_config();
+        config.workspace_path = None;
+
+        let spec = agent_child_spec(&config, Some(&creds), &HashMap::new());
+
+        // SAFETY: serialized via #[serial(env)]; no other thread reads env during this body.
+        unsafe {
+            std::env::remove_var("LENS_SANDBOX_WORKLOAD_HOME");
+        }
+        assert_eq!(
+            spec.env.get("HOME").map(String::as_str),
+            Some("/home/sandbox"),
+            "the policy frame carries no env, so the inherited env is the only place the marker arrives"
+        );
+        assert_eq!(spec.cwd.as_deref(), Some("/home/sandbox"));
+        assert!(!spec.env.keys().any(|k| k.starts_with("LENS_SANDBOX_")));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_run_as_users_home_still_fills_an_undeclared_home() {
+        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+        let config = make_agent_config();
+
+        let env = build_agent_env(&config, Some(&creds), &HashMap::new());
+
+        assert_eq!(env.get("HOME").map(String::as_str), Some(creds.home()));
+        assert_eq!(env.get("USER").map(String::as_str), Some(creds.user()));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
     fn a_root_run_as_keeps_its_identity_but_not_its_setuid() {
         let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
         let mut config = make_agent_config();

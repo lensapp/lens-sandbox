@@ -36,7 +36,7 @@ pub fn compose_workload_env(
     let mut entries: Vec<(String, String)> = Vec::new();
     if let Some(image) = image_env {
         for kv in image {
-            if let Some((k, v)) = kv.split_once('=') {
+            if let Some((k, v)) = kv.split_once('=').filter(|(k, _)| !is_internal(k)) {
                 upsert(&mut entries, k, v);
             }
         }
@@ -46,6 +46,9 @@ pub fn compose_workload_env(
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
+        if is_internal(k) {
+            continue;
+        }
         if is_run_managed(k, extra_managed) {
             refused.push(k.to_string());
             continue;
@@ -159,8 +162,29 @@ pub fn run_workload_env(
         composed
             .env
             .push(format!("TERM={SUPERVISOR_PTY_OPT_IN_TERM}"));
+        // Only what the author declared: an image's own ENV HOME must not outrank the run-as identity, or an unprivileged workload inherits a home it cannot write.
+        for key in ["HOME", "USER"] {
+            if let Some(value) = declared(user_env, key) {
+                composed
+                    .env
+                    .push(format!("LENS_SANDBOX_WORKLOAD_{key}={value}"));
+            }
+        }
     }
     composed
+}
+
+/// The supervisor reads its own instructions out of this prefix, so no image or `-e` may write one.
+fn is_internal(key: &str) -> bool {
+    key.starts_with("LENS_SANDBOX_")
+}
+
+fn declared<'a>(user_env: &'a [String], key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    user_env
+        .iter()
+        .rev()
+        .find_map(|entry| entry.strip_prefix(&prefix))
 }
 
 pub fn refusal_warning(key: &str) -> String {

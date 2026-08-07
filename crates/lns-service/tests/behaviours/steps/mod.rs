@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod oauth_connector;
 pub mod pkce_connector;
 pub mod policy_guardrail;
+pub mod run_as_env;
 pub mod run_lifecycle;
 pub mod run_naming;
 pub mod sandbox_filesets;

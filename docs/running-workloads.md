@@ -206,6 +206,18 @@ segment is used as the uid), and `-h`/`--hostname` sets the guest hostname:
 lns run -u 1000:1000 -h build-box ghcr.io/acme/agent:1.0.0
 ```
 
+`HOME` and `USER` come from that user's guest passwd entry, so `-u root` normally
+gives the workload `HOME=/root`. A definition's `env:` or a `-e` on the command
+line overrides both — what you declare wins, and nothing rewrites it behind you.
+An image's own `ENV HOME` does not: an image shipping `ENV HOME=/root` must never
+hand an unprivileged workload a home it cannot write.
+
+```yaml
+spec:
+  env:
+    HOME: /home/sandbox     # kept, even under `lns run -u root`
+```
+
 ### Resources
 
 | Flag                          | Default | Meaning            |

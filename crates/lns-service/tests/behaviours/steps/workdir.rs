@@ -46,7 +46,8 @@ fn user_runs_unsupervised(world: &mut BehaviourWorld, cmd: String) {
 }
 
 fn compose_run_env(world: &mut BehaviourWorld, cmd: &str, agent_command: Option<&str>) {
-    let user_env = flag_values(cmd, &["-e", "--env"]);
+    let mut user_env = world.definition_env.clone();
+    user_env.extend(flag_values(cmd, &["-e", "--env"]));
     let workdir =
         workload_cwd::resolve(cli_workdir(cmd).as_deref(), world.image_workdir.as_deref());
     world.composed_env = Some(run_workload_env(
