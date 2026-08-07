@@ -68,6 +68,8 @@ pub struct SupervisorSession {
     pub credential_watcher: Option<crate::credential_flow::watcher::CredentialWatcher>,
     // Env vars of the run's custom providers + connected connectors, stripped from `-e` so a real secret can't bypass the placeholder.
     pub managed_env_vars: Vec<String>,
+    // `env_var=placeholder` for each provider that seeds one, captured at boot exactly as the workload's own set is, so an `lns exec` sees the same token path.
+    pub placeholder_env: Vec<(String, String)>,
 }
 
 /// The run's consent inputs: the definition's credential slots, the identity its grants key against, the slot ids whose boot-gate sign-in the user completed this launch, and each connector's forget count as the gate found it.

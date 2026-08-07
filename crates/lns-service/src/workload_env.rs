@@ -75,22 +75,65 @@ pub struct ToolRuntime {
     pub env: Vec<(String, String)>,
 }
 
-impl ToolRuntime {
-    /// The contribution that actually took effect on a composed workload env. `lns exec` composes against its own env — nearly always empty — so a var the image or `-e` already owns has to be dropped here or the exec session gets the tool's value where the workload got the definition's.
-    pub fn as_applied(&self, composed_env: &[String]) -> ToolRuntime {
-        ToolRuntime {
-            bin_paths: self.bin_paths.clone(),
-            env: self
-                .env
-                .iter()
-                .filter(|(name, value)| {
-                    composed_env
-                        .iter()
-                        .any(|kv| kv == &format!("{name}={value}"))
-                })
-                .cloned()
-                .collect(),
-        }
+pub const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
+
+/// The vars the supervisor handshake owns; they describe the workload's own session, so replaying them into an exec would tell a piped command it has a colour terminal and hand it the workload's command line.
+fn is_session_only(entry: &str) -> bool {
+    let (key, value) = entry.split_once('=').unwrap_or((entry, ""));
+    match key {
+        "AGENT_COMMAND" | "WORKSPACE_PATH" => true,
+        // Only the value we injected: a workload that declares its own TERM meant it.
+        "TERM" => value == SUPERVISOR_PTY_OPT_IN_TERM,
+        _ => key.starts_with("LENS_SANDBOX_"),
+    }
+}
+
+/// The CA bundle paths a workload's runtimes are given, so a curl, git, python or node command in an exec trusts the proxy the way the workload does.
+fn ca_bundle_env() -> [(&'static str, &'static str); 5] {
+    [
+        ("SSL_CERT_FILE", lns_session::SYSTEM_CA_BUNDLE_PATH),
+        ("REQUESTS_CA_BUNDLE", lns_session::SYSTEM_CA_BUNDLE_PATH),
+        ("NODE_EXTRA_CA_CERTS", lns_session::SYSTEM_CA_BUNDLE_PATH),
+        ("CURL_CA_BUNDLE", lns_session::SYSTEM_CA_BUNDLE_PATH),
+        ("GIT_SSL_CAINFO", lns_session::SYSTEM_CA_BUNDLE_PATH),
+    ]
+}
+
+/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, the CA bundle the workload trusts, and last the credential placeholders — which override, because the workload's real env carries the placeholder for those vars too.
+pub fn exec_session_env(
+    exec_environment: &crate::run_registry::ExecEnvironment,
+    exec_env: &[String],
+) -> Vec<String> {
+    let joined: Vec<String> = exec_environment
+        .session_env
+        .iter()
+        .filter(|entry| !is_session_only(entry))
+        .cloned()
+        .collect();
+    let caller: Vec<String> = exec_env
+        .iter()
+        .filter(|entry| !is_session_only(entry))
+        .cloned()
+        .collect();
+    let mut env = compose_workload_env(Some(&joined), &caller, &[]).env;
+    compose_guest_tool_env(&mut env, &exec_environment.tools);
+    for (key, value) in ca_bundle_env() {
+        overwrite(&mut env, key, value);
+    }
+    for (key, value) in &exec_environment.placeholders {
+        overwrite(&mut env, key, value);
+    }
+    env
+}
+
+fn overwrite(env: &mut Vec<String>, key: &str, value: &str) {
+    let entry = format!("{key}={value}");
+    match env
+        .iter_mut()
+        .find(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))
+    {
+        Some(slot) => *slot = entry,
+        None => env.push(entry),
     }
 }
 
@@ -148,7 +191,6 @@ pub fn run_workload_env(
     extra_managed: &[String],
     tools: &ToolRuntime,
 ) -> WorkloadEnv {
-    const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
     let mut composed = compose_workload_env(image_env, user_env, extra_managed);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
     compose_guest_tool_env(&mut composed.env, tools);
@@ -440,48 +482,144 @@ mod tests {
     }
 
     #[test]
-    fn only_the_tool_vars_that_took_effect_travel_to_an_exec_session() {
-        // `lns exec` composes against its own (usually empty) env, so a var the definition already set would come back as the tool's value there — one sandbox, two CARGO_HOMEs, no warning.
-        let tools = ToolRuntime {
-            bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
-            env: vec![
-                (
-                    "SOME_TOOL_CACHE".to_string(),
-                    "/.lens/tools/some-tool/1.2.3/home/.cache".to_string(),
-                ),
-                (
-                    "SOME_TOOL_HOME".to_string(),
-                    "/.lens/tools/some-tool/1.2.3/home".to_string(),
-                ),
+    fn an_exec_session_joins_the_runs_environment_and_keeps_the_definitions_own_values() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec![
+                "HOME=/workspace".into(),
+                "SOME_TOOL_CACHE=/workspace/mine".into(),
             ],
+            tools: ToolRuntime {
+                bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
+                env: vec![
+                    (
+                        "SOME_TOOL_CACHE".to_string(),
+                        "/.lens/tools/some-tool/1.2.3/home/.cache".to_string(),
+                    ),
+                    (
+                        "SOME_TOOL_HOME".to_string(),
+                        "/.lens/tools/some-tool/1.2.3/home".to_string(),
+                    ),
+                ],
+            },
+            ..Default::default()
         };
-        let composed = run_workload_env(
-            Some(&["SOME_TOOL_CACHE=/workspace/mine".into()]),
-            &[],
-            None,
-            None,
-            &[],
-            &tools,
+
+        let env = exec_session_env(&run, &[]);
+
+        assert!(env.contains(&"HOME=/workspace".to_string()), "got: {env:?}");
+        assert!(
+            env.contains(&"SOME_TOOL_CACHE=/workspace/mine".to_string()),
+            "the var the definition owns keeps the definition's value, not the tool tree's: {env:?}"
         );
-        let applied = tools.as_applied(&composed.env);
-        assert_eq!(
-            applied.env,
-            vec![(
-                "SOME_TOOL_HOME".to_string(),
-                "/.lens/tools/some-tool/1.2.3/home".to_string()
-            )],
-            "the var the definition owns must not reach exec as the tool's"
+        assert!(
+            env.contains(&"SOME_TOOL_HOME=/.lens/tools/some-tool/1.2.3/home".to_string()),
+            "a tool var nothing else set still arrives: {env:?}"
         );
         assert_eq!(
-            applied.bin_paths, tools.bin_paths,
-            "the PATH rule is unchanged"
+            env.iter().find(|kv| kv.starts_with("PATH=")),
+            Some(&format!(
+                "PATH=/.lens/tools/some-tool/1.2.3/bin:{GUEST_DEFAULT_PATH}"
+            )),
+            "the run's tool dirs still come first: {env:?}"
+        );
+    }
+
+    #[test]
+    fn the_supervisors_own_handshake_does_not_travel_into_an_exec_session() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec![
+                "AGENT_COMMAND=agent --serve".into(),
+                "WORKSPACE_PATH=/workspace".into(),
+                format!("TERM={SUPERVISOR_PTY_OPT_IN_TERM}"),
+                "LENS_SANDBOX_TOKEN=a-relay-token".into(),
+                // A malformed entry still names an internal var, so the prefix decides, not the shape.
+                "LENS_SANDBOX_BARE".into(),
+                "MODE=research".into(),
+            ],
+            ..Default::default()
+        };
+
+        let env = exec_session_env(&run, &[]);
+
+        for leaked in [
+            "AGENT_COMMAND=",
+            "WORKSPACE_PATH=",
+            "TERM=",
+            "LENS_SANDBOX_",
+            "LENS_SANDBOX_BARE",
+        ] {
+            assert!(
+                !env.iter().any(|kv| kv.starts_with(leaked)),
+                "{leaked} must not reach an exec session: {env:?}"
+            );
+        }
+        assert!(env.contains(&"MODE=research".to_string()), "got: {env:?}");
+    }
+
+    #[test]
+    fn the_caller_of_an_exec_cannot_smuggle_an_internal_var_in_either() {
+        let env = exec_session_env(
+            &Default::default(),
+            &["LENS_SANDBOX_TOKEN=a-forged-token".to_string()],
         );
 
-        let mut exec_env = Vec::new();
-        compose_guest_tool_env(&mut exec_env, &applied);
         assert!(
-            !exec_env.iter().any(|kv| kv.starts_with("SOME_TOOL_CACHE=")),
-            "got: {exec_env:?}"
+            !env.iter().any(|kv| kv.starts_with("LENS_SANDBOX_")),
+            "got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn a_workloads_own_term_is_a_declaration_and_survives() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["TERM=dumb".into()],
+            ..Default::default()
+        };
+
+        assert!(
+            exec_session_env(&run, &[]).contains(&"TERM=dumb".to_string()),
+            "only the value the supervisor injected is internal"
+        );
+    }
+
+    #[test]
+    fn an_exec_session_trusts_the_same_ca_bundle_the_workload_does() {
+        let env = exec_session_env(&Default::default(), &[]);
+
+        for key in [
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert!(
+                env.contains(&format!("{key}={}", lns_session::SYSTEM_CA_BUNDLE_PATH)),
+                "a python or node command in an exec fails TLS without {key}: {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_placeholder_overrides_whatever_the_run_env_holds_for_that_var() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["SOME_TOKEN=an-image-baked-value".into()],
+            placeholders: vec![(
+                "SOME_TOKEN".to_string(),
+                "some-provider_LNSPLACEHOLDER0000".to_string(),
+            )],
+            ..Default::default()
+        };
+
+        let env = exec_session_env(&run, &[]);
+
+        assert!(
+            env.contains(&"SOME_TOKEN=some-provider_LNSPLACEHOLDER0000".to_string()),
+            "the workload's own env carries the placeholder for a managed var, so an exec must match: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|kv| kv.contains("an-image-baked-value")),
+            "got: {env:?}"
         );
     }
 

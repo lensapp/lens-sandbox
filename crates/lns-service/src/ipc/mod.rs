@@ -477,13 +477,12 @@ pub(super) fn build_session_params(
     args: lns_ipc::ExecImageArgs,
     run_id: &str,
 ) -> crate::vm::session_client::SessionParams {
-    let mut env = args.env;
-    // The run's declared tools reach exec through the same rule the workload's PATH was built with; the image's own PATH additions are not part of an exec session, which inherits the guest default.
-    crate::workload_env::compose_guest_tool_env(&mut env, &crate::run_registry::tools(run_id));
+    let exec_environment = crate::run_registry::exec_environment(run_id);
+    let env = crate::workload_env::exec_session_env(&exec_environment, &args.env);
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env,
-        cwd: None,
+        cwd: exec_environment.workdir,
         hostname: None,
         tty: args.tty,
         stdin: args.stdin,
@@ -930,7 +929,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tools: Default::default(),
+                exec_environment: Default::default(),
             },
         );
 
@@ -1290,7 +1289,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tools: Default::default(),
+            exec_environment: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
         let resp = handle_request(
@@ -1325,7 +1324,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tools: Default::default(),
+            exec_environment: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1381,7 +1380,7 @@ mod tests {
             status: Mutex::new(lns_ipc::RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tools: Default::default(),
+            exec_environment: Default::default(),
         };
         crate::run_registry::register(run_id.clone(), handle);
 
@@ -1470,7 +1469,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tools: Default::default(),
+                exec_environment: Default::default(),
             },
         );
     }
@@ -1818,7 +1817,7 @@ mod tests {
                 status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
                 logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
                 config: lns_ipc::RunConfig::default(),
-                tools: Default::default(),
+                exec_environment: Default::default(),
             },
         );
 
@@ -1891,10 +1890,10 @@ mod tests {
         };
         let params = build_session_params(args, "1");
         assert_eq!(params.argv, vec!["echo".to_string()]);
-        assert_eq!(params.env, vec!["A=B".to_string()]);
+        assert!(params.env.contains(&"A=B".to_string()));
         assert_eq!(
             params.cwd, None,
-            "exec sessions run in the broker's default cwd"
+            "a run with no stored environment forces no working directory"
         );
         let ws = params.initial_winsize.expect("winsize should be mapped");
         assert_eq!((ws.rows, ws.cols), (24, 80));
@@ -1947,7 +1946,7 @@ mod tests {
 
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tools = tools.clone();
+        handle.exec_environment.tools = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
         let mut args = exec_args(vec!["node".into()], false, false);
         args.env = vec!["PATH=/usr/bin".into()];
@@ -1971,6 +1970,58 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
+    async fn an_exec_session_joins_the_runs_own_environment() {
+        let run_id = crate::run_registry::allocate_run_id();
+        let (mut handle, _cancel) = crate::run_registry::test_handle();
+        handle.exec_environment = crate::run_registry::ExecEnvironment {
+            session_env: vec![
+                "HOME=/workspace".into(),
+                "SHELL=/bin/bash".into(),
+                "SOME_TOOL_HOME=/workspace/mine".into(),
+            ],
+            workdir: Some("/workspace".into()),
+            tools: crate::workload_env::ToolRuntime {
+                bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
+                env: vec![(
+                    "SOME_TOOL_HOME".into(),
+                    "/.lens/tools/some-tool/1.2.3/home".into(),
+                )],
+            },
+            ..Default::default()
+        };
+        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+
+        let args = exec_args(vec!["printenv".into()], false, false);
+        assert!(args.env.is_empty(), "the CLI sends no env for an exec");
+        let params = build_session_params(args, &run_id);
+        crate::run_registry::deregister(&run_id);
+
+        assert!(
+            params.env.contains(&"HOME=/workspace".to_string()),
+            "a diagnostic command that has to re-export HOME is not in the same sandbox: {:?}",
+            params.env
+        );
+        assert!(
+            params.env.contains(&"SHELL=/bin/bash".to_string()),
+            "got: {:?}",
+            params.env
+        );
+        assert!(
+            params
+                .env
+                .contains(&"SOME_TOOL_HOME=/workspace/mine".to_string()),
+            "the definition's own value must win over the tool tree's: {:?}",
+            params.env
+        );
+        assert_eq!(
+            params.cwd.as_deref(),
+            Some("/workspace"),
+            "an exec starting in / makes `sh -lc` write to the wrong place"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn an_exec_carrying_no_env_still_puts_the_runs_tool_dirs_first() {
         // What `lns exec` actually sends is an empty env, so the composed PATH has to hold up on that input and not just on a hand-supplied one.
         let tools = crate::workload_env::ToolRuntime {
@@ -1979,7 +2030,7 @@ mod tests {
         };
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tools = tools.clone();
+        handle.exec_environment.tools = tools.clone();
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
         let args = exec_args(vec!["node".into()], false, false);
         assert!(args.env.is_empty(), "the CLI sends no env for exec");
@@ -2003,7 +2054,7 @@ mod tests {
         // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
-        handle.tools = crate::workload_env::ToolRuntime {
+        handle.exec_environment.tools = crate::workload_env::ToolRuntime {
             bin_paths: vec!["/.lens/tools/node/22.11.0/bin".to_string()],
             env: Vec::new(),
         };
