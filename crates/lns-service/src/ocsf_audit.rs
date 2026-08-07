@@ -146,6 +146,20 @@ pub fn bind_event(
     ))
 }
 
+pub fn host_access_event(
+    cx: &OcsfCtx,
+    id: &str,
+    host_source: &str,
+    guest_target: &str,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::socket_forward(
+        &cx.ctx(),
+        id,
+        host_source,
+        guest_target,
+    ))
+}
+
 pub fn egress_event(
     cx: &OcsfCtx,
     method: &str,

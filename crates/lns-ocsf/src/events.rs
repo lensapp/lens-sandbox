@@ -417,6 +417,33 @@ pub fn bind_mount(
     ev.build()
 }
 
+/// A host agent reached through a forwarded socket. Deliberately not a bind: nothing is mounted, the guest sees a socket rather than a folder, and a SIEM rule asking "which host directories did this run mount?" must not match the one grant that lets a workload ask the host to sign.
+pub fn socket_forward(ctx: &Context, id: &str, host_source: &str, guest_target: &str) -> Value {
+    Event::new(
+        "host-access",
+        class::FILE_ACTIVITY,
+        category::SYSTEM,
+        activity::FILE_CREATE,
+        severity::MEDIUM,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("{id}: host agent at {host_source} reachable at {guest_target}").into(),
+    )
+    .set(
+        "file",
+        json!({"name": guest_target, "type_id": file_type::LOCAL_SOCKET}),
+    )
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_host_access", id.into())
+    .note("lns_source", host_source.into())
+    .note("lns_target", guest_target.into())
+    .build()
+}
+
 pub fn sandbox_run(
     ctx: &Context,
     reference: &str,
@@ -827,6 +854,40 @@ mod tests {
         assert_eq!(ev["message"], "/src → /work");
         assert!(ev["unmapped"].get("lns_exposed_secrets").is_none());
         assert!(ev["unmapped"].get("lns_dropped_secrets").is_none());
+    }
+
+    #[test]
+    fn a_socket_forward_is_not_reported_as_a_folder_bind() {
+        let ev = socket_forward(
+            &ctx(),
+            "git-signing",
+            "/run/user/501/gnupg/S.gpg-agent.extra",
+            "/home/sandbox/.gnupg/S.gpg-agent",
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(
+            ev["file"]["type_id"], 5,
+            "OCSF Local Socket: a forwarded agent is not a folder, and not the Named Pipe that 6 means — a query for mounted host directories must not match it"
+        );
+        assert_ne!(ev["activity_id"], 5, "nothing is mounted");
+        assert_eq!(ev["unmapped"]["lns_host_access"], "git-signing");
+        assert_eq!(
+            ev["unmapped"]["lns_source"],
+            "/run/user/501/gnupg/S.gpg-agent.extra"
+        );
+        assert_eq!(
+            ev["unmapped"]["lns_target"],
+            "/home/sandbox/.gnupg/S.gpg-agent"
+        );
+    }
+
+    #[test]
+    fn a_socket_forward_is_not_informational_because_it_grants_signing() {
+        let ev = socket_forward(&ctx(), "git-signing", "/run/a.sock", "/home/s/.gnupg/S");
+        assert_eq!(
+            ev["severity_id"], 3,
+            "while the run is live the workload can ask the host agent to sign anything"
+        );
     }
 
     #[test]

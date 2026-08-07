@@ -11,34 +11,34 @@ Feature: host access forwards the host's signing agent into the guest
   Scenario: a commit made in the guest carries a signature that verifies
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg git >/dev/null; mkdir -p /tmp/r && cd /tmp/r && git init -q . && git commit --allow-empty -S -m x && git log --show-signature -1'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg git >/dev/null; mkdir -p /tmp/r && cd /tmp/r && git init -q . && git commit --allow-empty -S -m x && git log --show-signature -1'" as user "root" with host access "git-signing"
     Then the exit code is 0
     And the output contains "Good signature"
 
   Scenario: the verified signature reports full trust, not unknown validity
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg git >/dev/null; mkdir -p /tmp/r && cd /tmp/r && git init -q . && git commit --allow-empty -S -m x && echo trust=$(git log --format=%G? -1)'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg git >/dev/null; mkdir -p /tmp/r && cd /tmp/r && git init -q . && git commit --allow-empty -S -m x && echo trust=$(git log --format=%G? -1)'" as user "root" with host access "git-signing"
     Then the exit code is 0
     And the output contains "trust=G"
 
   Scenario: the guest holds the signing key as a stub with no private material
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; gpg --batch --list-secret-keys'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; gpg --batch --list-secret-keys'" as user "root" with host access "git-signing"
     Then the exit code is 0
     And the output contains "sec#"
 
   Scenario: the private key cannot be exported through the forwarded agent
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; gpg --batch --export-secret-keys > /dev/null 2>&1; echo rc=$?'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; gpg --batch --export-secret-keys > /dev/null 2>&1; echo rc=$?'" as user "root" with host access "git-signing"
     Then the output contains "rc=2"
 
   Scenario: the forwarded socket belongs to the run-as user
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; ls -ln $HOME/.gnupg/S.gpg-agent'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'ls -ln $HOME/.gnupg/S.gpg-agent'" with host access "git-signing"
     Then the exit code is 0
     And the output shows the socket owned by the run-as user with mode 0600
 
@@ -52,7 +52,7 @@ Feature: host access forwards the host's signing agent into the guest
   Scenario: two signs at once each get their own connection
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
-    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; echo a > /tmp/a; echo b > /tmp/b; gpg --batch --yes --detach-sign /tmp/a & gpg --batch --yes --detach-sign /tmp/b; wait; gpg --verify /tmp/a.sig /tmp/a && gpg --verify /tmp/b.sig /tmp/b'" with host access "git-signing"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; echo a > /tmp/a; echo b > /tmp/b; gpg --batch --yes --detach-sign /tmp/a & gpg --batch --yes --detach-sign /tmp/b; wait; gpg --verify /tmp/a.sig /tmp/a && gpg --verify /tmp/b.sig /tmp/b'" as user "root" with host access "git-signing"
     Then the exit code is 0
 
   Scenario: the sandbox survives the host agent stopping mid-run

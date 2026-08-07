@@ -1,7 +1,7 @@
 use crate::E2eWorld;
 use cucumber::{given, then, when};
 
-/// A throwaway GnuPG home with an unprotected key and its own agent, so the scenario signs with a key it created rather than the developer's.
+/// A throwaway GnuPG home with an unprotected key and its own agent, so the scenario never touches the developer's key.
 #[given(regex = r"^the host agent holds the key named by user\.signingkey$")]
 fn host_agent_with_key(world: &mut E2eWorld) {
     let home = super::microvm::ensure_home(world);
@@ -15,8 +15,17 @@ fn host_agent_with_key(world: &mut E2eWorld) {
     )
     .expect("agent conf");
 
-    // Launched before the key is generated, because generation itself goes through the agent.
-    run_gpgconf(&gnupg, &["--launch", "gpg-agent"]);
+    // Spawned directly rather than via `gpgconf --launch`, which needs gpg-connect-agent and fails on a sandboxed macOS session.
+    let agent = std::process::Command::new("gpg-agent")
+        .args(["--daemon", "--allow-loopback-pinentry"])
+        .env("GNUPGHOME", &gnupg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("gpg-agent must be installed to run this scenario");
+    world.host_agent = Some(agent);
+    world.host_gnupg_home = Some(gnupg.clone());
+    wait_for_agent_socket(&gnupg);
 
     let params = gnupg.join("keyparams");
     std::fs::write(
@@ -48,6 +57,20 @@ fn run_gpg(gnupg: &std::path::Path, args: &[&str]) -> String {
 
 fn run_gpgconf(gnupg: &std::path::Path, args: &[&str]) -> String {
     output_of("gpgconf", gnupg, args)
+}
+
+fn wait_for_agent_socket(gnupg: &std::path::Path) {
+    let socket = gnupg.join("S.gpg-agent");
+    for _ in 0..100 {
+        if socket.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!(
+        "gpg-agent did not create {} within 10s; this scenario cannot run without its own agent",
+        socket.display()
+    );
 }
 
 fn output_of(program: &str, gnupg: &std::path::Path, args: &[&str]) -> String {
@@ -112,7 +135,7 @@ fn detached_run_with_host_access(world: &mut E2eWorld, id: String) {
     // The marker lets the later exec tell "gpg is missing" from "signing failed", and lets it wait out an install that a detached run does not block on.
     super::microvm::run_microvm_public(
         world,
-        vec!["--yes".into(), "-d".into()],
+        vec!["--yes".into(), "-d".into(), "-u".into(), "root".into()],
         "/bin/sh -c 'apk add --no-cache gnupg >/dev/null && touch /tmp/gpg-ready; sleep 120'",
     );
     let run = world
@@ -177,13 +200,15 @@ fn socket_owner_and_mode(world: &mut E2eWorld) {
         .as_ref()
         .map(|r| format!("{}{}", r.stdout, r.stderr))
         .unwrap_or_default();
+    // Anchored on the mode column: the captured output also carries the CLI's own echo of the command, which names the same path.
     let line = output
         .lines()
-        .find(|l| l.contains("S.gpg-agent"))
-        .unwrap_or_else(|| panic!("no listing line for the socket: {output}"));
+        .map(str::trim)
+        .find(|l| l.starts_with("srw"))
+        .unwrap_or_else(|| panic!("no ls listing line for the socket: {output}"));
     assert!(
         line.starts_with("srw-------"),
-        "the socket must be a 0600 socket inode: {line}"
+        "the socket must be mode 0600: {line}"
     );
     let mut fields = line.split_whitespace();
     let uid = fields.nth(2).unwrap_or_default();

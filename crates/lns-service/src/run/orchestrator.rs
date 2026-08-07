@@ -255,6 +255,17 @@ async fn orchestrate(
         )?;
     }
 
+    for forward in &args.socket_forwards {
+        crate::audit::record_host_access_attached(
+            &run_id,
+            &microvm,
+            &forward.id,
+            &forward.host_source,
+            &forward.guest_target,
+            &crate::oauth::RealClock,
+        )?;
+    }
+
     let ensured_tools = if tool_requests.is_empty() {
         None
     } else {
