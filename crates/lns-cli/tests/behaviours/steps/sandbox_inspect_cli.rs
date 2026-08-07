@@ -57,6 +57,8 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -87,6 +89,8 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -117,6 +121,8 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -169,6 +175,8 @@ fn inspects_sandbox_credential_with_requirement(
         }],
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -192,6 +200,8 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         policy_flags: vec![
             "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into(),
         ],
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -211,6 +221,8 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }));
     cached_artifact(world, &reference, inspection);
 }

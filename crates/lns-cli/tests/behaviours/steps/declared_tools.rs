@@ -78,6 +78,8 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
         credentials: Vec::new(),
         tools: PINNED_TOOLS.iter().map(ToString::to_string).collect(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     };
     w.sandbox.response = Some(Response::Error {
         message: format!("no active run with id {TOOLS_REFERENCE}"),
@@ -141,7 +143,13 @@ fn run_summary_discloses_tools(w: &mut BehaviourWorld) -> Result<(), String> {
     }
     let cwd = w.cwd.as_ref().ok_or("cwd")?.path().to_path_buf();
     let mut buf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut buf).map_err(|e| format!("{e:#}"))?;
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut buf,
+    )
+    .map_err(|e| format!("{e:#}"))?;
     let summary = String::from_utf8_lossy(&buf).into_owned();
     let expected = format!("Tools:     {}", PINNED_TOOLS.join(", "));
     if summary.contains(&expected) {

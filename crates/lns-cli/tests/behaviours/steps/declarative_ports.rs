@@ -57,6 +57,8 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     }
 }
 
@@ -80,7 +82,13 @@ fn summarize(world: &mut BehaviourWorld, defaults: &Defaults, flags: &str, local
     }
     let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
     let mut buf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut buf,
+    )
+    .expect("print_run_summary");
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
 }
 

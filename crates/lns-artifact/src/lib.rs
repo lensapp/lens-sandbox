@@ -1,6 +1,7 @@
 pub mod build;
 pub mod memory;
 pub mod registry;
+pub mod resources;
 pub mod sandbox;
 pub mod spec;
 pub mod tools;

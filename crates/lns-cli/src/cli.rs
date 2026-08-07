@@ -247,16 +247,16 @@ pub struct RunArgs {
     pub cmd: Vec<String>,
 }
 
-pub const DEFAULT_CPUS: u8 = 1;
-pub const DEFAULT_MEM_MIB: usize = 512;
-
 impl RunArgs {
+    /// What the wire carries beside `cpus_explicit`; the summary prints the resolved size instead, which a definition can raise.
     pub fn effective_cpus(&self) -> u8 {
-        self.cpus.unwrap_or(DEFAULT_CPUS)
+        self.cpus
+            .unwrap_or(lns_artifact::resources::DEFAULT_VM_SIZE.cpus)
     }
 
     pub fn effective_mem(&self) -> usize {
-        self.mem.unwrap_or(DEFAULT_MEM_MIB)
+        self.mem
+            .unwrap_or(lns_artifact::resources::DEFAULT_VM_SIZE.mem_mib)
     }
 
     pub fn effective_sandbox_user(&self) -> Option<String> {
@@ -582,6 +582,21 @@ mod tests {
         let mut full = vec!["exec"];
         full.extend_from_slice(argv);
         ExecHarness::try_parse_from(full).map(|h| h.args)
+    }
+
+    #[test]
+    fn the_wire_size_is_the_flag_or_the_built_in_default() {
+        let flagless = parse_run(&["someimage"]).expect("defaults parse");
+        assert_eq!(flagless.effective_cpus(), 1);
+        assert_eq!(flagless.effective_mem(), 512);
+        assert!(
+            flagless.cpus.is_none() && flagless.mem.is_none(),
+            "the wire must stay able to say the user asked for nothing, or a definition can no longer outrank a flag"
+        );
+
+        let flagged = parse_run(&["--cpus", "4", "-m", "2g", "someimage"]).expect("flags parse");
+        assert_eq!(flagged.effective_cpus(), 4);
+        assert_eq!(flagged.effective_mem(), 2048);
     }
 
     #[test]

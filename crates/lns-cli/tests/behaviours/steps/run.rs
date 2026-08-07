@@ -201,7 +201,13 @@ async fn the_run_starts(world: &mut BehaviourWorld) {
     let cwd = require_cwd(world).to_path_buf();
     let args = parse_argv(&world.argv);
     let mut buf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut buf,
+    )
+    .expect("print_run_summary");
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
 
     drive_canned_sequence(world).await;
@@ -491,7 +497,13 @@ async fn resolution_fails(world: &mut BehaviourWorld) {
     let cwd = require_cwd(world).to_path_buf();
     let args = parse_argv(&world.argv);
     let mut sbuf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut sbuf).expect("print_run_summary");
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut sbuf,
+    )
+    .expect("print_run_summary");
     world.summary_output = String::from_utf8(sbuf).expect("non-utf8 summary");
 
     let err_frame = encode_frame(&Response::RunLog {

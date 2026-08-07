@@ -74,7 +74,13 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
     }
     let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
     let mut buf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut buf,
+    )
+    .expect("print_run_summary");
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
 }
 
@@ -101,6 +107,8 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     });
 }
 
@@ -127,6 +135,8 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
         credentials: Vec::new(),
         tools: Vec::new(),
         policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
     });
 }
 
@@ -141,7 +151,13 @@ fn pulled_run_prepared(world: &mut BehaviourWorld) {
     }
     let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
     let mut buf = Vec::<u8>::new();
-    print_run_summary(&args, &cwd, &mut buf).expect("print_run_summary");
+    print_run_summary(
+        &args,
+        lns_cli::run::summary::resolved_size(Default::default(), &args),
+        &cwd,
+        &mut buf,
+    )
+    .expect("print_run_summary");
     world.summary_output = String::from_utf8(buf).expect("non-utf8 summary output");
 }
 
