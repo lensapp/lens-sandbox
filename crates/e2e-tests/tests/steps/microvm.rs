@@ -1560,6 +1560,54 @@ fn policy_deny_all(world: &mut E2eWorld) {
     );
 }
 
+/// The ext4 superblock's `s_state`: the kernel clears bit 0 at read-write mount and sets it back only when the filesystem is put away, so this byte is what tells a later mount whether to warn that the image is unchecked.
+#[then(regex = r#"^the backing image for volume "([^"]+)" is marked clean$"#)]
+fn volume_image_marked_clean(world: &mut E2eWorld, name: String) -> Result<(), String> {
+    const SUPERBLOCK_OFFSET: u64 = 1024;
+    const S_MAGIC_OFFSET: u64 = 0x38;
+    const EXT4_SUPER_MAGIC: u16 = 0xEF53;
+    const EXT4_VALID_FS: u16 = 0x0001;
+
+    let home = world
+        .home
+        .as_ref()
+        .ok_or("Given a clean lns cache home first")?
+        .path();
+    let cache_root = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches")
+    } else {
+        home.join(".cache")
+    };
+    let image = cache_root
+        .join("lns")
+        .join("volumes")
+        .join(format!("{name}.img"));
+
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(&image).map_err(|e| format!("{}: {e}", image.display()))?;
+    file.seek(SeekFrom::Start(SUPERBLOCK_OFFSET + S_MAGIC_OFFSET))
+        .map_err(|e| e.to_string())?;
+    // s_magic then s_state, adjacent — reading both proves the offsets land on a real superblock rather than garbage.
+    let mut bytes = [0u8; 4];
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    let magic = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let state = u16::from_le_bytes([bytes[2], bytes[3]]);
+
+    if magic != EXT4_SUPER_MAGIC {
+        return Err(format!(
+            "{} does not start with an ext4 superblock (s_magic={magic:#06x})",
+            image.display()
+        ));
+    }
+    if state & EXT4_VALID_FS == 0 {
+        return Err(format!(
+            "{} is still marked unchecked (s_state={state:#06x}); every later mount warns that e2fsck is recommended",
+            image.display()
+        ));
+    }
+    Ok(())
+}
+
 #[then(regex = r#"^volume "([^"]+)" is released$"#)]
 fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(30);

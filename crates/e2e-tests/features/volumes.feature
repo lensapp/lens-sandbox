@@ -68,3 +68,10 @@ Feature: named volumes persist workload state across runs
     When the user runs a microVM command "/bin/sh -c 'echo got-it'" with volume "e2e-vol-live" at "/data"
     Then the exit code is non-zero
     And the output contains "in use"
+
+  Scenario: a volume the run finished with is left marked clean
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'echo persisted > /data/marker'" with volume "e2e-vol-clean" at "/data"
+    Then the exit code is 0
+    And volume "e2e-vol-clean" is released
+    And the backing image for volume "e2e-vol-clean" is marked clean

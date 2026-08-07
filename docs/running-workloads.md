@@ -346,6 +346,16 @@ asks for confirmation unless you pass `-f`/`--force`. Everything else in a
 sandbox is ephemeral by design — volumes are the one place data persists, so
 removing one is permanent.
 
+A run that finishes, or that you `lns stop`, **releases** each volume before the
+guest powers off, so the image is left marked clean. A run the host cannot ask to
+stop — `lns kill`, or a service killed outright — cannot do that, and leaves its
+volumes dirty. The images carry no journal yet, so nothing replays on the next
+mount: prefer `lns stop` over `lns kill` when a volume holds work you care about.
+
+Once an image has been left dirty, it stays dirty. The kernel restores the state
+it found at mount, so a later clean run does not clear the mark, and there is no
+in-guest `e2fsck` to clear it either — only recreating the volume does.
+
 ### Declarative mounts
 
 Mounts that are part of the sandbox belong in `spec.volumes`. A named volume

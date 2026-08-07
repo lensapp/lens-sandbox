@@ -535,6 +535,12 @@ pub fn validate_volume_target(target: &str) -> Result<(), String> {
         let reason = "must not contain whitespace, quotes, or control characters";
         return Err(format!("invalid volume target {target:?}: {reason}"));
     }
+    // The guest hands the broker its mounted volume targets as one colon-separated list, and a target it cannot name is a volume nothing releases.
+    if target.contains(':') {
+        return Err(format!(
+            "invalid volume target {target:?}: must not contain `:`"
+        ));
+    }
     if target.split('/').any(|seg| seg == "." || seg == "..") {
         return Err(format!(
             "invalid volume target {target:?}: must not contain `.` or `..` path segments"
@@ -1502,6 +1508,12 @@ mod tests {
         validate_volume_target("/srv/..").unwrap_err();
         validate_volume_target("/../etc").unwrap_err();
         validate_volume_target("/a/./b").unwrap_err();
+    }
+
+    #[test]
+    fn validate_volume_target_refuses_a_colon_so_the_guest_can_name_it_for_release() {
+        let err = validate_volume_target("/da:ta").unwrap_err();
+        assert!(err.contains("must not contain `:`"), "got: {err}");
     }
 
     #[test]

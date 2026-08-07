@@ -522,6 +522,8 @@ fn do_umount(sys: &dyn Syscalls, target: &str) -> Result<(), MountError> {
     })
 }
 
+pub const VOLUME_TARGETS_ENV: &str = "LENS_VOLUME_TARGETS";
+
 fn mount_volumes(
     sys: &dyn Syscalls,
     volumes: &[crate::cmdline::VolumeParam],
@@ -529,6 +531,7 @@ fn mount_volumes(
     run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
     let mut seeded: Vec<&str> = Vec::new();
+    let mut mounted: Vec<&str> = Vec::new();
     for vol in volumes {
         let target = format!("{newroot}{}", vol.target);
         if !seeded.contains(&vol.dev.as_str()) {
@@ -544,6 +547,11 @@ fn mount_volumes(
         if !vol.read_only {
             reconcile_volume_owner(sys, &target, run_ids);
         }
+        mounted.push(&vol.target);
+    }
+    // Only lns-init knows which guest paths are volumes, and the broker has to release them before poweroff.
+    if !mounted.is_empty() {
+        sys.export_env(VOLUME_TARGETS_ENV, &mounted.join(":"));
     }
     Ok(())
 }
@@ -2492,6 +2500,51 @@ mod tests {
             )
             .is_ok(),
             "one ownership failure must warn, not strand the run"
+        );
+    }
+
+    #[test]
+    fn every_mounted_volume_target_is_exported_for_the_broker_to_release() {
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[
+                volume("/dev/vdc", "/data", false),
+                volume("/dev/vdd", "/cache", true),
+            ],
+            "/newroot",
+            None,
+        )
+        .unwrap();
+
+        let exported = exported_env(&sys.calls());
+        assert!(
+            exported.contains(&(VOLUME_TARGETS_ENV.to_string(), "/data:/cache".to_string())),
+            "the broker cannot release what it was never told about, and a volume left mounted stays marked unchecked: {exported:?}"
+        );
+    }
+
+    fn exported_env(calls: &[Call]) -> Vec<(String, String)> {
+        calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::ExportEnv { key, value } => Some((key.clone(), value.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_with_no_volumes_exports_no_target_list() {
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(&sys, &[], "/newroot", None).unwrap();
+
+        let exported = exported_env(&sys.calls());
+        assert!(
+            !exported.iter().any(|(key, _)| key == VOLUME_TARGETS_ENV),
+            "a run with no volumes has nothing to release: {exported:?}"
         );
     }
 
