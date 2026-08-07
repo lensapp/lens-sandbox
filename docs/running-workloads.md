@@ -767,6 +767,17 @@ session has no way yet to route your keystrokes to itself rather than to the run
 own workload. So `lns exec 7 -- bash` gets you a shell with closed stdin, which
 exits at once. To reach a live terminal inside the run, use `lns attach`.
 
+An exec **joins the run it names**, so a diagnostic command sees the same sandbox
+the workload does: the run's resolved environment (base image `ENV`, `spec.env`,
+`-e`, and its declared tools on `PATH`), its working directory, the CA bundle its
+runtimes trust, and the credential placeholders — so a request you make from an
+exec goes through the same policy and the same credential swap. You never have to
+re-export the environment by hand, and `~` means what it means to the workload.
+
+The supervisor's own handshake variables stay out, so a piped exec is not told it
+has a colour terminal. Real credential values stay out too: an exec is handed the
+same placeholder the workload holds, never the secret behind it.
+
 ### Stopping vs killing
 
 `lns kill` sends one signal (case-insensitive, bare or `SIG`-prefixed: `TERM`,

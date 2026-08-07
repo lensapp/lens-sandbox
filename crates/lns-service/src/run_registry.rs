@@ -30,8 +30,20 @@ pub struct RunHandle {
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
     pub config: lns_ipc::RunConfig,
-    /// What this run's declared tools contribute to its guest environment, so `lns exec` into the same guest resolves them the way the workload does.
+    /// Everything an `lns exec` into this run needs to land in the same sandbox the workload is in.
+    pub exec_environment: ExecEnvironment,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecEnvironment {
+    /// The run's resolved workload env, so a diagnostic command does not have to re-export it by hand.
+    pub session_env: Vec<String>,
+    /// What this run's declared tools contribute, so `lns exec` resolves them the way the workload does.
     pub tools: crate::workload_env::ToolRuntime,
+    /// `env_var=placeholder` for each connector that seeds one, so an exec can exercise a token path the workload uses without ever holding the real value.
+    pub placeholders: Vec<(String, String)>,
+    /// The workload's working directory; `docker exec` inherits it, and an exec in `/` makes `sh -lc` write to the wrong place.
+    pub workdir: Option<String>,
 }
 
 pub fn allocate_run_id() -> String {
@@ -198,11 +210,11 @@ pub fn connector(run_id: &str) -> Option<std::sync::Arc<dyn GuestTransport>> {
         .and_then(|h| h.connector.clone())
 }
 
-pub fn tools(run_id: &str) -> crate::workload_env::ToolRuntime {
+pub fn exec_environment(run_id: &str) -> ExecEnvironment {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
-        .map(|h| h.tools.clone())
+        .map(|h| h.exec_environment.clone())
         .unwrap_or_default()
 }
 
@@ -213,15 +225,15 @@ pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>
     }
 }
 
-/// The connector is what makes a run exec-able, so a run that has declared tools publishes both in one mutation — an exec that saw the gate open but not the tools would run without them and with no error.
-pub fn set_connector_with_tools(
+/// The connector is what makes a run exec-able, so both publish in one mutation — an exec that saw the gate open but not the environment would run without it and with no error.
+pub fn set_connector_with_environment(
     run_id: &str,
     connector: std::sync::Arc<dyn GuestTransport>,
-    tools: crate::workload_env::ToolRuntime,
+    exec_environment: ExecEnvironment,
 ) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
-        h.tools = tools;
+        h.exec_environment = exec_environment;
         h.connector = Some(connector);
     }
 }
@@ -410,7 +422,7 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
             status: std::sync::Mutex::new(RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
             config: lns_ipc::RunConfig::default(),
-            tools: Default::default(),
+            exec_environment: Default::default(),
         },
         cancel_rx,
     )
@@ -647,16 +659,28 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
-    async fn a_runs_tool_environment_is_readable_for_the_life_of_the_run() {
-        // `lns exec` enters the same guest later and has to compose the same PATH and the same tool vars.
+    async fn a_runs_exec_environment_is_readable_for_the_life_of_the_run() {
+        // `lns exec` enters the same guest later and has to compose the same env, the same PATH and the same tool vars.
         let id = allocate_run_id();
         let (mut h, _rx) = make_handle();
-        h.tools = tool_runtime();
+        h.exec_environment = exec_environment_fixture();
         register_named(id.clone(), None, h).unwrap();
-        assert_eq!(tools(&id), tool_runtime());
-        assert_eq!(tools("ghost"), Default::default());
+        assert_eq!(exec_environment(&id), exec_environment_fixture());
+        assert_eq!(exec_environment("ghost"), Default::default());
         deregister(&id);
-        assert_eq!(tools(&id), Default::default());
+        assert_eq!(exec_environment(&id), Default::default());
+    }
+
+    fn exec_environment_fixture() -> ExecEnvironment {
+        ExecEnvironment {
+            session_env: vec!["HOME=/workspace".to_string()],
+            tools: tool_runtime(),
+            placeholders: vec![(
+                "SOME_TOKEN".to_string(),
+                "some-provider_LNSPLACEHOLDER0000".to_string(),
+            )],
+            workdir: Some("/workspace".to_string()),
+        }
     }
 
     fn tool_runtime() -> crate::workload_env::ToolRuntime {
@@ -671,14 +695,18 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
-    async fn a_run_never_becomes_exec_able_before_its_tool_environment_is_readable() {
-        // The connector is the gate `lns exec` passes; publishing it a moment before the tools would let an exec in that window run without them and with no error.
+    async fn a_run_never_becomes_exec_able_before_its_environment_is_readable() {
+        // The connector is the gate `lns exec` passes; publishing it a moment before the environment would let an exec in that window run without it and with no error.
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
         register_named(id.clone(), None, h).unwrap();
-        set_connector_with_tools(&id, std::sync::Arc::new(StubTransport), tool_runtime());
+        set_connector_with_environment(
+            &id,
+            std::sync::Arc::new(StubTransport),
+            exec_environment_fixture(),
+        );
         assert!(connector(&id).is_some());
-        assert_eq!(tools(&id), tool_runtime());
+        assert_eq!(exec_environment(&id), exec_environment_fixture());
         deregister(&id);
     }
 

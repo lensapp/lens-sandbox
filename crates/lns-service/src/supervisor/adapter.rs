@@ -336,6 +336,15 @@ fn collect_managed_env_vars(providers: &[DefProvider]) -> Vec<String> {
     providers.iter().map(|p| p.env_var().to_string()).collect()
 }
 
+/// Only what the guest seeds into the workload env, and only the placeholder — this function is never handed a credential value, so an exec session cannot carry a real token.
+fn collect_placeholder_env(providers: &[DefProvider]) -> Vec<(String, String)> {
+    providers
+        .iter()
+        .filter(|p| p.seeds_env())
+        .map(|p| (p.env_var().to_string(), p.placeholder().to_string()))
+        .collect()
+}
+
 /// `Weak` so the closure doesn't keep the credential session alive past the run; a dropped session yields an empty list.
 fn make_credentials_provider(
     credential_session: &Arc<CredentialSession>,
@@ -692,6 +701,7 @@ pub(super) async fn start(
         .collect();
     let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
+    let placeholder_env = collect_placeholder_env(&custom_providers);
 
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
@@ -798,6 +808,7 @@ pub(super) async fn start(
         watcher: Some(watcher),
         credential_watcher: Some(credential_watcher),
         managed_env_vars,
+        placeholder_env,
     })
 }
 
@@ -1825,6 +1836,25 @@ mod tests {
     #[test]
     fn collect_managed_env_vars_lists_each_run_providers_env_var() {
         assert_eq!(collect_managed_env_vars(&acme_custom()), ["ACME_API_KEY"]);
+    }
+
+    #[test]
+    fn a_seeding_connector_contributes_its_env_var_and_placeholder_pair() {
+        let pairs = collect_placeholder_env(&acme_custom());
+
+        assert_eq!(
+            pairs,
+            vec![(
+                "ACME_API_KEY".to_string(),
+                "acme_LNSPLACEHOLDER".to_string()
+            )]
+        );
+        for (_, value) in &pairs {
+            assert!(
+                value.contains("LNSPLACEHOLDER"),
+                "an exec session must never be handed anything but a self-identifying placeholder: {value}"
+            );
+        }
     }
 
     #[test]
