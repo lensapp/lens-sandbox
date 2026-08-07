@@ -324,6 +324,13 @@ The format is `name:/absolute/path[:ro]`. The volume `name` may contain letters,
 digits, `_`, `.`, and `-`; the target must be an absolute path with no `.`/`..`
 segments. Volume contents are stored by the service and survive between runs.
 
+A volume outlives the identity that wrote it, so its **root directory** is
+transferred to the run-as user on each writable attach. That is what lets a
+volume first written under one `-u` still be written under another. Files already
+inside it keep the owner they had — a volume written as root and then attached
+unprivileged still holds root-owned files, and a tool that checks ownership (git's
+`safe.directory`, for one) will say so.
+
 Manage the store with `lns volume`:
 
 ```bash
