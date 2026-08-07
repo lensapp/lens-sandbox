@@ -20,4 +20,9 @@ impl HostFacts for RealHostFacts {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
+
+    fn is_socket(&self, path: &str) -> bool {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path).is_ok_and(|md| md.file_type().is_socket())
+    }
 }

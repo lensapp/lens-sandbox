@@ -61,6 +61,14 @@ Feature: lns run brings the host's signing identity into the sandbox (host acces
     And the failure names "commit.gpgsign" as the setting that required it
     And the sandbox is not launched
 
+  Scenario: A named agent socket that nothing is listening on refuses the launch
+    Given the sandbox definition declares host access "git-signing"
+    And the host git config enables commit.gpgsign
+    And the host names an agent socket at "/run/user/501/gnupg/S.gpg-agent.extra" that does not exist
+    When the host access is resolved for `lns run alpine` interactively
+    Then the host-access resolution fails with "no signing agent"
+    And the sandbox is not launched
+
   Scenario: A host with no GnuPG at all runs the definition with the capability absent
     Given the sandbox definition declares host access "git-signing"
     And the host has no git config and no agent

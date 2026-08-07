@@ -16,6 +16,7 @@ pub trait HostFacts: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> io::Result<HostCommandOutput>;
     fn env(&self, name: &str) -> Option<String>;
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
+    fn is_socket(&self, path: &str) -> bool;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,8 +165,11 @@ pub fn locate_output(facts: &dyn HostFacts, locate: &Locate) -> Option<String> {
     (!raw.trim().is_empty()).then(|| raw.clone())
 }
 
+/// `gpgconf --list-dir` answers with the path an agent would use whether or not one is running, so a located path is checked before it is believed — otherwise the run arms and the workload meets an opaque failure at its first signature.
 pub fn locate_socket(facts: &dyn HostFacts, spec: &SocketSpec) -> Option<String> {
-    locate_output(facts, &spec.locate).map(|raw| raw.trim().to_string())
+    locate_output(facts, &spec.locate)
+        .map(|raw| raw.trim().to_string())
+        .filter(|path| facts.is_socket(path))
 }
 
 /// The first of `names` the host home actually holds. `pubring.kbx` is the modern keyring; a homedir written by an older GnuPG has `pubring.gpg` instead, and gpg still reads it.
@@ -749,6 +753,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeFacts {
+        no_live_socket: bool,
         files: std::collections::HashMap<String, Vec<u8>>,
         stdout: String,
         status: i32,
@@ -782,6 +787,15 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, path.to_string()))
         }
+
+        /// Path-exact against whichever source produced it, so a regression that stops trimming fails here instead of on every real host.
+        fn is_socket(&self, path: &str) -> bool {
+            let located = [Some(self.stdout.as_str()), self.env.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|source| source.trim() == path);
+            !self.no_live_socket && located
+        }
     }
 
     fn command_spec() -> SocketSpec {
@@ -791,6 +805,7 @@ mod tests {
         }
     }
 
+    /// The trailing newline is what `gpgconf` really prints, and the fake matches its path exactly, so a regression that stops trimming before the liveness check fails here rather than on every real host.
     #[test]
     fn locate_runs_the_command_and_trims_the_path_it_prints() {
         let facts = FakeFacts {
@@ -842,6 +857,19 @@ mod tests {
             Some("/run/user/501/ssh-agent.sock")
         );
         assert!(locate_socket(&FakeFacts::default(), &spec).is_none());
+    }
+
+    #[test]
+    fn a_located_path_with_no_listener_is_not_an_agent() {
+        let named_but_dead = FakeFacts {
+            stdout: "/run/user/501/agent.sock\n".into(),
+            no_live_socket: true,
+            ..Default::default()
+        };
+        assert!(
+            locate_socket(&named_but_dead, &command_spec()).is_none(),
+            "a locator prints a path whether or not an agent runs; only a live socket counts"
+        );
     }
 
     #[test]

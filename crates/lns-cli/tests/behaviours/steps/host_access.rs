@@ -19,6 +19,7 @@ struct ScriptedHost {
     openpgp_socket: Option<String>,
     ssh_socket: Option<String>,
     gnupg_home: Option<String>,
+    live_sockets: Vec<String>,
     keyring: Option<Vec<u8>>,
     trustdb: Option<Vec<u8>>,
 }
@@ -45,6 +46,10 @@ impl HostFacts for ScriptedHost {
             "SSH_AUTH_SOCK" => self.ssh_socket.clone(),
             _ => None,
         }
+    }
+
+    fn is_socket(&self, path: &str) -> bool {
+        self.live_sockets.iter().any(|live| live == path)
     }
 
     fn read(&self, path: &str) -> std::io::Result<Vec<u8>> {
@@ -113,6 +118,7 @@ fn drive(world: &mut BehaviourWorld, interactive: bool) {
         openpgp_socket: world.host_access.openpgp_socket.clone(),
         ssh_socket: world.host_access.ssh_socket.clone(),
         gnupg_home: world.host_access.gnupg_home.clone(),
+        live_sockets: world.host_access.live_sockets.clone(),
         keyring: world.host_access.keyring.clone(),
         trustdb: world.host_access.trustdb.clone(),
     };
@@ -284,12 +290,20 @@ fn no_git_at_all(world: &mut BehaviourWorld) {
 
 #[given(regex = r#"^the host agent socket is located at "([^"]+)"$"#)]
 fn openpgp_socket_at(world: &mut BehaviourWorld, path: String) {
+    world.host_access.openpgp_socket = Some(path.clone());
+    world.host_access.live_sockets.push(path);
+}
+
+/// gpgconf prints the path an agent would use whether or not one is running, so a located path is not proof of a listener.
+#[given(regex = r#"^the host names an agent socket at "([^"]+)" that does not exist$"#)]
+fn openpgp_socket_named_but_dead(world: &mut BehaviourWorld, path: String) {
     world.host_access.openpgp_socket = Some(path);
 }
 
 #[given(regex = r#"^the host ssh agent socket is located at "([^"]+)"$"#)]
 fn ssh_socket_at(world: &mut BehaviourWorld, path: String) {
-    world.host_access.ssh_socket = Some(path);
+    world.host_access.ssh_socket = Some(path.clone());
+    world.host_access.live_sockets.push(path);
 }
 
 #[given(regex = r"^no agent socket can be located on the host$")]

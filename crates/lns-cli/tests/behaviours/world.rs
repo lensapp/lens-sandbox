@@ -67,6 +67,8 @@ pub struct HostAccessRig {
     /// True when the host has no git at all, so the config command fails.
     pub no_git: bool,
     pub openpgp_socket: Option<String>,
+    /// Socket paths a listener actually holds; a located path absent from this list exists only on paper.
+    pub live_sockets: Vec<String>,
     pub gnupg_home: Option<String>,
     pub keyring: Option<Vec<u8>>,
     pub trustdb: Option<Vec<u8>>,
