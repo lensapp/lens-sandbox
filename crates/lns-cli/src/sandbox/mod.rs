@@ -914,6 +914,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
+            if let Some(user) = &view.user {
+                writeln!(out, "user: {user}")?;
+            }
             if let Some(workdir) = &view.workdir {
                 writeln!(out, "workdir: {workdir}")?;
             }
@@ -1241,6 +1244,7 @@ mod tests {
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
                 workdir: None,
+                user: None,
                 mounts: Vec::new(),
                 ports: Vec::new(),
                 filesets: Vec::new(),
@@ -1994,6 +1998,7 @@ mod tests {
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
                     workdir: None,
+                    user: None,
                     mounts: Vec::new(),
                     ports: Vec::new(),
                     filesets: Vec::new(),

@@ -38,6 +38,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "docker.io/library/alpine@sha256:abc".into(),
             workdir: None,
+            user: None,
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),

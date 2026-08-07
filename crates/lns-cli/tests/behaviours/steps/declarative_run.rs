@@ -165,6 +165,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         digest: format!("sha256:{}", "a".repeat(64)),
         image: def.spec.image.clone(),
         workdir: def.spec.workdir.clone(),
+        user: None,
         mounts: def
             .spec
             .volumes

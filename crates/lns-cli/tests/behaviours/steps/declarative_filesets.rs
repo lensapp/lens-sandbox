@@ -93,6 +93,7 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
@@ -121,6 +122,7 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {

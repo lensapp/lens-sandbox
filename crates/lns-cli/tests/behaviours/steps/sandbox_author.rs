@@ -33,6 +33,16 @@ fn valid_lns_yaml(w: &mut BehaviourWorld) {
     );
 }
 
+#[given(regex = r#"^an lns\.yaml declaring user "([^"]+)"$"#)]
+fn lns_yaml_with_user(w: &mut BehaviourWorld, user: String) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  user: {user}\n"
+        ),
+    );
+}
+
 #[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" credential as "([^"]+)"$"#)]
 fn lns_yaml_with_credential(w: &mut BehaviourWorld, name: String, env: String) {
     seed(

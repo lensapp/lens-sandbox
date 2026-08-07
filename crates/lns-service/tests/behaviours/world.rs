@@ -34,6 +34,9 @@ pub struct BehaviourWorld {
     pub connect_task: Option<tokio::task::JoinHandle<()>>,
 
     pub image_env: Option<Vec<String>>,
+    pub image_user: Option<String>,
+    pub spec_user: Option<String>,
+    pub resolved_run_as: Option<lns_service::vm::RunAs>,
     pub image_workdir: Option<String>,
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
     pub resolved_workdir: Option<Option<String>>,

@@ -100,6 +100,9 @@ pub struct SandboxSpec {
     pub command: Option<String>,
     #[serde(default)]
     pub workdir: Option<String>,
+    /// The run-as user the sandbox needs, `USER[:GROUP]` like `-u`; the flag still wins, and the image's own `USER` is the fallback.
+    #[serde(default)]
+    pub user: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -184,6 +187,9 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
                 "invalid env key {key:?}: env keys must be non-empty and free of '=', whitespace, and control characters"
             );
         }
+    }
+    if let Some(user) = &doc.spec.user {
+        validate_run_as_user(user)?;
     }
     if let Some(resources) = &doc.spec.resources {
         validate_resources(resources)?;
@@ -376,6 +382,29 @@ fn overlaps_runtime_namespace(path: &str) -> bool {
         None => true,
         Some(first) => first == ".lens",
     }
+}
+
+/// The value reaches the guest on a space-joined kernel cmdline, so anything that could split it or be read as another key is refused here — the one offline check every load path shares.
+fn validate_run_as_user(user: &str) -> Result<()> {
+    let mut segments = user.split(':');
+    let name = segments.next().unwrap_or_default();
+    let group = segments.next();
+    if segments.next().is_some() {
+        bail!("invalid user {user:?}: expected USER or USER:GROUP");
+    }
+    for segment in [Some(name), group].into_iter().flatten() {
+        // A quote is as dangerous as whitespace here: both the kernel's parse_args and lns-init's own tokenizer honour it, so one would swallow every key after this into its value.
+        if segment.is_empty()
+            || !is_valid_env_key(segment)
+            || segment.contains('"')
+            || segment.contains('\'')
+        {
+            bail!(
+                "invalid user {user:?}: each of USER and GROUP must be non-empty and free of '=', quotes, whitespace, and control characters"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn is_valid_env_key(key: &str) -> bool {
@@ -850,6 +879,39 @@ mod tests {
             assert!(
                 rendered.contains("resources.memory") && rendered.contains(expected),
                 "spec {spec}: got: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_reads_a_declared_run_as_user() {
+        let def = parse(&def_json(r#"{"image":"x:1","user":"root"}"#)).unwrap();
+        assert_eq!(def.spec.user.as_deref(), Some("root"));
+
+        let named = parse(&def_json(r#"{"image":"x:1","user":"node:staff"}"#)).unwrap();
+        assert_eq!(named.spec.user.as_deref(), Some("node:staff"));
+
+        let silent = parse(&def_json(r#"{"image":"x:1"}"#)).unwrap();
+        assert_eq!(silent.spec.user, None);
+    }
+
+    #[test]
+    fn parse_rejects_a_user_that_would_split_the_kernel_cmdline() {
+        for spec in [
+            r#"{"image":"x:1","user":"root sh"}"#,
+            r#"{"image":"x:1","user":"a=b"}"#,
+            r#"{"image":"x:1","user":""}"#,
+            r#"{"image":"x:1","user":"   "}"#,
+            r#"{"image":"x:1","user":"a:b:c"}"#,
+            r#"{"image":"x:1","user":":staff"}"#,
+            r#"{"image":"x:1","user":"node:"}"#,
+            r#"{"image":"x:1","user":"\"root"}"#,
+            r#"{"image":"x:1","user":"ro'ot"}"#,
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("user"),
+                "the value reaches the guest on the space-joined kernel cmdline, so it must be screened here — spec {spec}: got {err:#}"
             );
         }
     }

@@ -273,6 +273,9 @@ pub struct SandboxView {
     pub image: String,
     #[serde(default)]
     pub workdir: Option<String>,
+    /// The run-as user the sandbox declared, so a pulled artifact asking for root is visible before it boots.
+    #[serde(default)]
+    pub user: Option<String>,
     #[serde(default)]
     pub mounts: Vec<SandboxMount>,
     #[serde(default)]
@@ -1359,6 +1362,7 @@ mod tests {
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),
             workdir: Some("/workspace".into()),
+            user: None,
             mounts: vec![SandboxMount {
                 kind: SandboxMountKind::Bind,
                 source: ".".into(),

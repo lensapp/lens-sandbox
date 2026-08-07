@@ -451,6 +451,7 @@ mod tests {
             digest: "sha256:abc".into(),
             image: "registry.example.test/runtime:1".into(),
             workdir: None,
+            user: None,
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: vec![lns_ipc::SandboxFileset {

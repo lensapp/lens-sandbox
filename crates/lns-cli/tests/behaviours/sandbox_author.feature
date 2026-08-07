@@ -62,6 +62,13 @@ Feature: authoring a sandbox
     And the output contains "policy"
     And the service received no request
 
+  Scenario: inspect discloses the run-as user a definition asks for
+    Given an lns.yaml declaring user "root"
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
+    And the output contains "user:         root"
+    And the service received no request
+
   Scenario: inspect discloses every declared credential slot
     Given an lns.yaml declaring the "some-provider" credential as "SOME_TOKEN"
     When the user runs sandbox command "inspect"

@@ -47,6 +47,7 @@ pub(crate) fn project_inspection(
                     mem_mib: declared_size.mem_mib,
                     image: resolved.base_image,
                     workdir: def.spec.workdir.clone(),
+                    user: def.spec.user.clone(),
                     mounts: def
                         .spec
                         .volumes
@@ -184,12 +185,17 @@ mod tests {
     }
 
     /// The projection of a bare sandbox that declares nothing but an image, so a test can vary one field and compare whole values.
-    fn bare_sandbox_view(cpus: Option<u8>, mem_mib: Option<usize>) -> ArtifactInspection {
+    fn bare_sandbox_view(
+        cpus: Option<u8>,
+        mem_mib: Option<usize>,
+        user: Option<&str>,
+    ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
             workdir: None,
+            user: user.map(str::to_string),
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),
@@ -204,13 +210,25 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_projects_the_run_as_user_it_declared_so_a_pull_can_disclose_it() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","user":"root"}}"#
+            )
+            .unwrap(),
+            bare_sandbox_view(None, None, Some("root")),
+            "without this a pulled artifact asking for root is invisible before it boots"
+        );
+    }
+
+    #[test]
     fn a_sandbox_projects_the_size_it_declared_so_a_pulled_run_can_report_it() {
         assert_eq!(
             project_sandbox(
                 r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":3,"memory":"6Gi"}}}"#
             )
             .unwrap(),
-            bare_sandbox_view(Some(3), Some(6144)),
+            bare_sandbox_view(Some(3), Some(6144), None),
             "without this the summary of a pulled run falls back to the default size"
         );
     }
@@ -222,7 +240,7 @@ mod tests {
                 r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#
             )
             .unwrap(),
-            bare_sandbox_view(None, None),
+            bare_sandbox_view(None, None, None),
             "None must stay distinguishable from a declared default, or a flag can no longer outrank a declaration"
         );
     }
@@ -240,6 +258,7 @@ mod tests {
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: Some("/work".into()),
+                user: None,
                 mounts: vec![
                     SandboxMount {
                         kind: SandboxMountKind::Bind,
@@ -309,6 +328,7 @@ mod tests {
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: None,
+                user: None,
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
@@ -340,6 +360,7 @@ mod tests {
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: None,
+                user: None,
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
@@ -367,6 +388,7 @@ mod tests {
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: None,
+                user: None,
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],

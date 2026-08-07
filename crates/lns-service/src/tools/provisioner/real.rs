@@ -166,7 +166,7 @@ async fn run_provisioner(
         }
     };
 
-    let run_as = vm::resolve_run_as(Some("0"), Some(0), None);
+    let run_as = vm::resolve_run_as(Some("0"), Some(0), None, None);
     let argv = vec!["/bin/sh".to_string(), DRIVER.to_string()];
     let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None);
 
