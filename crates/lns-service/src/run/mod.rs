@@ -106,21 +106,13 @@ pub(super) fn sandbox_vm_size(
     requested_mem_mib: usize,
     mem_explicit: bool,
 ) -> (u8, usize) {
-    use crate::artifact::resources::{ResourceOverrides, VmSize, resolve_size};
-    const DEFAULT_CPUS: u8 = 1;
-    const DEFAULT_MEM_MIB: usize = 512;
+    use crate::artifact::resources::resolve_size;
+    use lns_artifact::resources::{DEFAULT_VM_SIZE, ResourceOverrides};
     let overrides = ResourceOverrides {
         cpus: cpus_explicit.then_some(requested_cpus),
         mem_mib: mem_explicit.then_some(requested_mem_mib),
     };
-    let size = resolve_size(
-        resources,
-        &overrides,
-        VmSize {
-            cpus: DEFAULT_CPUS,
-            mem_mib: DEFAULT_MEM_MIB,
-        },
-    );
+    let size = resolve_size(resources, &overrides, DEFAULT_VM_SIZE);
     (size.cpus, size.mem_mib)
 }
 

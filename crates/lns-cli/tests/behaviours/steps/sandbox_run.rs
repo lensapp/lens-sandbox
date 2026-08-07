@@ -75,6 +75,8 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             credentials: Vec::new(),
             tools: Vec::new(),
             policy_flags: Vec::new(),
+            cpus: None,
+            mem_mib: None,
         })),
     });
 }
@@ -151,6 +153,7 @@ fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: 
     if let Some(policy) = args.policy.as_deref() {
         w.summary_output = format_summary(
             &args,
+            lns_cli::run::summary::resolved_size(Default::default(), &args),
             &Policy::default(),
             &cwd.join(policy),
             &PolicySource::Explicit(policy.to_path_buf()),

@@ -253,12 +253,14 @@ pub async fn run_image(
         (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
+    // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
+    let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
     let resolved_policy = if quiet {
         let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
         path
     } else {
-        print_run_summary(&args, &cwd, &mut std::io::stderr())?
+        print_run_summary(&args, size, &cwd, &mut std::io::stderr())?
     };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
@@ -1150,6 +1152,8 @@ mod tests {
                 credentials: Vec::new(),
                 tools: Vec::new(),
                 policy_flags: Vec::new(),
+                cpus: None,
+                mem_mib: None,
             })),
         )
         .unwrap();
@@ -1202,6 +1206,8 @@ mod tests {
                 credentials: Vec::new(),
                 tools: Vec::new(),
                 policy_flags: Vec::new(),
+                cpus: None,
+                mem_mib: None,
             })),
         )
         .unwrap_err();

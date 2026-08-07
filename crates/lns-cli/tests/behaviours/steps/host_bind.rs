@@ -137,6 +137,7 @@ fn run_resolve(world: &mut BehaviourWorld, flags: &str, interactive: bool) {
             let args: RunArgs = parse_args(&argv).expect("argv must parse");
             let mut text = format_summary(
                 &args,
+                lns_cli::run::summary::resolved_size(Default::default(), &args),
                 &Policy::default(),
                 Path::new("./lns-policy.yaml"),
                 &PolicySource::FoundInCwd,

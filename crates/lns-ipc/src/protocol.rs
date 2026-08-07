@@ -289,6 +289,11 @@ pub struct SandboxView {
     pub tools: Vec<String>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
+    /// What the sandbox declared, not what it resolves to — `None` must stay distinguishable from "declared exactly the default", or a flag can no longer outrank a declaration.
+    #[serde(default)]
+    pub cpus: Option<u8>,
+    #[serde(default)]
+    pub mem_mib: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1383,6 +1388,8 @@ mod tests {
             }],
             tools: vec!["node@22.11.0".into()],
             policy_flags: Vec::new(),
+            cpus: Some(3),
+            mem_mib: Some(6144),
         };
         let response = Response::ImageInspected {
             inspection: ArtifactInspection::Sandbox(Box::new(view)),

@@ -23,11 +23,16 @@ pub struct Defaults {
     pub workdir: Option<String>,
     pub mounts: Vec<MountDefault>,
     pub ports: Vec<PortDefault>,
+    pub size: lns_artifact::resources::DeclaredSize,
 }
 
 impl Defaults {
     pub fn from_definition(definition: &lns_artifact::sandbox::Definition) -> Self {
+        let (size, _) = lns_artifact::resources::DeclaredSize::from_resources(
+            definition.spec.resources.as_ref(),
+        );
         Self {
+            size,
             workdir: definition.spec.workdir.clone(),
             mounts: definition
                 .spec
@@ -54,6 +59,10 @@ impl Defaults {
 
     pub fn from_view(view: &lns_ipc::SandboxView) -> Self {
         Self {
+            size: lns_artifact::resources::DeclaredSize {
+                cpus: view.cpus,
+                mem_mib: view.mem_mib,
+            },
             workdir: view.workdir.clone(),
             mounts: view
                 .mounts

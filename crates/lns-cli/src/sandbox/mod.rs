@@ -1249,6 +1249,8 @@ mod tests {
                 credentials: Vec::new(),
                 tools,
                 policy_flags: Vec::new(),
+                cpus: None,
+                mem_mib: None,
             })),
         }
     }
@@ -2000,6 +2002,8 @@ mod tests {
                     credentials: Vec::new(),
                     tools: vec!["node@22.11.0".into()],
                     policy_flags: Vec::new(),
+                    cpus: None,
+                    mem_mib: None,
                 })),
             },
         );

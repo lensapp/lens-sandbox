@@ -37,10 +37,14 @@ pub(crate) fn project_inspection(
             let def = lns_artifact::sandbox::parse(config_json.as_bytes())
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
+            let (declared_size, _) =
+                lns_artifact::resources::DeclaredSize::from_resources(def.spec.resources.as_ref());
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
                     reference: image_ref.to_string(),
                     digest,
+                    cpus: declared_size.cpus,
+                    mem_mib: declared_size.mem_mib,
                     image: resolved.base_image,
                     workdir: def.spec.workdir.clone(),
                     mounts: def
@@ -179,6 +183,50 @@ mod tests {
         );
     }
 
+    /// The projection of a bare sandbox that declares nothing but an image, so a test can vary one field and compare whole values.
+    fn bare_sandbox_view(cpus: Option<u8>, mem_mib: Option<usize>) -> ArtifactInspection {
+        ArtifactInspection::Sandbox(Box::new(SandboxView {
+            reference: "registry.example.test/team/sandbox:latest".into(),
+            digest: digest(),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            connectors: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: Vec::new(),
+            policy_flags: Vec::new(),
+            cpus,
+            mem_mib,
+        }))
+    }
+
+    #[test]
+    fn a_sandbox_projects_the_size_it_declared_so_a_pulled_run_can_report_it() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":3,"memory":"6Gi"}}}"#
+            )
+            .unwrap(),
+            bare_sandbox_view(Some(3), Some(6144)),
+            "without this the summary of a pulled run falls back to the default size"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_declares_no_size_projects_none_not_the_default() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#
+            )
+            .unwrap(),
+            bare_sandbox_view(None, None),
+            "None must stay distinguishable from a declared default, or a flag can no longer outrank a declaration"
+        );
+    }
+
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
         let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"egress":{"http":[{"match":"*","verdict":"allow"}]}}}}"#;
@@ -242,6 +290,8 @@ mod tests {
                 policy_flags: vec![
                     "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into()
                 ],
+                cpus: None,
+                mem_mib: None,
             }))
         );
     }
@@ -271,6 +321,8 @@ mod tests {
                 }],
                 tools: vec![],
                 policy_flags: vec![],
+                cpus: None,
+                mem_mib: None,
             }))
         );
     }
@@ -296,6 +348,8 @@ mod tests {
                 credentials: vec![],
                 tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
                 policy_flags: vec![],
+                cpus: None,
+                mem_mib: None,
             }))
         );
     }
@@ -321,6 +375,8 @@ mod tests {
                 credentials: vec![],
                 tools: vec![],
                 policy_flags: vec![],
+                cpus: None,
+                mem_mib: None,
             }))
         );
     }

@@ -52,21 +52,38 @@ pub fn resolve_policy(explicit: Option<&Path>, cwd: &Path) -> Result<(PathBuf, P
     }
 }
 
+/// The size the run will boot with: an explicit flag outranks what the definition declared, which outranks the built-in default.
+pub fn resolved_size(
+    declared: lns_artifact::resources::DeclaredSize,
+    args: &RunArgs,
+) -> lns_artifact::resources::VmSize {
+    lns_artifact::resources::resolve_declared(
+        declared,
+        &lns_artifact::resources::ResourceOverrides {
+            cpus: args.cpus,
+            mem_mib: args.mem,
+        },
+        lns_artifact::resources::DEFAULT_VM_SIZE,
+    )
+}
+
 pub fn print_run_summary(
     args: &RunArgs,
+    size: lns_artifact::resources::VmSize,
     cwd: &Path,
     writer: &mut impl io::Write,
 ) -> Result<PathBuf> {
     let (path, source) = resolve_policy(args.policy.as_deref(), cwd)?;
     let policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
-    let body = format_summary(args, &policy, &path, &source);
+    let body = format_summary(args, size, &policy, &path, &source);
     writer.write_all(body.as_bytes())?;
     Ok(path)
 }
 
 pub fn format_summary(
     args: &RunArgs,
+    size: lns_artifact::resources::VmSize,
     policy: &Policy,
     policy_path: &Path,
     source: &PolicySource,
@@ -90,13 +107,7 @@ pub fn format_summary(
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
-    writeln!(
-        s,
-        "  Resources: {} vCPU · {} MiB",
-        args.effective_cpus(),
-        args.effective_mem()
-    )
-    .unwrap();
+    writeln!(s, "  Resources: {} vCPU · {} MiB", size.cpus, size.mem_mib).unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
     if !args.declared_unpublished.is_empty() {
@@ -313,7 +324,18 @@ fn source_line(source: &PolicySource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_artifact::resources::{DEFAULT_VM_SIZE, VmSize};
     use lns_policy::{RouteRule, TcpEgressRule};
+
+    /// Most lines are indifferent to the size, so they read the built-in default; the resources line has its own tests.
+    fn summary_of(
+        args: &RunArgs,
+        policy: &Policy,
+        policy_path: &Path,
+        source: &PolicySource,
+    ) -> String {
+        format_summary(args, DEFAULT_VM_SIZE, policy, policy_path, source)
+    }
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
@@ -361,7 +383,7 @@ mod tests {
     fn summary_with_publish(ports: Vec<lns_ipc::PortPublish>) -> String {
         let mut args = run_args(Some("prism"));
         args.publish = ports;
-        format_summary(
+        summary_of(
             &args,
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
@@ -443,6 +465,8 @@ mod tests {
             credentials: Vec::new(),
             tools: Vec::new(),
             policy_flags: Vec::new(),
+            cpus: None,
+            mem_mib: None,
         };
 
         assert_eq!(
@@ -469,7 +493,7 @@ mod tests {
     fn tools_line_lists_declared_tools_and_is_absent_without_them() {
         let mut args = run_args(Some("prism"));
         args.tools = vec!["node@22.11.0".into(), "python@3.12.6".into()];
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
@@ -525,7 +549,7 @@ mod tests {
     #[test]
     fn summary_lists_image_resources_flags_and_policy_block() {
         let args = run_args(Some("ubuntu"));
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/home/dev/my-app/lns-policy.yaml"),
@@ -552,7 +576,7 @@ mod tests {
                 read_only: true,
             }),
         ];
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -576,7 +600,7 @@ mod tests {
             target: "/work".into(),
             read_only: false,
         })];
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -596,7 +620,7 @@ mod tests {
             target: "/cfg".into(),
             read_only: true,
         })];
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -638,7 +662,7 @@ mod tests {
     fn summary_lists_the_requested_workdir() {
         let mut args = run_args(Some("ubuntu"));
         args.workdir = Some("/app".into());
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -649,7 +673,7 @@ mod tests {
 
     #[test]
     fn summary_omits_workdir_line_when_unset() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -660,7 +684,7 @@ mod tests {
 
     #[test]
     fn summary_omits_volume_line_when_none_attached() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -672,7 +696,7 @@ mod tests {
     #[test]
     fn image_field_shows_resolving_placeholder_until_service_confirms_digest() {
         let args = run_args(Some("ubuntu"));
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -684,7 +708,7 @@ mod tests {
     #[test]
     fn no_reference_run_shows_the_local_definition_as_the_image() {
         let args = run_args(None);
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -701,7 +725,7 @@ mod tests {
     fn a_file_selector_run_shows_the_selected_definition_as_the_image() {
         let mut args = run_args(None);
         args.file = Some(std::path::PathBuf::from("lns.dev.yaml"));
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -712,8 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn resources_line_falls_back_to_one_vcpu_and_512_mib_when_nothing_is_requested() {
-        let s = format_summary(
+    fn resources_line_renders_the_size_the_run_will_boot_with() {
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -723,17 +747,23 @@ mod tests {
     }
 
     #[test]
-    fn resources_line_renders_cpu_and_memory_with_units() {
-        let mut args = run_args(Some("ubuntu"));
-        args.cpus = Some(4);
-        args.mem = Some(2048);
+    fn resources_line_reports_the_resolved_size_not_the_flags() {
+        let args = run_args(Some("ubuntu"));
+        assert!(
+            args.cpus.is_none() && args.mem.is_none(),
+            "the point of this test is that no flag was passed"
+        );
         let s = format_summary(
             &args,
+            VmSize {
+                cpus: 3,
+                mem_mib: 6144,
+            },
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
             &PolicySource::FoundInCwd,
         );
-        assert!(s.contains("4 vCPU · 2048 MiB"), "resources line wrong: {s}");
+        assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
     }
 
     #[test]
@@ -742,7 +772,7 @@ mod tests {
         args.interactive = true;
         args.tty = true;
         args.detach = false;
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -757,7 +787,7 @@ mod tests {
         args.interactive = false;
         args.tty = false;
         args.detach = true;
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -770,7 +800,7 @@ mod tests {
     fn flags_line_includes_auto_remove_when_set() {
         let mut args = run_args(Some("ubuntu"));
         args.auto_remove = true;
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -785,7 +815,7 @@ mod tests {
         args.interactive = false;
         args.tty = false;
         args.detach = false;
-        let s = format_summary(
+        let s = summary_of(
             &args,
             &Policy::default(),
             Path::new("/x/lns-policy.yaml"),
@@ -801,7 +831,7 @@ mod tests {
         let mut policy = Policy::default();
         policy.add_rule(RouteRule::allow_host("api.example.test"));
         policy.add_rule(RouteRule::deny_host("*"));
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-policy.yaml"),
@@ -821,7 +851,7 @@ mod tests {
         policy.add_rule(RouteRule::allow_host("api.example.com"));
         policy.add_rule(RouteRule::allow_host("registry.npmjs.org"));
         policy.add_rule(RouteRule::deny_host("evil.example"));
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-policy.yaml"),
@@ -847,7 +877,7 @@ mod tests {
             .egress
             .tcp
             .push(TcpEgressRule::allow_destination("0.0.0.0/0:5432"));
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-policy.yaml"),
@@ -867,7 +897,7 @@ mod tests {
             .egress
             .tcp
             .push(TcpEgressRule::allow_destination("db.internal:5432"));
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-policy.yaml"),
@@ -881,7 +911,7 @@ mod tests {
 
     #[test]
     fn rules_line_says_none_defined_for_an_empty_route_list() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
@@ -898,7 +928,7 @@ mod tests {
         let mut policy = Policy::default();
         policy.add_rule(RouteRule::allow_host("api.linear.app"));
         policy.add_rule(RouteRule::deny_host("evil.example"));
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-policy.yaml"),
@@ -909,7 +939,7 @@ mod tests {
 
     #[test]
     fn source_line_for_found_in_cwd_reads_found_in_this_directory() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
@@ -920,7 +950,7 @@ mod tests {
 
     #[test]
     fn source_line_for_auto_created_calls_out_no_policy_in_directory() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
@@ -931,7 +961,7 @@ mod tests {
 
     #[test]
     fn source_line_for_explicit_flag_quotes_the_passed_path() {
-        let s = format_summary(
+        let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/home/ops/team-policy.yaml"),
@@ -1010,7 +1040,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let args = run_args(Some("ubuntu"));
         let mut buf = Vec::<u8>::new();
-        let path = print_run_summary(&args, dir.path(), &mut buf).unwrap();
+        let path = print_run_summary(
+            &args,
+            resolved_size(Default::default(), &args),
+            dir.path(),
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(path, dir.path().join(DEFAULT_POLICY_FILENAME));
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("lns run"));

@@ -25,6 +25,7 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
     world.resolved_run = Some(ResolvedRunView {
         summary: format_summary(
             &resolved,
+            lns_cli::run::summary::resolved_size(Default::default(), &resolved),
             &Policy::default(),
             Path::new("./lns-policy.yaml"),
             &PolicySource::FoundInCwd,
