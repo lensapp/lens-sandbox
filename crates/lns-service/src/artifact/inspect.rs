@@ -221,6 +221,7 @@ mod tests {
         mounts: Vec<SandboxMount>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            host_access: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),

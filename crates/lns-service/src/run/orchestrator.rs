@@ -312,6 +312,8 @@ async fn orchestrate(
     fileset_specs.extend(crate::host_access::staged_specs(
         &args.host_access,
         &host_socket_plan,
+        // `env`, not `args.env`: a definition's spec.env is merged in above, and that is what the supervisor composes the workload's HOME from.
+        crate::workload_env::declared_home(&env),
     ));
     let runtime_layer = runtime_layer::for_run(
         imageless,

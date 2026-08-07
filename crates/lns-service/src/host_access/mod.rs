@@ -33,10 +33,17 @@ pub fn plan(forwards: &[SocketForward]) -> Vec<HostSocketSpec> {
 }
 
 /// The instruction manifest the broker executes, one tab-separated line per step:
-/// `dir <mode> <target>`, `file <mode> <staged> <target>`, `socket <port> <target>`.
-/// A `~/` target is resolved in the guest against the run-as user's passwd home, which the host cannot spell. The host socket path never appears — the guest has no use for it.
-pub fn manifest(grants: &[HostAccessGrant], plan: &[HostSocketSpec]) -> String {
+/// `home <path>`, `dir <mode> <target>`, `file <mode> <staged> <target>`, `socket <port> <target>`.
+/// A `~/` target resolves in the guest, against the declared home when the author set one — the same value the supervisor gives the workload — and otherwise against the run-as user's passwd entry, which only the guest can read. The host socket path never appears; the guest has no use for it.
+pub fn manifest(
+    grants: &[HostAccessGrant],
+    plan: &[HostSocketSpec],
+    declared_home: Option<&str>,
+) -> String {
     let mut out = String::new();
+    if let Some(home) = declared_home {
+        out.push_str(&format!("home\t{home}\n"));
+    }
     for (index, grant) in grants.iter().enumerate() {
         for dir in &grant.dirs {
             out.push_str(&format!("dir\t{:o}\t{}\n", dir.mode, dir.target));
@@ -71,6 +78,7 @@ pub fn staged_path(grant_index: usize, file_index: usize) -> String {
 pub fn staged_specs(
     grants: &[HostAccessGrant],
     plan: &[HostSocketSpec],
+    declared_home: Option<&str>,
 ) -> Vec<crate::runtime_layer::RuntimeFileSpec> {
     if grants.is_empty() {
         return Vec::new();
@@ -78,7 +86,9 @@ pub fn staged_specs(
     let mut specs = vec![crate::runtime_layer::RuntimeFileSpec {
         guest_path: MANIFEST_GUEST_PATH.into(),
         mode: 0o444,
-        source: crate::runtime_layer::RuntimeSource::Bytes(manifest(grants, plan).into_bytes()),
+        source: crate::runtime_layer::RuntimeSource::Bytes(
+            manifest(grants, plan, declared_home).into_bytes(),
+        ),
     }];
     for (index, grant) in grants.iter().enumerate() {
         for (file_index, file) in grant.files.iter().enumerate() {
@@ -145,7 +155,7 @@ mod tests {
     #[test]
     fn the_manifest_orders_the_home_before_the_files_and_the_socket_last() {
         let grants = [grant("some-access")];
-        let rendered = manifest(&grants, &plan(&[forward("some-access")]));
+        let rendered = manifest(&grants, &plan(&[forward("some-access")]), None);
         assert_eq!(
             rendered,
             format!(
@@ -156,9 +166,61 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_home_leads_the_manifest_so_every_target_resolves_against_it() {
+        let grants = [grant("some-access")];
+        let rendered = manifest(
+            &grants,
+            &plan(&[forward("some-access")]),
+            Some("/home/sandbox"),
+        );
+        assert!(
+            rendered.starts_with("home\t/home/sandbox\n"),
+            "the home must be known before the first target is resolved:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn no_home_line_is_written_when_the_author_declared_none() {
+        let grants = [grant("some-access")];
+        let rendered = manifest(&grants, &plan(&[forward("some-access")]), None);
+        assert!(
+            !rendered.contains("home\t"),
+            "with nothing declared the guest must fall back to the passwd entry:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_declared_home_the_author_could_forge_an_instruction_with_never_reaches_the_manifest() {
+        // spec.env values are author-controlled and this manifest is line-oriented, so the home goes through the same chokepoint every target does.
+        for hostile in [
+            "relative",
+            "/home/sandbox\ndir\t777\t/etc",
+            "/home/../etc",
+            "/home/with space",
+        ] {
+            let env = vec![format!("HOME={hostile}")];
+            let declared = crate::workload_env::declared_home(&env);
+            let rendered = manifest(&[grant("some-access")], &[], declared);
+            assert!(
+                !rendered.contains("home\t") && !rendered.contains("dir\t777"),
+                "{hostile:?} must not reach the manifest:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sound_declared_home_does_reach_the_manifest() {
+        let env = vec!["HOME=/home/sandbox".to_string()];
+        assert_eq!(
+            crate::workload_env::declared_home(&env),
+            Some("/home/sandbox")
+        );
+    }
+
+    #[test]
     fn the_manifest_never_names_the_host_socket() {
         let grants = [grant("some-access")];
-        let rendered = manifest(&grants, &plan(&[forward("some-access")]));
+        let rendered = manifest(&grants, &plan(&[forward("some-access")]), None);
         assert!(
             !rendered.contains("/run/some-access.sock"),
             "the host path is the one thing the guest must not learn: {rendered}"
@@ -171,7 +233,7 @@ mod tests {
         without.socket_target = None;
         let with = grant("other-access");
         let plan = plan(&[forward("other-access")]);
-        let rendered = manifest(&[without, with], &plan);
+        let rendered = manifest(&[without, with], &plan, None);
         assert!(
             rendered.contains(&format!("socket\t{}\t~/.gnupg/S.gpg-agent\n", plan[0].port)),
             "the grant that asked for a socket must get the forward that carries its id:\n{rendered}"
@@ -185,7 +247,11 @@ mod tests {
 
     #[test]
     fn a_socket_target_with_no_matching_forward_renders_no_line() {
-        let rendered = manifest(&[grant("some-access")], &plan(&[forward("other-access")]));
+        let rendered = manifest(
+            &[grant("some-access")],
+            &plan(&[forward("other-access")]),
+            None,
+        );
         assert!(
             !rendered.contains("socket\t"),
             "a grant whose forward is absent must not borrow another's port:\n{rendered}"
@@ -196,20 +262,20 @@ mod tests {
     fn a_grant_with_no_socket_still_projects_its_files() {
         let mut g = grant("some-access");
         g.socket_target = None;
-        let rendered = manifest(&[g], &[]);
+        let rendered = manifest(&[g], &[], None);
         assert!(rendered.contains("~/.gitconfig"), "{rendered}");
         assert!(!rendered.contains("socket\t"), "{rendered}");
     }
 
     #[test]
     fn the_manifest_of_nothing_is_empty_so_the_broker_does_nothing() {
-        assert!(manifest(&[], &[]).is_empty());
+        assert!(manifest(&[], &[], None).is_empty());
     }
 
     #[test]
     fn staged_specs_carry_the_manifest_and_one_blob_per_projected_file() {
         let grants = [grant("some-access")];
-        let specs = staged_specs(&grants, &plan(&[forward("some-access")]));
+        let specs = staged_specs(&grants, &plan(&[forward("some-access")]), None);
         let paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
         assert_eq!(paths, [MANIFEST_GUEST_PATH, &format!("{STAGING_DIR}/0.0")]);
         assert!(specs.iter().all(|s| s.mode == 0o444));
@@ -217,7 +283,7 @@ mod tests {
 
     #[test]
     fn staged_specs_of_no_grant_stage_nothing_not_even_an_empty_manifest() {
-        assert!(staged_specs(&[], &[]).is_empty());
+        assert!(staged_specs(&[], &[], None).is_empty());
     }
 
     #[test]

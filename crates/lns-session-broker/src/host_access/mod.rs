@@ -23,9 +23,20 @@ pub enum Step {
     Socket { target: String, port: u32 },
 }
 
+/// The home every `~/` target resolves against: a leading `home` line carries what the author declared, which the supervisor also gives the workload, and otherwise the run-as user's passwd entry.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn effective_home<'a>(text: &'a str, passwd_home: &'a str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.strip_prefix("home\t"))
+        .map(str::trim)
+        .filter(|home| home.starts_with('/') && !home.split('/').any(|seg| seg == ".."))
+        .unwrap_or(passwd_home)
+}
+
 /// A malformed line is skipped rather than failing the boot: one bad instruction must not cost the workload its whole session.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn parse_manifest(text: &str, home: &str) -> Vec<Step> {
+pub fn parse_manifest(text: &str, passwd_home: &str) -> Vec<Step> {
+    let home = effective_home(text, passwd_home);
     text.lines()
         .filter_map(|line| parse_step(line, home))
         .collect()
@@ -80,6 +91,53 @@ fn resolve_target(target: &str, home: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_declared_home_line_is_what_every_target_resolves_against() {
+        let parsed = parse_manifest(
+            "home\t/home/sandbox\nsocket\t1040\t~/.gnupg/S.gpg-agent\n",
+            "/root",
+        );
+        assert_eq!(
+            parsed,
+            [Step::Socket {
+                target: "/home/sandbox/.gnupg/S.gpg-agent".into(),
+                port: 1040,
+            }],
+            "the projection must land where the workload's HOME points, not where passwd does"
+        );
+    }
+
+    #[test]
+    fn the_passwd_home_is_used_when_the_manifest_declares_none() {
+        assert_eq!(effective_home("dir\t700\t~/x\n", "/var/www"), "/var/www");
+    }
+
+    #[test]
+    fn a_home_line_that_could_escape_is_ignored_in_favour_of_passwd() {
+        for bad in ["relative", "/home/../etc", ""] {
+            assert_eq!(
+                effective_home(&format!("home\t{bad}\n"), "/root"),
+                "/root",
+                "{bad:?} must not steer the projection"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_line_cannot_smuggle_a_second_instruction_past_the_host() {
+        // Defence in depth: the host refuses a forgeable home, and a line the guest cannot resolve is still dropped rather than executed against passwd.
+        let forged = "home\t/home/sandbox\ndir\t777\t~/../../etc\n";
+        assert!(
+            parse_manifest(forged, "/root").is_empty(),
+            "a target escaping the home must not become a step"
+        );
+    }
+
+    #[test]
+    fn the_home_line_itself_is_not_an_instruction() {
+        assert!(parse_manifest("home\t/home/sandbox\n", "/root").is_empty());
+    }
 
     #[test]
     fn a_home_relative_target_resolves_against_the_run_as_users_home() {

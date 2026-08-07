@@ -49,6 +49,15 @@ Feature: host access forwards the host's signing agent into the guest
     Then the exit code is 0
     And the output contains "/root/.gnupg/S.gpg-agent"
 
+  Scenario: the projection follows a declared HOME rather than the passwd entry
+    Given the Lens Sandbox service is running
+    And the host agent holds the key named by user.signingkey
+    And the project definition sets env "HOME=/home/sandbox"
+    When the user runs a microVM command "/bin/sh -c 'apk add --no-cache gnupg >/dev/null; echo home=$HOME; gpg --batch --yes --detach-sign /etc/hostname && echo SIGNED_OK'" as user "root" with host access "git-signing"
+    Then the exit code is 0
+    And the output contains "home=/home/sandbox"
+    And the output contains "SIGNED_OK"
+
   Scenario: two signs at once each get their own connection
     Given the Lens Sandbox service is running
     And the host agent holds the key named by user.signingkey
