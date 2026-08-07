@@ -31,6 +31,10 @@ Feature: HOME and USER when the run-as user is not the author's user
     When the user runs `lns run someimage` under a policy
     Then the supervised workload env pins no declared HOME
 
+  Scenario: -e cannot forge the declaration either
+    When the user runs `lns run -e LENS_SANDBOX_WORKLOAD_HOME=/root someimage` under a policy
+    Then the supervised workload env pins no declared HOME
+
   Scenario: A run that declares nothing keeps the run-as user's own home
     When the user runs `lns run someimage` under a policy
     Then the supervised workload env pins no declared HOME
