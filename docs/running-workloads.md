@@ -794,6 +794,10 @@ flagging a permissive default policy.
 `lns ps` lists running sandboxes with their CPU share and memory — the microVM is
 the workload, so the numbers cover everything the run is doing.
 
+A run whose guest has stopped answering — one you just killed, for instance —
+still gets a row, with `-` in place of its CPU and memory (`null` under
+`--format json`). One unresponsive guest never costs you the rest of the listing.
+
 ## Cleaning up the cache
 
 Cached sandboxes accumulate as you pull and build. Remove one with `lns rm` (a

@@ -575,8 +575,8 @@ async fn ps<W: std::io::Write>(
             })
             .await?
         {
-            Response::RunStats { stats } => stats,
-            Response::Error { message } => bail!("daemon error: {message}"),
+            Response::RunStats { stats } => Some(stats),
+            Response::Error { .. } => None,
             other => bail!("unexpected response from daemon: {other:?}"),
         };
         rows.push(PsRow::new(run, stats));
@@ -594,13 +594,15 @@ struct PsRow {
     command: String,
     status: lns_ipc::RunStatus,
     started: String,
-    cpu_permille: u32,
-    mem_used_bytes: u64,
-    mem_total_bytes: u64,
+    cpu_permille: Option<u32>,
+    mem_used_bytes: Option<u64>,
+    mem_total_bytes: Option<u64>,
 }
 
+const NO_SAMPLE: &str = "-";
+
 impl PsRow {
-    fn new(run: &lns_ipc::RunSummary, stats: RunStatsInfo) -> Self {
+    fn new(run: &lns_ipc::RunSummary, stats: Option<RunStatsInfo>) -> Self {
         Self {
             id: run.id.clone(),
             name: run.name.clone(),
@@ -608,9 +610,18 @@ impl PsRow {
             command: run.command.clone(),
             status: run.status,
             started: run.started.clone(),
-            cpu_permille: stats.cpu_permille,
-            mem_used_bytes: stats.mem_used_bytes,
-            mem_total_bytes: stats.mem_total_bytes,
+            cpu_permille: stats.as_ref().map(|s| s.cpu_permille),
+            mem_used_bytes: stats.as_ref().map(|s| s.mem_used_bytes),
+            mem_total_bytes: stats.as_ref().map(|s| s.mem_total_bytes),
+        }
+    }
+
+    fn memory_cell(&self) -> String {
+        match (self.mem_used_bytes, self.mem_total_bytes) {
+            (Some(used), Some(total)) => {
+                format!("{} / {}", format_bytes(used), format_bytes(total))
+            }
+            _ => NO_SAMPLE.to_string(),
         }
     }
 }
@@ -623,12 +634,9 @@ impl crate::output::TableRow for PsRow {
             lns_ipc::short_run_id(&self.id).to_string(),
             self.name.clone(),
             self.image.clone(),
-            format_permille(self.cpu_permille),
-            format!(
-                "{} / {}",
-                format_bytes(self.mem_used_bytes),
-                format_bytes(self.mem_total_bytes)
-            ),
+            self.cpu_permille
+                .map_or_else(|| NO_SAMPLE.to_string(), format_permille),
+            self.memory_cell(),
         ]
     }
 }
@@ -1857,23 +1865,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ps_surfaces_a_stats_error_and_rejects_an_unrelated_stats_variant() {
-        let err = ps(
+    async fn ps_keeps_a_run_whose_guest_stopped_answering_the_stats_probe() {
+        let mut out = Vec::new();
+        let code = ps(
             &CannedService::with_stats(
                 Response::RunList {
                     runs: vec![running_run()],
                 },
                 Response::Error {
-                    message: "stats probe failed".into(),
+                    message: "sampling guest stats failed: connect_to_guest_port(1029) timed out"
+                        .into(),
                 },
             ),
             &ps_args(),
-            &mut Vec::new(),
+            &mut out,
         )
         .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("stats probe failed"));
+        .expect("a dead guest must not fail the whole listing");
+        let text = String::from_utf8(out).expect("utf8");
+        assert_eq!(code, 0);
+        let row = text
+            .lines()
+            .find(|l| l.contains("reviewer"))
+            .unwrap_or_else(|| panic!("row lost: {text}"));
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(
+            &cells[cells.len() - 2..],
+            [NO_SAMPLE, NO_SAMPLE],
+            "an unsampled CPU and MEM must each render as a cell, or the trailing-empty-cell \
+             trim shortens the row and misaligns it under the header: {row}"
+        );
+        assert!(
+            !text.contains("sampling guest stats failed"),
+            "scripted cleanup must stay quiet: {text}"
+        );
+    }
 
+    #[tokio::test]
+    async fn ps_rejects_a_stats_variant_that_is_neither_a_sample_nor_an_error() {
         let err = ps(
             &CannedService::with_stats(
                 Response::RunList {

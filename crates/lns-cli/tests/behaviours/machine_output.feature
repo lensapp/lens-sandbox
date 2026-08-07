@@ -22,6 +22,23 @@ Feature: machine-readable output from the list verbs
     And JSON row 0 has "id" set to "00000003000000000000000000000000"
     And the output does not contain "000000030000  "
 
+  Scenario: ps nulls the stats of a run whose guest stopped answering
+    Given the service reports one running sandbox whose stats probe fails
+    When the user runs sandbox command "ps --format json"
+    Then the exit code is 0
+    And the output is a JSON array of 1 rows
+    And JSON row 0 has "name" set to "reviewer"
+    And JSON row 0 has a null "cpuPermille"
+    And JSON row 0 has a null "memUsedBytes"
+    And JSON row 0 has a null "memTotalBytes"
+
+  Scenario: the human table keeps a run whose guest stopped answering
+    Given the service reports one running sandbox whose stats probe fails
+    When the user runs sandbox command "ps"
+    Then the exit code is 0
+    And the output contains "reviewer"
+    And the output does not contain "sampling guest stats failed"
+
   Scenario: ps with nothing running is an empty array, not absent output
     Given the service reports no runs
     When the user runs sandbox command "ps --format json"

@@ -518,6 +518,16 @@ fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
     });
 }
 
+#[given(regex = r"^the service reports one running sandbox whose stats probe fails$")]
+fn canned_running_with_a_failing_stats_probe(w: &mut BehaviourWorld) {
+    canned_running_with_stats(w, 0, 0);
+    w.sandbox.stats_response = Some(Response::Error {
+        message: "sampling guest stats failed: opening capture vsock to broker: \
+                  connect_to_guest_port(1029) timed out after 10s"
+            .into(),
+    });
+}
+
 #[given(regex = r"^the service reports no runs$")]
 fn canned_no_runs(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::RunList { runs: Vec::new() });
