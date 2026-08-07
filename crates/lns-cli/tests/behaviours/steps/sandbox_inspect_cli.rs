@@ -36,6 +36,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: Some("/workspace".into()),
+        user: None,
         mounts: vec![
             SandboxMount {
                 kind: SandboxMountKind::Bind,
@@ -72,6 +73,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: vec![
             SandboxPort {
@@ -104,6 +106,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
@@ -116,6 +119,28 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
             mount_path: mount,
             owner: lns_ipc::SandboxFilesetOwner::Workload,
         }],
+        connectors: Vec::new(),
+        env: Vec::new(),
+        credentials: Vec::new(),
+        tools: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring user "([^"]+)"$"#)]
+fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        user: Some(user),
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
         connectors: Vec::new(),
         env: Vec::new(),
         credentials: Vec::new(),
@@ -163,6 +188,7 @@ fn inspects_sandbox_credential_with_requirement(
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: Vec::new(),
@@ -190,6 +216,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: Vec::new(),
@@ -213,6 +240,7 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: Vec::new(),

@@ -198,6 +198,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     if let Some(command) = &def.spec.command {
         writeln!(out, "  command:      {command}")?;
     }
+    if let Some(user) = &def.spec.user {
+        writeln!(out, "  user:         {user}")?;
+    }
     if let Some(workdir) = &def.spec.workdir {
         writeln!(out, "  workdir:      {workdir}")?;
     }

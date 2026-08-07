@@ -43,6 +43,12 @@ Feature: inspecting a typed artifact before running it
     And the output contains "fileset"
     And the output contains "/root/.agent/skills"
 
+  Scenario: inspect discloses the run-as user a pulled sandbox asks for
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring user "root"
+    When the user runs sandbox command "inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "user: root"
+
   Scenario: inspecting a published sandbox discloses its credential slots
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the "some-provider" credential as "SOME_TOKEN"
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"

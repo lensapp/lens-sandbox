@@ -62,6 +62,7 @@ The `spec` fields:
 | `image`        | The base OCI image the sandbox runs (**required**). Pin it by digest before publishing. |
 | `command`      | Command to run in the workload, replacing the image's default command.       |
 | `workdir`      | Absolute guest working directory. It is created when missing.                 |
+| `user`         | The run-as user the sandbox needs, `USER[:GROUP]` like `-u`, so a definition that needs root is runnable as published. A per-run `-u` still wins, and the image's own `USER` is the fallback when this is unset. |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `policy`       | The network policy — the `egress.http` and `egress.tcp` rule tables (see [Policy](policy.md)). |
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
@@ -205,6 +206,21 @@ segment is used as the uid), and `-h`/`--hostname` sets the guest hostname:
 ```bash
 lns run -u 1000:1000 -h build-box ghcr.io/acme/agent:1.0.0
 ```
+
+A definition can ask for its own run-as user, so it does not need a wrapper to
+pass `-u`:
+
+```yaml
+spec:
+  user: root                # or `node`, `node:staff`, `1000`
+```
+
+The order is: `-u` on the command line, then `spec.user`, then the image's
+`USER`, then the unprivileged `sandbox` user (uid 65534). A **name** is resolved
+from the guest's own passwd file, so `user: node` gets whatever uid that image
+gives `node`; a **number** is used as the uid directly. `lns inspect` shows the
+declared user, including for a pulled sandbox, so an artifact that wants root is
+visible before it boots.
 
 `HOME` and `USER` come from that user's guest passwd entry, so `-u root` normally
 gives the workload `HOME=/root`. A definition's `env:` or a `-e` on the command

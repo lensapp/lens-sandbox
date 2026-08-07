@@ -67,6 +67,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         def.spec.policy != lns_policy::NetworkPolicy::default() || !def.spec.connectors.is_empty();
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
+        user: def.spec.user.clone(),
         local_filesets: def
             .spec
             .filesets
@@ -226,12 +227,17 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"egress":{"http":[{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"egress":{"http":[{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"],"user":"root"}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
         assert_eq!(resolved.base_image, "ghcr.io/team/base@sha256:abc");
         assert_eq!(resolved.command.as_deref(), Some("agent --serve"));
+        assert_eq!(
+            assembly::assemble(&resolved).user.as_deref(),
+            Some("root"),
+            "the run-as user the definition asked for has to survive assembly, or the launch resolves without it"
+        );
         assert_eq!(
             resolved.env.get("MODE").map(String::as_str),
             Some("research")

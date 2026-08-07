@@ -67,6 +67,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             digest,
             image: "docker.io/library/alpine@sha256:abc".into(),
             workdir: None,
+            user: None,
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),

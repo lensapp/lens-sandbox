@@ -70,6 +70,7 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
         workdir: None,
+        user: None,
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: Vec::new(),

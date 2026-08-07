@@ -346,6 +346,9 @@ async fn orchestrate(
     let run_as = vm::resolve_run_as(
         args.sandbox_user.as_deref(),
         args.sandbox_uid,
+        sandbox_plan
+            .as_ref()
+            .and_then(|plan| plan.workload.user.as_deref()),
         image
             .config
             .as_ref()

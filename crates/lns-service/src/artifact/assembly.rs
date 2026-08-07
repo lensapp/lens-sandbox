@@ -22,6 +22,7 @@ pub struct ResolvedSandbox {
     pub inline_filesets: Vec<InlineFileset>,
     pub filesets: Vec<ResolvedFileset>,
     pub command: Option<String>,
+    pub user: Option<String>,
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
@@ -42,6 +43,7 @@ pub struct ResolvedFileset {
 pub struct AssembledWorkload {
     pub base_image: String,
     pub command: Option<String>,
+    pub user: Option<String>,
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
@@ -53,6 +55,7 @@ pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
     AssembledWorkload {
         base_image: sandbox.base_image.clone(),
         command: sandbox.command.clone(),
+        user: sandbox.user.clone(),
         env: sandbox.env.clone(),
         resources: sandbox.resources.clone(),
         policy: sandbox.policy.clone(),

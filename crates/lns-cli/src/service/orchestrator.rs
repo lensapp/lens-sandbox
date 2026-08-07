@@ -1130,6 +1130,7 @@ mod tests {
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: Some("/workspace".into()),
+                user: None,
                 mounts: vec![lns_ipc::SandboxMount {
                     kind: lns_ipc::SandboxMountKind::Bind,
                     source: ".".into(),
@@ -1198,6 +1199,7 @@ mod tests {
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),
                 workdir: Some("/workspace".into()),
+                user: None,
                 mounts: Vec::new(),
                 ports: Vec::new(),
                 filesets: Vec::new(),
