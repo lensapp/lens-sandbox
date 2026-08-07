@@ -541,8 +541,30 @@ fn mount_volumes(
             false => MountFlags::none().nosuid().nodev(),
         };
         do_mount(sys, &vol.dev, &target, "ext4", flags, None)?;
+        if !vol.read_only {
+            reconcile_volume_owner(sys, &target, run_ids);
+        }
     }
     Ok(())
+}
+
+/// Runs after the mount, so it lands on the volume's own root inode rather than the ephemeral directory the mount covers.
+fn reconcile_volume_owner(sys: &dyn Syscalls, target: &str, run_ids: Option<(u32, u32)>) {
+    use std::os::unix::fs::MetadataExt;
+    let Some((uid, gid)) = run_ids else {
+        return;
+    };
+    // Root writes any path already, and rewriting here would clobber the ownership an image seeded.
+    if uid == 0 {
+        return;
+    }
+    let Ok(md) = std::fs::metadata(target) else {
+        return;
+    };
+    if (md.uid(), md.gid()) == (uid, gid) {
+        return;
+    }
+    lchown_logged(sys, target, uid, gid);
 }
 
 fn mount_binds(
@@ -2310,6 +2332,167 @@ mod tests {
             target: target.into(),
             read_only,
         }
+    }
+
+    /// A real directory to mount a volume over, plus the ids that own it, so a test can ask for a run-as identity that differs from the first attacher's.
+    fn volume_target(newroot: &tempfile::TempDir) -> (String, u32, u32) {
+        use std::os::unix::fs::MetadataExt;
+        let target = newroot.path().join("data");
+        std::fs::create_dir_all(&target).unwrap();
+        let md = std::fs::metadata(&target).unwrap();
+        (
+            newroot.path().to_string_lossy().into_owned(),
+            md.uid(),
+            md.gid(),
+        )
+    }
+
+    fn volume_chowns(calls: &[Call]) -> Vec<&Call> {
+        calls
+            .iter()
+            .filter(|c| matches!(c, Call::Lchown { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn a_volume_root_owned_by_another_uid_is_transferred_to_the_run_as_user() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, uid, gid) = volume_target(&dir);
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/data", false)],
+            &newroot,
+            Some((uid + 1, gid)),
+        )
+        .unwrap();
+
+        let calls = sys.calls();
+        let target = format!("{newroot}/data");
+        let chown = calls.iter().position(|c| {
+            matches!(c, Call::Lchown { path, uid: u, gid: g } if path == &target && *u == uid + 1 && *g == gid)
+        });
+        let mount = calls.iter().position(
+            |c| matches!(c, Call::Mount { target: t, fstype, .. } if t == &target && fstype == "ext4"),
+        );
+        assert!(
+            chown.is_some(),
+            "a volume attached under a different run-as identity leaves every file owned by the first attacher's uid: {calls:?}"
+        );
+        assert!(
+            chown > mount,
+            "the chown must land on the volume's own root inode, so it follows the mount: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_volume_root_already_owned_by_the_run_as_user_is_not_rewritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, uid, gid) = volume_target(&dir);
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/data", false)],
+            &newroot,
+            Some((uid, gid)),
+        )
+        .unwrap();
+
+        assert!(
+            volume_chowns(&sys.calls()).is_empty(),
+            "the common path costs one stat and no write"
+        );
+    }
+
+    #[test]
+    fn a_root_run_as_leaves_an_image_seeded_volumes_ownership_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, uid, gid) = volume_target(&dir);
+        assert_ne!(uid, 0, "the fixture must not already be root-owned");
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/data", false)],
+            &newroot,
+            Some((0, gid)),
+        )
+        .unwrap();
+
+        assert!(
+            volume_chowns(&sys.calls()).is_empty(),
+            "root can write any path, and rewriting here would clobber an image's own ownership"
+        );
+    }
+
+    #[test]
+    fn a_read_only_volume_attach_never_writes_to_the_volume() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, uid, gid) = volume_target(&dir);
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/data", true)],
+            &newroot,
+            Some((uid + 1, gid)),
+        )
+        .unwrap();
+
+        assert!(
+            volume_chowns(&sys.calls()).is_empty(),
+            "a chown on a read-only mount is EROFS, so every :ro attach would log a failure"
+        );
+    }
+
+    #[test]
+    fn a_volume_attach_without_a_resolved_run_as_user_chowns_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, _uid, _gid) = volume_target(&dir);
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(&sys, &[volume("/dev/vdc", "/data", false)], &newroot, None).unwrap();
+
+        assert!(volume_chowns(&sys.calls()).is_empty());
+    }
+
+    #[test]
+    fn a_volume_target_that_cannot_be_stat_ed_is_skipped_without_failing_the_boot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_string_lossy().into_owned();
+        let sys = FakeSyscalls::new();
+
+        mount_volumes(
+            &sys,
+            &[volume("/dev/vdc", "/absent", false)],
+            &newroot,
+            Some((1000, 1000)),
+        )
+        .unwrap();
+
+        assert!(volume_chowns(&sys.calls()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_volume_chown_does_not_abort_the_boot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (newroot, uid, gid) = volume_target(&dir);
+        let sys = FakeSyscalls::new().fail_when(|c| {
+            matches!(c, Call::Lchown { .. }).then_some(std::io::ErrorKind::PermissionDenied)
+        });
+
+        assert!(
+            mount_volumes(
+                &sys,
+                &[volume("/dev/vdc", "/data", false)],
+                &newroot,
+                Some((uid + 1, gid)),
+            )
+            .is_ok(),
+            "one ownership failure must warn, not strand the run"
+        );
     }
 
     #[test]
