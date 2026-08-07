@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use cucumber::{given, then, when};
 use lns_cli::run::declarative::{Defaults, resolve};
 
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, TEST_HOST};
 
 #[when(regex = r#"^the user runs "lns push(.*)"$"#)]
 async fn user_runs_lns_push(w: &mut BehaviourWorld, rest: String) {
@@ -88,8 +88,13 @@ fn request_roots_sources_at(w: &mut BehaviourWorld, dir: String) -> Result<(), S
         .project_dir
         .clone()
         .ok_or("the run resolved no project directory")?;
-    let resolved = resolve(&Defaults::from_definition(&def), &project, None, Vec::new())
-        .map_err(|e| format!("declarative settings did not resolve: {e:#}"))?;
+    let resolved = resolve(
+        &Defaults::from_definition(&def, Some(TEST_HOST)),
+        &project,
+        None,
+        Vec::new(),
+    )
+    .map_err(|e| format!("declarative settings did not resolve: {e:#}"))?;
     let (_, binds) = lns_cli::cli::split_mounts(&resolved.mounts);
     let rendered: Vec<String> = binds
         .iter()

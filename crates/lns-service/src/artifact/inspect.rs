@@ -27,6 +27,7 @@ pub(crate) fn project_inspection(
     artifact_type: Option<&str>,
     config_media_type: &str,
     config_json: &str,
+    host: Option<lns_artifact::resources::HostCapacity>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
         RunPath::SingleImage => Ok(ArtifactInspection::Image(ImageView {
@@ -37,8 +38,10 @@ pub(crate) fn project_inspection(
             let def = lns_artifact::sandbox::parse(config_json.as_bytes())
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
-            let (declared_size, _) =
-                lns_artifact::resources::DeclaredSize::from_resources(def.spec.resources.as_ref());
+            let (declared_size, _) = lns_artifact::resources::DeclaredSize::from_resources(
+                def.spec.resources.as_ref(),
+                host,
+            );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
                     reference: image_ref.to_string(),
@@ -126,7 +129,20 @@ mod tests {
         format!("sha256:{}", "a".repeat(64))
     }
 
+    const TEST_HOST: lns_artifact::resources::HostCapacity =
+        lns_artifact::resources::HostCapacity {
+            cpus: 10,
+            mem_mib: 16384,
+        };
+
     fn project_sandbox(config: &str) -> Result<ArtifactInspection> {
+        project_sandbox_on(config, None)
+    }
+
+    fn project_sandbox_on(
+        config: &str,
+        host: Option<lns_artifact::resources::HostCapacity>,
+    ) -> Result<ArtifactInspection> {
         let artifact_type = lns_artifact::spec::Kind::Sandbox.artifact_type();
         let config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
         project_inspection(
@@ -135,6 +151,7 @@ mod tests {
             Some(&artifact_type),
             &config_media_type,
             config,
+            host,
         )
     }
 
@@ -146,6 +163,7 @@ mod tests {
             None,
             "application/vnd.oci.image.config.v1+json",
             "{}",
+            None,
         )
         .unwrap();
 
@@ -166,6 +184,7 @@ mod tests {
             Some("application/vnd.acme.thing"),
             "application/vnd.oci.image.config.v1+json",
             "{}",
+            None,
         )
         .unwrap_err();
 
@@ -218,6 +237,19 @@ mod tests {
             .unwrap(),
             bare_sandbox_view(None, None, Some("root")),
             "without this a pulled artifact asking for root is invisible before it boots"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_declaring_a_share_projects_that_share_of_the_given_host() {
+        assert_eq!(
+            project_sandbox_on(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":"80%","memory":"80%"}}}"#,
+                Some(TEST_HOST)
+            )
+            .unwrap(),
+            bare_sandbox_view(Some(8), Some(13107), None),
+            "a pulled sandbox sized in percent has to report the share it will actually boot with"
         );
     }
 

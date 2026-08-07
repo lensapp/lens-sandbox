@@ -105,6 +105,7 @@ pub(super) fn sandbox_vm_size(
     cpus_explicit: bool,
     requested_mem_mib: usize,
     mem_explicit: bool,
+    host: Option<lns_artifact::resources::HostCapacity>,
 ) -> (u8, usize) {
     use crate::artifact::resources::resolve_size;
     use lns_artifact::resources::{DEFAULT_VM_SIZE, ResourceOverrides};
@@ -112,7 +113,7 @@ pub(super) fn sandbox_vm_size(
         cpus: cpus_explicit.then_some(requested_cpus),
         mem_mib: mem_explicit.then_some(requested_mem_mib),
     };
-    let size = resolve_size(resources, &overrides, DEFAULT_VM_SIZE);
+    let size = resolve_size(resources, &overrides, DEFAULT_VM_SIZE, host);
     (size.cpus, size.mem_mib)
 }
 
@@ -204,6 +205,11 @@ pub(super) fn workload_identity(
 
 #[cfg(test)]
 mod tests {
+    const TEST_HOST: lns_artifact::resources::HostCapacity =
+        lns_artifact::resources::HostCapacity {
+            cpus: 10,
+            mem_mib: 16384,
+        };
     use super::*;
     use lns_ipc::LogLevel;
     use tokio::sync::mpsc;
@@ -218,7 +224,10 @@ mod tests {
     #[test]
     fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
-        assert_eq!(sandbox_vm_size(Some(&res), 1, false, 512, false), (4, 2048));
+        assert_eq!(
+            sandbox_vm_size(Some(&res), 1, false, 512, false, Some(TEST_HOST)),
+            (4, 2048)
+        );
     }
 
     #[test]
@@ -317,14 +326,17 @@ mod tests {
     #[test]
     fn sandbox_vm_size_lets_an_explicit_request_override_the_sandbox() {
         let res = resources(4, 2048);
-        assert_eq!(sandbox_vm_size(Some(&res), 2, true, 1024, true), (2, 1024));
+        assert_eq!(
+            sandbox_vm_size(Some(&res), 2, true, 1024, true, Some(TEST_HOST)),
+            (2, 1024)
+        );
     }
 
     #[test]
     fn sandbox_vm_size_honors_an_explicit_request_that_equals_the_builtin_default() {
         let res = resources(4, 2048);
         assert_eq!(
-            sandbox_vm_size(Some(&res), 1, true, 512, true),
+            sandbox_vm_size(Some(&res), 1, true, 512, true, Some(TEST_HOST)),
             (1, 512),
             "a user who explicitly asks for the default size must be able to constrain a greedy sandbox"
         );
@@ -332,8 +344,14 @@ mod tests {
 
     #[test]
     fn sandbox_vm_size_falls_back_to_the_request_when_the_sandbox_is_silent() {
-        assert_eq!(sandbox_vm_size(None, 1, false, 512, false), (1, 512));
-        assert_eq!(sandbox_vm_size(None, 8, true, 4096, true), (8, 4096));
+        assert_eq!(
+            sandbox_vm_size(None, 1, false, 512, false, Some(TEST_HOST)),
+            (1, 512)
+        );
+        assert_eq!(
+            sandbox_vm_size(None, 8, true, 4096, true, Some(TEST_HOST)),
+            (8, 4096)
+        );
     }
 
     #[tokio::test]

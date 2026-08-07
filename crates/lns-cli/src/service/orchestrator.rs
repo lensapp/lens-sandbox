@@ -206,7 +206,10 @@ pub async fn run_image(
     };
     let defaults = match (&target, &published) {
         (crate::run::target::RunTarget::Local { def, .. }, _) => {
-            crate::run::declarative::Defaults::from_definition(def)
+            crate::run::declarative::Defaults::from_definition(
+                def,
+                lns_artifact::resources::host::probe(),
+            )
         }
         (_, Some(published)) => published.defaults.clone(),
         _ => crate::run::declarative::Defaults::default(),

@@ -1,3 +1,5 @@
+pub mod host;
+
 use crate::spec::{Quantity, Resources};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,12 +41,26 @@ pub fn resolve_declared(
     }
 }
 
+/// What this machine has in total — not what is free — so a definition sizing itself as a share of it lands the same on every run of one host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapacity {
+    pub cpus: u8,
+    pub mem_mib: usize,
+}
+
 impl DeclaredSize {
     /// The `ignored` field names each request the host will not grant, so the caller that owns a log can say so.
-    pub fn from_resources(resources: Option<&Resources>) -> (Self, Vec<&'static str>) {
+    pub fn from_resources(
+        resources: Option<&Resources>,
+        host: Option<HostCapacity>,
+    ) -> (Self, Vec<&'static str>) {
         let mut ignored = Vec::new();
-        let cpus = read(resources.and_then(|r| r.cpu.as_ref()), quantity_to_cpus);
-        let mem_mib = read(resources.and_then(|r| r.memory.as_ref()), quantity_to_mib);
+        let cpus = read(resources.and_then(|r| r.cpu.as_ref()), |q| {
+            quantity_to_cpus(q, host)
+        });
+        let mem_mib = read(resources.and_then(|r| r.memory.as_ref()), |q| {
+            quantity_to_mib(q, host)
+        });
         if cpus.asked_and_refused {
             ignored.push("cpu");
         }
@@ -82,10 +98,14 @@ fn read<T>(quantity: Option<&Quantity>, parse: impl Fn(&Quantity) -> Option<T>) 
     }
 }
 
-fn quantity_to_cpus(quantity: &Quantity) -> Option<u8> {
+fn quantity_to_cpus(quantity: &Quantity, host: Option<HostCapacity>) -> Option<u8> {
     let whole = match quantity {
         Quantity::Int(n) => u32::try_from(*n).ok()?,
-        Quantity::Text(text) => parse_cpu_text(text)?,
+        Quantity::Text(text) => match parse_percent(text) {
+            // A share can only ever raise the guest to the floor, never lower it below what boots.
+            Some(pct) => u32::from(cpu_share(host?.cpus, pct).max(DEFAULT_VM_SIZE.cpus)),
+            None => parse_cpu_text(text)?,
+        },
     };
     (1..=u32::from(u8::MAX))
         .contains(&whole)
@@ -100,15 +120,39 @@ fn parse_cpu_text(text: &str) -> Option<u32> {
     }
 }
 
+/// A whole-number percentage of this host, 1 through 100; anything else is not a share.
+pub(crate) fn parse_percent(text: &str) -> Option<u8> {
+    let digits = text.trim().strip_suffix('%')?;
+    digits
+        .parse::<u8>()
+        .ok()
+        .filter(|pct| (1..=100).contains(pct))
+}
+
+/// Both shares are computed in a wider type and are never larger than the total, so neither narrowing can wrap.
+fn cpu_share(total: u8, pct: u8) -> u8 {
+    (u32::from(total) * u32::from(pct) / 100) as u8
+}
+
+fn mem_share(total: usize, pct: u8) -> usize {
+    (total as u128 * u128::from(pct) / 100) as usize
+}
+
 /// Ceiling on an artifact-declared VM memory size; a greedy or adversarial sandbox can't size the guest past this and starve the host (a user who genuinely needs more passes `-m` explicitly).
 pub const MAX_MEM_MIB: usize = 256 * 1024;
 
-fn quantity_to_mib(quantity: &Quantity) -> Option<usize> {
-    let mib = match quantity {
-        Quantity::Int(n) => usize::try_from(*n).ok(),
-        Quantity::Text(text) => crate::memory::parse_mib(text).ok(),
-    };
-    mib.filter(|mib| (1..=MAX_MEM_MIB).contains(mib))
+fn quantity_to_mib(quantity: &Quantity, host: Option<HostCapacity>) -> Option<usize> {
+    // A share is clamped into what boots, because the author asked for "some of this host" and any host can answer that; an absolute size out of range is a request this host refuses.
+    let in_range = |mib: &usize| (1..=MAX_MEM_MIB).contains(mib);
+    match quantity {
+        Quantity::Int(n) => usize::try_from(*n).ok().filter(in_range),
+        Quantity::Text(text) => match parse_percent(text) {
+            Some(pct) => {
+                Some(mem_share(host?.mem_mib, pct).clamp(DEFAULT_VM_SIZE.mem_mib, MAX_MEM_MIB))
+            }
+            None => crate::memory::parse_mib(text).ok().filter(in_range),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +164,7 @@ mod tests {
         overrides: &ResourceOverrides,
         defaults: VmSize,
     ) -> VmSize {
-        let (declared, _) = DeclaredSize::from_resources(resources);
+        let (declared, _) = DeclaredSize::from_resources(resources, None);
         resolve_declared(declared, overrides, defaults)
     }
 
@@ -319,13 +363,110 @@ mod tests {
         );
     }
 
+    const TEN_CORE_16G: HostCapacity = HostCapacity {
+        cpus: 10,
+        mem_mib: 16384,
+    };
+
+    #[test]
+    fn a_definition_sized_in_percent_takes_that_share_of_this_host() {
+        let res = Resources {
+            cpu: Some(Quantity::Text("80%".into())),
+            memory: Some(Quantity::Text("80%".into())),
+        };
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(TEN_CORE_16G));
+
+        assert_eq!(
+            declared,
+            DeclaredSize {
+                cpus: Some(8),
+                mem_mib: Some(13107)
+            }
+        );
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn a_share_too_small_to_boot_is_lifted_to_the_built_in_floor() {
+        let tiny = HostCapacity {
+            cpus: 1,
+            mem_mib: 512,
+        };
+        let res = Resources {
+            cpu: Some(Quantity::Text("80%".into())),
+            memory: Some(Quantity::Text("80%".into())),
+        };
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(tiny));
+
+        assert_eq!(
+            declared,
+            DeclaredSize {
+                cpus: Some(DEFAULT_VM_SIZE.cpus),
+                mem_mib: Some(DEFAULT_VM_SIZE.mem_mib)
+            },
+            "a share is a request, and must never leave the guest too small to boot"
+        );
+        assert!(
+            ignored.is_empty(),
+            "the floor is not a refusal: {ignored:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_share_still_respects_the_host_starvation_ceiling() {
+        let huge = HostCapacity {
+            cpus: 200,
+            mem_mib: 512 * 1024,
+        };
+        let res = Resources {
+            cpu: None,
+            memory: Some(Quantity::Text("100%".into())),
+        };
+        let (declared, _) = DeclaredSize::from_resources(Some(&res), Some(huge));
+
+        assert_eq!(
+            declared.mem_mib,
+            Some(MAX_MEM_MIB),
+            "a percentage must not walk past the ceiling an absolute size cannot"
+        );
+    }
+
+    #[test]
+    fn a_percentage_with_no_host_reading_falls_back_rather_than_guessing() {
+        let res = Resources {
+            cpu: Some(Quantity::Text("80%".into())),
+            memory: Some(Quantity::Text("80%".into())),
+        };
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&res), None);
+
+        assert_eq!(declared, DeclaredSize::default());
+        assert_eq!(
+            ignored,
+            vec!["cpu", "memory"],
+            "an unresolvable share must be reported, not silently booted at some other size"
+        );
+    }
+
+    #[test]
+    fn a_percentage_outside_one_to_a_hundred_is_refused() {
+        for pct in ["0%", "101%", "%", "8 0%", "-5%", "1000%"] {
+            let res = Resources {
+                cpu: Some(Quantity::Text(pct.into())),
+                memory: Some(Quantity::Text(pct.into())),
+            };
+            let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(TEN_CORE_16G));
+            assert_eq!(declared, DeclaredSize::default(), "pct {pct}");
+            assert_eq!(ignored, vec!["cpu", "memory"], "pct {pct}");
+        }
+    }
+
     #[test]
     fn a_request_the_host_will_not_grant_is_named_so_the_caller_can_say_so() {
         let refused = Resources {
             cpu: Some(Quantity::Int(9000)),
             memory: Some(Quantity::Text("999999Gi".into())),
         };
-        let (declared, ignored) = DeclaredSize::from_resources(Some(&refused));
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&refused), None);
         assert_eq!(declared, DeclaredSize::default());
         assert_eq!(ignored, vec!["cpu", "memory"]);
 
@@ -333,7 +474,7 @@ mod tests {
             cpu: Some(Quantity::Int(2)),
             memory: Some(Quantity::Text("2Gi".into())),
         };
-        let (declared, ignored) = DeclaredSize::from_resources(Some(&honoured));
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&honoured), None);
         assert_eq!(
             declared,
             DeclaredSize {
@@ -343,7 +484,7 @@ mod tests {
         );
         assert!(ignored.is_empty());
 
-        let (declared, ignored) = DeclaredSize::from_resources(None);
+        let (declared, ignored) = DeclaredSize::from_resources(None, None);
         assert_eq!(declared, DeclaredSize::default());
         assert!(
             ignored.is_empty(),

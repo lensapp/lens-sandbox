@@ -383,6 +383,7 @@ async fn orchestrate(
         args.cpus_explicit,
         args.mem,
         args.mem_explicit,
+        lns_artifact::resources::host::probe(),
     );
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 
