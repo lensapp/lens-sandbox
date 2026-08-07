@@ -5,6 +5,7 @@ mod network;
 mod pty;
 mod session;
 mod trust;
+mod volumes;
 mod vsock;
 
 use std::process::ExitCode;
@@ -28,6 +29,8 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
         eprintln!("lns-session-broker: powering off (workload exit {code})");
+        // A synced-but-mounted ext4 keeps its clean bit cleared, so every later attach warns that the filesystem is unchecked.
+        volumes::release_volumes();
         // SAFETY: PID 1 final-shutdown call; sync flushes buffers before reboot.
         unsafe { libc::sync() };
         // SAFETY: reboot(RB_POWER_OFF) does not return on success.
