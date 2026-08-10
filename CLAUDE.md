@@ -4,10 +4,36 @@ Lens Sandbox is a local desktop app for running AI agents, commands, OCI images,
 
 - **Start here:** `docs/README.md` — the first-party user documentation index.
 - **Product language:** the Product Vision above and `docs/` are the source of truth for terminology and framing; keep naming consistent with them. `docs/` is user-facing documentation only — no internal sales/marketing material lives in this repo.
-- **Concepts:** approvals drive policy authoring; a per-directory `lns-policy.yaml` (auto-created empty; a destination no rule decides is asked about) holds network rules and the ids of connected connectors, while custom credential-provider declarations live in a separate user catalog (`~/.lns-connectors.yaml`) and per-machine credential values are stored separately again so secrets aren't committed; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload via credential-shaped placeholders.
+- **Concepts:** approvals drive policy authoring; a per-directory decisions file (today `lns-policy.yaml`, auto-created empty; a destination no rule decides is asked about) holds network rules and the ids of connected connectors, while custom credential-provider declarations live in a separate user catalog (`~/.lns-connectors.yaml`) and per-machine credential values are stored separately again so secrets aren't committed; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload via credential-shaped placeholders.
+- **Target format:** `docs/sandbox-spec.md` is the normative specification for the `lns.run/v1` document format and the decisions behind it. **The code does not implement all of it** — see [Transitional mode](#transitional-mode) before you touch a document-format surface.
 - **Sibling product:** Lens Agents is the centrally managed counterpart for IT teams. Same policy model.
 
 Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **ephemeral by default**, **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **one directory = one project**, **real secrets stay outside the workload**. A small user-launched background service (the tray-resident `lns-service`, started by `lns service start` and stoppable via the tray Quit menu or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
+
+## Transitional mode
+
+**The document format has an agreed target that the code has not reached.** `docs/sandbox-spec.md` states that target and states it as settled. This section is the contributor rule for the gap between them. It is temporary and shrinks as the gap closes.
+
+Read this before changing anything that parses, validates, publishes, resolves, or merges an `lns.yaml`, a connector, or the per-directory decisions file.
+
+### Which document wins
+
+| Question | Authority |
+|---|---|
+| What *should* the format be? | `docs/sandbox-spec.md`. It is the decision, not a proposal. |
+| What does `lns` accept *today*? | The code, and the guides in `docs/` that describe it. |
+
+Never edit the specification to match the code. A divergence is work to be done, not a doc bug. If the specification is genuinely wrong — the code encodes a constraint the spec did not know about — say so and change the spec deliberately, as a decision, in its own commit.
+
+### The rules
+
+1. **Move toward the target, never away.** A change may leave a divergence in place. It may not deepen one, and it may not add a new field, flag, or file shape that the specification does not describe.
+2. **No compatibility shims.** The product is pre-1.0. Closing a gap is a breaking, unversioned change: change the format, change every caller and test, delete the old spelling. Do not carry both.
+3. **The guides describe what ships.** Do not rewrite a user guide to describe unimplemented behaviour, and do not annotate one with what the target says instead — a guide answers "how do I use this today".
+4. **Closing a gap is behaviour work, so it starts with a failing test** in the layer that owns it (see [Workflow](#workflow)). A format change with no red test first is not done.
+5. **Read the code for what ships.** This repository does not carry a list of where the two disagree, so do not add one and do not trust a stale summary: before changing a format surface, read the code that owns it and read the section of the specification that decides it.
+
+Two questions the specification leaves open, so do not settle them in code by accident: what the local decisions file is called, and where a per-project connector grant lives ([§8.3](docs/sandbox-spec.md#83-open-the-name), [§8.4](docs/sandbox-spec.md#84-open-where-a-connector-grant-goes)).
 
 ## Project Overview
 
