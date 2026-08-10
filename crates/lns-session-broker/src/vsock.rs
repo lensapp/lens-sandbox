@@ -7,10 +7,12 @@ use std::os::fd::RawFd;
 mod real;
 pub use real::read_exact;
 #[cfg(target_os = "linux")]
-pub use real::{accept, listen, write_all};
+pub use real::{accept, connect, listen, write_all};
 
 const AF_VSOCK: c_int = 40;
 const VMADDR_CID_ANY: u32 = u32::MAX;
+/// The host end of the vsock link, which is where a guest→host forward dials.
+const VMADDR_CID_HOST: u32 = 2;
 
 #[repr(C)]
 pub(crate) struct SockaddrVm {
@@ -46,6 +48,7 @@ pub enum ReadOutcome {
 pub(crate) trait VsockSyscalls {
     fn socket(&self) -> io::Result<RawFd>;
     fn bind(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()>;
+    fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()>;
     fn listen(&self, fd: RawFd, backlog: c_int) -> io::Result<()>;
     fn accept_once(&self, listen_fd: RawFd) -> io::Result<RawFd>;
     fn close(&self, fd: RawFd);
@@ -60,6 +63,37 @@ fn vsock_listen_addr(port: u32) -> SockaddrVm {
         svm_port: port,
         svm_cid: VMADDR_CID_ANY,
         svm_zero: [0; 4],
+    }
+}
+
+fn vsock_connect_addr(port: u32) -> SockaddrVm {
+    SockaddrVm {
+        svm_family: AF_VSOCK as libc::sa_family_t,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: VMADDR_CID_HOST,
+        svm_zero: [0; 4],
+    }
+}
+
+pub(crate) fn connect_with(sys: &dyn VsockSyscalls, port: u32) -> Result<RawFd, VsockError> {
+    let fd = sys.socket().map_err(|err| VsockError::Syscall {
+        op: format!("socket(AF_VSOCK) port={port}"),
+        err,
+    })?;
+    let addr = vsock_connect_addr(port);
+    loop {
+        match sys.connect(fd, &addr) {
+            Ok(()) => return Ok(fd),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                sys.close(fd);
+                return Err(VsockError::Syscall {
+                    op: format!("connect(vsock host:{port})"),
+                    err,
+                });
+            }
+        }
     }
 }
 
@@ -138,6 +172,7 @@ mod tests {
     enum Call {
         Socket,
         Bind { fd: RawFd, port: u32, cid: u32 },
+        Connect { fd: RawFd, port: u32, cid: u32 },
         Listen { fd: RawFd, backlog: c_int },
         AcceptOnce(RawFd),
         Close(RawFd),
@@ -161,6 +196,7 @@ mod tests {
         calls: RefCell<Vec<Call>>,
         socket_ret: Option<io::Result<RawFd>>,
         bind_fail: Option<ErrorKind>,
+        connect_script: RefCell<VecDeque<io::Result<()>>>,
         listen_fail: Option<ErrorKind>,
         accept_script: RefCell<VecDeque<io::Result<RawFd>>>,
         reads: RefCell<VecDeque<ReadStep>>,
@@ -192,6 +228,17 @@ mod tests {
                 Some(k) => Err(io::Error::new(k, "scripted")),
                 None => Ok(()),
             }
+        }
+        fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()> {
+            self.calls.borrow_mut().push(Call::Connect {
+                fd,
+                port: addr.svm_port,
+                cid: addr.svm_cid,
+            });
+            self.connect_script
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Ok(()))
         }
         fn listen(&self, fd: RawFd, backlog: c_int) -> io::Result<()> {
             self.calls.borrow_mut().push(Call::Listen { fd, backlog });
@@ -433,5 +480,75 @@ mod tests {
             .borrow_mut()
             .push_back(WriteStep::Fail(ErrorKind::BrokenPipe));
         assert!(!write_all_with(&sys, 3, b"abc"));
+    }
+
+    #[test]
+    fn connect_dials_the_host_cid_on_the_given_port() {
+        let sys = FakeVsock {
+            socket_ret: Some(Ok(11)),
+            ..Default::default()
+        };
+        assert_eq!(connect_with(&sys, 1040).unwrap(), 11);
+        assert_eq!(
+            sys.calls(),
+            [
+                Call::Socket,
+                Call::Connect {
+                    fd: 11,
+                    port: 1040,
+                    cid: VMADDR_CID_HOST,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_retries_an_interrupted_dial_rather_than_failing() {
+        let sys = FakeVsock {
+            socket_ret: Some(Ok(11)),
+            ..Default::default()
+        };
+        sys.connect_script
+            .borrow_mut()
+            .push_back(Err(io::Error::new(ErrorKind::Interrupted, "scripted")));
+        assert_eq!(connect_with(&sys, 1040).unwrap(), 11);
+        assert_eq!(
+            sys.calls()
+                .iter()
+                .filter(|c| matches!(c, Call::Connect { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn connect_closes_the_socket_when_the_dial_fails_so_no_fd_leaks() {
+        let sys = FakeVsock {
+            socket_ret: Some(Ok(11)),
+            ..Default::default()
+        };
+        sys.connect_script
+            .borrow_mut()
+            .push_back(Err(io::Error::new(
+                ErrorKind::ConnectionRefused,
+                "scripted",
+            )));
+        let err = connect_with(&sys, 1040).unwrap_err();
+        assert!(
+            format!("{err}").contains("connect(vsock host:1040)"),
+            "{err}"
+        );
+        assert!(sys.calls().contains(&Call::Close(11)));
+    }
+
+    #[test]
+    fn connect_surfaces_a_socket_failure_without_dialing() {
+        let sys = FakeVsock {
+            socket_ret: Some(Err(io::Error::new(ErrorKind::PermissionDenied, "scripted"))),
+            ..Default::default()
+        };
+        let err = connect_with(&sys, 1040).unwrap_err();
+        assert!(format!("{err}").contains("socket(AF_VSOCK)"), "{err}");
+        assert_eq!(sys.calls(), [Call::Socket]);
     }
 }

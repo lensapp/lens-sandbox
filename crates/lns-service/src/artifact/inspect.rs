@@ -88,6 +88,7 @@ pub(crate) fn project_inspection(
                         })
                         .collect(),
                     connectors: def.spec.connectors,
+                    host_access: def.spec.host_access,
                     env: def
                         .spec
                         .env
@@ -220,6 +221,7 @@ mod tests {
         mounts: Vec<SandboxMount>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            host_access: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -370,6 +372,7 @@ mod tests {
                     },
                 ],
                 connectors: vec![],
+                host_access: Vec::new(),
                 env: vec![],
                 credentials: vec![],
                 tools: vec![],
@@ -400,6 +403,7 @@ mod tests {
                 ports: vec![],
                 filesets: vec![],
                 connectors: vec![],
+                host_access: Vec::new(),
                 env: vec![],
                 credentials: vec![SandboxCredential {
                     name: "some-provider".into(),
@@ -432,6 +436,7 @@ mod tests {
                 ports: vec![],
                 filesets: vec![],
                 connectors: vec![],
+                host_access: Vec::new(),
                 env: vec![],
                 credentials: vec![],
                 tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
@@ -460,6 +465,7 @@ mod tests {
                 ports: vec![],
                 filesets: vec![],
                 connectors: vec![],
+                host_access: Vec::new(),
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
                 credentials: vec![],
                 tools: vec![],

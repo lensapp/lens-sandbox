@@ -21,6 +21,14 @@ The workload behaves as though it holds the credential without the secret ever
 entering the sandbox. A request carrying a placeholder to a domain the provider
 isn't configured for is not rewritten — the placeholder goes nowhere useful.
 
+## Secrets that never cross HTTP
+
+The boundary swap only fits a secret that travels in a header or a URI. A signing
+key does not: `gpg` and `ssh` talk to a local agent over a unix socket, so there is
+no request to rewrite. Those secrets stay outside the workload a second way —
+[host access](running-workloads.md#host-access) forwards the *agent*, not the key,
+so the workload can ask your agent to sign and never holds the private half.
+
 ## Providers are connectors
 
 Every credential provider is a [connector](connectors.md): a named service that

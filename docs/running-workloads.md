@@ -69,6 +69,7 @@ The `spec` fields:
 | `credentials`  | Credential slots — the explicit way a sandbox insists on a credential: each names a connector (`name`), the env var it is injected as (`env`, remapping the catalog default), and optionally `required: true`. A slot arms when its value is bound on the machine; a **required** slot with no value bound refuses the launch before boot, pointing at `lns connector connect` (see [Credentials](credentials.md#value-decisions)). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
+| `hostAccess`   | Host capabilities the sandbox asks for by id, resolved per user; see [Host access](#host-access). |
 | `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
@@ -661,6 +662,83 @@ host; publishing a sandbox never grants it silent access to host files.
 > `.git/config`) is exposed to the workload **without a prompt**. To hide a nested
 > secret you know about, name it in `.lensignore` (a nested path is honored); for an
 > untrusted subtree, bind a narrower path or use `:ro`.
+
+### Host access
+
+Some things a workload needs are not files and not credentials the boundary can
+swap. A signing key is the clearest case: `git commit -S` asks a local agent over
+a unix socket, so there is nothing to rewrite at the network boundary, and the
+socket itself cannot be shared into the guest — a bind mount passes the inode, not
+the endpoint.
+
+**Host access** is the answer. A capability is a named bundle that lns resolves on
+whatever machine the sandbox runs on, so a published definition asks for it by id
+and carries no host specifics:
+
+```yaml
+spec:
+  hostAccess:
+    - git-signing
+```
+
+`git-signing` supplies three things a signature needs, all resolved per user: your
+git config, your **public** keyring and trust database, and your signing agent's
+socket, forwarded over vsock so only this guest can reach it. Your `user.signingkey` comes from your
+own config, so the same file works for a colleague signing with their own key.
+
+Your host's `commit.gpgsign` decides whether the capability is mandatory:
+
+- **Enabled** — the run needs it. If no agent can be located, the launch is
+  refused before any microVM boots, naming the setting that required it, rather
+  than starting a sandbox that fails on the first commit.
+- **Disabled or unset** — nothing is forwarded and nothing is projected. The run
+  summary shows the capability as absent, and the workload commits unsigned, which
+  is what your host does.
+
+The private key never enters the guest. Inside, `gpg --list-secret-keys` shows the
+key as a stub (`sec#`), signing succeeds through the forwarded agent, and
+`gpg --export-secret-keys` fails — the forwarded endpoint is the agent's
+restricted socket, which can sign but cannot hand over key material. A cold agent
+prompts for your passphrase **on the host**, where it belongs.
+
+#### Declaring, granting, and the card
+
+Declaring a capability never arms it, exactly as a
+[declared connector](connectors.md) never arms. The first run raises a card naming
+the host socket and the guest path it will appear at:
+
+```text
+Host access: GnuPG agent wants the host agent at /Users/you/.gnupg/S.gpg-agent.extra, reachable in the sandbox at ~/.gnupg/S.gpg-agent.
+While the run is live the workload can ask your agent to sign anything. It cannot read the key.
+Grant it? [g]rant / [D]ecline (default):
+```
+
+- **Grant** records the id under `hostAccess:` in this directory's
+  `lns-policy.yaml`, so later runs arm it without asking. The list names ids, not
+  host paths, so it stays shareable.
+- **Decline** refuses the launch and is remembered **per machine**, outside the
+  policy file. A declined capability keeps refusing until you clear it with
+  `lns host-access grant`; a policy file that arrives with a clone cannot overrule
+  your no.
+- A non-interactive run (`-d`, or no terminal) with no grant refuses rather than
+  asking, and names `lns host-access grant` as the fix.
+
+Grant, revoke, and inspect them with [`lns host-access`](cli-reference.md#lns-host-access);
+a directory with no definition can grant one too.
+
+#### Secrets in your git config
+
+The whole resolved config is projected, not a hand-picked subset, so the sandbox
+keeps the aliases and defaults that make it feel like your own machine. That means
+the same scan host binds get: a secret-shaped setting (`http.<url>.extraheader`,
+`credential.helper`, `*.token`, `sendemail.smtppass`, a URL with an embedded
+password) is found before the run starts and you are asked once whether to keep or
+drop it. The default on a bare Enter is **drop**, a non-interactive run drops any
+undecided setting and notes it on stderr, and your choice is remembered per
+machine. The run summary lists each dropped key.
+
+Include directives are resolved on the host, so the guest sees one flat config
+with no dangling host paths.
 
 ### Publishing ports
 

@@ -117,6 +117,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         policy: ships_policy.then(|| lns_policy::Policy {
             network: def.spec.policy.clone(),
             connectors: def.spec.connectors.clone(),
+            host_access: def.spec.host_access.clone(),
         }),
         credentials: def.spec.credentials.clone(),
         tools: def.spec.tools.clone(),

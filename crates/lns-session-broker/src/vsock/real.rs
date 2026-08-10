@@ -41,6 +41,22 @@ impl VsockSyscalls for RealVsockSyscalls {
         }
     }
 
+    fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()> {
+        // SAFETY: addr is a fully-initialised SockaddrVm of the size we pass.
+        let r = unsafe {
+            libc::connect(
+                fd,
+                addr as *const SockaddrVm as *const libc::sockaddr,
+                std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     fn listen(&self, fd: RawFd, backlog: c_int) -> io::Result<()> {
         // SAFETY: fd is the owned listening socket.
         let r = unsafe { libc::listen(fd, backlog) };
@@ -100,6 +116,11 @@ impl VsockSyscalls for RealVsockSyscalls {
 #[cfg(target_os = "linux")]
 pub fn listen(port: u32) -> Result<RawFd, VsockError> {
     listen_with(&RealVsockSyscalls, port)
+}
+
+#[cfg(target_os = "linux")]
+pub fn connect(port: u32) -> Result<RawFd, VsockError> {
+    super::connect_with(&RealVsockSyscalls, port)
 }
 
 #[cfg(target_os = "linux")]

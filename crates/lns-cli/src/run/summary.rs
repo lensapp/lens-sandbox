@@ -167,6 +167,27 @@ pub fn format_bind_dispositions(binds: &[crate::run::host_bind::ResolvedBind]) -
     s
 }
 
+/// Renders what each host access resolved to (printed after the grant card); an absent capability is disclosed too, so a run that silently cannot sign is never a surprise.
+pub fn format_host_access(outcomes: &[crate::run::host_access::HostAccessOutcome]) -> String {
+    use crate::run::host_access::HostAccessOutcome;
+    let mut s = String::new();
+    for outcome in outcomes {
+        match outcome {
+            HostAccessOutcome::Absent { id } => {
+                writeln!(s, "  {id}: absent (host does not sign)").unwrap();
+            }
+            HostAccessOutcome::Armed(armed) => {
+                writeln!(s, "  Host access: {} → identity + agent", armed.id).unwrap();
+                writeln!(s, "    agent: {}", armed.socket_source).unwrap();
+                for key in &armed.dropped_keys {
+                    writeln!(s, "  {key}: dropped").unwrap();
+                }
+            }
+        }
+    }
+    s
+}
+
 fn flags_line(args: &RunArgs) -> String {
     let mut flags: Vec<&str> = Vec::new();
     if args.interactive {
@@ -364,6 +385,8 @@ mod tests {
             declared_unpublished: Vec::new(),
             filesets: Vec::new(),
             tools: Vec::new(),
+            declared_host_access: Vec::new(),
+            host_access: Vec::new(),
             mounts: Vec::new(),
             assume_yes: false,
             quiet: false,
@@ -462,6 +485,7 @@ mod tests {
                 owner: lns_ipc::SandboxFilesetOwner::Root,
             }],
             connectors: Vec::new(),
+            host_access: Vec::new(),
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),

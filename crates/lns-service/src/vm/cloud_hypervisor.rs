@@ -70,9 +70,13 @@ pub(super) async fn run_async_with<S: process::Spawner>(
     let layout = launch::SocketLayout::for_run_dir(&run_dir);
     let bins = vmm_bin::resolve(env_get)?;
     require_read_only_support(&bins.virtiofsd)?;
-    let relay_fd_tx = spec.vsock.as_ref().map(|c| c.fd_tx.clone());
+    let guest_channels: Vec<(u32, tokio::sync::mpsc::UnboundedSender<std::os::fd::RawFd>)> = spec
+        .vsock
+        .iter()
+        .map(|c| (c.port, c.fd_tx.clone()))
+        .collect();
     let running =
-        orchestrate::launch(spawner, &spec, &bins, &layout, relay_fd_tx, timeouts).await?;
+        orchestrate::launch(spawner, &spec, &bins, &layout, &guest_channels, timeouts).await?;
     let orchestrate::RunningVm {
         mut virtiofsd,
         mut cloud_hypervisor,
@@ -128,7 +132,7 @@ mod tests {
             workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
-            vsock: None,
+            vsock: Vec::new(),
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

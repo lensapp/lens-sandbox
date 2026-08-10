@@ -234,6 +234,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
             egress: lns_policy::Egress { http, tcp },
         },
         connectors: overlay.connectors.clone(),
+        host_access: overlay.host_access.clone(),
     }
 }
 
@@ -632,6 +633,20 @@ mod tests {
                 .connectors
                 .contains(&"some-artifact-connector".to_string()),
             "an artifact-declared connector is never force-armed by the merge; it stays connectable and is offered on first use"
+        );
+    }
+
+    #[test]
+    fn merge_applies_only_overlay_host_access_grants() {
+        let mut overlay = Policy::default();
+        overlay.grant_host_access("some-granted-access");
+        let mut baseline = Policy::default();
+        baseline.grant_host_access("some-declared-access");
+        let merged = merge_effective(Some(&baseline), &overlay);
+        assert_eq!(
+            merged.host_access,
+            ["some-granted-access"],
+            "a declared host access is never force-armed by the merge; only this directory's grant arms it"
         );
     }
 

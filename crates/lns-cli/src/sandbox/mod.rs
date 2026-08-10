@@ -948,6 +948,7 @@ fn render_cached_inspect<W: std::io::Write>(
                 )?;
             }
             render_connectors(out, &view.connectors)?;
+            render_host_access(out, &view.host_access)?;
             for credential in &view.credentials {
                 let required = if credential.required {
                     " (required)"
@@ -986,6 +987,13 @@ fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
 fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
     for id in connectors {
         writeln!(out, "connector: {id}")?;
+    }
+    Ok(())
+}
+
+fn render_host_access<W: std::io::Write>(out: &mut W, ids: &[String]) -> Result<()> {
+    for id in ids {
+        writeln!(out, "host access: {id}")?;
     }
     Ok(())
 }
@@ -1249,6 +1257,7 @@ mod tests {
                 ports: Vec::new(),
                 filesets: Vec::new(),
                 connectors: Vec::new(),
+                host_access: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
                 tools,
@@ -2003,6 +2012,7 @@ mod tests {
                     ports: Vec::new(),
                     filesets: Vec::new(),
                     connectors: vec!["some-provider".into()],
+                    host_access: vec!["some-access".into()],
                     env: Vec::new(),
                     credentials: Vec::new(),
                     tools: vec!["node@22.11.0".into()],
@@ -2022,6 +2032,13 @@ mod tests {
             "got: {text}"
         );
         assert!(text.contains("connector: some-provider"), "got: {text}");
+        assert!(text.contains("host access: some-access"), "got: {text}");
+        let connector_at = text.find("connector: some-provider").unwrap();
+        let access_at = text.find("host access: some-access").unwrap();
+        assert!(
+            connector_at < access_at,
+            "host access is disclosed after the connectors it sits beside: {text}"
+        );
         assert!(text.contains("tool: node@22.11.0"), "got: {text}");
     }
 

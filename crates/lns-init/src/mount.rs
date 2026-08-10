@@ -261,6 +261,21 @@ fn passwd_uid_gid(newroot: &str, name: &str) -> Option<(u32, u32)> {
     })
 }
 
+/// The run-as user's home from `/etc/passwd`, falling back to the home `seed_sandbox_user` creates. Only the guest can answer this, so it is exported for the broker rather than passed in.
+pub(crate) fn workload_home(newroot: &str, name: &str) -> String {
+    std::fs::read_to_string(format!("{newroot}/etc/passwd"))
+        .ok()
+        .and_then(|passwd| {
+            passwd.lines().find_map(|line| {
+                let mut fields = line.split(':');
+                (fields.next()? == name).then_some(())?;
+                let home = fields.nth(4)?;
+                (!home.is_empty()).then(|| home.to_string())
+            })
+        })
+        .unwrap_or_else(|| format!("/home/{name}"))
+}
+
 /// Resolve the (uid, gid) the workload runs as: the user's uid comes from passwd or its seeded numeric id, the gid honors an explicit `USER` group (numeric or resolved against `/etc/group`) and otherwise tracks the user's primary group, and a user or group that resolves to neither an `/etc/{passwd,group}` entry nor a numeric id is unresolvable — the caller refuses to boot rather than let it fall through to root.
 pub(crate) fn resolve_workload_ids(
     newroot: &str,
@@ -834,6 +849,9 @@ fn mount_composefs_and_exec_broker_inner(
     if let Some((uid, gid)) = run_ids {
         sys.export_env("LENS_RUN_UID", &uid.to_string());
         sys.export_env("LENS_RUN_GID", &gid.to_string());
+        if let Some(user) = sandbox_user {
+            sys.export_env("LENS_RUN_HOME", &workload_home(newroot, &user.name));
+        }
     }
 
     chown_fileset_owned(sys, newroot, run_ids);
@@ -2925,6 +2943,13 @@ mod tests {
                 Call::ExportEnv { key, value } if key == "LENS_RUN_GID" && value == "50"
             )),
             "the gid must come from the image passwd's gid field, not from a like-named group or the uid"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/var/www"
+            )),
+            "the broker resolves a ~/-relative socket target against this home; only the guest can read it out of the image passwd"
         );
         let run_target = format!("{newroot}/run");
         assert!(

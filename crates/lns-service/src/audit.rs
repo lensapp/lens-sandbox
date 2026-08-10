@@ -371,8 +371,65 @@ pub fn record_bind_attached(
     )
 }
 
+pub fn record_host_access_attached_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    id: &str,
+    host_source: &str,
+    guest_target: &str,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::host_access_event(cx, id, host_source, guest_target),
+    )
+}
+
+pub fn record_host_access_attached(
+    run_id: &str,
+    microvm: &str,
+    id: &str,
+    host_source: &str,
+    guest_target: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_host_access_attached_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        id,
+        host_source,
+        guest_target,
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_forwarded_host_socket_is_recorded_with_its_guest_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        record_host_access_attached_at(
+            &path,
+            &cx(),
+            "git-signing",
+            "/run/user/501/gnupg/S.gpg-agent.extra",
+            "~/.gnupg/S.gpg-agent",
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("/run/user/501/gnupg/S.gpg-agent.extra"),
+            "the chain must name the host socket that was attached: {body}"
+        );
+        assert!(
+            body.contains("~/.gnupg/S.gpg-agent"),
+            "and where the guest reaches it: {body}"
+        );
+        assert!(
+            body.contains("git-signing"),
+            "the grant's id is its policy-facing identity: {body}"
+        );
+    }
+
     use super::*;
 
     struct FixedClock(u64);
@@ -579,6 +636,32 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "first\nsecond\n",
             "the reused handle appends after the first event"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn record_host_access_attached_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_host_access_attached(
+            "aa123",
+            "calm-finch",
+            "git-signing",
+            "/run/user/501/gnupg/S.gpg-agent.extra",
+            "~/.gnupg/S.gpg-agent",
+            &CLOCK,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
+        assert!(
+            content.contains("\"lns_source\":\"/run/user/501/gnupg/S.gpg-agent.extra\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"lns_target\":\"~/.gnupg/S.gpg-agent\""),
+            "{content}"
         );
     }
 

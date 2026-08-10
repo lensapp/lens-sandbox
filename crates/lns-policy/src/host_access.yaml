@@ -1,0 +1,13 @@
+hostAccess:
+  - id: git-signing
+    name: Git signing identity
+    provides: gitSigning
+    openpgpSocket:
+      locate: !command [gpgconf, --list-dir, agent-extra-socket]
+      target: ~/.gnupg/S.gpg-agent
+    sshSocket:
+      locate: !env SSH_AUTH_SOCK
+      target: ~/.ssh/lns-agent.sock
+    gnupgHome: ~/.gnupg
+    gitConfig: ~/.gitconfig
+    hostGnupgHome: !command [gpgconf, --list-dirs, homedir]

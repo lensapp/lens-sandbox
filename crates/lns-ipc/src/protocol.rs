@@ -285,6 +285,8 @@ pub struct SandboxView {
     #[serde(default)]
     pub connectors: Vec<String>,
     #[serde(default)]
+    pub host_access: Vec<String>,
+    #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
     pub credentials: Vec<SandboxCredential>,
@@ -401,6 +403,10 @@ pub struct RunConfig {
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub binds: Vec<BindMount>,
+    #[serde(default)]
+    pub socket_forwards: Vec<SocketForward>,
+    #[serde(default)]
+    pub host_access: Vec<HostAccessGrant>,
     pub detached: bool,
     #[serde(default)]
     pub auto_remove: bool,
@@ -421,6 +427,8 @@ impl RunConfig {
             published_ports: args.published_ports.clone(),
             volumes: args.volumes.clone(),
             binds: args.binds.clone(),
+            socket_forwards: args.socket_forwards.clone(),
+            host_access: args.host_access.clone(),
             detached: args.detached,
             auto_remove: args.auto_remove,
         }
@@ -447,6 +455,101 @@ pub struct PortPublish {
     pub host_port: u16,
     pub container_port: u16,
     pub protocol: Protocol,
+}
+
+/// One host unix socket the guest may reach, proxied over vsock. The guest creates `guest_target` and every connection to it is relayed to `host_source`; the socket itself is never shared, because virtiofs passes the inode rather than the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketForward {
+    pub id: String,
+    pub host_source: String,
+    /// Absolute, or `~/`-relative to the run-as user's home, which only the guest can resolve.
+    pub guest_target: String,
+}
+
+impl SocketForward {
+    /// Each field reaches a line-oriented guest manifest, so the same chokepoint rules as a bind source apply, plus a ban on the newline that would forge a second entry.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() || self.id.chars().any(cmdline_unsafe_char) {
+            return Err(format!(
+                "invalid socket forward id {:?}: must be non-empty and free of whitespace, quotes, and control characters",
+                self.id
+            ));
+        }
+        validate_bind_source(&self.host_source)
+            .map_err(|e| e.replace("host bind source", "socket forward source"))?;
+        if !self.guest_target.starts_with('/') && !self.guest_target.starts_with("~/") {
+            return Err(format!(
+                "invalid socket forward target {:?}: must be absolute or start with ~/",
+                self.guest_target
+            ));
+        }
+        if self.guest_target.chars().any(cmdline_unsafe_char)
+            || self.guest_target.split('/').any(|seg| seg == "..")
+        {
+            return Err(format!(
+                "invalid socket forward target {:?}: must not contain whitespace, quotes, control characters, or a .. segment",
+                self.guest_target
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A directory the guest creates in the run-as user's home before any projected file lands in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccessDir {
+    pub target: String,
+    pub mode: u32,
+}
+
+/// Bytes the host resolved (a filtered git config, a public keyring) for the guest to write into the run-as user's home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccessFile {
+    pub target: String,
+    pub mode: u32,
+    #[serde(with = "crate::base64_bytes")]
+    pub contents: Vec<u8>,
+}
+
+/// Everything one granted host capability puts in the guest: the directories it needs, the files it projects, and the socket the guest creates for its forward.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccessGrant {
+    pub id: String,
+    #[serde(default)]
+    pub socket_target: Option<String>,
+    #[serde(default)]
+    pub dirs: Vec<HostAccessDir>,
+    #[serde(default)]
+    pub files: Vec<HostAccessFile>,
+}
+
+impl HostAccessGrant {
+    /// Same chokepoint as a socket forward: every target reaches a line-oriented guest manifest, so a newline or a `..` segment must never make it through.
+    pub fn validate(&self) -> Result<(), String> {
+        for target in self
+            .socket_target
+            .iter()
+            .chain(self.dirs.iter().map(|d| &d.target))
+            .chain(self.files.iter().map(|f| &f.target))
+        {
+            validate_guest_target(target)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_guest_target(target: &str) -> Result<(), String> {
+    if !target.starts_with('/') && !target.starts_with("~/") {
+        return Err(format!(
+            "invalid host access target {target:?}: must be absolute or start with ~/"
+        ));
+    }
+    if target.chars().any(cmdline_unsafe_char) || target.split('/').any(|seg| seg == "..") {
+        return Err(format!(
+            "invalid host access target {target:?}: must not contain whitespace, quotes, control characters, or a .. segment"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,6 +595,10 @@ pub struct RunImageArgs {
     pub volumes: Vec<VolumeMount>,
     #[serde(default)]
     pub binds: Vec<BindMount>,
+    #[serde(default)]
+    pub socket_forwards: Vec<SocketForward>,
+    #[serde(default)]
+    pub host_access: Vec<HostAccessGrant>,
     #[serde(default)]
     pub auto_remove: bool,
     /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
@@ -804,6 +911,7 @@ mod tests {
             protocol: Protocol::Tcp,
         };
         let req = Request::RunImage(Box::new(RunImageArgs {
+            host_access: Vec::new(),
             image: Some("prism".into()),
             resolved_image: None,
             name: None,
@@ -827,6 +935,7 @@ mod tests {
             published_ports: vec![mapping],
             volumes: Vec::new(),
             binds: Vec::new(),
+            socket_forwards: Vec::new(),
             auto_remove: false,
             verify_sandbox: false,
             definition: None,
@@ -840,6 +949,8 @@ mod tests {
     #[test]
     fn run_image_args_declarative_launch_settings_survive_postcard_round_trip() {
         let args = RunImageArgs {
+            host_access: Vec::new(),
+            socket_forwards: Vec::new(),
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             name: None,
@@ -969,6 +1080,8 @@ mod tests {
 
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
+            host_access: Vec::new(),
+            socket_forwards: Vec::new(),
             image: Some("some-image:1".into()),
             resolved_image: None,
             name: None,
@@ -1362,6 +1475,160 @@ mod tests {
         assert_eq!(json["layers"], 1);
     }
 
+    fn forward(host_source: &str, guest_target: &str) -> SocketForward {
+        SocketForward {
+            id: "some-access".into(),
+            host_source: host_source.into(),
+            guest_target: guest_target.into(),
+        }
+    }
+
+    fn grant_with(target: &str) -> HostAccessGrant {
+        HostAccessGrant {
+            id: "some-access".into(),
+            socket_target: Some("~/.gnupg/S.gpg-agent".into()),
+            dirs: vec![HostAccessDir {
+                target: "~/.gnupg".into(),
+                mode: 0o700,
+            }],
+            files: vec![HostAccessFile {
+                target: target.into(),
+                mode: 0o600,
+                contents: b"body".to_vec(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_well_formed_grant_validates_every_target_it_carries() {
+        grant_with("~/.gitconfig")
+            .validate()
+            .expect("should validate");
+        grant_with("/etc/lns/config")
+            .validate()
+            .expect("an absolute target is fine");
+    }
+
+    #[test]
+    fn a_grant_target_must_be_rooted() {
+        let err = grant_with("relative/config").validate().unwrap_err();
+        assert!(err.contains("must be absolute or start with ~/"), "{err}");
+    }
+
+    #[test]
+    fn a_grant_target_may_not_escape_the_home_or_forge_a_manifest_line() {
+        for bad in [
+            "~/../escape",
+            "~/ok/../bad",
+            "~/with space",
+            "~/with\nnewline",
+        ] {
+            let err = grant_with(bad).validate().unwrap_err();
+            assert!(err.contains("host access target"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_grant_validates_its_socket_and_directory_targets_too() {
+        let mut socket = grant_with("~/.gitconfig");
+        socket.socket_target = Some("~/../escape".into());
+        assert!(socket.validate().is_err());
+        let mut dir = grant_with("~/.gitconfig");
+        dir.dirs[0].target = "relative".into();
+        assert!(dir.validate().is_err());
+    }
+
+    #[test]
+    fn a_grant_with_no_targets_at_all_validates() {
+        let empty = HostAccessGrant {
+            id: "some-access".into(),
+            socket_target: None,
+            dirs: Vec::new(),
+            files: Vec::new(),
+        };
+        empty.validate().expect("nothing to check is not a failure");
+    }
+
+    #[test]
+    fn projected_bytes_survive_the_json_frame_as_base64() {
+        let file = HostAccessFile {
+            target: "~/.gnupg/pubring.kbx".into(),
+            mode: 0o600,
+            // A keyring is binary and includes bytes JSON cannot carry as text.
+            contents: (0..=255u8).collect(),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(
+            json.contains("\"contents\":\""),
+            "contents must be one base64 string, not a byte list: {json}"
+        );
+        let parsed: HostAccessFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, file);
+    }
+
+    #[test]
+    fn a_frame_whose_contents_are_not_base64_is_refused() {
+        let json = r#"{"target":"~/x","mode":384,"contents":"not base64!"}"#;
+        let parsed: serde_json::Result<HostAccessFile> = serde_json::from_str(json);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn a_well_formed_socket_forward_validates() {
+        forward("/run/user/501/agent.sock", "~/.gnupg/S.gpg-agent")
+            .validate()
+            .expect("should validate");
+        forward("/run/user/501/agent.sock", "/run/lns/agent.sock")
+            .validate()
+            .expect("an absolute target is fine");
+    }
+
+    #[test]
+    fn a_socket_forward_source_must_be_an_absolute_cmdline_safe_path() {
+        for bad in [
+            "relative/agent.sock",
+            "/run/with space.sock",
+            "/run/quote\".sock",
+        ] {
+            let err = forward(bad, "~/.gnupg/S.gpg-agent").validate().unwrap_err();
+            assert!(err.contains("socket forward source"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_socket_forward_target_must_be_rooted_and_carry_no_parent_segment() {
+        for bad in [
+            "relative/sock",
+            "~/../escape/sock",
+            "~/ok/../bad",
+            "~/with space",
+            "~/with\nnewline",
+        ] {
+            let err = forward("/run/agent.sock", bad).validate().unwrap_err();
+            assert!(err.contains("socket forward target"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_socket_forward_id_must_be_non_empty_and_cmdline_safe() {
+        for bad in ["", "two words", "quote\""] {
+            let mut f = forward("/run/agent.sock", "~/x");
+            f.id = bad.into();
+            let err = f.validate().unwrap_err();
+            assert!(err.contains("socket forward id"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn socket_forwards_default_to_empty_so_an_older_cli_still_deserializes() {
+        let json = serde_json::to_value(sample_run_args()).unwrap();
+        let mut object = json.as_object().unwrap().clone();
+        object.remove("socket_forwards");
+        let parsed: RunImageArgs =
+            serde_json::from_value(serde_json::Value::Object(object)).unwrap();
+        assert!(parsed.socket_forwards.is_empty());
+    }
+
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
@@ -1398,6 +1665,7 @@ mod tests {
                 owner: SandboxFilesetOwner::Workload,
             }],
             connectors: Vec::new(),
+            host_access: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
             credentials: vec![SandboxCredential {
                 name: "some-provider".into(),

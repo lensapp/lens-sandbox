@@ -255,6 +255,17 @@ async fn orchestrate(
         )?;
     }
 
+    for forward in &args.socket_forwards {
+        crate::audit::record_host_access_attached(
+            &run_id,
+            &microvm,
+            &forward.id,
+            &forward.host_source,
+            &forward.guest_target,
+            &crate::oauth::RealClock,
+        )?;
+    }
+
     let ensured_tools = if tool_requests.is_empty() {
         None
     } else {
@@ -297,6 +308,13 @@ async fn orchestrate(
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
     fileset_specs.extend(workload_ca_spec);
+    let host_socket_plan = crate::host_access::plan(&args.socket_forwards);
+    fileset_specs.extend(crate::host_access::staged_specs(
+        &args.host_access,
+        &host_socket_plan,
+        // `env`, not `args.env`: a definition's spec.env is merged in above, and that is what the supervisor composes the workload's HOME from.
+        crate::workload_env::declared_home(&env),
+    ));
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,
@@ -402,10 +420,7 @@ async fn orchestrate(
         binds: bind_attachments,
         workload_uid: run_as.uid,
         workload_gid: vm::host_known_workload_gid(&run_as),
-        vsock: session.as_ref().map(|s| vm::VsockChannel {
-            port: crate::relay::VSOCK_PORT,
-            fd_tx: s.relay.fd_tx.clone(),
-        }),
+        vsock: guest_vsock_channels(session.as_ref(), &host_socket_plan),
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
@@ -542,6 +557,29 @@ async fn orchestrate(
 }
 
 /// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. Returns the ids whose sign-in the user completed this launch — that consent becomes the workload's grant, so the slot arms now and the next run skips the sign-in. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
+/// The relay channel plus one per host-socket forward, each with its own accept-many proxy to the host socket. The relay supersedes its connection by design; a forward must not, so it gets a channel of its own rather than sharing.
+fn guest_vsock_channels(
+    session: Option<&crate::supervisor::SupervisorSession>,
+    plan: &[crate::host_access::HostSocketSpec],
+) -> Vec<vm::VsockChannel> {
+    let mut channels: Vec<vm::VsockChannel> = session
+        .map(|s| vm::VsockChannel {
+            port: crate::relay::VSOCK_PORT,
+            fd_tx: s.relay.fd_tx.clone(),
+        })
+        .into_iter()
+        .collect();
+    for spec in plan {
+        let (fd_tx, fd_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::host_access::real::serve(spec.clone(), fd_rx);
+        channels.push(vm::VsockChannel {
+            port: spec.port,
+            fd_tx,
+        });
+    }
+    channels
+}
+
 async fn gate_declared_sign_ins(
     credentials: &[lns_artifact::spec::CredentialSlot],
     frame_tx: &Sender<WireFrame>,

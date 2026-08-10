@@ -406,5 +406,7 @@ re-approve them.
   policy and follow the same allow / deny / ask model.
 - [Connectors](connectors.md) — connecting a connector records it under
   `connectors:` and allows the routes it declares.
+- [Host access](running-workloads.md#host-access) — granting a host capability
+  records it under `hostAccess:`; the per-machine decline stays outside this file.
 - [Running workloads](running-workloads.md) — `--policy` and the run summary.
 - [CLI reference](cli-reference.md) — the full `lns policy` flag list.

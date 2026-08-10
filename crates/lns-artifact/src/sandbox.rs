@@ -119,6 +119,8 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub connectors: Vec<String>,
     #[serde(default)]
+    pub host_access: Vec<String>,
+    #[serde(default)]
     pub credentials: Vec<CredentialSlot>,
     #[serde(default)]
     pub tools: Vec<String>,
@@ -230,6 +232,15 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     for connector in &doc.spec.connectors {
         if !spec::is_valid_name(connector) {
             bail!("invalid connector id {connector:?}");
+        }
+    }
+    let mut declared_host_access = BTreeSet::new();
+    for id in &doc.spec.host_access {
+        if !spec::is_valid_name(id) {
+            bail!("invalid host access id {id:?}");
+        }
+        if !declared_host_access.insert(id) {
+            bail!("duplicate host access {id:?}");
         }
     }
     let mut slot_connectors = BTreeSet::new();
@@ -1360,6 +1371,42 @@ mod tests {
         let err = parse(&def_json(r#"{"image":"x:1","connectors":["Bad_Id"]}"#)).unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid connector id"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_keeps_declared_host_access_ids_in_order() {
+        let doc = parse(&def_json(
+            r#"{"image":"x:1","hostAccess":["some-access","other-access"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(doc.spec.host_access, ["some-access", "other-access"]);
+    }
+
+    #[test]
+    fn parse_defaults_host_access_to_empty_when_absent() {
+        let doc = parse(&def_json(r#"{"image":"x:1"}"#)).unwrap();
+        assert!(doc.spec.host_access.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_an_invalid_host_access_id() {
+        let err = parse(&def_json(r#"{"image":"x:1","hostAccess":["Bad_Id"]}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid host access id"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_duplicate_host_access_id() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","hostAccess":["some-access","some-access"]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate host access"),
             "got: {err:#}"
         );
     }

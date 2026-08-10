@@ -221,6 +221,12 @@ fn is_internal(key: &str) -> bool {
     key.starts_with("LENS_SANDBOX_")
 }
 
+/// The declared HOME, but only when it is safe to put in a guest instruction: `spec.env` values are author-controlled and reach a line-oriented manifest, so a newline would let a definition forge an instruction. Returning the validated value here keeps that check off every caller.
+pub fn declared_home(user_env: &[String]) -> Option<&str> {
+    declared(user_env, "HOME")
+        .filter(|home| home.starts_with('/') && lns_ipc::validate_guest_target(home).is_ok())
+}
+
 fn declared<'a>(user_env: &'a [String], key: &str) -> Option<&'a str> {
     let prefix = format!("{key}=");
     user_env

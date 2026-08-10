@@ -125,12 +125,56 @@ fn resolve_host_binds(
     )
 }
 
+/// Resolves every host capability this run asks for, records a fresh grant in the directory's policy, and refuses the launch when the host's own git config requires signing that cannot be delivered.
+fn resolve_host_access(
+    args: &RunArgs,
+    policy_path: &std::path::Path,
+    interactive: bool,
+) -> Result<Vec<crate::run::host_access::HostAccessOutcome>> {
+    let granted = lns_policy::Policy::load_or_default(policy_path)
+        .map(|policy| policy.host_access)
+        .unwrap_or_default();
+    let mut declared = args.declared_host_access.clone();
+    declared.extend(args.host_access.iter().cloned());
+    if declared.is_empty() && granted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let facts = crate::run::host_access::RealHostFacts;
+    let secrets = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
+        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
+    );
+    let verdicts = lns_policy::host_access_decisions::JsonFileHostAccessDecisionStore::new(
+        lns_policy::host_access_decisions::default_host_access_decisions_path(),
+    );
+    let ports = crate::run::host_access::HostAccessPorts {
+        facts: &facts,
+        secrets: &secrets,
+        verdicts: &verdicts,
+    };
+    let stdin = std::io::stdin();
+    let mut locked = stdin.lock();
+    let mut stderr = std::io::stderr();
+    let mut console = crate::run::host_access::Console {
+        input: &mut locked,
+        output: &mut stderr,
+    };
+    let resolution = crate::run::host_access::resolve(
+        &crate::run::host_access::HostAccessRequest { declared, granted },
+        &ports,
+        interactive,
+        &mut console,
+    )?;
+    crate::run::host_access::record_grants(policy_path, &resolution.newly_granted)?;
+    Ok(resolution.outcomes)
+}
+
 #[derive(Debug)]
 struct PublishedTarget {
     image: String,
     defaults: crate::run::declarative::Defaults,
     filesets: Vec<(String, String, String)>,
     tools: Vec<String>,
+    host_access: Vec<String>,
 }
 
 fn published_target(
@@ -150,6 +194,7 @@ fn published_target(
                 defaults: crate::run::declarative::Defaults::from_view(&view),
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
                 tools: crate::run::summary::tools_from_view(&view),
+                host_access: view.host_access.clone(),
             })
         }
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
@@ -256,6 +301,11 @@ pub async fn run_image(
         (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
+    args.declared_host_access = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => def.spec.host_access.clone(),
+        (_, Some(published)) => published.host_access.clone(),
+        _ => Vec::new(),
+    };
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
@@ -290,6 +340,13 @@ pub async fn run_image(
             &mut input,
             &mut std::io::stderr(),
         )?;
+    }
+    let host_access = resolve_host_access(&args, &resolved_policy, interactive)?;
+    if !quiet {
+        let disclosure = crate::run::summary::format_host_access(&host_access);
+        if !disclosure.is_empty() {
+            eprint!("{disclosure}");
+        }
     }
     let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
     if !quiet {
@@ -341,6 +398,8 @@ pub async fn run_image(
         published_ports: args.publish,
         volumes,
         binds,
+        socket_forwards: crate::run::host_access::to_wire(&host_access),
+        host_access: crate::run::host_access::to_wire_grants(&host_access),
         auto_remove: args.auto_remove,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),
@@ -1153,6 +1212,7 @@ mod tests {
                     owner: lns_ipc::SandboxFilesetOwner::Workload,
                 }],
                 connectors: Vec::new(),
+                host_access: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
                 tools: Vec::new(),
@@ -1208,6 +1268,7 @@ mod tests {
                 ports: Vec::new(),
                 filesets: Vec::new(),
                 connectors: Vec::new(),
+                host_access: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
                 tools: Vec::new(),

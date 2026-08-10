@@ -49,6 +49,8 @@ pub mod device_type {
 
 pub mod file_type {
     pub const FOLDER: u8 = 2;
+    /// OCSF Local Socket (5); 6 is Named Pipe, which a forwarded agent is not.
+    pub const LOCAL_SOCKET: u8 = 5;
 }
 
 pub fn http_method_activity(method: &str) -> u16 {

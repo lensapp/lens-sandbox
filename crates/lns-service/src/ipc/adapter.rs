@@ -509,6 +509,11 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         return Ok(());
     }
 
+    if let Err(message) = super::validate_host_access(&args) {
+        let _ = write_error(&mut stream, message).await;
+        return Ok(());
+    }
+
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
     let (detach_tx, detach_rx) = oneshot::channel::<()>();

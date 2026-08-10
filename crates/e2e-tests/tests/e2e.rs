@@ -27,6 +27,10 @@ pub struct E2eWorld {
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,
     pub project_connectors: Vec<String>,
+    pub project_host_access: Vec<String>,
+    /// A scenario-spawned gpg-agent standing in for the operator's own; `--daemon` forks, so this Child is the exited parent and teardown kills the daemon through its home instead.
+    pub host_agent: Option<std::process::Child>,
+    pub host_gnupg_home: Option<PathBuf>,
     pub project_command: Option<String>,
     pub project_env: Vec<(String, String)>,
     /// Credential slots the project definition declares, as (connector id, env target, required).
@@ -86,6 +90,16 @@ impl E2eWorld {
 
 impl Drop for E2eWorld {
     fn drop(&mut self) {
+        if let Some(agent) = &mut self.host_agent {
+            let _ = agent.wait();
+        }
+        if let Some(home) = &self.host_gnupg_home {
+            // The daemon outlived its spawning parent, so ask gpgconf to stop it; `--kill` works on hosts where `--launch` does not.
+            let _ = std::process::Command::new("gpgconf")
+                .args(["--kill", "gpg-agent"])
+                .env("GNUPGHOME", home)
+                .output();
+        }
         self.kill_detached_runs();
         self.remove_created_volumes();
         self.shutdown_service();
@@ -109,7 +123,7 @@ async fn main() {
         .filter_run_and_exit(features_dir, move |feat, _, sc| {
             let tagged =
                 |tag: &str| feat.tags.iter().any(|t| t == tag) || sc.tags.iter().any(|t| t == tag);
-            if tagged("gui") {
+            if tagged("gui") || tagged("todo") {
                 return false;
             }
             if let Some(needle) = &only_feature

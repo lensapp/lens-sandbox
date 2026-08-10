@@ -50,6 +50,7 @@ pub struct BehaviourWorld {
     /// Exact pins the scripted index answers "not listed" for at push verification.
     pub unlisted_pins: std::collections::HashSet<String>,
     pub host_bind: HostBindRig,
+    pub host_access: HostAccessRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
@@ -57,6 +58,41 @@ pub struct BehaviourWorld {
 }
 
 use lns_policy::host_bind_decisions::SecretDisposition;
+
+/// Scripted host facts plus recorded verdicts for driving host-access resolution.
+#[derive(Debug, Default)]
+pub struct HostAccessRig {
+    /// `git config --list -z` settings as (key, value) pairs, in the order git would emit them.
+    pub git_settings: Vec<(String, String)>,
+    /// True when the host has no git at all, so the config command fails.
+    pub no_git: bool,
+    pub openpgp_socket: Option<String>,
+    /// Socket paths a listener actually holds; a located path absent from this list exists only on paper.
+    pub live_sockets: Vec<String>,
+    pub gnupg_home: Option<String>,
+    pub keyring: Option<Vec<u8>>,
+    pub trustdb: Option<Vec<u8>>,
+    pub ssh_socket: Option<String>,
+    pub declared: Vec<String>,
+    pub granted: Vec<String>,
+    pub card_answer: Option<String>,
+    pub secret_answer: Option<String>,
+    pub secret_decisions: std::collections::HashMap<String, SecretDisposition>,
+    pub declines: Vec<String>,
+    pub outcome: Option<HostAccessOutcome>,
+    /// Exit code plus captured output of the last `lns host-access` invocation.
+    pub cli: Option<(i32, String)>,
+}
+
+#[derive(Debug)]
+pub struct HostAccessOutcome {
+    pub result: Result<Vec<lns_cli::run::host_access::HostAccessOutcome>, String>,
+    pub prompt: String,
+    pub persisted_secrets: std::collections::HashMap<String, SecretDisposition>,
+    pub persisted_declines: Vec<String>,
+    pub summary: String,
+    pub policy_host_access: Vec<String>,
+}
 
 /// Scripted host directory + recorded decisions for driving `resolve_binds`.
 #[derive(Debug, Default)]
