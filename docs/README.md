@@ -37,6 +37,16 @@ You drive everything through one binary: the `lns` CLI.
 ## Reference
 
 - **[CLI reference](cli-reference.md)** — every command, subcommand, and flag.
+- **[Sandbox definition specification](sandbox-spec.md)** — the normative
+  `lns.run/v1` document format: every field, every rule, and the three kinds a
+  run is assembled from.
+
+### Today and the target
+
+The guides above describe what `lns` does today. The specification describes the
+**target** format, which the code does not implement in full yet — the product is
+pre-1.0, and each gap closes as a breaking change. Read a guide to use the tool;
+read the specification to know what the format is becoming.
 
 ## How it fits together
 
