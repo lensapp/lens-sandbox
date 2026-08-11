@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use lns_policy::matching::split_destination;
+use lns_policy::matching::{destination_covers, split_destination};
 use lns_policy::{NetworkPolicy, Policy, RouteRule, TcpEgressRule, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,24 +104,30 @@ fn allowed_by_every_ceiling<R>(
         .all(|ceiling| live_rules(table(ceiling), closes).any(|permitted| permits(permitted, rule)))
 }
 
-/// Whether `permitted` covers `rule`: identical apart from binary scoping and the human-readable note neither layer grants anything by, and scoped no tighter than `rule` — a rule that only narrows a ceiling's grant to fewer callers grants nothing the ceiling didn't.
+/// Whether `permitted` covers `rule`: it names every destination `rule` does, grants them on the same terms, and is scoped no tighter — a rule that only narrows a ceiling's grant to fewer hosts or fewer callers grants nothing the ceiling didn't.
 fn permits(permitted: &RouteRule, rule: &RouteRule) -> bool {
     let widened = RouteRule {
+        match_pattern: permitted.match_pattern.clone(),
         binaries: permitted.binaries.clone(),
         description: permitted.description.clone(),
         ..rule.clone()
     };
-    widened == *permitted && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
+    widened == *permitted
+        && destination_covers(&permitted.match_pattern, &rule.match_pattern)
+        && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
 }
 
 /// The `egress.tcp` counterpart of [`permits`], scoping included: a ceiling that splices a destination for every caller also covers a rule splicing it for some of them.
 fn tcp_permits(permitted: &TcpEgressRule, rule: &TcpEgressRule) -> bool {
     let widened = TcpEgressRule {
+        match_pattern: permitted.match_pattern.clone(),
         binaries: permitted.binaries.clone(),
         description: permitted.description.clone(),
         ..rule.clone()
     };
-    widened == *permitted && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
+    widened == *permitted
+        && destination_covers(&permitted.match_pattern, &rule.match_pattern)
+        && scope_within(rule.binaries.as_deref(), permitted.binaries.as_deref())
 }
 
 fn scope_within(rule: Option<&[String]>, permitted: Option<&[String]>) -> bool {
@@ -541,6 +547,63 @@ mod tests {
     }
 
     #[test]
+    fn a_ceiling_authorizes_an_allow_its_own_wildcard_already_covers() {
+        let mut ceiling = allow("*.example.test");
+        ceiling.add_rule(RouteRule::deny_host("*"));
+
+        let merged = merge_effective(Some(&ceiling), &allow("api.example.test"));
+
+        assert!(
+            merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.example.test"
+                    && rule.verdict == Verdict::Allow),
+            "the ceiling already permits every host under *.example.test, so approving one of them must not be dropped: {:?}",
+            merged.network.egress.http
+        );
+    }
+
+    #[test]
+    fn a_ceiling_still_refuses_an_allow_reaching_past_what_it_covers() {
+        let mut ceiling = allow("*.example.test");
+        ceiling.add_rule(RouteRule::deny_host("*"));
+
+        let merged = merge_effective(Some(&ceiling), &allow("api.other.test"));
+
+        assert!(
+            !merged.network.egress.http.iter().any(
+                |rule| rule.match_pattern == "api.other.test" && rule.verdict == Verdict::Allow
+            ),
+            "a host the ceiling never named stays clamped"
+        );
+    }
+
+    #[test]
+    fn a_ceilings_wildcard_does_not_authorize_a_wider_treatment_of_the_same_hosts() {
+        let mut ceiling = Policy::default();
+        ceiling.add_rule(RouteRule {
+            tls_terminate: true,
+            ..RouteRule::allow_host("*.example.test")
+        });
+        ceiling.add_rule(RouteRule::deny_host("*"));
+
+        let merged = merge_effective(Some(&ceiling), &allow("api.example.test"));
+
+        assert!(
+            !merged
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.example.test"),
+            "the ceiling grants those hosts only under inspection; an uninspected allow of one is not covered"
+        );
+    }
+
+    #[test]
     fn a_deny_by_default_layer_clamps_the_other_layers_tcp_allow() {
         let mut ceiling = Policy::default();
         ceiling.add_rule(RouteRule::deny_host("*"));
@@ -548,6 +611,25 @@ mod tests {
         assert!(
             merged.network.egress.tcp.is_empty(),
             "a locked-down layer names every destination it permits; the user cannot widen it"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_authorizes_a_raw_splice_inside_a_range_it_already_splices() {
+        let mut ceiling = tcp_allow("10.0.0.0/8:5432");
+        ceiling.add_rule(RouteRule::deny_host("*"));
+
+        let merged = merge_effective(Some(&ceiling), &tcp_allow("10.0.0.5:5432"));
+
+        assert!(
+            merged
+                .network
+                .egress
+                .tcp
+                .iter()
+                .any(|rule| rule.match_pattern == "10.0.0.5:5432"),
+            "the ceiling already splices every address in 10.0.0.0/8 on that port, so naming one of them adds no reach: {:?}",
+            merged.network.egress.tcp
         );
     }
 
