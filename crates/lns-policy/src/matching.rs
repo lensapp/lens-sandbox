@@ -161,7 +161,8 @@ pub(crate) fn port_shaped(tail: &str) -> bool {
     !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn destination_covers(existing: &str, new: &str) -> bool {
+/// Whether every destination `new` names is also named by `existing` — the same reading the guest gate's first-match scan gives them.
+pub fn destination_covers(existing: &str, new: &str) -> bool {
     let (existing, new) = (classify(existing), classify(new));
     port_covers(&existing.port, &new.port) && hosts_cover(&existing.hosts, &new.hosts)
 }
