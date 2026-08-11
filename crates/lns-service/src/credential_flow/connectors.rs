@@ -132,6 +132,8 @@ pub fn resolve_applied_with_slots(
     let mut base = policy.clone();
     base.connectors.retain(|id| !slot_ids.contains(id.as_str()));
     let mut out = resolve_applied_connectors(&base, catalog);
+    // `base` drops the slot's id so its env remap cannot double-seed a provider, but the reach a connect earned is not the slot's to withdraw.
+    out.routes = applied_connector_routes(&policy.connectors, catalog);
     let ceiling_denies = crate::artifact::policy::is_closed(policy);
     for slot in slots {
         let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
@@ -141,8 +143,9 @@ pub fn resolve_applied_with_slots(
             def.env_var = slot.env.clone();
             out.providers.push(DefProvider::new(def));
         }
-        // A slot is artifact-declared, so its route must not widen the user's lockdown.
-        if !ceiling_denies {
+        // A slot is artifact-declared, so its route must not widen the user's lockdown — a connector connected here already carries its own.
+        let connected_here = policy.connectors.contains(&slot.name);
+        if !ceiling_denies && !connected_here {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));
         }
@@ -1132,6 +1135,56 @@ mod tests {
             "the slot and the declared id must not double-seed"
         );
         assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
+    }
+
+    /// A deny-by-default directory: `is_closed` reads the http table, so the catch-all deny is what makes this policy a ceiling.
+    fn closed_policy_applying(ids: &[&str]) -> Policy {
+        let mut policy = policy_applying(ids);
+        policy.add_rule(lns_policy::RouteRule::deny_host("*"));
+        policy
+    }
+
+    #[test]
+    fn a_slot_does_not_withdraw_the_reach_the_users_own_connect_earned() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_slots(
+            &closed_policy_applying(&["some-provider"]),
+            &[slot("some-provider", "PROVIDER_KEY", false)],
+            &catalog,
+        );
+        assert_eq!(
+            out.routes.len(),
+            1,
+            "the connector stays connected, so declaring a slot for it must not silently stop it working"
+        );
+        assert_eq!(out.routes[0].match_pattern, "api.example.test");
+        assert_eq!(
+            out.providers[0].env_var(),
+            "PROVIDER_KEY",
+            "the slot's env remap still wins"
+        );
+    }
+
+    #[test]
+    fn a_slot_alone_still_cannot_widen_a_locked_down_directory() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_slots(
+            &closed_policy_applying(&[]),
+            &[slot("some-provider", "SOME_TOKEN", false)],
+            &catalog,
+        );
+        assert!(
+            out.routes.is_empty(),
+            "an artifact-declared slot the user never connected must not open a closed policy"
+        );
     }
 
     #[test]
