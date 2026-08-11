@@ -48,10 +48,9 @@ Decisions are made interactively, at either of two moments:
 - **Reactively** — the first request that carries a placeholder pauses for an
   approval, the same allow / deny / ask flow as [network policy](policy.md).
 - **Proactively** — `lns connector connect <id>` raises the same card in the
-  approval window before any run, which is how you bind a credential a sandbox
-  definition **requires**: a required slot (`spec.credentials` with
-  `required: true`) with no decision on your machine refuses the launch and
-  names this command as the fix. A denied credential refuses distinctly.
+  approval window before any run, which is how you bind a credential ahead of
+  the workload that needs it. A connector connected this way supplies a declared
+  credential (`spec.credentials`) whose domains it claims.
 
 Either way you choose to use the value Lens Sandbox detects on the host, store a
 specific value at the boundary, or deny (requests carrying the placeholder then

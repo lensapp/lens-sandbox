@@ -64,17 +64,20 @@ A connector reaches a project's workloads in any of three ways:
   sandbox from spending a bound credential or opening a route behind your back.
   An id the machine's catalog doesn't know refuses the launch and points at
   `lns connector add`.
-- **Required as a credential slot.** A definition's `spec.credentials` entry
-  names a connector, the env var it is injected as (remapping the catalog
-  default), and whether the workload requires it — the explicit way a sandbox
-  insists on a credential. A bound slot is injected under the slot's env name
-  once this workload has been [granted](credentials.md#workload-grants) the
-  connector; until then it is offered on first use like any other.
-  A **required** slot with no value bound on the machine refuses the launch
-  before any microVM boots — naming the credential, its injection target, and
-  the `lns connector connect` fix — and a credential you've denied refuses
-  distinctly. An optional slot runs reactively. A required `oauth`-kind slot
-  blocks on the sign-in instead, and completing that sign-in is itself the
+- **Asked for by a declared credential.** A definition's `spec.credentials`
+  entry states the whole injection contract itself — the variable the workload
+  reads, the placeholder it holds, and the domains the real value may travel to
+  — and names no connector. A connector that claims one of those domains
+  supplies the value: it is injected under the *declared* variable, with the
+  *declared* placeholder, once this workload has been
+  [granted](credentials.md#workload-grants) it; until then it is offered on
+  first use like any other. With no connector claiming the domain the
+  declaration still works — the workload holds the placeholder and the first
+  request asks you for a value. A connector supplies one declaration, since it
+  holds one value: a second entry naming the same domain asks you for its own.
+  When the supplying connector is `oauth`-kind and holds no sign-in, the launch
+  blocks on that sign-in before any microVM boots, and completing it is itself
+  the
   [grant](credentials.md#workload-grants) — the workload starts armed rather
   than asking you twice.
 - **Connected to the directory.** `lns connector connect` binds the
@@ -110,11 +113,12 @@ of any one workload, so the value itself arms only where this workload holds a
 than inheriting your approval. A **declared** id from a sandbox definition
 seeds its placeholder but never arms on its own; it is offered reactively on
 first use, so an untrusted published sandbox can't open a route or spend a
-bound credential without your say-so. A **required credential
-slot** is the exception a sandbox uses to insist on a credential — it refuses
-the launch when unbound (or blocks on the sign-in for an `oauth` slot), so the
-workload never starts half-provisioned. A new connector reaches a workload
-only at launch, so relaunch a running sandbox to pick it up.
+bound credential without your say-so. A connector supplying a declared
+credential is the one case that can hold the launch: when it signs in with
+`oauth` and this machine holds no sign-in, the run blocks on that sign-in
+rather than starting half-provisioned. A new
+connector reaches a workload only at launch, so relaunch a running sandbox to
+pick it up.
 
 ## The catalog file
 
