@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const API_VERSION: &str = "lens.dev/v1alpha1";
@@ -55,7 +55,7 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub name: String,
@@ -63,7 +63,7 @@ pub struct Metadata {
     pub labels: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
     pub path: String,
@@ -71,14 +71,14 @@ pub struct Mount {
     pub read_only: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Quantity {
     Int(i64),
     Text(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
     #[serde(default)]
@@ -87,7 +87,7 @@ pub struct Resources {
     pub memory: Option<Quantity>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Port {
     #[serde(default)]

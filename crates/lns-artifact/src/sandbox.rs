@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use lns_policy::NetworkPolicy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::spec::{self, Metadata, Port, Resources};
@@ -40,14 +40,14 @@ pub struct Definition {
     pub spec: SandboxSpec,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VolumeType {
     Bind,
     Volume,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volume {
     #[serde(rename = "type", default)]
@@ -93,7 +93,7 @@ impl Volume {
 }
 
 /// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the connector ids it needs.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpec {
     #[serde(default)]
@@ -128,7 +128,7 @@ pub struct SandboxSpec {
 }
 
 /// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesetEntry {
     #[serde(default)]
@@ -149,7 +149,7 @@ pub struct FilesetEntry {
 }
 
 /// Who owns the materialized files in the guest: the run-as workload user (so the workload can rewrite its own seeded state), or root (pinned inputs the workload must not touch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum FilesetOwner {
     #[default]
