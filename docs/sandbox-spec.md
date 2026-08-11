@@ -921,7 +921,7 @@ injections:
 | Field | Type | Rules |
 |---|---|---|
 | `envVar` | string | REQUIRED. The variable the workload sees. |
-| `placeholder` | string | REQUIRED. The literal value the workload reads. MUST self-identify as fake — it contains `placeholder` or `lns`, case-insensitively. |
+| `placeholder` | string | REQUIRED. The literal value the workload reads. MUST self-identify as fake — it contains `placeholder` or `lns`, case-insensitively — and MUST be at least 16 characters, so a stream is unlikely to carry the marker by accident. |
 | `injections` | list | optional. Where the real value replaces the placeholder, host by host. |
 | `injections[].kind` | string | REQUIRED. See the two families below. |
 | `injections[].domain` | string | REQUIRED. The destination this injection applies to, port included for a raw stream. |
@@ -1062,8 +1062,9 @@ Offline validation (`lns sandbox validate`, and every load path including
   `http` entry declaring `rules` terminates TLS; every `binaries` filter is
   non-empty and names kernel-resolvable paths.
 - **credentials**: every `envVar` is a legal environment-variable name; every
-  `placeholder` self-identifies as fake; every `injections[].domain` is set, and
-  `header` appears only on `api_key_header`; no two entries share an `envVar`.
+  `placeholder` self-identifies as fake and is at least 16 characters; every
+  `injections[].domain` is set, and `header` appears only on `api_key_header`;
+  no two entries share an `envVar`.
 - **tools**: every entry parses as portable `name@version`; one entry per name.
 - **volumes**: each `target` is a legal mount path outside `/.lens`; the
   `type`/`source`/`name` combination is one of the three legal shapes; volume
@@ -1074,7 +1075,7 @@ Offline validation (`lns sandbox validate`, and every load path including
 - **ports**: `container` and `host` in range and each unique.
 - **Connector**: at least one method; each method carries the block its
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
-  placeholder self-identifies as fake.
+  placeholder self-identifies as fake and is at least 16 characters.
 - **Mixin**: no `image`, `command`, `workdir`, `user`, or `resources`; every
   reference in
   a document's `mixins` is digest-pinned.
