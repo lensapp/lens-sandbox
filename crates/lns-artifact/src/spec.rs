@@ -7,15 +7,17 @@ pub const API_VERSION: &str = "lens.dev/v1alpha1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Sandbox,
+    Mixin,
     FileSet,
 }
 
-const ALL_KINDS: [Kind; 2] = [Kind::Sandbox, Kind::FileSet];
+const ALL_KINDS: [Kind; 3] = [Kind::Sandbox, Kind::Mixin, Kind::FileSet];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Sandbox => "Sandbox",
+            Kind::Mixin => "Mixin",
             Kind::FileSet => "FileSet",
         }
     }
@@ -23,6 +25,7 @@ impl Kind {
     pub fn family(self) -> &'static str {
         match self {
             Kind::Sandbox => "sandbox",
+            Kind::Mixin => "mixin",
             Kind::FileSet => "fileset",
         }
     }
@@ -211,20 +214,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kind_maps_family_and_media_types() {
-        assert_eq!(Kind::Sandbox.family(), "sandbox");
-        assert_eq!(Kind::Sandbox.as_str(), "Sandbox");
-        assert_eq!(
-            Kind::Sandbox.artifact_type(),
-            "application/vnd.lens.sandbox.v1+json"
-        );
-        assert_eq!(
-            Kind::Sandbox.config_media_type(),
-            "application/vnd.lens.sandbox.config.v1+json"
-        );
-        for kind in ALL_KINDS {
-            let _ = kind.as_str();
-            let _ = kind.family();
+    fn every_kind_carries_the_media_types_the_specification_names() {
+        for (kind, name, artifact_type, config_media_type) in [
+            (
+                Kind::Sandbox,
+                "Sandbox",
+                "application/vnd.lens.sandbox.v1+json",
+                "application/vnd.lens.sandbox.config.v1+json",
+            ),
+            (
+                Kind::Mixin,
+                "Mixin",
+                "application/vnd.lens.mixin.v1+json",
+                "application/vnd.lens.mixin.config.v1+json",
+            ),
+            (
+                Kind::FileSet,
+                "FileSet",
+                "application/vnd.lens.fileset.v1+json",
+                "application/vnd.lens.fileset.config.v1+json",
+            ),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.artifact_type(), artifact_type);
+            assert_eq!(kind.config_media_type(), config_media_type);
         }
     }
 

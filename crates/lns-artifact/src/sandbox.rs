@@ -116,6 +116,8 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
+    pub mixins: Vec<String>,
+    #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
     pub volumes: Vec<Volume>,
@@ -170,6 +172,57 @@ struct Doc {
 
 /// Parse and cross-field-validate a `lns.run/v1` sandbox definition, offline.
 pub fn parse(config_json: &[u8]) -> Result<Definition> {
+    let doc = parse_of_kind(config_json, spec::Kind::Sandbox)?;
+    if doc.spec.image.trim().is_empty() {
+        bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
+    }
+    Ok(doc)
+}
+
+/// Parse and cross-field-validate a `lns.run/v1` mixin, offline. Its blocks follow the same rules as a sandbox's; what differs is that the five describing one launch are forbidden, and there is no image to require.
+pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
+    parse_of_kind(config_json, spec::Kind::Mixin)
+}
+
+/// A remote mixin reference must be digest-pinned, because a published document has to resolve to the same thing for everyone.
+fn validate_mixin_reference(reference: &str) -> Result<()> {
+    if reference.trim().is_empty() {
+        bail!("a mixin entry must name a directory or an OCI reference");
+    }
+    let is_local_directory = reference == "."
+        || reference == ".."
+        || reference.starts_with("./")
+        || reference.starts_with("../")
+        || reference.starts_with('/');
+    if !is_local_directory && !spec::is_digest_pinned_image(reference) {
+        bail!(
+            "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local directory starts with `./`, `../` or `/`"
+        );
+    }
+    Ok(())
+}
+
+/// The blocks a mixin may not carry: the five that describe one launch, which the sandbox owns, plus the connector list — how a credential is obtained is decided per machine, never by a document that travels with a workload.
+fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
+    let launch_blocks = [
+        (!spec.image.trim().is_empty(), "image"),
+        (spec.command.is_some(), "command"),
+        (spec.workdir.is_some(), "workdir"),
+        (spec.user.is_some(), "user"),
+        (spec.resources.is_some(), "resources"),
+    ];
+    if let Some((_, block)) = launch_blocks.iter().find(|(declared, _)| *declared) {
+        bail!("a mixin must not declare {block}: it describes one launch, and the sandbox owns it");
+    }
+    if !spec.connectors.is_empty() {
+        bail!(
+            "a mixin must not name a connector: which method supplies a credential is decided per machine"
+        );
+    }
+    Ok(())
+}
+
+fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     let doc: Doc = serde_json::from_slice(config_json).context("parsing sandbox definition")?;
     if doc.api_version != API_VERSION {
         bail!(
@@ -177,9 +230,10 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             doc.api_version
         );
     }
-    if doc.kind != KIND {
+    if doc.kind != kind.as_str() {
         bail!(
-            "expected kind {KIND} but definition declares {:?}",
+            "expected kind {} but definition declares {:?}",
+            kind.as_str(),
             doc.kind
         );
     }
@@ -190,8 +244,8 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
         metadata: doc.metadata,
         spec: serde_json::from_value(doc.spec).context("parsing sandbox spec")?,
     };
-    if doc.spec.image.trim().is_empty() {
-        bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
+    if kind == spec::Kind::Mixin {
+        refuse_blocks_a_mixin_cannot_carry(&doc.spec)?;
     }
     for key in doc.spec.env.keys() {
         if !lns_spec::is_legal_env_var_name(key) {
@@ -239,6 +293,9 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     }
     lns_spec::credential::validate_all(&doc.spec.credentials)
         .map_err(|problem| anyhow!(problem))?;
+    for reference in &doc.spec.mixins {
+        validate_mixin_reference(reference)?;
+    }
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
@@ -585,9 +642,17 @@ fn validate_volume_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Schema + cross-field guards for a sandbox definition.
+/// Parse whichever `lns.run/v1` document this is, so every verb answers for the kind the file declares rather than the one it expected.
+pub fn parse_document(config_json: &[u8]) -> Result<Definition> {
+    if spec::read_kind(config_json).ok() == Some(spec::Kind::Mixin) {
+        return parse_mixin(config_json);
+    }
+    parse(config_json)
+}
+
+/// Schema + cross-field guards for whichever `lns.run/v1` document this is.
 pub fn validate(config_json: &[u8]) -> Result<()> {
-    parse(config_json).map(|_| ())
+    parse_document(config_json).map(|_| ())
 }
 
 #[cfg(test)]
@@ -599,6 +664,144 @@ mod tests {
             r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
         )
         .into_bytes()
+    }
+
+    fn mixin_json(spec: &str) -> Vec<u8> {
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"postgres-tools"}},"spec":{spec}}}"#
+        )
+        .into_bytes()
+    }
+
+    const PINNED: &str = "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582";
+
+    #[test]
+    fn a_mixin_reads_every_block_it_shares_with_a_sandbox() {
+        let def = parse_mixin(&mixin_json(
+            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"mountPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
+        ))
+        .expect("a mixin's shared blocks follow the same rules as a sandbox's");
+        assert_eq!(def.metadata.name, "postgres-tools");
+        assert_eq!(def.spec.tools, vec!["postgresql@17".to_string()]);
+        assert_eq!(
+            def.spec.env.get("MODE").map(String::as_str),
+            Some("research")
+        );
+        assert_eq!(def.spec.ports[0].container, 8080);
+        assert_eq!(def.spec.volumes[0].target, "/home/agent/.cache");
+        assert_eq!(def.spec.policy.egress.tcp.len(), 1);
+        assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
+        assert_eq!(def.spec.filesets[0].mount_path, "/home/agent/notes");
+    }
+
+    #[test]
+    fn a_mixin_refuses_each_block_that_describes_one_launch() {
+        for (spec, block) in [
+            (r#"{"image":"ghcr.io/team/base:1"}"#, "image"),
+            (r#"{"command":"agent --serve"}"#, "command"),
+            (r#"{"workdir":"/workspace"}"#, "workdir"),
+            (r#"{"user":"node"}"#, "user"),
+            (r#"{"resources":{"cpu":2}}"#, "resources"),
+        ] {
+            let err = parse_mixin(&mixin_json(spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&format!("a mixin must not declare {block}")),
+                "a block the sandbox owns must be refused by name rather than silently ignored; got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mixin_may_not_name_a_connector() {
+        let err = parse_mixin(&mixin_json(r#"{"connectors":["some-provider"]}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not name a connector"),
+            "how a credential is obtained is the user's decision on their own machine, and the retired field stays a sandbox-only divergence rather than spreading to a new kind; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_reports_its_forbidden_block_before_that_block_is_validated() {
+        let err = parse_mixin(&mixin_json(r#"{"workdir":"relative/path"}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not declare workdir"),
+            "the author needs the answer that matters — the block does not belong here at all — not a complaint about its contents; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_needs_no_image_of_its_own() {
+        assert!(
+            parse_mixin(&mixin_json(r#"{"tools":["postgresql@17"]}"#)).is_ok(),
+            "a mixin layers onto a sandbox, so the image requirement is the sandbox's alone"
+        );
+    }
+
+    #[test]
+    fn each_reader_answers_only_for_its_own_kind() {
+        let sandbox_err = parse_mixin(&def_json(r#"{"image":"x:1"}"#)).unwrap_err();
+        assert!(
+            format!("{sandbox_err:#}").contains("expected kind Mixin"),
+            "got: {sandbox_err:#}"
+        );
+        let mixin_err = parse(&mixin_json(r#"{"tools":["postgresql@17"]}"#)).unwrap_err();
+        assert!(
+            format!("{mixin_err:#}").contains("expected kind Sandbox"),
+            "got: {mixin_err:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_declares_the_mixins_it_layers_on() {
+        let def = parse(&def_json(&format!(
+            r#"{{"image":"x:1","mixins":["./mixins/postgres-tools/","{PINNED}"]}}"#
+        )))
+        .expect("a local directory and a digest-pinned reference are both legal");
+        assert_eq!(def.spec.mixins.len(), 2);
+        let mixin_of_a_mixin = parse_mixin(&mixin_json(&format!(r#"{{"mixins":["{PINNED}"]}}"#)))
+            .expect("a mixin may build on other mixins, exactly as a sandbox does");
+        assert_eq!(mixin_of_a_mixin.spec.mixins.len(), 1);
+    }
+
+    #[test]
+    fn a_remote_mixin_reference_that_is_not_digest_pinned_is_refused() {
+        for reference in [
+            "ghcr.io/acme/postgres-tools:1.4.0",
+            "ghcr.io/acme/postgres-tools",
+            "ghcr.io/acme/postgres-tools@sha256:tooshort",
+        ] {
+            let err = parse(&def_json(&format!(
+                r#"{{"image":"x:1","mixins":["{reference}"]}}"#
+            )))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("must be digest-pinned")
+                    && format!("{err:#}").contains("./"),
+                "a published sandbox has to resolve to the same thing for everyone, so a tag that can move is refused; {reference}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_answers_for_the_kind_the_file_declares() {
+        assert!(
+            validate(&mixin_json(r#"{"tools":["postgresql@17"]}"#)).is_ok(),
+            "a mixin validates offline like any other document"
+        );
+        let err = validate(&mixin_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not declare image"),
+            "routing on the declared kind is what lets the mixin rule report itself; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_entry_naming_nothing_is_refused() {
+        let err = parse(&def_json(r#"{"image":"x:1","mixins":["  "]}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must name a directory or an OCI reference"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

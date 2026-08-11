@@ -914,6 +914,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
+            for mixin in &view.mixins {
+                writeln!(out, "mixin: {mixin}")?;
+            }
             if let Some(user) = &view.user {
                 writeln!(out, "user: {user}")?;
             }
@@ -1246,6 +1249,7 @@ mod tests {
     fn sandbox_inspection_with_digest(tools: Vec<String>, digest: String) -> Response {
         Response::ImageInspected {
             inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                mixins: Vec::new(),
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2000,6 +2004,7 @@ mod tests {
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    mixins: Vec::new(),
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),

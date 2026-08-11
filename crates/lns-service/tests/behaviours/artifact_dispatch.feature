@@ -26,3 +26,8 @@ Feature: run dispatches on the pulled artifact type
     Given a pulled reference whose manifest is a fileset artifact
     When the run resolves the reference for launch
     Then the run is refused because the artifact is not directly runnable
+
+  Scenario: A mixin is a kit a sandbox references, never one a run launches
+    Given a pulled reference whose manifest is a mixin artifact
+    When the run resolves the reference for launch
+    Then the run is refused because the artifact is not directly runnable

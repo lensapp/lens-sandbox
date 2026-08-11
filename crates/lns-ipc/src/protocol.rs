@@ -271,6 +271,9 @@ pub struct SandboxView {
     #[serde(default)]
     pub digest: String,
     pub image: String,
+    /// The mixins the document declares, so a reader sees the capabilities it layers on before trusting it.
+    #[serde(default)]
+    pub mixins: Vec<String>,
     #[serde(default)]
     pub workdir: Option<String>,
     /// The run-as user the sandbox declared, so a pulled artifact asking for root is visible before it boots.
@@ -1368,6 +1371,7 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
+            mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:1".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),

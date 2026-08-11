@@ -1129,6 +1129,7 @@ mod tests {
         let target = published_target(
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1203,6 +1204,7 @@ mod tests {
         let err = published_target(
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),

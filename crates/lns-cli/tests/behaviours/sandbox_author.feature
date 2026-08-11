@@ -54,6 +54,20 @@ Feature: authoring a sandbox
     And the output contains "unknown field"
     And the service received no request
 
+  Scenario: validate answers for a mixin document too
+    Given an lns.yaml holding a mixin document
+    When the user runs sandbox command "validate"
+    Then the exit code is 0
+    And the output contains "valid"
+    And the service received no request
+
+  Scenario: validate refuses a mixin that claims a block the sandbox owns
+    Given an lns.yaml holding a mixin document that declares an image
+    When the user runs sandbox command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "a mixin must not declare image"
+    And the service received no request
+
   Scenario: validate refuses a document the other verbs cannot run
     Given an lns.yaml written against the retired lens.dev/v1alpha1 group
     When the user runs sandbox command "validate"

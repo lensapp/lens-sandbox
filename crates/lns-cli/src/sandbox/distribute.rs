@@ -102,8 +102,9 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
     doc: &[u8],
     reference: &str,
 ) -> Result<(Vec<u8>, Vec<PackedFileset>)> {
-    let def = lns_artifact::sandbox::parse(doc)
-        .map_err(|e| anyhow::anyhow!("refusing to push an invalid sandbox: {e:#}"))?;
+    let def = lns_artifact::sandbox::parse_document(doc)
+        .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
+    refuse_unpinned_mixins(&def)?;
     if def.spec.filesets.is_empty() {
         return Ok((doc.to_vec(), Vec::new()));
     }
@@ -150,6 +151,18 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
     }
     let rewritten = serde_json::to_vec(&value).context("serializing the pinned definition")?;
     Ok((rewritten, packed))
+}
+
+/// A local directory means nothing on the machine that pulls the published document, and §3.3.1 pins a published `spec.mixins` entry by digest — so publish refuses what authoring accepts, exactly as it does for a fileset `path`.
+fn refuse_unpinned_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
+    for reference in &def.spec.mixins {
+        if !lns_artifact::spec::is_digest_pinned_image(reference) {
+            bail!(
+                "mixin {reference} is not digest-pinned; a published document pins every mixin by digest so every consumer resolves the same one"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn owner_str(owner: lns_artifact::sandbox::FilesetOwner) -> &'static str {
@@ -475,7 +488,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("invalid sandbox"),
+            format!("{err:#}").contains("invalid document"),
             "got: {err:#}"
         );
     }
@@ -520,6 +533,50 @@ mod tests {
         assert_eq!(packed.len(), 1);
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(value["spec"]["filesets"][0]["owner"], "root");
+    }
+
+    #[tokio::test]
+    async fn push_publishes_a_mixin_under_its_own_artifact_type() {
+        let producer = FakeProducer::ok(&format!("sha256:{}", "b".repeat(64)));
+        let mut out = Vec::new();
+        let code = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"env":{"MODE":"research"}}}"#,
+            "ghcr.io/acme/postgres-tools:1.4.0",
+            &mut out,
+        )
+        .await
+        .expect("a mixin is a kit, published like any other");
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("ghcr.io/acme/postgres-tools:1.4.0"),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_refuses_a_mixin_reference_a_consumer_could_not_resolve() {
+        let producer = FakeProducer::err("must not reach the producer");
+        let mut out = Vec::new();
+        let err = push(
+            &fs_with_skills(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","mixins":["./mixins/postgres-tools/"]}}"#,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("mixin ./mixins/postgres-tools/ is not digest-pinned"),
+            "a directory beside the author's file means nothing to a consumer, so publishing one would ship a reference nobody else can resolve; got: {err:#}"
+        );
     }
 
     #[tokio::test]

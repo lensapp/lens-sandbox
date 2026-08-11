@@ -216,6 +216,28 @@ mod tests {
     }
 
     #[test]
+    fn a_mixin_publishes_under_its_own_artifact_type() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"tools":["node@22"]}}"#;
+        let built = build_artifact(doc).expect("a mixin is a kit, published like any other");
+        assert_eq!(built.artifact_type, "application/vnd.lens.mixin.v1+json");
+        let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
+        assert_eq!(
+            manifest["config"]["mediaType"], "application/vnd.lens.mixin.config.v1+json",
+            "the media type names the kind, so a puller knows what it fetched before reading it"
+        );
+    }
+
+    #[test]
+    fn a_mixin_that_declares_a_launch_block_is_refused_before_it_publishes() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"image":"reg/base:1"}}"#;
+        let err = build_artifact(doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not declare image"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
     fn build_artifact_produces_a_config_only_manifest_with_matching_digests() {
         let built = build_artifact(&sandbox()).unwrap();
         assert_eq!(built.artifact_type, "application/vnd.lens.sandbox.v1+json");

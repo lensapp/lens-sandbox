@@ -32,6 +32,7 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
 fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -73,6 +74,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
 )]
 fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -101,11 +103,35 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     cached_artifact(world, &reference, inspection);
 }
 
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the mixin "([^"]+)"$"#)]
+fn inspects_sandbox_mixins(world: &mut BehaviourWorld, reference: String, mixin: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: vec![mixin],
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        user: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        connectors: Vec::new(),
+        env: Vec::new(),
+        credentials: Vec::new(),
+        tools: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
 #[given(
     regex = r#"^the service inspects "([^"]+)" as a sandbox declaring a fileset at "([^"]+)"$"#
 )]
 fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, mount: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -139,6 +165,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring user "([^"]+)"$"#)]
 fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -168,6 +195,7 @@ fn inspects_sandbox_credential(
     domain: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -200,6 +228,7 @@ fn inspects_sandbox_credential(
 )]
 fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -224,6 +253,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox setting env "([^"]+)"$"#)]
 fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        mixins: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
