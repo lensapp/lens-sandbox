@@ -384,8 +384,14 @@ removing one is permanent.
 A run that finishes, or that you `lns stop`, **releases** each volume before the
 guest powers off, so the image is left marked clean. A run the host cannot ask to
 stop — `lns kill`, or a service killed outright — cannot do that, and leaves its
-volumes dirty. The images carry no journal yet, so nothing replays on the next
-mount: prefer `lns stop` over `lns kill` when a volume holds work you care about.
+volumes dirty.
+
+A volume image carries an internal journal, so an interrupted run leaves it
+mountable and consistent — the kernel replays the journal at the next attach. A
+volume created by an older build has no journal, and gains one only when you
+recreate it (`lns volume rm`, then the next run). Every volume also mounts with
+`errors=remount-ro`, so an image the kernel does find inconsistent stops taking
+writes instead of compounding the damage.
 
 Once an image has been left dirty, it stays dirty. The kernel restores the state
 it found at mount, so a later clean run does not clear the mark, and there is no

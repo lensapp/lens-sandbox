@@ -1560,14 +1560,9 @@ fn policy_deny_all(world: &mut E2eWorld) {
     );
 }
 
-/// The ext4 superblock's `s_state`: the kernel clears bit 0 at read-write mount and sets it back only when the filesystem is put away, so this byte is what tells a later mount whether to warn that the image is unchecked.
-#[then(regex = r#"^the backing image for volume "([^"]+)" is marked clean$"#)]
-fn volume_image_marked_clean(world: &mut E2eWorld, name: String) -> Result<(), String> {
-    const SUPERBLOCK_OFFSET: u64 = 1024;
-    const S_MAGIC_OFFSET: u64 = 0x38;
-    const EXT4_SUPER_MAGIC: u16 = 0xEF53;
-    const EXT4_VALID_FS: u16 = 0x0001;
+const SUPERBLOCK_OFFSET: u64 = 1024;
 
+fn volume_image_path(world: &E2eWorld, name: &str) -> Result<std::path::PathBuf, String> {
     let home = world
         .home
         .as_ref()
@@ -1578,18 +1573,59 @@ fn volume_image_marked_clean(world: &mut E2eWorld, name: String) -> Result<(), S
     } else {
         home.join(".cache")
     };
-    let image = cache_root
+    Ok(cache_root
         .join("lns")
         .join("volumes")
-        .join(format!("{name}.img"));
+        .join(format!("{name}.img")))
+}
 
+fn read_superblock_field(image: &std::path::Path, offset: u64) -> Result<[u8; 4], String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(&image).map_err(|e| format!("{}: {e}", image.display()))?;
-    file.seek(SeekFrom::Start(SUPERBLOCK_OFFSET + S_MAGIC_OFFSET))
+    let mut file = std::fs::File::open(image).map_err(|e| format!("{}: {e}", image.display()))?;
+    file.seek(SeekFrom::Start(SUPERBLOCK_OFFSET + offset))
         .map_err(|e| e.to_string())?;
-    // s_magic then s_state, adjacent — reading both proves the offsets land on a real superblock rather than garbage.
     let mut bytes = [0u8; 4];
     file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// A journal the kernel can replay is what keeps a volume the guest never unmounted mountable and consistent.
+#[then(regex = r#"^the backing image for volume "([^"]+)" declares an internal journal$"#)]
+fn volume_image_declares_journal(world: &mut E2eWorld, name: String) -> Result<(), String> {
+    const S_FEATURE_COMPAT_OFFSET: u64 = 0x5C;
+    const S_JOURNAL_INUM_OFFSET: u64 = 0xE0;
+    const FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+    const JOURNAL_INO: u32 = 8;
+
+    let image = volume_image_path(world, &name)?;
+    let compat = u32::from_le_bytes(read_superblock_field(&image, S_FEATURE_COMPAT_OFFSET)?);
+    let inum = u32::from_le_bytes(read_superblock_field(&image, S_JOURNAL_INUM_OFFSET)?);
+
+    if compat & FEATURE_COMPAT_HAS_JOURNAL == 0 {
+        return Err(format!(
+            "{} carries no journal (s_feature_compat={compat:#010x}); a volume the guest never unmounted has nothing to replay",
+            image.display()
+        ));
+    }
+    if inum != JOURNAL_INO {
+        return Err(format!(
+            "{} advertises a journal on inode {inum}, not {JOURNAL_INO}",
+            image.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The ext4 superblock's `s_state`: the kernel clears bit 0 at read-write mount and sets it back only when the filesystem is put away, so this byte is what tells a later mount whether to warn that the image is unchecked.
+#[then(regex = r#"^the backing image for volume "([^"]+)" is marked clean$"#)]
+fn volume_image_marked_clean(world: &mut E2eWorld, name: String) -> Result<(), String> {
+    const S_MAGIC_OFFSET: u64 = 0x38;
+    const EXT4_SUPER_MAGIC: u16 = 0xEF53;
+    const EXT4_VALID_FS: u16 = 0x0001;
+
+    let image = volume_image_path(world, &name)?;
+    // s_magic then s_state, adjacent — reading both proves the offsets land on a real superblock rather than garbage.
+    let bytes = read_superblock_field(&image, S_MAGIC_OFFSET)?;
     let magic = u16::from_le_bytes([bytes[0], bytes[1]]);
     let state = u16::from_le_bytes([bytes[2], bytes[3]]);
 

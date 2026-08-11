@@ -33,12 +33,12 @@ mod host_validation {
         None
     }
 
-    fn produce_image(size_bytes: u64) -> (tempfile::TempDir, PathBuf) {
+    fn produce_image(size_bytes: u64) -> (tempfile::TempDir, PathBuf, Plan) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("upper.img");
-        let plan = Plan::new(size_bytes, [0xAA; 16], "lns-upper", 0x12345678);
+        let plan = Plan::new(size_bytes, [0xAA; 16], "lns-upper", 0x12345678).expect("plan");
         write_ext4(&plan, &path).expect("write_ext4");
-        (dir, path)
+        (dir, path, plan)
     }
 
     fn parse_field(out: &str, key: &str) -> Option<String> {
@@ -60,7 +60,7 @@ mod host_validation {
             eprintln!("SKIP: e2fsck not found on host");
             return;
         };
-        let (_dir, path) = produce_image(32 * 1024 * 1024);
+        let (_dir, path, _plan) = produce_image(32 * 1024 * 1024);
         let out = Command::new(&e2fsck)
             .args(["-f", "-n", "-v"])
             .arg(&path)
@@ -86,7 +86,7 @@ mod host_validation {
             eprintln!("SKIP: e2fsck not found on host");
             return;
         };
-        let (_dir, path) = produce_image(10 * 1024 * 1024 * 1024);
+        let (_dir, path, _plan) = produce_image(10 * 1024 * 1024 * 1024);
         let out = Command::new(&e2fsck)
             .args(["-f", "-n"])
             .arg(&path)
@@ -108,7 +108,7 @@ mod host_validation {
             eprintln!("SKIP: tune2fs not found on host");
             return;
         };
-        let (_dir, path) = produce_image(32 * 1024 * 1024);
+        let (_dir, path, _plan) = produce_image(32 * 1024 * 1024);
         let out = Command::new(&tune2fs)
             .arg("-l")
             .arg(&path)
@@ -127,6 +127,7 @@ mod host_validation {
         let feat_set: Vec<&str> = features.split_whitespace().collect();
 
         for required in [
+            "has_journal",
             "ext_attr",
             "filetype",
             "extent",
@@ -139,7 +140,6 @@ mod host_validation {
             );
         }
         for forbidden in [
-            "has_journal",
             "64bit",
             "metadata_csum",
             "huge_file",
@@ -163,7 +163,7 @@ mod host_validation {
             eprintln!("SKIP: dumpe2fs not found on host");
             return;
         };
-        let (_dir, path) = produce_image(32 * 1024 * 1024);
+        let (_dir, path, _plan) = produce_image(32 * 1024 * 1024);
         let out = Command::new(&dumpe2fs)
             .arg("-h")
             .arg(&path)
@@ -193,6 +193,41 @@ mod host_validation {
 
     #[test]
     #[ignore]
+    fn dumpe2fs_reports_a_journal_of_the_planned_size() {
+        let Some(dumpe2fs) = find_tool("dumpe2fs") else {
+            eprintln!("SKIP: dumpe2fs not found on host");
+            return;
+        };
+        let (_dir, path, plan) = produce_image(32 * 1024 * 1024);
+        let out = Command::new(&dumpe2fs)
+            .arg("-h")
+            .arg(&path)
+            .output()
+            .expect("run dumpe2fs");
+        assert!(out.status.success(), "dumpe2fs failed");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        eprintln!("dumpe2fs -h output:\n{stdout}");
+
+        assert_eq!(parse_field(&stdout, "Journal inode").as_deref(), Some("8"));
+        assert_eq!(
+            parse_field(&stdout, "Total journal blocks").as_deref(),
+            Some(plan.journal_blocks().to_string().as_str()),
+            "dumpe2fs only reports this after it parses our big-endian JBD2 superblock"
+        );
+        assert_eq!(
+            parse_field(&stdout, "Journal sequence").as_deref(),
+            Some("0x00000001")
+        );
+        assert_eq!(parse_field(&stdout, "Journal start").as_deref(), Some("0"));
+        assert_eq!(
+            parse_field(&stdout, "Journal features").as_deref(),
+            Some("(none)"),
+            "a journal with no optional features is recoverable by any kernel"
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn compare_with_mke2fs_reference_image() {
         let Some(mke2fs) = find_tool("mke2fs") else {
             eprintln!("SKIP: mke2fs not found on host");
@@ -207,7 +242,7 @@ mod host_validation {
         let ours = dir.path().join("ours.img");
         let theirs = dir.path().join("theirs.img");
 
-        let plan = Plan::new(32 * 1024 * 1024, [0xAA; 16], "lns-upper", 0);
+        let plan = Plan::new(32 * 1024 * 1024, [0xAA; 16], "lns-upper", 0).expect("plan");
         write_ext4(&plan, &ours).expect("write ours");
 
         let theirs_file = std::fs::File::create(&theirs).expect("create theirs");
@@ -228,9 +263,11 @@ mod host_validation {
                 "-I",
                 "256",
                 "-O",
-                "sparse_super,filetype,extents,ext_attr,large_file,\
-                 ^has_journal,^64bit,^huge_file,^flex_bg,^metadata_csum,\
+                "sparse_super,filetype,extents,ext_attr,large_file,has_journal,\
+                 ^64bit,^huge_file,^flex_bg,^metadata_csum,\
                  ^dir_index,^resize_inode,^inline_data,^extra_isize",
+                "-J",
+                "size=4",
                 "-U",
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "-L",
@@ -334,7 +371,7 @@ mod overlayfs_validation {
         std::fs::create_dir_all(&parent).expect("create parent tempdir");
         let dir = tempfile::TempDir::new_in(&parent).expect("tempdir");
         let path = dir.path().join("upper.img");
-        let plan = Plan::new(32 * 1024 * 1024, [0xBB; 16], "lns-upper", 0);
+        let plan = Plan::new(32 * 1024 * 1024, [0xBB; 16], "lns-upper", 0).expect("plan");
         write_ext4(&plan, &path).expect("write_ext4");
         (dir, path)
     }

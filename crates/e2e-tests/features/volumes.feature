@@ -69,6 +69,25 @@ Feature: named volumes persist workload state across runs
     Then the exit code is non-zero
     And the output contains "in use"
 
+  # NOT a journal test, and no scenario here is one. `lns kill` signals the
+  # workload, not the guest: the broker still unmounts every volume and calls
+  # sync() before poweroff, so the next attach never has anything to replay.
+  # The workload deliberately does not sync — what this pins is that the
+  # release path flushes the workload's unsynced write. Journal recovery would
+  # need a scenario that terminates the VM outright, which this harness has no
+  # step for; the journal's presence is pinned in volume_management.feature.
+  Scenario: a killed workload's unsynced write is still on the volume
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c 'echo survived > /data/marker; echo wrote=$?; /.lens/guest-tools/bin/busybox sleep 60'" with volume "e2e-vol-killed" at "/data"
+    Then the exit code is 0
+    When the user prints that run's logs until they contain "wrote=0"
+    Then the exit code is 0
+    When the user kills that run
+    Then volume "e2e-vol-killed" is released
+    When the user runs a microVM command "/bin/sh -c 'read v < /data/marker; echo got=$v'" with volume "e2e-vol-killed" at "/data"
+    Then the exit code is 0
+    And the output contains "got=survived"
+
   Scenario: a volume the run finished with is left marked clean
     Given the Lens Sandbox service is running
     When the user runs a microVM command "/bin/sh -c 'echo persisted > /data/marker'" with volume "e2e-vol-clean" at "/data"

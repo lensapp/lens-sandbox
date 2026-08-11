@@ -40,6 +40,7 @@ pub struct Superblock {
     pub volume_name: [u8; 16],
     // reserved_gdt_blocks MUST be 0 when COMPAT_RESIZE_INODE is clear — e2fsprogs warns on any non-zero value without the matching feature.
     pub reserved_gdt_blocks: u16,
+    pub journal_inum: u32,
     pub mkfs_time: u32,
 }
 
@@ -85,6 +86,7 @@ impl Superblock {
             uuid,
             volume_name: pad_name::<16>(volume_name),
             reserved_gdt_blocks: 0,
+            journal_inum: JOURNAL_INO,
             mkfs_time,
         }
     }
@@ -125,7 +127,8 @@ impl Superblock {
         b[0x68..0x78].copy_from_slice(&self.uuid);
         b[0x78..0x88].copy_from_slice(&self.volume_name);
         b[0xCE..0xD0].copy_from_slice(&self.reserved_gdt_blocks.to_le_bytes());
-        // 0xD0..0x108: journal fields all zero because HAS_JOURNAL is clear.
+        b[0xE0..0xE4].copy_from_slice(&self.journal_inum.to_le_bytes());
+        // 0xD0..0xE0 (s_journal_uuid) and 0xE4..0xE8 (s_journal_dev) MUST stay zero — a non-zero value there means the journal lives on an external device.
         // 0xFE..0x100: s_desc_size MUST be 0 when INCOMPAT_64BIT is clear — e2fsprogs treats non-zero as "64bit implied" and errors.
         b[0x108..0x10C].copy_from_slice(&self.mkfs_time.to_le_bytes());
         b
@@ -261,6 +264,30 @@ impl Inode {
         }
     }
 
+    pub fn journal(time: u32, first_block: u32, journal_blocks: u32) -> Self {
+        let i_block = encode_inline_leaf(&[ExtentLeaf {
+            logical_block: 0,
+            length: u16::try_from(journal_blocks).expect("journal_blocks fits one extent record"),
+            physical_block: first_block as u64,
+        }]);
+        Self {
+            mode: S_IFREG | 0o600,
+            uid: 0,
+            size: journal_blocks * BLOCK_SIZE,
+            atime: time,
+            ctime: time,
+            mtime: time,
+            dtime: 0,
+            gid: 0,
+            links_count: 1,
+            blocks: journal_blocks * (BLOCK_SIZE / 512),
+            flags: EXT4_EXTENTS_FL,
+            i_block,
+            generation: 0,
+            file_acl: 0,
+        }
+    }
+
     pub fn to_bytes(&self) -> [u8; INODE_SIZE as usize] {
         let mut b = [0u8; INODE_SIZE as usize];
         b[0x00..0x02].copy_from_slice(&self.mode.to_le_bytes());
@@ -309,7 +336,7 @@ mod tests {
         let compat = u32::from_le_bytes([b[0x5C], b[0x5D], b[0x5E], b[0x5F]]);
         let incompat = u32::from_le_bytes([b[0x60], b[0x61], b[0x62], b[0x63]]);
         let ro_compat = u32::from_le_bytes([b[0x64], b[0x65], b[0x66], b[0x67]]);
-        assert_eq!(compat, 0x0000_0008, "EXT_ATTR only");
+        assert_eq!(compat, 0x0000_000C, "EXT_ATTR | HAS_JOURNAL");
         assert_eq!(incompat, 0x0000_0042, "FILETYPE | EXTENTS");
         assert_eq!(ro_compat, 0x0000_0003, "SPARSE_SUPER | LARGE_FILE");
     }
@@ -399,13 +426,42 @@ mod tests {
     }
 
     #[test]
-    fn superblock_journal_area_is_zero() {
+    fn superblock_journal_area_is_zero_apart_from_the_inode_number() {
         let sb = Superblock::for_fresh_image(&small_layout(), [0; 16], "test", 0);
         let b = sb.to_bytes();
         for (off, byte) in b[0xD0..0x108].iter().enumerate() {
             let abs = 0xD0 + off;
+            if (0xE0..0xE4).contains(&abs) {
+                continue;
+            }
             assert_eq!(*byte, 0, "journal area byte 0x{abs:X} must be zero");
         }
+    }
+
+    #[test]
+    fn the_superblock_advertises_an_internal_journal_on_inode_8() {
+        let sb = Superblock::for_fresh_image(&small_layout(), [0; 16], "test", 0);
+        let b = sb.to_bytes();
+        let compat = u32::from_le_bytes([b[0x5C], b[0x5D], b[0x5E], b[0x5F]]);
+        assert_eq!(
+            compat & FEATURE_COMPAT_HAS_JOURNAL,
+            FEATURE_COMPAT_HAS_JOURNAL
+        );
+        assert_eq!(
+            u32::from_le_bytes([b[0xE0], b[0xE1], b[0xE2], b[0xE3]]),
+            JOURNAL_INO,
+            "s_journal_inum"
+        );
+        assert_eq!(
+            &b[0xD0..0xE0],
+            &[0u8; 16],
+            "s_journal_uuid stays zero for an internal journal"
+        );
+        assert_eq!(
+            &b[0xE4..0xE8],
+            &[0u8; 4],
+            "s_journal_dev stays zero for an internal journal"
+        );
     }
 
     #[test]
@@ -544,6 +600,39 @@ mod tests {
         assert_eq!(logical, 0);
         assert_eq!(length, 4);
         assert_eq!(physical, 517);
+    }
+
+    #[test]
+    fn the_journal_inode_is_a_regular_root_owned_file_the_workload_cannot_see() {
+        let j = Inode::journal(0, 521, 4096);
+        assert_eq!(j.mode, S_IFREG | 0o600, "mode = 0100600");
+        assert_eq!(j.links_count, 1, "reachable only from the superblock");
+        assert_eq!(j.uid, 0);
+        assert_eq!(j.gid, 0);
+        assert_eq!(j.flags, EXT4_EXTENTS_FL);
+    }
+
+    #[test]
+    fn the_journal_inode_maps_the_reserved_range_as_one_extent() {
+        let j = Inode::journal(0, 521, 4096);
+        let (magic, entries, _, depth) = extent_header(&j.i_block);
+        assert_eq!(magic, EXT4_EXTENT_MAGIC);
+        assert_eq!(
+            entries, 1,
+            "the journal must stay contiguous: encode_inline_leaf holds at most 4 records"
+        );
+        assert_eq!(depth, 0);
+        let (logical, length, physical) = extent_record(&j.i_block, 0);
+        assert_eq!(logical, 0);
+        assert_eq!(length, 4096);
+        assert_eq!(physical, 521);
+    }
+
+    #[test]
+    fn the_journal_inode_size_and_block_count_match_the_reservation() {
+        let j = Inode::journal(0, 521, 4096);
+        assert_eq!(j.size, 4096 * BLOCK_SIZE, "16 MiB still fits u32");
+        assert_eq!(j.blocks, 4096 * (BLOCK_SIZE / 512));
     }
 
     #[test]

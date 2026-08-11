@@ -83,6 +83,10 @@ pub fn block_bitmap(layout: &Layout, g: u32) -> Vec<u8> {
         for i in 0..LOST_FOUND_BLOCKS {
             mark(&mut bm, gbl.data_first_block + 1 + i);
         }
+        let journal_first = journal_first_block(layout);
+        for i in 0..journal_blocks(layout) {
+            mark(&mut bm, journal_first + i);
+        }
     }
 
     let real_blocks = layout.blocks_in_group(g) as usize;
@@ -92,6 +96,25 @@ pub fn block_bitmap(layout: &Layout, g: u32) -> Vec<u8> {
     }
 
     bm
+}
+
+pub fn journal_first_block(layout: &Layout) -> u32 {
+    group_block_layout(layout, 0).data_first_block + 1 + LOST_FOUND_BLOCKS
+}
+
+fn group_zero_free_blocks(layout: &Layout) -> u32 {
+    let gbl = group_block_layout(layout, 0);
+    layout
+        .blocks_in_group(0)
+        .saturating_sub(gbl.data_first_block + 1 + LOST_FOUND_BLOCKS)
+}
+
+pub fn journal_blocks(layout: &Layout) -> u32 {
+    if group_zero_free_blocks(layout) >= JOURNAL_TARGET_BLOCKS * 4 {
+        JOURNAL_TARGET_BLOCKS
+    } else {
+        JBD2_MIN_JOURNAL_BLOCKS
+    }
 }
 
 pub fn inode_bitmap(layout: &Layout, g: u32) -> Vec<u8> {
@@ -143,19 +166,40 @@ pub struct Plan {
     pub superblock: Superblock,
     pub root_inode: Inode,
     pub lost_found_inode: Inode,
+    pub journal_inode: Inode,
     pub root_dir_block: Vec<u8>,
     pub lost_found_blocks: Vec<Vec<u8>>,
 }
 
 impl Plan {
-    pub fn new(image_size_bytes: u64, uuid: [u8; 16], volume_name: &str, mkfs_time: u32) -> Self {
+    pub fn new(
+        image_size_bytes: u64,
+        uuid: [u8; 16],
+        volume_name: &str,
+        mkfs_time: u32,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            image_size_bytes >= BLOCK_SIZE as u64,
+            "an image of {image_size_bytes} bytes is too small for a journalled volume: it holds no whole {BLOCK_SIZE}-byte block"
+        );
         let layout = Layout::from_image_size(image_size_bytes);
+        let free = group_zero_free_blocks(&layout);
+        anyhow::ensure!(
+            free >= JBD2_MIN_JOURNAL_BLOCKS * 4,
+            "an image of {image_size_bytes} bytes is too small for a journalled volume: group 0 has {free} free blocks, and the smallest recoverable journal needs {}",
+            JBD2_MIN_JOURNAL_BLOCKS * 4
+        );
 
         let root_data_block = group_block_layout(&layout, 0).data_first_block;
         let lost_found_first_block = root_data_block + 1;
 
         let root_inode = Inode::root_directory(mkfs_time, root_data_block);
         let lost_found_inode = Inode::lost_found_directory(mkfs_time, lost_found_first_block);
+        let journal_inode = Inode::journal(
+            mkfs_time,
+            journal_first_block(&layout),
+            journal_blocks(&layout),
+        );
 
         let mut root_dir = DirBlock::new();
         root_dir.push(DirEntry::new(ROOT_INO, FT_DIR, "."));
@@ -177,14 +221,15 @@ impl Plan {
         superblock.free_blocks_count = free_blocks;
         superblock.free_inodes_count = free_inodes;
 
-        Self {
+        Ok(Self {
             layout,
             superblock,
             root_inode,
             lost_found_inode,
+            journal_inode,
             root_dir_block,
             lost_found_blocks,
-        }
+        })
     }
 
     pub fn root_data_block(&self) -> u32 {
@@ -193,6 +238,14 @@ impl Plan {
 
     pub fn lost_found_first_block(&self) -> u32 {
         self.root_data_block() + 1
+    }
+
+    pub fn journal_first_block(&self) -> u32 {
+        journal_first_block(&self.layout)
+    }
+
+    pub fn journal_blocks(&self) -> u32 {
+        journal_blocks(&self.layout)
     }
 }
 
@@ -295,7 +348,10 @@ mod tests {
         for bit in 516..=520 {
             assert!(get_bit(&bm, bit), "bit {bit} should be set (root/l+f)");
         }
-        for bit in 521..32768 {
+        for bit in 521..=4616 {
+            assert!(get_bit(&bm, bit), "bit {bit} should be set (journal)");
+        }
+        for bit in 4617..32768 {
             assert!(!get_bit(&bm, bit), "bit {bit} should be clear (free)");
         }
     }
@@ -366,10 +422,119 @@ mod tests {
     }
 
     #[test]
+    fn a_ten_gib_image_gets_the_full_journal_target() {
+        let l = ten_gib();
+        let blocks = journal_blocks(&l);
+        assert_eq!(blocks, JOURNAL_TARGET_BLOCKS);
+        assert!(
+            blocks < group_zero_free_blocks(&l),
+            "the journal has to fit group 0's free space alongside root and lost+found"
+        );
+        assert!(
+            blocks <= 32768,
+            "one initialised extent record caps at 32768 blocks, and the journal must stay a single extent"
+        );
+    }
+
+    #[test]
+    fn a_thirty_two_mib_image_falls_back_to_the_jbd2_minimum() {
+        let l = small();
+        assert_eq!(journal_blocks(&l), JBD2_MIN_JOURNAL_BLOCKS);
+    }
+
+    #[test]
+    fn an_image_too_small_to_hold_the_minimum_journal_is_refused() {
+        let err = Plan::new(4 * 1024 * 1024, [0; 16], "test", 0).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("too small for a journalled volume"),
+            "volume provisioning runs Plan::new on a service worker, so an unformattable size has to come back as an error: {err}"
+        );
+    }
+
+    #[test]
+    fn the_guard_sits_on_the_real_boundary_rather_than_a_threshold_above_it() {
+        let smallest_accepted = (4..=64u64)
+            .map(|mib| mib * 1024 * 1024)
+            .find(|size| Plan::new(*size, [0; 16], "test", 0).is_ok())
+            .expect("some size in 4..=64 MiB is formattable");
+        assert!(
+            Plan::new(smallest_accepted - 1024 * 1024, [0; 16], "test", 0).is_err(),
+            "one MiB below the smallest accepted size must still be refused"
+        );
+    }
+
+    #[test]
+    fn the_journal_never_exceeds_a_quarter_of_group_zeros_free_space() {
+        for size in (4 * 1024 * 1024..=10 * 1024 * 1024 * 1024u64).step_by(7 * 1024 * 1024) {
+            let layout = Layout::from_image_size(size);
+            let free = group_zero_free_blocks(&layout);
+            if free < JBD2_MIN_JOURNAL_BLOCKS * 4 {
+                continue;
+            }
+            assert!(
+                journal_blocks(&layout) * 4 <= free,
+                "{size} bytes: journal_blocks answers unconditionally, so everything the guard admits must have the room"
+            );
+        }
+    }
+
+    #[test]
+    fn the_journal_sits_immediately_after_lost_and_found() {
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
+        assert_eq!(
+            p.journal_first_block(),
+            p.lost_found_first_block() + LOST_FOUND_BLOCKS
+        );
+    }
+
+    #[test]
+    fn group_zero_block_bitmap_marks_every_journal_block_and_no_more() {
+        let l = ten_gib();
+        let bm = block_bitmap(&l, 0);
+        let first = journal_first_block(&l) as usize;
+        let len = journal_blocks(&l) as usize;
+        for bit in first..first + len {
+            assert!(get_bit(&bm, bit), "journal bit {bit} should be set");
+        }
+        assert!(
+            !get_bit(&bm, first + len),
+            "a journal that runs past its reservation would be overwritten by the first file written"
+        );
+    }
+
+    #[test]
+    fn an_image_smaller_than_group_zeros_own_metadata_is_refused_not_wrapped() {
+        for bytes in [1024u64, 3072, 32 * 1024, 16 * 1024 * 1024] {
+            let err = Plan::new(bytes, [0; 16], "test", 0)
+                .expect_err("an image this small cannot hold a journalled filesystem");
+            assert!(
+                format!("{err:#}").contains("too small for a journalled volume"),
+                "group 0's metadata outgrows its block count here, so an unguarded subtraction \
+                 would wrap to a huge free count and admit the image: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_zero_free_blocks_drop_by_exactly_the_journal_size() {
+        let l = ten_gib();
+        let gd = group_descriptor(&l, 0);
+        assert_eq!(gd.free_blocks_count, 32247 - 4096);
+    }
+
+    #[test]
+    fn the_journal_does_not_move_the_root_or_lost_and_found_data_blocks() {
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
+        assert_eq!(p.root_data_block(), 516);
+        assert_eq!(p.lost_found_first_block(), 517);
+    }
+
+    #[test]
     fn group_descriptor_group_0_10_gib() {
         let l = ten_gib();
         let gd = group_descriptor(&l, 0);
-        assert_eq!(gd.free_blocks_count, 32247);
+        assert_eq!(gd.free_blocks_count, 28151);
         assert_eq!(gd.free_inodes_count, 8181);
         assert_eq!(gd.used_dirs_count, 2);
         assert_eq!(gd.block_bitmap, 2);
@@ -397,17 +562,24 @@ mod tests {
 
     #[test]
     fn plan_32_mib_total_free_blocks() {
-        let p = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0);
-        assert_eq!(p.superblock.free_blocks_count, 8055);
+        let p = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0).unwrap();
+        assert_eq!(
+            p.superblock.free_blocks_count,
+            8055 - JBD2_MIN_JOURNAL_BLOCKS
+        );
         assert_eq!(p.superblock.free_inodes_count, 2048 - 11);
     }
 
     #[test]
     fn plan_10_gib_total_free_counts() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         let backup_groups = 9u32;
         let other_groups = 80 - 9;
-        let expected_metadata = backup_groups * 516 + other_groups * 514 + 1 /*root dir*/ + 4 /*l+f*/;
+        let expected_metadata = backup_groups * 516
+            + other_groups * 514
+            + 1 /*root dir*/
+            + 4 /*l+f*/
+            + JOURNAL_TARGET_BLOCKS;
         let expected_free = 2_621_440 - expected_metadata;
         assert_eq!(p.superblock.free_blocks_count, expected_free);
         assert_eq!(p.superblock.free_inodes_count, 655_360 - 11);
@@ -424,7 +596,7 @@ mod tests {
 
     #[test]
     fn plan_root_inode_points_to_correct_block() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         assert_eq!(p.root_data_block(), 516);
         let (logical, length, physical) = first_extent(&p.root_inode);
         assert_eq!(logical, 0);
@@ -434,7 +606,7 @@ mod tests {
 
     #[test]
     fn plan_lost_found_inode_points_to_4_consecutive_blocks() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         assert_eq!(p.lost_found_first_block(), 517);
         let (logical, length, physical) = first_extent(&p.lost_found_inode);
         assert_eq!(logical, 0);
@@ -443,8 +615,17 @@ mod tests {
     }
 
     #[test]
+    fn plan_journal_inode_covers_exactly_the_reserved_run() {
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
+        let (logical, length, physical) = first_extent(&p.journal_inode);
+        assert_eq!(logical, 0);
+        assert_eq!(length as u32, p.journal_blocks());
+        assert_eq!(physical as u32, p.journal_first_block());
+    }
+
+    #[test]
     fn plan_lost_found_blocks_count_matches_constant() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         assert_eq!(p.lost_found_blocks.len(), LOST_FOUND_BLOCKS as usize);
         for block in &p.lost_found_blocks {
             assert_eq!(block.len(), BLOCK_SIZE as usize);
@@ -453,7 +634,7 @@ mod tests {
 
     #[test]
     fn plan_root_dir_block_has_three_entries() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         let b = &p.root_dir_block;
         assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), ROOT_INO);
         assert_eq!(u16::from_le_bytes([b[4], b[5]]), 12);
@@ -471,7 +652,7 @@ mod tests {
 
     #[test]
     fn plan_lost_found_first_block_has_dot_and_dotdot() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         let b = &p.lost_found_blocks[0];
         assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), LOST_FOUND_INO);
         assert_eq!(u32::from_le_bytes([b[12], b[13], b[14], b[15]]), ROOT_INO);
@@ -480,7 +661,7 @@ mod tests {
 
     #[test]
     fn plan_lost_found_trailing_blocks_are_sentinels() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         for i in 1..LOST_FOUND_BLOCKS as usize {
             let b = &p.lost_found_blocks[i];
             assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0);
@@ -490,7 +671,7 @@ mod tests {
 
     #[test]
     fn plan_layout_geometry_propagates_to_superblock() {
-        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0);
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         assert_eq!(p.superblock.blocks_count, p.layout.block_count);
         assert_eq!(p.superblock.inodes_count, p.layout.inodes_count);
         assert_eq!(p.superblock.blocks_per_group, p.layout.blocks_per_group);
