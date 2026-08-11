@@ -387,6 +387,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         Arc::new(ApprovalSession::new(
             Policy::default(),
+            Policy::default(),
             notifier,
             store,
             tx,
@@ -1064,6 +1065,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let session = Arc::new(ApprovalSession::new(
             Policy::default(),
+            Policy::default(),
             notifier.clone(),
             store,
             tx,
@@ -1225,6 +1227,7 @@ mod tests {
         let store = Arc::new(crate::approval_flow::session::tests::CapturingStore::default());
         let (tx, _rx) = mpsc::unbounded_channel();
         let session = Arc::new(ApprovalSession::new(
+            Policy::default(),
             Policy::default(),
             notifier.clone(),
             store,

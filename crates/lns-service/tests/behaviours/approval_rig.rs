@@ -84,6 +84,7 @@ impl ApprovalRig {
         let timeout = Duration::from_secs(30);
         let session = Arc::new(ApprovalSession::new(
             Policy::default(),
+            Policy::default(),
             notifier.clone(),
             store.clone(),
             tx,
