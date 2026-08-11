@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use lns_artifact::sandbox::FilesetOwner;
 use oci_client::Reference;
 use oci_client::manifest::OciImageManifest;
 
-use crate::artifact::assembly::{InlineFileset, LocalFileset};
+use crate::artifact::assembly::{HostFileset, InlineFileset, LocalFileset};
 use crate::content_store::ContentStore;
 use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
@@ -123,6 +123,85 @@ pub fn local_fileset_specs<D: SnapshotDir + ?Sized>(
         out.absorb(local.owner, &local.mount_path, specs);
     }
     Ok(())
+}
+
+/// What a host path resolves to, symlinks followed, so the seam reports facts and this module decides what they mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostFileFacts {
+    pub mode: u32,
+    pub is_regular_file: bool,
+}
+
+/// Host-file seam for hostPath filesets; `RealSnapshotDir` in `real.rs` is the std::fs leaf.
+pub trait HostFileProbe {
+    fn home(&self) -> Option<PathBuf>;
+    /// `Ok(None)` when nothing resolves at the path, which includes a symlink whose target is gone.
+    fn stat(&self, path: &Path) -> std::io::Result<Option<HostFileFacts>>;
+}
+
+/// Snapshot each declared host file into one guest-write spec at its mountPath, so a definition can seed the guest from the machine that runs it; an absent path refuses the plan unless the author marked it optional.
+pub fn host_fileset_specs<P: HostFileProbe + ?Sized>(
+    probe: &P,
+    hosts: &[HostFileset],
+    out: &mut MaterializedFilesets,
+) -> Result<()> {
+    for host in hosts {
+        let resolved = resolve_host_source(probe, &host.source)?;
+        let facts = probe
+            .stat(&resolved)
+            .with_context(|| format!("hostPath {} ({})", host.source, resolved.display()))?;
+        let Some(facts) = host_file_facts(host, &resolved, facts)? else {
+            continue;
+        };
+        let specs = vec![RuntimeFileSpec {
+            guest_path: host.mount_path.clone(),
+            mode: facts.mode,
+            source: RuntimeSource::HostFile(resolved),
+        }];
+        out.absorb(host.owner, &host.mount_path, specs);
+    }
+    Ok(())
+}
+
+/// `Ok(None)` is the one benign miss: an optional path nothing resolves at, announced on the run's own log so the operator sees why the guest is unseeded.
+fn host_file_facts(
+    host: &HostFileset,
+    resolved: &Path,
+    facts: Option<HostFileFacts>,
+) -> Result<Option<HostFileFacts>> {
+    let Some(facts) = facts else {
+        if !host.optional {
+            bail!(
+                "hostPath {} is not present on this host ({}); create it or declare the fileset optional",
+                host.source,
+                resolved.display()
+            );
+        }
+        crate::log::info!(
+            "fileset",
+            "skipping optional hostPath {} — not present on this host",
+            host.source
+        );
+        return Ok(None);
+    };
+    if !facts.is_regular_file {
+        bail!(
+            "hostPath {} ({}) is not a regular file; a hostPath fileset seeds the guest with one file",
+            host.source,
+            resolved.display()
+        );
+    }
+    Ok(Some(facts))
+}
+
+fn resolve_host_source<P: HostFileProbe + ?Sized>(probe: &P, source: &str) -> Result<PathBuf> {
+    let Some(under_home) = source.strip_prefix("~/") else {
+        return Ok(PathBuf::from(source));
+    };
+    let home = probe.home().with_context(|| {
+        format!("cannot resolve hostPath {source}: this machine has no home directory")
+    })?;
+    Ok(home.join(under_home))
 }
 
 pub fn inline_fileset_specs(inline_filesets: &[InlineFileset], out: &mut MaterializedFilesets) {
@@ -616,6 +695,246 @@ mod tests {
                 .iter()
                 .any(|s| s.guest_path == OWNED_MANIFEST_PATH),
             "pinned inputs must not be transferred to the workload"
+        );
+    }
+
+    struct StagedHost {
+        facts: Option<HostFileFacts>,
+        unreadable: bool,
+        home: Option<PathBuf>,
+    }
+
+    impl StagedHost {
+        fn present() -> Self {
+            Self {
+                facts: Some(HostFileFacts {
+                    mode: 0o644,
+                    is_regular_file: true,
+                }),
+                unreadable: false,
+                home: Some(PathBuf::from("/home/some-user")),
+            }
+        }
+    }
+
+    impl HostFileProbe for StagedHost {
+        fn home(&self) -> Option<PathBuf> {
+            self.home.clone()
+        }
+
+        fn stat(&self, _path: &Path) -> std::io::Result<Option<HostFileFacts>> {
+            if self.unreadable {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            Ok(self.facts)
+        }
+    }
+
+    fn host(source: &str, mount_path: &str, owner: FilesetOwner, optional: bool) -> HostFileset {
+        HostFileset {
+            source: source.into(),
+            mount_path: mount_path.into(),
+            owner,
+            optional,
+        }
+    }
+
+    #[test]
+    fn a_workload_owned_host_file_joins_the_chown_manifest() {
+        let mut out = MaterializedFilesets::default();
+        host_fileset_specs(
+            &StagedHost::present(),
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                false,
+            )],
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            out.owned_paths
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["/home/agent/.gitconfig"],
+            "without the chown the workload cannot rewrite the file it was seeded with"
+        );
+        assert!(
+            out.into_specs()
+                .iter()
+                .any(|spec| spec.guest_path == OWNED_MANIFEST_PATH)
+        );
+    }
+
+    #[test]
+    fn a_root_owned_host_file_does_not() {
+        let mut out = MaterializedFilesets::default();
+        host_fileset_specs(
+            &StagedHost::present(),
+            &[host(
+                "/etc/gitconfig",
+                "/etc/gitconfig",
+                FilesetOwner::Root,
+                false,
+            )],
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.owned_paths.is_empty());
+        assert!(
+            !out.into_specs()
+                .iter()
+                .any(|spec| spec.guest_path == OWNED_MANIFEST_PATH)
+        );
+    }
+
+    #[test]
+    fn a_host_file_keeps_the_mode_the_host_reports() {
+        let mut out = MaterializedFilesets::default();
+        host_fileset_specs(
+            &StagedHost {
+                facts: Some(HostFileFacts {
+                    mode: 0o600,
+                    is_regular_file: true,
+                }),
+                ..StagedHost::present()
+            },
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                false,
+            )],
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.specs[0].mode, 0o600);
+    }
+
+    #[test]
+    fn a_host_path_that_resolves_to_something_other_than_a_regular_file_is_refused() {
+        let err = host_fileset_specs(
+            &StagedHost {
+                facts: Some(HostFileFacts {
+                    mode: 0o755,
+                    is_regular_file: false,
+                }),
+                ..StagedHost::present()
+            },
+            &[host("/etc", "/etc/gitconfig", FilesetOwner::Root, true)],
+            &mut MaterializedFilesets::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/etc") && format!("{err:#}").contains("regular file"),
+            "a directory or device is not a file the guest can be seeded with, and `optional` must not swallow it: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_host_path_the_probe_cannot_read_names_the_path_it_failed_on() {
+        let err = host_fileset_specs(
+            &StagedHost {
+                unreadable: true,
+                ..StagedHost::present()
+            },
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                true,
+            )],
+            &mut MaterializedFilesets::default(),
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("~/.gitconfig") && message.contains("/home/some-user/.gitconfig"),
+            "a denied stat is not an absent file, so `optional` must not skip it silently: {message}"
+        );
+    }
+
+    #[test]
+    fn an_absent_optional_host_path_is_skipped_and_tells_the_operator_one_line() {
+        let mut out = MaterializedFilesets::default();
+        let frames = crate::log::testing::capture_run_frames(|| {
+            host_fileset_specs(
+                &StagedHost {
+                    facts: None,
+                    ..StagedHost::present()
+                },
+                &[host(
+                    "~/.gitconfig",
+                    "/home/agent/.gitconfig",
+                    FilesetOwner::Workload,
+                    true,
+                )],
+                &mut out,
+            )
+            .unwrap();
+        });
+        assert!(
+            out.specs.is_empty(),
+            "an absent optional host file must reach nothing downstream: {:?}",
+            out.specs
+        );
+        assert_eq!(
+            frames,
+            vec![lns_ipc::WireFrame::Json(lns_ipc::Response::RunLog {
+                level: lns_ipc::LogLevel::Info,
+                verb: Some("fileset".to_string()),
+                message: "skipping optional hostPath ~/.gitconfig — not present on this host"
+                    .to_string(),
+            })],
+            "the run span carries this line to the CLI, which prints it as one status line; drop it and the guest is silently unseeded"
+        );
+    }
+
+    #[test]
+    fn a_home_rooted_host_path_without_a_known_home_is_refused() {
+        let err = host_fileset_specs(
+            &StagedHost {
+                home: None,
+                ..StagedHost::present()
+            },
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                true,
+            )],
+            &mut MaterializedFilesets::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("~/.gitconfig"),
+            "an unresolvable home must name the path rather than seed a literal `~` file: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_absent_required_host_path_names_both_the_declared_and_the_resolved_path() {
+        let err = host_fileset_specs(
+            &StagedHost {
+                facts: None,
+                ..StagedHost::present()
+            },
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                false,
+            )],
+            &mut MaterializedFilesets::default(),
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("~/.gitconfig"), "got: {message}");
+        assert!(
+            message.contains("/home/some-user/.gitconfig"),
+            "the resolved path is what the operator has to create — including when a symlink is what points nowhere, which the probe reports as this same absence: {message}"
         );
     }
 

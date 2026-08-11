@@ -176,3 +176,30 @@ fn sandbox_resolves_to_same_artifact(w: &mut BehaviourWorld, to: String) -> Resu
         ))
     }
 }
+
+#[given(
+    regex = r#"^a valid lns\.yaml in the current directory declaring a hostPath fileset "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn valid_lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String, mount: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
+        ),
+    );
+}
+
+#[then("the published sandbox config carries the hostPath unchanged")]
+fn published_config_keeps_host_path(w: &mut BehaviourWorld) -> Result<(), String> {
+    let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(doc).map_err(|error| format!("invalid pushed json: {error}"))?;
+    let entry = &value["spec"]["filesets"][0];
+    if entry["hostPath"] == "~/.gitconfig" && entry.get("ref").is_none() {
+        Ok(())
+    } else {
+        Err(format!(
+            "a hostPath is what makes the artifact portable — packing or rewriting it would pin the author's machine, got {entry}"
+        ))
+    }
+}

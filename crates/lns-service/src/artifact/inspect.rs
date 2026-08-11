@@ -65,6 +65,7 @@ pub(crate) fn project_inspection(
                             target: volume.target.clone(),
                             read_only: volume.read_only(),
                             exclude: volume.exclude().to_vec(),
+                            optional: volume.optional(),
                         })
                         .collect(),
                     ports: declared_view_ports(&def.spec.ports)?,
@@ -76,6 +77,8 @@ pub(crate) fn project_inspection(
                             path: fileset.path.clone(),
                             reference: fileset.reference.clone(),
                             inline: fileset.inline.is_some(),
+                            host_path: fileset.host_path.clone(),
+                            optional: fileset.optional,
                             mount_path: fileset.mount_path.clone(),
                             owner: match fileset.owner {
                                 lns_artifact::sandbox::FilesetOwner::Workload => {
@@ -238,6 +241,26 @@ mod tests {
         }))
     }
 
+    fn sandbox_view_with_filesets(filesets: Vec<SandboxFileset>) -> ArtifactInspection {
+        ArtifactInspection::Sandbox(Box::new(SandboxView {
+            reference: "registry.example.test/team/sandbox:latest".into(),
+            digest: digest(),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: None,
+            user: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets,
+            connectors: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: Vec::new(),
+            policy_flags: Vec::new(),
+            cpus: None,
+            mem_mib: None,
+        }))
+    }
+
     #[test]
     fn a_sandbox_projects_the_run_as_user_it_declared_so_a_pull_can_disclose_it() {
         assert_eq!(
@@ -304,9 +327,54 @@ mod tests {
                     target: "/workspace".into(),
                     read_only: false,
                     exclude: vec![".cargo".into(), "tmp/scratch".into()],
+                    optional: false,
                 }]
             ),
             "a pulled sandbox whose exclusions are dropped here publishes masks that never apply"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_discloses_a_host_file_source_and_whether_it_is_optional() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}}"#
+            )
+            .unwrap(),
+            sandbox_view_with_filesets(vec![SandboxFileset {
+                path: None,
+                reference: None,
+                inline: false,
+                host_path: Some("~/.gitconfig".into()),
+                mount_path: "/home/agent/.gitconfig".into(),
+                owner: lns_ipc::SandboxFilesetOwner::Workload,
+                optional: true,
+            }]),
+            "a pulled sandbox that reads a file off the consumer's machine must say which file, before it boots"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_whether_its_bind_is_optional() {
+        assert_eq!(
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":"~/.claude","target":"/home/agent/.claude","optional":true}]}}"#
+            )
+            .unwrap(),
+            sandbox_view_with(
+                None,
+                None,
+                None,
+                vec![SandboxMount {
+                    kind: SandboxMountKind::Bind,
+                    source: "~/.claude".into(),
+                    target: "/home/agent/.claude".into(),
+                    read_only: false,
+                    exclude: Vec::new(),
+                    optional: true,
+                }]
+            ),
+            "dropping this makes a pulled optional bind required again, so a consumer without the directory could not run the sandbox at all"
         );
     }
 
@@ -331,6 +399,7 @@ mod tests {
                         target: "/workspace".into(),
                         read_only: false,
                         exclude: Vec::new(),
+                        optional: false,
                     },
                     SandboxMount {
                         kind: SandboxMountKind::Volume,
@@ -338,6 +407,7 @@ mod tests {
                         target: "/root/.cache".into(),
                         read_only: true,
                         exclude: Vec::new(),
+                        optional: false,
                     },
                 ],
                 ports: vec![
@@ -358,6 +428,8 @@ mod tests {
                                 .into()
                         ),
                         inline: false,
+                        host_path: None,
+                        optional: false,
                         mount_path: "/root/.agent/skills".into(),
                         owner: lns_ipc::SandboxFilesetOwner::Workload,
                     },
@@ -365,6 +437,8 @@ mod tests {
                         path: None,
                         reference: None,
                         inline: true,
+                        host_path: None,
+                        optional: false,
                         mount_path: "/etc/agent".into(),
                         owner: lns_ipc::SandboxFilesetOwner::Root,
                     },

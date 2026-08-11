@@ -129,7 +129,7 @@ fn resolve_host_binds(
 struct PublishedTarget {
     image: String,
     defaults: crate::run::declarative::Defaults,
-    filesets: Vec<(String, String, String)>,
+    filesets: Vec<crate::run::summary::FilesetSummary>,
     tools: Vec<String>,
 }
 
@@ -222,6 +222,7 @@ pub async fn run_image(
     let resolved = crate::run::declarative::resolve(
         &defaults,
         target.project_dir().unwrap_or(&cwd),
+        dirs::home_dir().as_deref(),
         args.workdir.take(),
         std::mem::take(&mut args.mounts),
     )?;
@@ -240,12 +241,11 @@ pub async fn run_image(
             .spec
             .filesets
             .iter()
-            .map(|fileset| {
-                (
-                    crate::run::summary::fileset_source_display(fileset),
-                    fileset.mount_path.clone(),
-                    crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
-                )
+            .map(|fileset| crate::run::summary::FilesetSummary {
+                source: crate::run::summary::fileset_source_display(fileset),
+                mount_path: fileset.mount_path.clone(),
+                owner: crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
+                from_host: fileset.host_path.is_some(),
             })
             .collect(),
         (_, Some(published)) => published.filesets.clone(),
@@ -1140,6 +1140,7 @@ mod tests {
                     target: "/workspace".into(),
                     read_only: false,
                     exclude: Vec::new(),
+                    optional: false,
                 }],
                 ports: Vec::new(),
                 filesets: vec![lns_ipc::SandboxFileset {
@@ -1149,6 +1150,8 @@ mod tests {
                         "b".repeat(64)
                     )),
                     inline: false,
+                    host_path: None,
+                    optional: false,
                     mount_path: "/root/.agent/skills".into(),
                     owner: lns_ipc::SandboxFilesetOwner::Workload,
                 }],
@@ -1170,14 +1173,15 @@ mod tests {
         assert_eq!(target.defaults.mounts[0].source, ".");
         assert_eq!(
             target.filesets,
-            [(
-                format!(
+            [crate::run::summary::FilesetSummary {
+                source: format!(
                     "registry.example.test/team/skills@sha256:{}…",
                     "b".repeat(12)
                 ),
-                "/root/.agent/skills".to_string(),
-                "workload".to_string()
-            )]
+                mount_path: "/root/.agent/skills".to_string(),
+                owner: "workload".to_string(),
+                from_host: false,
+            }]
         );
     }
 

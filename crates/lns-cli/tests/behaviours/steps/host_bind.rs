@@ -313,6 +313,7 @@ fn later_run_no_prompt(world: &mut BehaviourWorld) -> Result<(), String> {
             target: m.target.clone(),
             read_only: m.read_only,
             exclude: Vec::new(),
+            optional: false,
         })
         .collect();
     let dir = dir_from(world);
@@ -369,4 +370,147 @@ fn summary_shows_bind_line(world: &mut BehaviourWorld, line: String) -> Result<(
 #[then(regex = r#"^the summary shows "([^"]+)"$"#)]
 fn summary_shows(world: &mut BehaviourWorld, line: String) -> Result<(), String> {
     summary_contains(world, &line)
+}
+
+#[given(regex = r#"^a definition declaring a bind from "([^"]+)" to "([^"]+)"$"#)]
+fn definition_declares_bind(world: &mut BehaviourWorld, source: String, target: String) {
+    world
+        .declared_mounts
+        .mounts
+        .push(lns_cli::run::declarative::MountDefault {
+            bind: true,
+            source,
+            target,
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+        });
+}
+
+#[given(regex = r#"^this machine's home directory is "([^"]+)"$"#)]
+fn machine_home_is(world: &mut BehaviourWorld, home: String) {
+    world.declared_mounts.home = Some(std::path::PathBuf::from(home));
+}
+
+#[given("this machine has no home directory")]
+fn machine_has_no_home(world: &mut BehaviourWorld) {
+    world.declared_mounts.home = None;
+}
+
+#[when("the declared mounts resolve")]
+fn declared_mounts_resolve(world: &mut BehaviourWorld) {
+    let defaults = lns_cli::run::declarative::Defaults {
+        mounts: world.declared_mounts.mounts.clone(),
+        ..Default::default()
+    };
+    world.declared_mounts.outcome = Some(
+        lns_cli::run::declarative::resolve(
+            &defaults,
+            Path::new("/work/project"),
+            world.declared_mounts.home.as_deref(),
+            None,
+            Vec::new(),
+        )
+        .map(|resolved| resolved.mounts)
+        .map_err(|e| format!("{e:#}")),
+    );
+}
+
+#[then(regex = r#"^the host bind source is "([^"]+)"$"#)]
+fn host_bind_source_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let mounts = world
+        .declared_mounts
+        .outcome
+        .as_ref()
+        .ok_or("no declared-mount resolution captured")?
+        .as_ref()
+        .map_err(|e| format!("resolution failed: {e}"))?;
+    let sources: Vec<&str> = mounts
+        .iter()
+        .filter_map(|mount| match mount {
+            lns_ipc::MountSpec::Bind(bind) => Some(bind.host_source.as_str()),
+            lns_ipc::MountSpec::Named(_) => None,
+        })
+        .collect();
+    if sources == [expected.as_str()] {
+        Ok(())
+    } else {
+        Err(format!("expected [{expected:?}], got {sources:?}"))
+    }
+}
+
+#[then(regex = r#"^the mount resolution fails naming "([^"]+)"$"#)]
+fn mount_resolution_fails(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    match world
+        .declared_mounts
+        .outcome
+        .as_ref()
+        .ok_or("no declared-mount resolution captured")?
+    {
+        Err(message) if message.contains(&needle) => Ok(()),
+        other => Err(format!(
+            "expected a failure naming {needle:?}, got {other:?}"
+        )),
+    }
+}
+
+#[given(regex = r#"^an? (optional|required) declared bind from "([^"]+)" to "([^"]+)"$"#)]
+fn declared_bind_spec(world: &mut BehaviourWorld, kind: String, source: String, target: String) {
+    world.host_bind.declared_specs.push(lns_ipc::BindSpec {
+        host_source: source,
+        target,
+        read_only: false,
+        exclude: Vec::new(),
+        optional: kind == "optional",
+    });
+}
+
+#[when("the declared binds are resolved interactively")]
+fn declared_binds_resolved(world: &mut BehaviourWorld) {
+    let specs = world.host_bind.declared_specs.clone();
+    let dir = dir_from(world);
+    let store = FakeStore {
+        state: Mutex::new(world.host_bind.decisions.clone()),
+    };
+    let mut input = std::io::Cursor::new(world.host_bind.answer.clone().unwrap_or_default());
+    let mut out = Vec::new();
+    let result =
+        resolve_binds(&specs, &dir, &store, true, &mut input, &mut out).map_err(|e| e.to_string());
+    world.resolved_run = Some(ResolvedRunView {
+        binds: result
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|bind| format!("{} -> {}", bind.host_source, bind.target))
+            .collect(),
+        ..Default::default()
+    });
+    world.host_bind.outcome = Some(HostBindOutcome {
+        result,
+        prompt: String::from_utf8(out).unwrap(),
+        persisted: store.state.into_inner().unwrap(),
+        summary: String::new(),
+    });
+}
+
+#[then("no host bind is resolved")]
+fn no_host_bind_resolved(world: &mut BehaviourWorld) -> Result<(), String> {
+    let binds = resolved_binds(world)?;
+    if binds.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "a skipped bind must reach neither the secret scan, the wire, nor the audit record, got {binds:?}"
+        ))
+    }
+}
+
+#[then("the output says the bind was skipped because it is not present on this host")]
+fn output_reports_skipped_bind(world: &mut BehaviourWorld) -> Result<(), String> {
+    let prompt = &outcome(world)?.prompt;
+    if prompt.contains("skipping optional bind") && prompt.contains("not present on this host") {
+        Ok(())
+    } else {
+        Err(format!("expected a skip line, got {prompt:?}"))
+    }
 }

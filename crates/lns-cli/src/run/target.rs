@@ -116,7 +116,7 @@ fn absolutize_fileset_paths(
         .context("spec.filesets is not an array")?;
     for (index, fileset) in def.spec.filesets.iter().enumerate() {
         if let Some(path) = &fileset.path {
-            let rooted = crate::run::declarative::resolve_bind_source(path, cwd)
+            let rooted = crate::run::declarative::resolve_bind_source(path, cwd, None)
                 .with_context(|| format!("fileset {path}"))?;
             entries[index]["path"] = serde_json::Value::String(rooted);
         }

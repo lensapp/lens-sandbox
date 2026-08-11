@@ -7,7 +7,7 @@ pub struct PulledEffects<'a> {
     pub reference: &'a str,
     pub binds: &'a [lns_ipc::BindSpec],
     pub volumes: &'a [lns_ipc::VolumeMount],
-    pub filesets: &'a [(String, String, String)],
+    pub filesets: &'a [crate::run::summary::FilesetSummary],
     pub tools: &'a [String],
 }
 
@@ -95,15 +95,21 @@ fn disclosure(effects: &PulledEffects) -> String {
         )
         .unwrap();
     }
-    for (source, mount_path, owner) in effects.filesets {
-        let mode = if owner == "workload" {
+    for fileset in effects.filesets {
+        let mode = if fileset.owner == "workload" {
             "read and write"
         } else {
             "read"
         };
+        let provenance = if fileset.from_host {
+            "a file read from this machine at launch, which the workload can"
+        } else {
+            "author-published files the workload can"
+        };
         writeln!(
             s,
-            "  Fileset:   {source} → {mount_path} — author-published files the workload can {mode} (owner: {owner})"
+            "  Fileset:   {} → {} — {provenance} {mode} (owner: {})",
+            fileset.source, fileset.mount_path, fileset.owner
         )
         .unwrap();
     }
@@ -127,6 +133,7 @@ mod tests {
             target: "/work".into(),
             read_only,
             exclude: Vec::new(),
+            optional: false,
         }
     }
 
@@ -142,6 +149,15 @@ mod tests {
         (r, String::from_utf8(out).unwrap())
     }
 
+    fn fileset(source: &str, mount_path: &str, owner: &str) -> crate::run::summary::FilesetSummary {
+        crate::run::summary::FilesetSummary {
+            source: source.into(),
+            mount_path: mount_path.into(),
+            owner: owner.into(),
+            from_host: false,
+        }
+    }
+
     fn volume(name: &str, read_only: bool) -> lns_ipc::VolumeMount {
         lns_ipc::VolumeMount {
             name: name.into(),
@@ -152,7 +168,7 @@ mod tests {
 
     fn mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
-        filesets: &'a [(String, String, String)],
+        filesets: &'a [crate::run::summary::FilesetSummary],
     ) -> PulledEffects<'a> {
         volume_mounts(binds, &[], filesets)
     }
@@ -160,7 +176,7 @@ mod tests {
     fn volume_mounts<'a>(
         binds: &'a [lns_ipc::BindSpec],
         volumes: &'a [lns_ipc::VolumeMount],
-        filesets: &'a [(String, String, String)],
+        filesets: &'a [crate::run::summary::FilesetSummary],
     ) -> PulledEffects<'a> {
         PulledEffects {
             reference: "ghcr.io/team/hermes:1",
@@ -185,6 +201,7 @@ mod tests {
             target: target.into(),
             read_only: false,
             exclude: Vec::new(),
+            optional: false,
         })
     }
 
@@ -270,16 +287,12 @@ mod tests {
     #[test]
     fn disclosure_names_each_fileset_with_its_mount_path_and_access_mode() {
         let filesets = [
-            (
-                "reg/skills@sha256:abcabcabcabc…".to_string(),
-                "/root/.agent/skills".to_string(),
-                "workload".to_string(),
+            fileset(
+                "reg/skills@sha256:abcabcabcabc…",
+                "/root/.agent/skills",
+                "workload",
             ),
-            (
-                "inline".to_string(),
-                "/etc/agent".to_string(),
-                "root".to_string(),
-            ),
+            fileset("inline", "/etc/agent", "root"),
         ];
         let (r, out) = confirm(&mounts(&[], &filesets), false, true, "yes\n");
         r.unwrap();
@@ -351,11 +364,7 @@ mod tests {
 
     #[test]
     fn no_terminal_fails_closed_and_points_at_the_yes_flag() {
-        let filesets = [(
-            "reg/skills@sha256:abc".to_string(),
-            "/skills".to_string(),
-            "workload".to_string(),
-        )];
+        let filesets = [fileset("reg/skills@sha256:abc", "/skills", "workload")];
         let (r, out) = confirm(&mounts(&[], &filesets), false, false, "");
         let err = r.unwrap_err().to_string();
         assert!(err.contains("--yes"), "must name the escape hatch: {err}");

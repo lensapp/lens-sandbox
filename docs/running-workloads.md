@@ -427,6 +427,36 @@ shell or environment-variable interpolation, so use `source: .`, not `$PWD`.
 Paths are normalized, and a relative source cannot escape the project with
 `..`.
 
+A source that starts with `~/` resolves against the home directory of the user
+who runs `lns`, on the machine that runs it. This is the portable way for a
+definition to reach a per-user directory such as `~/.claude`. Only the `~/` form
+is supported: a bare `~` and another user's home (`~alice/…`) are refused,
+because a definition that names one machine's account is not portable.
+
+A `~/` source that names a secret store — `~/.ssh`, `~/.aws`, `~/.gnupg`, or any
+other secret-shaped segment — is refused offline, exactly as a `hostPath` is.
+The keep/drop prompt reads the top-level names under a bind root only, so it
+cannot be the guard for a bind whose root *is* the key store. An absolute or
+project-relative source keeps the rules it always had, because it names the
+author's own machine and cannot travel.
+
+A bind whose source is absent refuses the run and names the path. Add
+`optional: true` to skip it instead, so one definition runs both on a machine
+that has the directory and on a machine that does not:
+
+```yaml
+spec:
+  volumes:
+    - type: bind
+      source: ~/.claude            # this machine's own agent state
+      target: /home/agent/.claude
+      optional: true               # skipped, with one line, when it is absent
+```
+
+A skipped bind reaches nothing downstream — not the secret scan, not the guest,
+not the audit record. `optional` applies to a bind only; a named volume is
+created on demand and is never absent.
+
 Launch flags are the final override layer. Lens Sandbox starts with the mounts
 from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
 `--mount` targets the same guest path, and keeps mounts with other targets.
@@ -453,6 +483,9 @@ spec:
         mcp.json: |
           {"mcpServers":{}}
       mountPath: /home/sandbox
+    - hostPath: ~/.gitconfig      # one file from the machine that runs it
+      mountPath: /home/agent/.gitconfig
+      optional: true
 ```
 
 - **`path`** names a directory in the authoring project. A local `lns run`
@@ -462,7 +495,9 @@ spec:
   artifact, uploaded alongside the sandbox, and rewritten to a digest-pinned
   `ref` in the published config. (`spec.image` is published exactly as written —
   `lns push` does not resolve it; pin it by digest yourself for a reproducible
-  base, as above.)
+  base, as above.) A `path` is a directory beside the definition, so it cannot
+  be home-anchored: a `~/…` `path` is refused and names `hostPath` as the field
+  that reads the machine that runs the sandbox.
 - **`ref`** names a pre-published FileSet artifact, always pinned by digest. A
   pulled sandbox's filesets are fetched and materialized at launch; `lns
   inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
@@ -475,8 +510,23 @@ spec:
   Inline files remain in the published sandbox config, so `lns push`
   does not create a companion FileSet artifact for them. Inspect and run output
   disclose the inline source, mount path, and owner, never the file contents.
-- Each entry sets exactly one of `path`/`ref`/`inline`. `inline` must contain at
-  least one file. Every inline key must be a relative path without empty, `.`,
+- **`hostPath`** names one file on the machine that *runs* the sandbox, not on
+  the author's. It is read once at launch and written to `mountPath`, so the
+  guest gets a snapshot, never a live share — the file a workload edits inside
+  the guest dies with the microVM, and the host copy is never touched. This is
+  the portable way to seed the tool identity a workload needs, such as
+  `~/.gitconfig`. The path must be absolute or start with `~/` (resolved
+  against the home of the user who runs `lns`), and `mountPath` names a guest
+  **file**, so it must not end in `/`. A `hostPath` is carried into the
+  published config verbatim — `lns push` packs nothing for it, which is exactly
+  what keeps the artifact portable. Add `optional: true` when the file may be
+  absent: an absent required `hostPath` refuses the run and names the path, an
+  absent optional one is skipped and reported as one status line of the run.
+  A `hostPath` that is a symlink reads the file it points at, so a dotfile that
+  stow, chezmoi, or home-manager manages works; a link that points nowhere
+  counts as absent. `optional` applies to a `hostPath` entry only.
+- Each entry sets exactly one of `path`/`ref`/`inline`/`hostPath`. `inline` must
+  contain at least one file. Every inline key must be a relative path without empty, `.`,
   or `..` components. `mountPath` is an absolute
   guest path; duplicates — including collisions with a volume `target` — are
   rejected offline, as is any mount into the sandbox's own `/.lens` runtime
@@ -489,8 +539,9 @@ spec:
   MCP configs an agent must not rewrite mid-run. Either way the snapshot is
   ephemeral: changes die with the microVM.
 - A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
-  fileset, or as any path component in an `inline`
-  fileset refuses `validate`, `run`, and `push` outright: a fileset is baked
+  fileset, as any path component in an `inline`
+  fileset, or as any segment of a `hostPath`
+  refuses `validate`, `run`, and `push` outright: a fileset is baked
   into an artifact, so there is no keep/drop prompt to catch it later — real
   secrets stay outside the workload. Ship the tool's *configuration* in a
   fileset and bind its *credential* through `spec.credentials`, so the
@@ -636,7 +687,7 @@ directory while holding back the parts a workload must not see:
 spec:
   volumes:
     - type: bind
-      source: /Users/you/dev     # an absolute path; `~` is not expanded
+      source: ~/dev              # or an absolute path
       target: /work
       exclude:
         - .cargo          # host toolchains the guest must not use

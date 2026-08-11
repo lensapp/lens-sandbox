@@ -80,6 +80,22 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                 })
             })
             .collect(),
+        host_filesets: def
+            .spec
+            .filesets
+            .iter()
+            .filter_map(|fileset| {
+                fileset
+                    .host_path
+                    .as_ref()
+                    .map(|source| assembly::HostFileset {
+                        source: source.clone(),
+                        mount_path: fileset.mount_path.clone(),
+                        owner: fileset.owner,
+                        optional: fileset.optional,
+                    })
+            })
+            .collect(),
         inline_filesets: def
             .spec
             .filesets

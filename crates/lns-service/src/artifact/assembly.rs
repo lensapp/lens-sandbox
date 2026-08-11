@@ -8,6 +8,15 @@ pub struct LocalFileset {
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
+/// A definition's hostPath fileset: one file on the machine that runs it, snapshotted into the guest at launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFileset {
+    pub source: String,
+    pub mount_path: String,
+    pub owner: lns_artifact::sandbox::FilesetOwner,
+    pub optional: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineFileset {
     pub files: BTreeMap<String, String>,
@@ -19,6 +28,7 @@ pub struct InlineFileset {
 pub struct ResolvedSandbox {
     pub base_image: String,
     pub local_filesets: Vec<LocalFileset>,
+    pub host_filesets: Vec<HostFileset>,
     pub inline_filesets: Vec<InlineFileset>,
     pub filesets: Vec<ResolvedFileset>,
     pub command: Option<String>,

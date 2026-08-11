@@ -50,6 +50,7 @@ pub struct BehaviourWorld {
     /// Exact pins the scripted index answers "not listed" for at push verification.
     pub unlisted_pins: std::collections::HashSet<String>,
     pub host_bind: HostBindRig,
+    pub declared_mounts: DeclaredMountRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
@@ -68,6 +69,8 @@ pub struct HostBindRig {
     pub decisions: std::collections::HashMap<String, SecretDisposition>,
     pub answer: Option<String>,
     pub outcome: Option<HostBindOutcome>,
+    /// Binds a definition declared, rather than ones a `-v` flag parsed — the only way `optional` reaches `resolve_binds`.
+    pub declared_specs: Vec<lns_ipc::BindSpec>,
 }
 
 #[derive(Debug)]
@@ -76,6 +79,14 @@ pub struct HostBindOutcome {
     pub prompt: String,
     pub persisted: std::collections::HashMap<String, SecretDisposition>,
     pub summary: String,
+}
+
+/// A definition's declared mounts plus the home this machine reports, for driving `declarative::resolve` offline.
+#[derive(Debug, Default)]
+pub struct DeclaredMountRig {
+    pub mounts: Vec<lns_cli::run::declarative::MountDefault>,
+    pub home: Option<std::path::PathBuf>,
+    pub outcome: Option<Result<Vec<lns_ipc::MountSpec>, String>>,
 }
 
 #[derive(Debug, Default)]

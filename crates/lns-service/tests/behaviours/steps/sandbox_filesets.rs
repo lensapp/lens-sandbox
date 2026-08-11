@@ -286,3 +286,150 @@ fn plan_accepts_inline_without_ref(world: &mut BehaviourWorld) -> Result<(), Str
         ))
     }
 }
+
+struct StagedHost {
+    files: std::collections::HashMap<std::path::PathBuf, u32>,
+    home: Option<std::path::PathBuf>,
+}
+
+impl lns_service::artifact::fileset::HostFileProbe for StagedHost {
+    fn home(&self) -> Option<std::path::PathBuf> {
+        self.home.clone()
+    }
+
+    fn stat(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<Option<lns_service::artifact::fileset::HostFileFacts>> {
+        Ok(self
+            .files
+            .get(path)
+            .map(|mode| lns_service::artifact::fileset::HostFileFacts {
+                mode: *mode,
+                is_regular_file: true,
+            }))
+    }
+}
+
+#[given(
+    regex = r#"^a (published sandbox|definition) declaring an? (optional )?hostPath fileset "([^"]+)" at "([^"]+)"$"#
+)]
+fn definition_with_host_path_fileset(
+    world: &mut BehaviourWorld,
+    _who: String,
+    optional: String,
+    source: String,
+    mount: String,
+) {
+    let optional = !optional.is_empty();
+    world.fileset_definition = Some(sandbox_json(&format!(
+        r#"{{"hostPath":"{source}","mountPath":"{mount}","optional":{optional}}}"#
+    )));
+}
+
+#[given(regex = r#"^the host file "([^"]+)" exists with mode 0([0-7]+)$"#)]
+fn host_file_exists(world: &mut BehaviourWorld, path: String, mode: String) {
+    let mode = u32::from_str_radix(&mode, 8).expect("octal mode");
+    world
+        .host_files
+        .insert(std::path::PathBuf::from(path), mode);
+}
+
+#[given(regex = r#"^this machine's home directory is "([^"]+)"$"#)]
+fn machine_home_is(world: &mut BehaviourWorld, home: String) {
+    world.host_home = Some(std::path::PathBuf::from(home));
+}
+
+#[when("the host files are planned")]
+fn plan_host_files(world: &mut BehaviourWorld) {
+    let json = world
+        .fileset_definition
+        .take()
+        .expect("the scenario must declare a definition");
+    let def = lns_artifact::sandbox::parse(&json).expect("valid sandbox fixture");
+    let resolved = resolved_from_sandbox(&def);
+    let probe = StagedHost {
+        files: world.host_files.clone(),
+        home: world.host_home.clone(),
+    };
+    let mut materialized = MaterializedFilesets::default();
+    match lns_service::artifact::fileset::host_fileset_specs(
+        &probe,
+        &resolved.host_filesets,
+        &mut materialized,
+    ) {
+        Ok(()) => {
+            world.fileset_problems = Some(Vec::new());
+            world.host_file_writes = materialized
+                .specs
+                .iter()
+                .filter_map(|spec| match &spec.source {
+                    lns_service::runtime_layer::RuntimeSource::HostFile(path) => {
+                        Some((path.to_string_lossy().into_owned(), spec.guest_path.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            capture_materialized(world, materialized);
+        }
+        Err(error) => world.fileset_problems = Some(vec![format!("{error:#}")]),
+    }
+}
+
+#[then(regex = r#"^the plan carries a host-file write from "([^"]+)" to "([^"]+)"$"#)]
+fn plan_carries_host_file_write(
+    world: &mut BehaviourWorld,
+    source: String,
+    guest_path: String,
+) -> Result<(), String> {
+    if world
+        .host_file_writes
+        .contains(&(source.clone(), guest_path.clone()))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "a hostPath fileset must plan as a launch-time snapshot of the host file, not a live share — expected ({source:?}, {guest_path:?}) among {:?}",
+            world.host_file_writes
+        ))
+    }
+}
+
+#[then("the plan carries no guest-write spec")]
+fn plan_carries_no_spec(world: &mut BehaviourWorld) -> Result<(), String> {
+    let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
+    let specs = world.fileset_specs.as_ref().ok_or("no plan captured")?;
+    if problems.is_empty() && specs.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected an empty plan, got problems={problems:?} specs={specs:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the plan is refused naming "([^"]+)"$"#)]
+fn plan_refused_naming(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
+    if problems.iter().any(|problem| problem.contains(&needle)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a refusal naming {needle:?}, got {problems:?}"
+        ))
+    }
+}
+
+#[then("the plan accepts the hostPath fileset")]
+fn plan_accepts_host_path(world: &mut BehaviourWorld) -> Result<(), String> {
+    let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
+    let plan = world.fileset_plan.as_ref().ok_or("no plan captured")?;
+    if problems.is_empty() && plan.local_filesets.is_empty() && plan.host_filesets.len() == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected one accepted hostPath fileset, got problems={problems:?}, local={:?}, host={:?}",
+            plan.local_filesets, plan.host_filesets
+        ))
+    }
+}

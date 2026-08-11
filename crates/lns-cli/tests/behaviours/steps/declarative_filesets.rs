@@ -60,12 +60,11 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
             .spec
             .filesets
             .iter()
-            .map(|fileset| {
-                (
-                    fileset_source_display(fileset),
-                    fileset.mount_path.clone(),
-                    lns_cli::run::summary::fileset_owner_display(fileset.owner).to_string(),
-                )
+            .map(|fileset| lns_cli::run::summary::FilesetSummary {
+                source: fileset_source_display(fileset),
+                mount_path: fileset.mount_path.clone(),
+                owner: lns_cli::run::summary::fileset_owner_display(fileset.owner).to_string(),
+                from_host: fileset.host_path.is_some(),
             })
             .collect();
     }
@@ -100,6 +99,8 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
             path: None,
             reference: Some(reference),
             inline: false,
+            host_path: None,
+            optional: false,
             mount_path: mount,
             owner: lns_ipc::SandboxFilesetOwner::Workload,
         }],
@@ -129,6 +130,8 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
             path: None,
             reference: None,
             inline: true,
+            host_path: None,
+            optional: false,
             mount_path: mount,
             owner: lns_ipc::SandboxFilesetOwner::Root,
         }],
@@ -267,6 +270,97 @@ fn command_fails_naming(world: &mut BehaviourWorld, needle: String) -> Result<()
     } else {
         Err(format!(
             "expected a failure naming {needle:?}, got exit {} with: {}",
+            result.exit_code, result.output
+        ))
+    }
+}
+
+#[cucumber::given(
+    regex = r#"^a pulled sandbox whose view declares a hostPath fileset "([^"]+)" at "([^"]+)" and optional$"#
+)]
+fn pulled_view_with_host_path_fileset(world: &mut BehaviourWorld, source: String, mount: String) {
+    world.pulled_view = Some(lns_ipc::SandboxView {
+        reference: "registry.example.test/team/sandbox:1".into(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+        image: "registry.example.test/runtime:1".into(),
+        workdir: None,
+        user: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: vec![lns_ipc::SandboxFileset {
+            path: None,
+            reference: None,
+            inline: false,
+            host_path: Some(source),
+            mount_path: mount,
+            owner: lns_ipc::SandboxFilesetOwner::Workload,
+            optional: true,
+        }],
+        connectors: Vec::new(),
+        env: Vec::new(),
+        credentials: Vec::new(),
+        tools: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+    });
+}
+
+#[when("the pulled sandbox effects are confirmed with no answer")]
+fn pulled_effects_confirmed(world: &mut BehaviourWorld) {
+    let view = world.pulled_view.take().expect("a pulled view is staged");
+    let filesets = lns_cli::run::summary::fileset_summaries_from_view(&view);
+    let effects = lns_cli::run::pull_confirm::PulledEffects {
+        reference: &view.reference,
+        binds: &[],
+        volumes: &[],
+        filesets: &filesets,
+        tools: &[],
+    };
+    let mut input = std::io::Cursor::new(String::new());
+    let mut out = Vec::new();
+    let outcome = lns_cli::run::pull_confirm::confirm_pulled_effects(
+        &effects, false, true, &mut input, &mut out,
+    );
+    world.summary_output = String::from_utf8(out).expect("non-utf8 disclosure");
+    world.result = Some(CliRun {
+        exit_code: i32::from(outcome.is_err()),
+        output: outcome.err().map(|e| format!("{e:#}")).unwrap_or_default(),
+    });
+}
+
+#[then(regex = r#"^the disclosure names the host file "([^"]+)"$"#)]
+fn disclosure_names_host_file(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    if world.summary_output.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {needle:?} in the disclosure:\n{}",
+            world.summary_output
+        ))
+    }
+}
+
+#[then("the disclosure does not call the host file author-published")]
+fn disclosure_does_not_claim_author_published(world: &mut BehaviourWorld) -> Result<(), String> {
+    if world.summary_output.contains("author-published") {
+        Err(format!(
+            "a host file is read from the consumer's own machine, so calling it author-published inverts what the operator is consenting to:\n{}",
+            world.summary_output
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then("the run is refused without a confirmation")]
+fn run_refused_without_confirmation(world: &mut BehaviourWorld) -> Result<(), String> {
+    let result = world.result.as_ref().ok_or("no run captured")?;
+    if result.exit_code != 0 && result.output.contains("declined") {
+        Ok(())
+    } else {
+        Err(format!(
+            "a host file must not be read without consent, got exit {} with: {}",
             result.exit_code, result.output
         ))
     }

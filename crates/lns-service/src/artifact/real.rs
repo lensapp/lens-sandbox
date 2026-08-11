@@ -52,7 +52,13 @@ pub(crate) async fn peek_and_plan(
             if !problems.is_empty() {
                 anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
             }
-            let fileset_specs = materialize_filesets(&resolved).await?.into_specs();
+            let mut materialized = materialize_filesets(&resolved).await?;
+            crate::artifact::fileset::host_fileset_specs(
+                &RealSnapshotDir,
+                &resolved.host_filesets,
+                &mut materialized,
+            )?;
+            let fileset_specs = materialized.into_specs();
             Ok(Some(SandboxPlan {
                 workload: assembly::assemble(&resolved),
                 fileset_specs,
@@ -70,6 +76,11 @@ pub(crate) async fn plan_local(definition_json: &str) -> Result<SandboxPlan> {
     crate::artifact::fileset::local_fileset_specs(
         &RealSnapshotDir,
         &resolved.local_filesets,
+        &mut materialized,
+    )?;
+    crate::artifact::fileset::host_fileset_specs(
+        &RealSnapshotDir,
+        &resolved.host_filesets,
         &mut materialized,
     )?;
     Ok(SandboxPlan {
@@ -111,6 +122,28 @@ impl crate::artifact::fileset::SnapshotDir for RealSnapshotDir {
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entries)
+    }
+}
+
+impl crate::artifact::fileset::HostFileProbe for RealSnapshotDir {
+    fn home(&self) -> Option<std::path::PathBuf> {
+        dirs::home_dir()
+    }
+
+    /// `metadata`, not `symlink_metadata`: a stow/chezmoi dotfile is a symlink, and the read that follows this seeds from the target too.
+    fn stat(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<Option<crate::artifact::fileset::HostFileFacts>> {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(metadata) => Ok(Some(crate::artifact::fileset::HostFileFacts {
+                mode: metadata.permissions().mode() & 0o777,
+                is_regular_file: metadata.is_file(),
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -328,9 +361,54 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::fileset::{HostFileFacts, HostFileProbe};
     use oci_client::manifest::{OciDescriptor, OciImageManifest};
     use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_symlinked_host_file_reads_as_the_file_it_points_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("dotfiles").join("gitconfig");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&target, b"[user]").expect("write");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+        let link = dir.path().join(".gitconfig");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert_eq!(
+            RealSnapshotDir.stat(&link).expect("stat"),
+            Some(HostFileFacts {
+                mode: 0o640,
+                is_regular_file: true
+            }),
+            "stow, chezmoi and home-manager all leave ~/.gitconfig a symlink, and the read that follows this one seeds from the target; refusing the link here refuses the whole run and leaves `optional` powerless"
+        );
+    }
+
+    #[test]
+    fn a_symlink_with_no_target_counts_as_an_absent_host_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join(".gitconfig");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &link).expect("symlink");
+        assert_eq!(
+            RealSnapshotDir.stat(&link).expect("stat"),
+            None,
+            "nothing is behind the link, so there is no file to seed: absent is the honest answer, and an optional fileset skips it instead of refusing the run"
+        );
+    }
+
+    #[test]
+    fn a_directory_at_a_host_path_is_still_reported_as_not_a_regular_file() {
+        assert_eq!(
+            RealSnapshotDir
+                .stat(tempfile::tempdir().expect("tempdir").path())
+                .expect("stat")
+                .map(|facts| facts.is_regular_file),
+            Some(false),
+            "following the link must not soften the genuine case: a directory is not a file the guest can be seeded with"
+        );
+    }
 
     struct StreamingRegistry {
         blob: Vec<u8>,

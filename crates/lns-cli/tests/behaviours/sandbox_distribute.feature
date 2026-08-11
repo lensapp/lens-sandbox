@@ -123,3 +123,11 @@ Feature: distributing a sandbox
     When the user runs sandbox command "tag hermes:1.4.0 hermes:latest"
     Then the exit code is 0
     And the sandbox "hermes:latest" resolves to the same cached artifact
+
+  Scenario: push carries a hostPath fileset verbatim and packs nothing for it
+    Given a valid lns.yaml in the current directory declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And only the sandbox artifact is pushed
+    And the published sandbox config carries the hostPath unchanged

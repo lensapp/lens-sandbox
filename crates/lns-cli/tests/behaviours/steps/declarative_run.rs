@@ -63,7 +63,7 @@ fn resolve_defaults(world: &mut BehaviourWorld, defaults: &Defaults, project: &P
     let mut argv = vec!["lns".to_string(), "run".to_string()];
     argv.extend(flags.split_whitespace().map(str::to_string));
     let args: RunArgs = parse_args(&argv).expect("override flags must parse");
-    let resolved = resolve(defaults, project, args.workdir, args.mounts)
+    let resolved = resolve(defaults, project, None, args.workdir, args.mounts)
         .expect("declarative settings must resolve");
     let (volumes, binds) = lns_cli::cli::split_mounts(&resolved.mounts);
     world.resolved_run = Some(ResolvedRunView {
@@ -197,6 +197,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
                 target: volume.target.clone(),
                 read_only: volume.read_only(),
                 exclude: volume.exclude().to_vec(),
+                optional: volume.optional(),
             })
             .collect(),
         ports: Vec::new(),
@@ -263,7 +264,7 @@ fn resolve_declarative_binds(world: &mut BehaviourWorld) {
 }
 
 fn resolve_binds_with(world: &mut BehaviourWorld, defaults: Defaults) {
-    let resolved = resolve(&defaults, Path::new("/work"), None, Vec::new()).unwrap();
+    let resolved = resolve(&defaults, Path::new("/work"), None, None, Vec::new()).unwrap();
     let bind_specs = lns_cli::cli::split_mounts(&resolved.mounts).1;
     let dir = FakeDir {
         entries: world.host_bind.entries.clone(),

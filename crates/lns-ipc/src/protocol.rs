@@ -315,9 +315,14 @@ pub struct SandboxFileset {
     pub reference: Option<String>,
     #[serde(default)]
     pub inline: bool,
+    /// The host file the sandbox declared, verbatim — shape, never payload, so a consumer sees which of their files it reads.
+    #[serde(default)]
+    pub host_path: Option<String>,
     pub mount_path: String,
     #[serde(default)]
     pub owner: SandboxFilesetOwner,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -351,6 +356,9 @@ pub struct SandboxMount {
     /// Subpaths a published bind excluded, so a pulled sandbox's declared exclusions are visible and applied.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// True when the published bind is skipped on a machine that lacks its source, rather than refusing the run.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -631,6 +639,8 @@ pub struct BindSpec {
     pub read_only: bool,
     /// Subpaths the definition excluded, unioned with any `.lensignore` before the secret scan.
     pub exclude: Vec<String>,
+    /// True when an absent host source skips the bind instead of refusing the run.
+    pub optional: bool,
 }
 
 impl BindSpec {
@@ -649,8 +659,9 @@ impl BindSpec {
             host_source: source.to_string(),
             target: target.to_string(),
             read_only,
-            // A `-v` carries no exclude; the definition is the author surface for that.
+            // A `-v` carries neither exclude nor optional; the definition is the author surface for both.
             exclude: Vec::new(),
+            optional: false,
         })
     }
 }
@@ -1376,6 +1387,7 @@ mod tests {
                 target: "/workspace".into(),
                 read_only: true,
                 exclude: Vec::new(),
+                optional: false,
             }],
             ports: vec![
                 SandboxPort {
@@ -1394,6 +1406,8 @@ mod tests {
                     "a".repeat(64)
                 )),
                 inline: false,
+                host_path: None,
+                optional: false,
                 mount_path: "/root/.agent/skills".into(),
                 owner: SandboxFilesetOwner::Workload,
             }],
@@ -1550,6 +1564,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 exclude: Vec::new(),
+                optional: false,
             })
         );
     }

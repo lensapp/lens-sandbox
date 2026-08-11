@@ -60,3 +60,31 @@ Feature: a sandbox's declared filesets are planned into the launch
     Given a published sandbox declaring an inline file at "/home/sandbox"
     When the sandbox is planned
     Then the plan accepts the inline fileset without a fileset ref
+
+  Scenario: a hostPath fileset lands at its mountPath as a host-file write
+    Given a definition declaring a hostPath fileset "/etc/gitconfig" at "/home/agent/.gitconfig"
+    And the host file "/etc/gitconfig" exists with mode 0644
+    When the host files are planned
+    Then the plan carries a host-file write from "/etc/gitconfig" to "/home/agent/.gitconfig"
+
+  Scenario: a home-rooted hostPath resolves against this machine's home
+    Given a definition declaring a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig"
+    And this machine's home directory is "/home/some-user"
+    And the host file "/home/some-user/.gitconfig" exists with mode 0644
+    When the host files are planned
+    Then the plan carries a host-file write from "/home/some-user/.gitconfig" to "/home/agent/.gitconfig"
+
+  Scenario: an absent optional hostPath fileset is planned as nothing
+    Given a definition declaring an optional hostPath fileset "/etc/gitconfig" at "/home/agent/.gitconfig"
+    When the host files are planned
+    Then the plan carries no guest-write spec
+
+  Scenario: an absent required hostPath fileset refuses the plan
+    Given a definition declaring a hostPath fileset "/etc/gitconfig" at "/home/agent/.gitconfig"
+    When the host files are planned
+    Then the plan is refused naming "/etc/gitconfig"
+
+  Scenario: a published sandbox may declare a hostPath fileset but still not a local path fileset
+    Given a published sandbox declaring a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig"
+    When the sandbox is planned
+    Then the plan accepts the hostPath fileset
