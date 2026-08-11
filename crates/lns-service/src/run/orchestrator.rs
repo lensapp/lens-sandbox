@@ -35,7 +35,9 @@ pub async fn handle(
     }
 }
 
-#[allow(clippy::cognitive_complexity)]
+/// Every run boots with a supervisor session: `SupervisorSession::start` refuses rather than returning without one.
+const SUPERVISED: bool = true;
+
 // top-level boot sequence: tools → caches → ingest → supervisor → runtime → vm spec → session
 #[tracing::instrument(
     name = "lns.run",
@@ -45,7 +47,6 @@ pub async fn handle(
         image = args.image.as_deref().unwrap_or("<imageless>"),
         cpus = args.cpus,
         mem_mib = args.mem,
-        supervised = args.policy_path.is_some(),
     ),
     err,
 )]
@@ -135,7 +136,7 @@ async fn orchestrate(
         let guest_tools = guest_tools::ensure().await?;
         log::debug!("guest tools ready at +{:.2?}", prepare_started.elapsed());
         let (session, initrd) = tokio::try_join!(
-            supervisor::SupervisorSession::start_if_policy(
+            supervisor::SupervisorSession::start(
                 run_id.clone(),
                 microvm.clone(),
                 policy.as_deref().map(Path::new),
@@ -301,7 +302,7 @@ async fn orchestrate(
         imageless,
         &content_store,
         &guest_tools,
-        session.as_ref().map(|s| &s.assets),
+        Some(&session.assets),
         &fileset_specs,
     )?;
 
@@ -360,7 +361,7 @@ async fn orchestrate(
         args.entrypoint.as_deref(),
         &cmd,
         image.config.as_ref(),
-        session.as_ref(),
+        Some(&session),
     );
 
     #[cfg(target_os = "macos")]
@@ -402,9 +403,9 @@ async fn orchestrate(
         binds: bind_attachments,
         workload_uid: run_as.uid,
         workload_gid: vm::host_known_workload_gid(&run_as),
-        vsock: session.as_ref().map(|s| vm::VsockChannel {
+        vsock: Some(vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,
-            fd_tx: s.relay.fd_tx.clone(),
+            fd_tx: session.relay.fd_tx.clone(),
         }),
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
@@ -420,7 +421,7 @@ async fn orchestrate(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
         &cmd,
-        session.is_some(),
+        SUPERVISED,
     );
     let workdir = crate::workload_cwd::resolve(
         args.workdir.as_deref(),
@@ -437,13 +438,10 @@ async fn orchestrate(
         image.config.as_ref(),
         args.entrypoint.as_deref(),
         &cmd,
-        session.is_some(),
+        SUPERVISED,
         super::EnvInputs {
             user_env: &env,
-            extra_managed: session
-                .as_ref()
-                .map(|s| s.managed_env_vars.as_slice())
-                .unwrap_or(&[]),
+            extra_managed: session.managed_env_vars.as_slice(),
             workdir: workdir.as_deref(),
             tools: &tool_runtime,
         },
@@ -460,10 +458,7 @@ async fn orchestrate(
     let exec_environment = crate::run_registry::ExecEnvironment {
         session_env: composed.env.clone(),
         tools: tool_runtime,
-        placeholders: session
-            .as_ref()
-            .map(|s| s.placeholder_env.clone())
-            .unwrap_or_default(),
+        placeholders: session.placeholder_env.clone(),
         workdir: workdir.clone(),
     };
     let env: Vec<String> = composed.env;
@@ -476,7 +471,7 @@ async fn orchestrate(
         tty: args.tty,
         stdin: args.stdin,
         initial_winsize,
-        confine: session.is_none(),
+        confine: !SUPERVISED,
     };
 
     let frame_tx_for_session = frame_tx.clone();

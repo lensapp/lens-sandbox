@@ -81,7 +81,7 @@ pub struct RunConsent<'a> {
 }
 
 impl SupervisorSession {
-    pub async fn start_if_policy(
+    pub async fn start(
         run_id: String,
         microvm_name: String,
         policy: Option<&Path>,
@@ -89,16 +89,13 @@ impl SupervisorSession {
         consent: RunConsent<'_>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Self> {
         let Some(policy_path) = policy else {
-            if sandbox_policy.is_some() {
-                bail!(
-                    "this sandbox ships a network policy but no local policy path was resolved to \
-                     layer it under; refusing to launch it unsupervised (its policy would go \
-                     unenforced)"
-                );
-            }
-            return Ok(None);
+            bail!(
+                "no local policy path was resolved for this run; refusing to launch it \
+                 unsupervised (there would be no approval gate, no network enforcement, and no \
+                 credential injection)"
+            );
         };
         adapter::start(
             run_id,
@@ -110,7 +107,6 @@ impl SupervisorSession {
             user_env,
         )
         .await
-        .map(Some)
     }
 }
 
@@ -306,33 +302,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_if_policy_returns_none_when_no_policy() {
-        let result = SupervisorSession::start_if_policy(
+    async fn a_run_with_no_policy_path_is_refused_rather_than_left_unsupervised() {
+        let result = SupervisorSession::start(
             "aa42".to_string(),
             "vm-42".into(),
             None,
             None,
-            test_consent(&[]),
-            PathBuf::from("/tmp"),
-            vec![],
-        )
-        .await
-        .unwrap();
-        assert!(
-            result.is_none(),
-            "no policy → unsupervised, no relay spun up"
-        );
-    }
-
-    #[tokio::test]
-    async fn start_if_policy_refuses_a_shipped_policy_with_no_local_path() {
-        let mut sandbox_policy = lns_policy::Policy::default();
-        sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
-        let result = SupervisorSession::start_if_policy(
-            "aa42".to_string(),
-            "vm-42".into(),
-            None,
-            Some(&sandbox_policy),
             test_consent(&[]),
             PathBuf::from("/tmp"),
             vec![],
@@ -340,10 +315,10 @@ mod tests {
         .await;
         let err = result
             .err()
-            .expect("a sandbox that ships a policy must not boot unsupervised");
+            .expect("no policy path means no approval gate, no relay, no credential injection");
         assert!(
             format!("{err:#}").contains("refusing to launch it unsupervised"),
-            "got: {err:#}"
+            "the refusal must say the run would go unenforced: {err:#}"
         );
     }
 
@@ -575,7 +550,7 @@ mod tests {
         }
     }
 
-    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start_if_policy` drives a required slot's boot sign-in through the real grant sidecar.
+    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start` drives a required slot's boot sign-in through the real grant sidecar.
     struct BootSignInFixture {
         dir: tempfile::TempDir,
         policy_path: PathBuf,
@@ -646,7 +621,7 @@ mod tests {
         fixture: &BootSignInFixture,
         workload: &lns_policy::grants::WorkloadIdentity,
     ) -> SupervisorSession {
-        let result = SupervisorSession::start_if_policy(
+        SupervisorSession::start(
             "deadbeef00000000000000000000aa97".to_string(),
             "calm-finch".into(),
             Some(&fixture.policy_path),
@@ -661,8 +636,7 @@ mod tests {
             vec![],
         )
         .await
-        .expect("start_if_policy");
-        result.expect("Some(session) with policy set")
+        .expect("start")
     }
 
     #[tokio::test]
@@ -720,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn start_if_policy_with_policy_threads_through_adapter_to_supervisor_session() {
+    async fn start_with_policy_threads_through_adapter_to_supervisor_session() {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
@@ -732,7 +706,7 @@ mod tests {
         let policy_path = d.path().join("lns-policy.yaml");
         std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
 
-        let result = SupervisorSession::start_if_policy(
+        let result = SupervisorSession::start(
             "deadbeef00000000000000000000aa99".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
@@ -742,8 +716,8 @@ mod tests {
             vec![],
         )
         .await
-        .expect("start_if_policy");
-        let session = result.expect("Some(session) with policy set");
+        .expect("start");
+        let session = result;
         assert_eq!(session.assets.supervisor_bin, supervisor_bin);
         drop(session);
         tokio::task::yield_now().await;
@@ -751,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn start_if_policy_merges_a_sandbox_policy_floor_under_the_local_overlay() {
+    async fn start_merges_a_sandbox_policy_floor_under_the_local_overlay() {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
@@ -765,7 +739,7 @@ mod tests {
         let mut sandbox_policy = lns_policy::Policy::default();
         sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 
-        let result = SupervisorSession::start_if_policy(
+        let result = SupervisorSession::start(
             "deadbeef00000000000000000000aa98".to_string(),
             "calm-finch".into(),
             Some(&policy_path),
@@ -775,8 +749,8 @@ mod tests {
             vec![],
         )
         .await
-        .expect("start_if_policy");
-        let session = result.expect("Some(session) with a sandbox policy floor");
+        .expect("start");
+        let session = result;
         assert_eq!(session.assets.supervisor_bin, supervisor_bin);
         drop(session);
         tokio::task::yield_now().await;
