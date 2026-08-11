@@ -619,14 +619,18 @@ async fn start_credential_subsystem(
     Ok((credential_session, credential_watcher))
 }
 
-/// The run's initial running policy: the local overlay file, with the sandbox's shipped policy merged under it as the deny-dominant baseline. Approvals still persist to the local file only.
-fn effective_running_policy(policy_path: &Path, sandbox_policy: Option<&Policy>) -> Result<Policy> {
-    let overlay = Policy::load_or_default(policy_path)
+/// The effective policy the guest enforces and, second, the developer's own file — the only one an approval writes back.
+fn running_policies(
+    policy_path: &Path,
+    sandbox_policy: Option<&Policy>,
+) -> Result<(Policy, Policy)> {
+    let own = Policy::load_or_default(policy_path)
         .with_context(|| format!("loading policy {}", policy_path.display()))?;
-    Ok(match sandbox_policy {
-        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &overlay),
-        None => overlay,
-    })
+    let effective = match sandbox_policy {
+        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &own),
+        None => own.clone(),
+    };
+    Ok((effective, own))
 }
 
 pub(super) async fn start(
@@ -640,7 +644,7 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let sandbox_credentials = consent.credentials;
     let workload = consent.workload;
-    let mut policy = effective_running_policy(policy_path, sandbox_policy)?;
+    let (mut policy, own_policy) = running_policies(policy_path, sandbox_policy)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
@@ -707,8 +711,15 @@ pub(super) async fn start(
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
     let credential_frame_tx = frame_tx.clone();
     let session = Arc::new(
-        ApprovalSession::new(policy, notifier, store, frame_tx, APPROVAL_TIMEOUT)
-            .with_offers(offerable),
+        ApprovalSession::new(
+            policy,
+            own_policy,
+            notifier,
+            store,
+            frame_tx,
+            APPROVAL_TIMEOUT,
+        )
+        .with_offers(offerable),
     );
 
     session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
@@ -825,6 +836,7 @@ mod tests {
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let session = Arc::new(ApprovalSession::new(
+            Policy::default(),
             Policy::default(),
             notifier,
             store,
@@ -944,6 +956,7 @@ mod tests {
         let session = Arc::new(
             ApprovalSession::new(
                 Policy::default(),
+                Policy::default(),
                 notifier,
                 store,
                 frame_tx,
@@ -1007,6 +1020,7 @@ mod tests {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let session = Arc::new(
             ApprovalSession::new(
+                Policy::default(),
                 Policy::default(),
                 notifier,
                 store,
@@ -1102,6 +1116,7 @@ mod tests {
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let session = Arc::new(ApprovalSession::new(
+            Policy::default(),
             Policy::default(),
             notifier,
             store,
@@ -2627,6 +2642,7 @@ mod tests {
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let session = Arc::new(ApprovalSession::new(
+            Policy::default(),
             Policy::default(),
             notifier,
             store,

@@ -133,6 +133,8 @@ struct OfferRef {
 
 pub struct ApprovalSession {
     policy: Mutex<Policy>,
+    /// What the developer's own file holds — never the artifact baseline or a connector's derived routes the running `policy` also carries.
+    persisted: Mutex<Policy>,
     pending: Mutex<HashMap<String, PendingEntry>>,
     notifier: Arc<dyn Notifier>,
     store: Arc<dyn PolicyStore>,
@@ -157,6 +159,7 @@ pub enum DecisionOutcome {
 impl ApprovalSession {
     pub fn new(
         policy: Policy,
+        persisted: Policy,
         notifier: Arc<dyn Notifier>,
         store: Arc<dyn PolicyStore>,
         sink: FrameSink,
@@ -164,6 +167,7 @@ impl ApprovalSession {
     ) -> Self {
         Self {
             policy: Mutex::new(policy),
+            persisted: Mutex::new(persisted),
             pending: Mutex::new(HashMap::new()),
             notifier,
             store,
@@ -531,6 +535,7 @@ impl ApprovalSession {
     }
 
     pub fn apply_external_policy(&self, mut new_policy: Policy) {
+        *self.persisted.lock().expect("persisted mutex poisoned") = new_policy.clone();
         if let Some(floor) = self.policy_floor.get() {
             new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
         }
@@ -572,11 +577,17 @@ impl ApprovalSession {
     }
 
     fn apply_persistent_rule(&self, rule: RouteRule) {
-        let (approval, snapshot) = {
+        let (approval, effective) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
-            (policy.add_approved_rule(rule), policy.clone())
+            (policy.add_approved_rule(rule.clone()), policy.clone())
         };
-        self.publish_if_it_stands(approval, snapshot);
+        if approval == Approval::Stands {
+            self.persisted
+                .lock()
+                .expect("persisted mutex poisoned")
+                .add_approved_rule(rule);
+        }
+        self.publish_if_it_stands(approval, effective);
     }
 
     /// Says the decision stands for this request but outlived nothing.
@@ -592,16 +603,22 @@ impl ApprovalSession {
             self.report_no_rule_written(&e);
             return;
         }
-        let (approval, pre_empted, snapshot) = {
+        let (approval, pre_empted, effective) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             let pre_empted = pre_empted_http_patterns(&policy, &rule);
             (
-                policy.add_approved_tcp_rule(rule),
+                policy.add_approved_tcp_rule(rule.clone()),
                 pre_empted,
                 policy.clone(),
             )
         };
-        if !self.publish_if_it_stands(approval, snapshot) {
+        if approval == Approval::Stands {
+            self.persisted
+                .lock()
+                .expect("persisted mutex poisoned")
+                .add_approved_tcp_rule(rule);
+        }
+        if !self.publish_if_it_stands(approval, effective) {
             return;
         }
         // The http rules this raw rule displaces would otherwise go quiet without a word.
@@ -614,10 +631,10 @@ impl ApprovalSession {
     }
 
     /// Answers whether the decision stands, telling the developer when it applied to one request only — silence there would read as "remembered".
-    fn publish_if_it_stands(&self, approval: Approval, snapshot: Policy) -> bool {
+    fn publish_if_it_stands(&self, approval: Approval, effective: Policy) -> bool {
         let why = match approval {
             Approval::Stands => {
-                self.publish_and_persist(snapshot);
+                self.publish_and_persist(effective);
                 return true;
             }
             Approval::Shadowed(pattern) => format!(
@@ -632,13 +649,18 @@ impl ApprovalSession {
     }
 
     /// Hands the updated policy to the running guest first and to disk second, so a file that cannot be written still leaves the decision live for the rest of the run.
-    fn publish_and_persist(&self, snapshot: Policy) {
+    fn publish_and_persist(&self, effective: Policy) {
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(WireNetwork::seeded(snapshot.network.clone())),
+            network: Some(WireNetwork::seeded(effective.network)),
             credentials,
         }));
-        if let Err(e) = self.store.save(&snapshot) {
+        let to_persist = self
+            .persisted
+            .lock()
+            .expect("persisted mutex poisoned")
+            .clone();
+        if let Err(e) = self.store.save(&to_persist) {
             self.notifier.inform(&format!(
                 "policy rule applied in-memory but not persisted: {e}"
             ));
@@ -650,12 +672,13 @@ impl ApprovalSession {
         let (to_persist, live_network) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             policy.connect(id);
-            let to_persist = policy.clone();
             crate::artifact::policy::splice_connector_routes(
                 &mut policy.network.egress.http,
                 routes,
             );
-            (to_persist, policy.network.clone())
+            let mut persisted = self.persisted.lock().expect("persisted mutex poisoned");
+            persisted.connect(id);
+            (persisted.clone(), policy.network.clone())
         };
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
@@ -819,7 +842,14 @@ pub(crate) mod tests {
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let session = ApprovalSession::new(policy, notifier.clone(), store.clone(), tx, timeout);
+        let session = ApprovalSession::new(
+            policy.clone(),
+            policy,
+            notifier.clone(),
+            store.clone(),
+            tx,
+            timeout,
+        );
         (session, notifier, store, rx)
     }
 
@@ -979,6 +1009,110 @@ pub(crate) mod tests {
             vec!["RAW", "CONNECT db.internal"],
             "the port is what we could not read; that the traffic is opaque is still true"
         );
+    }
+
+    /// A run whose effective policy is the developer's file plus an artifact baseline and a connected connector's routes — the shape `supervisor::adapter::start` builds.
+    fn fixture_over_a_merged_run() -> Fixture {
+        let mut own = Policy::default();
+        own.add_rule(RouteRule::allow_host("mine.example.test"));
+        let mut effective = own.clone();
+        effective.add_rule(RouteRule::allow_host("from-the-artifact.example.test"));
+        crate::artifact::policy::splice_connector_routes(
+            &mut effective.network.egress.http,
+            vec![RouteRule::allow_host("from-a-connector.example.test")],
+        );
+        let notifier = Arc::new(RecordingNotifier::default());
+        let store = Arc::new(CapturingStore::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let session = ApprovalSession::new(
+            effective,
+            own,
+            notifier.clone(),
+            store.clone(),
+            tx,
+            TEST_TIMEOUT,
+        );
+        (session, notifier, store, rx)
+    }
+
+    #[test]
+    fn an_approval_writes_only_the_developers_own_policy_back() {
+        let (session, _n, store, _rx) = fixture_over_a_merged_run();
+        session.submit_pending(pending("r1", "just-approved.example.test"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+
+        let saved = store.saves.lock().unwrap();
+        let written: Vec<&str> = saved
+            .last()
+            .expect("the decision is persisted")
+            .network
+            .egress
+            .http
+            .iter()
+            .map(|rule| rule.match_pattern.as_str())
+            .collect();
+        assert_eq!(
+            written,
+            vec!["mine.example.test", "just-approved.example.test"],
+            "a pulled artifact's rule and a connector's derived route are not the developer's, so an approval must not write them into their file"
+        );
+    }
+
+    #[test]
+    fn an_approval_still_reaches_the_guest_with_the_whole_effective_policy() {
+        let (session, _n, _store, mut rx) = fixture_over_a_merged_run();
+        session.submit_pending(pending("r1", "just-approved.example.test"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+
+        let mut published = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if let HostFrame::Policy(message) = frame
+                && let Some(network) = message.network
+            {
+                published = network
+                    .egress
+                    .http
+                    .iter()
+                    .map(|rule| rule.match_pattern.clone())
+                    .collect();
+            }
+        }
+        for expected in [
+            "just-approved.example.test",
+            "mine.example.test",
+            "from-the-artifact.example.test",
+            "from-a-connector.example.test",
+        ] {
+            assert!(
+                published.iter().any(|p| p == expected),
+                "the guest still enforces the whole effective policy; {expected} missing from {published:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connect_writes_only_the_developers_own_policy_back() {
+        let (session, _n, store, _rx) = fixture_over_a_merged_run();
+        session.connect_connector(
+            "some-provider",
+            vec![RouteRule::allow_host("api.some-provider.example")],
+        );
+
+        let saved = store.saves.lock().unwrap();
+        let policy = saved.last().expect("the connect is persisted");
+        let written: Vec<&str> = policy
+            .network
+            .egress
+            .http
+            .iter()
+            .map(|rule| rule.match_pattern.as_str())
+            .collect();
+        assert_eq!(
+            written,
+            vec!["mine.example.test"],
+            "a connect records an id; the artifact's rules and the connector's own routes are re-derived at boot, so writing them would outlive `lns connector disconnect`"
+        );
+        assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
     }
 
     #[test]
@@ -1923,9 +2057,15 @@ pub(crate) mod tests {
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let session =
-            ApprovalSession::new(Policy::default(), notifier.clone(), store, tx, TEST_TIMEOUT)
-                .with_offers(offers);
+        let session = ApprovalSession::new(
+            Policy::default(),
+            Policy::default(),
+            notifier.clone(),
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_offers(offers);
         if let Some(c) = connector {
             session.set_connector(c);
         }
@@ -2379,10 +2519,19 @@ pub(crate) mod tests {
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let s =
-            ApprovalSession::new(policy, notifier.clone(), store, tx, TEST_TIMEOUT).with_offers(
-                vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            );
+        let s = ApprovalSession::new(
+            policy.clone(),
+            policy,
+            notifier.clone(),
+            store,
+            tx,
+            TEST_TIMEOUT,
+        )
+        .with_offers(vec![offerable(
+            "some-oauth",
+            "GitHub",
+            "api.some-oauth.example",
+        )]);
         s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
         assert_eq!(
             notifier.presented.lock().unwrap()[0].offer,
