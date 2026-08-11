@@ -1,17 +1,7 @@
-use crate::spec;
-
-/// Validate a single artifact document: schema + cross-field guards for its declared kind, plus the guards that belong to authoring only — whether this build can provision a declared tool is deliberately not part of parsing, since a consumer must still be able to inspect an artifact whose tool the shipped registry has since dropped.
+/// Validate a sandbox definition: the schema and cross-field guards `run`, `inspect` and `push` all load it through, plus the guards that belong to authoring only — whether this build can provision a declared tool is deliberately not part of parsing, since a consumer must still be able to inspect an artifact whose tool the shipped registry has since dropped.
 pub fn validate(doc: &[u8]) -> Result<(), Vec<String>> {
-    let is_sandbox = crate::sandbox::is_sandbox_definition(doc);
-    let schema = if is_sandbox {
-        crate::sandbox::validate(doc)
-    } else {
-        spec::validate_any(doc)
-    };
-    schema.map_err(|e| vec![format!("schema: {e:#}")])?;
-    if is_sandbox {
-        refuse_unprovisionable_tools(doc).map_err(|problem| vec![problem])?;
-    }
+    crate::sandbox::validate(doc).map_err(|e| vec![format!("schema: {e:#}")])?;
+    refuse_unprovisionable_tools(doc).map_err(|problem| vec![problem])?;
     Ok(())
 }
 
@@ -40,7 +30,7 @@ pub fn refuse_unprovisionable_tools(doc: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn sandbox(base_image: &str) -> Vec<u8> {
+    fn retired_group_sandbox(base_image: &str) -> Vec<u8> {
         format!(
             r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{base_image}"}}}}"#
         )
@@ -55,19 +45,20 @@ mod tests {
     }
 
     #[test]
-    fn a_well_formed_sandbox_validates() {
-        let doc = sandbox(&format!("reg/base@sha256:{}", "a".repeat(64)));
-        validate(&doc).unwrap();
-    }
-
-    #[test]
-    fn a_schema_violation_is_reported() {
-        let doc = sandbox("reg/base:1");
-        let problems = validate(&doc).unwrap_err();
-        assert!(
-            problems.iter().any(|p| p.contains("digest-pinned")),
-            "a floating base image must be reported: {problems:?}"
-        );
+    fn a_document_from_the_retired_group_is_not_a_definition() {
+        // `run -f`, `inspect -f` and `push` all load a definition through `sandbox::parse`, so validating one against the older group's schema would pass a file none of them can run.
+        for doc in [
+            retired_group_sandbox(&format!("reg/base@sha256:{}", "a".repeat(64))),
+            retired_group_sandbox("reg/base:1"),
+        ] {
+            let problems = validate(&doc).unwrap_err();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("apiVersion") && p.contains(crate::sandbox::API_VERSION)),
+                "the answer must name the group a definition is read as: {problems:?}"
+            );
+        }
     }
 
     #[test]
@@ -120,9 +111,12 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_is_reported() {
-        let doc = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sorcery","metadata":{"name":"x"},"spec":{}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","metadata":{"name":"x"},"spec":{"image":"reg/base:1"}}"#;
         let problems = validate(doc).unwrap_err();
-        assert!(problems.iter().any(|p| p.contains("unknown artifact kind")));
+        assert!(
+            problems.iter().any(|p| p.contains("kind")),
+            "got: {problems:?}"
+        );
     }
 
     #[test]

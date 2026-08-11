@@ -16,7 +16,7 @@ use std::net::TcpStream;
 
 fn sandbox_manifest() -> Vec<u8> {
     format!(
-        r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}"}}}}"#,
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"reg/base@sha256:{}"}}}}"#,
         "a".repeat(64)
     )
     .into_bytes()
@@ -58,8 +58,8 @@ async fn build_push_and_pull_round_trip_through_the_local_registry() {
         Some("application/vnd.lens.sandbox.v1+json"),
         "the pulled manifest must carry the lens artifactType"
     );
-    let parsed = lns_artifact::spec::parse_sandbox(config.as_bytes())
-        .expect("the pulled config is the sandbox spec");
+    let parsed = lns_artifact::sandbox::parse(config.as_bytes())
+        .expect("the pulled config loads through the same reader run and inspect use");
     assert_eq!(parsed.metadata.name, "some-sandbox");
 }
 

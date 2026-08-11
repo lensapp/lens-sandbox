@@ -34,18 +34,6 @@ const EXACT_SECRET_NAMES: &[&str] = &[
     ".docker",
 ];
 
-/// True when a document declares the user-facing `lns.run/v1` API group.
-pub fn is_sandbox_definition(config_json: &[u8]) -> bool {
-    #[derive(Deserialize)]
-    struct ApiOnly {
-        #[serde(rename = "apiVersion", default)]
-        api_version: String,
-    }
-    serde_json::from_slice::<ApiOnly>(config_json)
-        .map(|d| d.api_version == API_VERSION)
-        .unwrap_or(false)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
     pub metadata: Metadata,
@@ -175,8 +163,9 @@ struct Doc {
     #[serde(default)]
     kind: String,
     metadata: Metadata,
+    /// Read only after the group and kind decide, so another group's field names cannot answer as unknown fields of this one.
     #[serde(default)]
-    spec: SandboxSpec,
+    spec: serde_json::Value,
 }
 
 /// Parse and cross-field-validate a `lns.run/v1` sandbox definition, offline.
@@ -197,6 +186,10 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
     if !spec::is_valid_name(&doc.metadata.name) {
         bail!("invalid metadata.name {:?}", doc.metadata.name);
     }
+    let doc = Definition {
+        metadata: doc.metadata,
+        spec: serde_json::from_value(doc.spec).context("parsing sandbox spec")?,
+    };
     if doc.spec.image.trim().is_empty() {
         bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
     }
@@ -294,10 +287,7 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
             }
         }
     }
-    Ok(Definition {
-        metadata: doc.metadata,
-        spec: doc.spec,
-    })
+    Ok(doc)
 }
 
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
@@ -1790,14 +1780,5 @@ mod tests {
         let metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes","unexpected":true},"spec":{"image":"x:1"}}"#;
         let err = parse(metadata).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
-    }
-
-    #[test]
-    fn is_sandbox_definition_detects_the_api_group() {
-        assert!(is_sandbox_definition(&def_json(r#"{"image":"x:1"}"#)));
-        assert!(!is_sandbox_definition(
-            br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox"}"#
-        ));
-        assert!(!is_sandbox_definition(b"not json"));
     }
 }

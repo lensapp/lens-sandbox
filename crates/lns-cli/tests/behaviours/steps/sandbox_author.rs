@@ -63,6 +63,17 @@ fn lns_yaml_with_required_credential(w: &mut BehaviourWorld, name: String, env: 
     );
 }
 
+#[given("an lns.yaml written against the retired lens.dev/v1alpha1 group")]
+fn lns_yaml_from_the_retired_group(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lens.dev/v1alpha1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  isolation: microvm\n  baseImage: ghcr.io/team/base@sha256:{}\n",
+            "a".repeat(64)
+        ),
+    );
+}
+
 #[given("an lns.yaml with a misspelled volume readOnly field")]
 fn lns_yaml_with_unknown_nested_field(w: &mut BehaviourWorld) {
     seed(
