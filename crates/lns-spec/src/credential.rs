@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// The one injection contract: this placeholder, in this variable, replaced by the real value on a request to each declared domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Credential {
     pub env_var: String,
     pub placeholder: String,
@@ -12,14 +12,84 @@ pub struct Credential {
     pub injections: Vec<InjectionDef>,
 }
 
+impl Credential {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_legal_env_var_name(&self.env_var) {
+            return Err(format!(
+                "invalid credential env var {:?}: an env var name must be non-empty and free of '=', whitespace, and control characters",
+                self.env_var
+            ));
+        }
+        if self.placeholder.len() < MIN_PLACEHOLDER_LEN {
+            return Err(format!(
+                "credential {} placeholder {:?} must be at least {MIN_PLACEHOLDER_LEN} characters: the proxy finds this marker by substring in outbound bytes, so a short one would be substituted where it was never meant to be",
+                self.env_var, self.placeholder
+            ));
+        }
+        if !is_self_identifying(&self.placeholder) {
+            return Err(format!(
+                "credential {} placeholder {:?} must self-identify as fake: it has to contain \"placeholder\" or \"lns\", so a document that publishes to a registry cannot carry a real token as one",
+                self.env_var, self.placeholder
+            ));
+        }
+        for injection in &self.injections {
+            injection.validate(&self.env_var)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate a document's whole `credentials` block: every entry on its own, plus the per-document rule that no two claim one variable.
+pub fn validate_all(credentials: &[Credential]) -> Result<(), String> {
+    let mut claimed = std::collections::BTreeSet::new();
+    for credential in credentials {
+        credential.validate()?;
+        if !claimed.insert(&credential.env_var) {
+            return Err(format!(
+                "duplicate credential env var {:?}",
+                credential.env_var
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The grammar every kind shares for a variable the guest environment has to be able to hold.
+pub fn is_legal_env_var_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c == '=' || c.is_control() || c.is_whitespace())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InjectionDef {
     pub kind: InjectionKind,
     pub domain: String,
     /// Only `ApiKeyHeader` carries a header name (e.g. `x-api-key`); other kinds leave it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
+}
+
+impl InjectionDef {
+    fn validate(&self, env_var: &str) -> Result<(), String> {
+        if self.domain.trim().is_empty() {
+            return Err(format!(
+                "credential {env_var} injection must name the domain it applies to"
+            ));
+        }
+        match (self.kind, &self.header) {
+            (InjectionKind::ApiKeyHeader, None) => Err(format!(
+                "credential {env_var}: an api_key_header injection must name the header it sets"
+            )),
+            (InjectionKind::ApiKeyHeader, Some(_)) => Ok(()),
+            (_, Some(header)) => Err(format!(
+                "credential {env_var}: only an api_key_header injection carries a header name, not {header:?}"
+            )),
+            (_, None) => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +101,9 @@ pub enum InjectionKind {
     ApiKeyHeader,
     UriPlaceholder,
 }
+
+/// Long enough that a stream cannot carry the marker by accident; every bundled connector's placeholder is more than twice this.
+pub const MIN_PLACEHOLDER_LEN: usize = 16;
 
 /// A placeholder must self-identify as fake so no real credential can leak into a document that gets published.
 pub fn is_self_identifying(placeholder: &str) -> bool {
@@ -147,5 +220,193 @@ mod tests {
             error.to_string().contains("unknown variant"),
             "got: {error}"
         );
+    }
+
+    #[test]
+    fn a_misspelled_credential_key_fails_on_its_line() {
+        let error = serde_yaml::from_str::<Credential>(
+            "envVar: SOME_TOKEN\nplaceholdr: some_LNSPLACEHOLDER0000\n",
+        )
+        .expect_err("a misspelled key must fail rather than load with a default");
+        assert!(error.to_string().contains("unknown field"), "got: {error}");
+    }
+
+    #[test]
+    fn a_misspelled_injection_key_fails_on_its_line() {
+        let error = serde_yaml::from_str::<InjectionDef>(
+            "kind: api_key_header\ndomain: api.example.test\nheaader: x-api-key\n",
+        )
+        .expect_err("a misspelled key must fail rather than load with a default");
+        assert!(error.to_string().contains("unknown field"), "got: {error}");
+    }
+
+    fn credential(env_var: &str, placeholder: &str, injections: Vec<InjectionDef>) -> Credential {
+        Credential {
+            env_var: env_var.into(),
+            placeholder: placeholder.into(),
+            injections,
+        }
+    }
+
+    fn injection(kind: InjectionKind, domain: &str, header: Option<&str>) -> InjectionDef {
+        InjectionDef {
+            kind,
+            domain: domain.into(),
+            header: header.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_specification_example_validates() {
+        let credential = credential(
+            "SOME_TOKEN",
+            "some_LNSPLACEHOLDER0000000000",
+            vec![injection(
+                InjectionKind::BearerHeader,
+                "api.some-provider.example",
+                None,
+            )],
+        );
+        assert_eq!(credential.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_env_var_no_process_could_carry_is_refused() {
+        for name in [
+            "",
+            " ",
+            "SOME_TOKEN=x",
+            "SOME TOKEN",
+            "SOME_TOKEN\nLD_PRELOAD",
+        ] {
+            let error = credential(name, "some_LNSPLACEHOLDER0000", Vec::new())
+                .validate()
+                .expect_err("an env var the guest environment cannot hold must not load");
+            assert!(
+                error.contains("invalid credential env var"),
+                "{name:?}: got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_short_enough_to_occur_naturally_is_refused() {
+        for placeholder in ["lns", "lns-x", "PLACEHOLDER", "lns-placehold"] {
+            let error = credential("SOME_TOKEN", placeholder, Vec::new())
+                .validate()
+                .expect_err("the proxy substring-matches this marker in outbound bytes");
+            assert!(
+                error.contains("must be at least"),
+                "{placeholder:?}: a marker a stream could carry by accident would be substituted where it was never meant to be; got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_at_the_floor_validates() {
+        assert_eq!(
+            credential("SOME_TOKEN", "lns-placeholder0", Vec::new()).validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_placeholder_a_real_token_could_pass_for_is_refused() {
+        let error = credential("SOME_TOKEN", "sk-live-0123456789", Vec::new())
+            .validate()
+            .expect_err("a placeholder that reads like a token must not load");
+        assert!(error.contains("must self-identify as fake"), "got: {error}");
+    }
+
+    #[test]
+    fn an_injection_with_no_domain_is_refused() {
+        let error = credential(
+            "SOME_TOKEN",
+            "some_LNSPLACEHOLDER0000",
+            vec![injection(InjectionKind::BearerHeader, "  ", None)],
+        )
+        .validate()
+        .expect_err("injection is domain-keyed, so a blank domain injects nowhere");
+        assert!(error.contains("must name the domain"), "got: {error}");
+    }
+
+    #[test]
+    fn a_header_name_on_a_kind_that_cannot_use_one_is_refused() {
+        for kind in [
+            InjectionKind::BearerHeader,
+            InjectionKind::TokenHeader,
+            InjectionKind::BasicXAccessToken,
+            InjectionKind::UriPlaceholder,
+        ] {
+            let error = credential(
+                "SOME_TOKEN",
+                "some_LNSPLACEHOLDER0000",
+                vec![injection(kind, "api.example.test", Some("x-api-key"))],
+            )
+            .validate()
+            .expect_err("a header name the kind cannot use would silently do nothing");
+            assert!(
+                error.contains("only an api_key_header injection carries a header name"),
+                "{kind:?}: got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_api_key_header_with_no_header_name_is_refused() {
+        let error = credential(
+            "SOME_TOKEN",
+            "some_LNSPLACEHOLDER0000",
+            vec![injection(
+                InjectionKind::ApiKeyHeader,
+                "api.example.test",
+                None,
+            )],
+        )
+        .validate()
+        .expect_err("the proxy has no header to set, so the injection does nothing");
+        assert!(
+            error.contains("api_key_header injection must name the header"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn two_credentials_claiming_one_env_var_are_refused() {
+        let error = validate_all(&[
+            credential("SOME_TOKEN", "some_LNSPLACEHOLDER0000", Vec::new()),
+            credential("SOME_TOKEN", "other_LNSPLACEHOLDER0000", Vec::new()),
+        ])
+        .expect_err("nothing inside one document disambiguates two entries claiming one variable");
+        assert!(
+            error.contains("duplicate credential env var \"SOME_TOKEN\""),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_list_of_distinct_credentials_validates_each_entry() {
+        assert_eq!(
+            validate_all(&[
+                credential("SOME_TOKEN", "some_LNSPLACEHOLDER0000", Vec::new()),
+                credential("OTHER_TOKEN", "other_LNSPLACEHOLDER0000", Vec::new()),
+            ]),
+            Ok(())
+        );
+        let error = validate_all(&[
+            credential("SOME_TOKEN", "some_LNSPLACEHOLDER0000", Vec::new()),
+            credential("OTHER_TOKEN", "a-real-looking-token", Vec::new()),
+        ])
+        .expect_err("a per-entry rule holds for every entry, not just the first");
+        assert!(error.contains("must self-identify as fake"), "got: {error}");
+    }
+
+    #[test]
+    fn a_legal_env_var_name_is_the_grammar_every_kind_shares() {
+        assert!(is_legal_env_var_name("SOME_TOKEN"));
+        assert!(!is_legal_env_var_name(""));
+        assert!(!is_legal_env_var_name("SOME=TOKEN"));
+        assert!(!is_legal_env_var_name("SOME TOKEN"));
+        assert!(!is_legal_env_var_name("SOME\u{7f}TOKEN"));
     }
 }

@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 lns-policy = { path = "../lns-policy" }
+lns-spec = { path = "../lns-spec" }
 oci-client = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

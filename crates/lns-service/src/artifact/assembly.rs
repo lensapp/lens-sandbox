@@ -36,7 +36,7 @@ pub struct ResolvedSandbox {
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
-    pub credentials: Vec<crate::artifact::spec::CredentialSlot>,
+    pub credentials: Vec<lns_spec::Credential>,
     pub tools: Vec<String>,
 }
 
@@ -57,7 +57,7 @@ pub struct AssembledWorkload {
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
-    pub credentials: Vec<crate::artifact::spec::CredentialSlot>,
+    pub credentials: Vec<lns_spec::Credential>,
     pub tools: Vec<String>,
 }
 

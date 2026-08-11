@@ -18,8 +18,8 @@ use crate::approval_flow::window::{
     self, CredentialDecisionDelivery, DecisionDelivery, RequestAction,
 };
 use crate::credential_flow::connectors::{
-    applied_connector_routes, boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_slots,
-    resolve_connectable_with_slots,
+    applied_connector_routes, boot_sign_in_grants, declared_provider_ids, gate_armed_by_grant,
+    resolve_applied_with_credentials, resolve_connectable_with_credentials,
 };
 use crate::credential_flow::notification::WindowCredentialNotifier;
 use crate::credential_flow::providers::{DefProvider, Provider};
@@ -160,7 +160,7 @@ async fn credential_delivery_loop(
         let Some(session) = session.upgrade() else {
             break;
         };
-        // A pasted token is an Allow(Stored) and a grant of the token already bound is an AllowBound — both arm the slot directly via record_decision; only the browser-consent Allow drives a fresh device sign-in.
+        // A pasted token is an Allow(Stored) and a grant of the token already bound is an AllowBound — both arm the credential directly via record_decision; only the browser-consent Allow drives a fresh device sign-in.
         let needs_no_sign_in = matches!(
             delivery.request,
             crate::credential_flow::session::CredentialDecisionRequest::Allow(
@@ -496,10 +496,10 @@ const OAUTH_REFRESH_SKEW_SECS: u64 = 60;
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
-/// The run's consent boundary at boot: which ids arm a resolved value (`armed`), the artifact-declared credential slot ids a policy reload must not disarm (`slot_ids`), which ids are offered for a live connect (`connectable_ids`), and the grant identity (`project`/`workload`) plus sidecar (`grant_store`) that a live consent persists to and a reload re-gates a reconnected connector against.
+/// The run's consent boundary at boot: which value keys arm a resolved value (`armed`), the artifact-declared ones a policy reload must not disarm (`declared_ids`), which are offered for a live connect (`connectable_ids`), and the grant identity (`project`/`workload`) plus sidecar (`grant_store`) that a live consent persists to and a reload re-gates a reconnected connector against.
 struct CredentialConsent {
     armed: HashSet<String>,
-    slot_ids: HashSet<String>,
+    declared_ids: HashSet<String>,
     connectable_ids: HashSet<String>,
     project: String,
     workload: WorkloadIdentity,
@@ -563,7 +563,7 @@ async fn start_credential_subsystem(
         )
         .with_custom_providers(custom_providers)
         .with_armed_ids(consent.armed)
-        .with_slot_ids(consent.slot_ids)
+        .with_declared_ids(consent.declared_ids)
         .with_grants(
             consent.project.clone(),
             consent.workload.clone(),
@@ -604,7 +604,7 @@ async fn start_credential_subsystem(
 
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
-    // A policy reload re-gates the reconnected connectors through the grant snapshot, so a disconnected — or never-granted — connector's arming is revoked; granted slots survive because they don't derive from the policy file.
+    // A policy reload re-gates the reconnected connectors through the grant snapshot, so a disconnected — or never-granted — connector's arming is revoked; granted declarations survive because they don't derive from the policy file.
     session.set_armed_reconciler(make_armed_reconciler(
         &credential_session,
         consent.project,
@@ -649,12 +649,12 @@ pub(super) async fn start(
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
     let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
-    let applied = resolve_applied_with_slots(&policy, sandbox_credentials, &catalog);
+    let applied = resolve_applied_with_credentials(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog connectors resolve as connectable — detect-only unless definition-declared — so their use offers a live connect.
     let declared_connectors = sandbox_policy
         .map(|p| p.connectors.clone())
         .unwrap_or_default();
-    let connectable = resolve_connectable_with_slots(
+    let connectable = resolve_connectable_with_credentials(
         &policy,
         sandbox_credentials,
         &declared_connectors,
@@ -679,7 +679,7 @@ pub(super) async fn start(
     ));
     log::info!("Approvals", "window ready");
 
-    // A machine-global value arms only for a connector this workload holds an allow grant for, so a cloned overlay or a declared slot re-offers at first use instead of silently spending the credential.
+    // A machine-global value arms only for a value key this workload holds an allow grant for, so a cloned overlay or a declared credential re-offers at first use instead of silently spending the credential.
     let grants_path = default_workload_grants_path();
     let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
     let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
@@ -697,11 +697,9 @@ pub(super) async fn start(
         &|msg| notifier.inform(&msg),
     );
     let armed_ids = gate_armed_by_grant(&run.armed, &run.providers, &project, &workload, &grants);
-    // A reload re-gates overlay connectors but must never disarm an artifact slot the run consented to, so every catalog-known slot id is retained across a reload regardless of grant.
-    let slot_ids: HashSet<String> = sandbox_credentials
-        .iter()
-        .filter(|slot| catalog.iter().any(|i| i.id == slot.name))
-        .map(|slot| slot.name.clone())
+    // A reload re-gates overlay connectors but must never disarm a declared credential the run consented to, so every declared value key is retained across a reload regardless of grant.
+    let declared_ids: HashSet<String> = declared_provider_ids(sandbox_credentials, &catalog)
+        .into_iter()
         .collect();
     let custom_providers = Arc::new(run.providers);
     let managed_env_vars = collect_managed_env_vars(&custom_providers);
@@ -761,7 +759,7 @@ pub(super) async fn start(
         custom_providers,
         CredentialConsent {
             armed: armed_ids,
-            slot_ids,
+            declared_ids,
             connectable_ids,
             project,
             workload,
@@ -1182,7 +1180,7 @@ mod tests {
     fn fixture_credential_session_armed(
         custom: Arc<Vec<DefProvider>>,
         armed: HashSet<String>,
-        slot_ids: HashSet<String>,
+        declared_ids: HashSet<String>,
     ) -> (Arc<CredentialSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::credential_flow::notification::NoopCredentialNotifier;
         let (store, _dir) = tempfile_credential_store();
@@ -1199,7 +1197,7 @@ mod tests {
             )
             .with_custom_providers(custom)
             .with_armed_ids(armed)
-            .with_slot_ids(slot_ids),
+            .with_declared_ids(declared_ids),
         );
         (session, frame_rx)
     }

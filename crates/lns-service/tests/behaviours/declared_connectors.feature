@@ -107,9 +107,9 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     Then the allow rule is written to the directory's lns-policy.yaml
     And the sandbox definition is not modified
 
-  Scenario: A credential slot does not open a route past a local deny-by-default
+  Scenario: A declared credential does not open a route past a local deny-by-default
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
-    And the sandbox definition declares an optional credential slot "some-provider" injected as "SOME_TOKEN"
+    And the sandbox definition declares a credential "SOME_TOKEN" for "api.some-provider.example"
     And the directory's lns-policy.yaml denies all by default
     When the sandbox is launched
     Then a workload request to "api.some-provider.example" is denied by policy

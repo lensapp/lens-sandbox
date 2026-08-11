@@ -97,16 +97,7 @@ pub(crate) fn project_inspection(
                         .iter()
                         .map(|(key, value)| format!("{key}={value}"))
                         .collect(),
-                    credentials: def
-                        .spec
-                        .credentials
-                        .into_iter()
-                        .map(|credential| lns_ipc::SandboxCredential {
-                            name: credential.name,
-                            env: credential.env,
-                            required: credential.required,
-                        })
-                        .collect(),
+                    credentials: def.spec.credentials.clone(),
                     tools: def.spec.tools,
                     policy_flags: resolved
                         .policy
@@ -127,7 +118,7 @@ pub(crate) fn project_inspection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_ipc::{SandboxCredential, SandboxFileset, SandboxPort, SandboxView};
+    use lns_ipc::{SandboxFileset, SandboxPort, SandboxView};
 
     fn digest() -> String {
         format!("sha256:{}", "a".repeat(64))
@@ -458,7 +449,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_declared_credentials_and_no_flags_without_a_policy() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"name":"some-provider","env":"SOME_TOKEN","required":true}]}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -475,10 +466,14 @@ mod tests {
                 filesets: vec![],
                 connectors: vec![],
                 env: vec![],
-                credentials: vec![SandboxCredential {
-                    name: "some-provider".into(),
-                    env: "SOME_TOKEN".into(),
-                    required: true,
+                credentials: vec![lns_spec::Credential {
+                    env_var: "SOME_TOKEN".into(),
+                    placeholder: "lns-placeholder-some-token".into(),
+                    injections: vec![lns_spec::InjectionDef {
+                        kind: lns_spec::InjectionKind::BearerHeader,
+                        domain: "api.some-provider.example".into(),
+                        header: None,
+                    }],
                 }],
                 tools: vec![],
                 policy_flags: vec![],

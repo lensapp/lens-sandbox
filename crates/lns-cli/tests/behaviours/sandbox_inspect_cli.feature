@@ -49,17 +49,11 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "user: root"
 
-  Scenario: inspecting a published sandbox discloses its credential slots
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the "some-provider" credential as "SOME_TOKEN"
+  Scenario: inspecting a published sandbox discloses each credential and where its value may travel
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the "SOME_TOKEN" credential for "api.some-provider.example"
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
     Then the exit code is 0
-    And the output contains "credential: some-provider -> SOME_TOKEN"
-
-  Scenario: inspecting a published sandbox identifies a required credential slot
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the required "some-provider" credential as "SOME_TOKEN"
-    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
-    Then the exit code is 0
-    And the output contains "credential: some-provider -> SOME_TOKEN (required)"
+    And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
   Scenario: inspecting a sandbox flags a permissive shipped policy
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy allows every destination

@@ -287,7 +287,7 @@ pub struct SandboxView {
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
-    pub credentials: Vec<SandboxCredential>,
+    pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
@@ -297,14 +297,6 @@ pub struct SandboxView {
     pub cpus: Option<u8>,
     #[serde(default)]
     pub mem_mib: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxCredential {
-    pub name: String,
-    pub env: String,
-    #[serde(default)]
-    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1413,10 +1405,14 @@ mod tests {
             }],
             connectors: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
-            credentials: vec![SandboxCredential {
-                name: "some-provider".into(),
-                env: "SOME_TOKEN".into(),
-                required: true,
+            credentials: vec![lns_spec::Credential {
+                env_var: "SOME_TOKEN".into(),
+                placeholder: "some_LNSPLACEHOLDER0000".into(),
+                injections: vec![lns_spec::InjectionDef {
+                    kind: lns_spec::InjectionKind::BearerHeader,
+                    domain: "api.some-provider.example".into(),
+                    header: None,
+                }],
             }],
             tools: vec!["node@22.11.0".into()],
             policy_flags: Vec::new(),

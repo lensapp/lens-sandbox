@@ -147,13 +147,9 @@ impl crate::artifact::fileset::HostFileProbe for RealSnapshotDir {
     }
 }
 
-/// Refuse a launch whose definition declares a connector — under `spec.connectors` or as a credential slot — this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss.
-pub(crate) fn refuse_unknown_connectors(
-    policy: Option<&lns_policy::Policy>,
-    credentials: &[lns_artifact::spec::CredentialSlot],
-) -> Result<()> {
-    let mut declared: Vec<String> = policy.map(|p| p.connectors.clone()).unwrap_or_default();
-    declared.extend(credentials.iter().map(|slot| slot.name.clone()));
+/// Refuse a launch whose definition declares a `spec.connectors` id this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss. A declared credential names no connector, so it can never be unknown here.
+pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> Result<()> {
+    let declared: Vec<String> = policy.map(|p| p.connectors.clone()).unwrap_or_default();
     if declared.is_empty() {
         return Ok(());
     }
@@ -163,30 +159,6 @@ pub(crate) fn refuse_unknown_connectors(
         return Ok(());
     }
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
-}
-
-/// Refuse a launch whose definition requires a credential slot this machine has not bound (or has denied) — before any microVM boots.
-pub(crate) fn refuse_unbound_required_credentials(
-    credentials: &[lns_artifact::spec::CredentialSlot],
-) -> Result<()> {
-    if credentials.iter().all(|slot| !slot.required) {
-        return Ok(());
-    }
-    let catalog = effective_machine_catalog();
-    let state = {
-        use crate::credential_flow::store::{
-            CredentialStore, JsonFileCredentialStore, default_credentials_path,
-        };
-        JsonFileCredentialStore::new(default_credentials_path())
-            .load()
-            .unwrap_or_default()
-    };
-    if let Err(failure) =
-        crate::artifact::credential_boot::gate_required_slots(credentials, &catalog, &state)
-    {
-        anyhow::bail!(failure.as_message());
-    }
-    Ok(())
 }
 
 fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {

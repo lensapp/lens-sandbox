@@ -3261,6 +3261,7 @@ dependencies = [
  "anyhow",
  "hex",
  "lns-policy",
+ "lns-spec",
  "oci-client",
  "serde",
  "serde_json",
@@ -3304,6 +3305,7 @@ dependencies = [
  "lns-ipc",
  "lns-ocsf",
  "lns-policy",
+ "lns-spec",
  "oci-client",
  "regex",
  "reqwest 0.12.28",
@@ -3333,6 +3335,7 @@ name = "lns-ipc"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "lns-spec",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3388,6 +3391,7 @@ dependencies = [
  "lns-ocsf",
  "lns-policy",
  "lns-session",
+ "lns-spec",
  "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

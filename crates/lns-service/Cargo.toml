@@ -35,6 +35,7 @@ lns-artifact = { path = "../lns-artifact" }
 lns-audit   = { path = "../lns-audit" }
 lns-ocsf    = { path = "../lns-ocsf" }
 lns-policy  = { path = "../lns-policy" }
+lns-spec    = { path = "../lns-spec" }
 lns-session = { path = "../lns-session" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "sync", "time"] }
 # eframe / egui drive the main-thread event loop. The hidden main viewport

@@ -136,9 +136,9 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     }
     if !world.project_credentials.is_empty() {
         spec_tail.push_str("\n  credentials:");
-        for (name, env, required) in &world.project_credentials {
+        for (env, domain) in &world.project_credentials {
             spec_tail.push_str(&format!(
-                "\n    - name: {name}\n      env: {env}\n      required: {required}"
+                "\n    - envVar: {env}\n      placeholder: lns-placeholder-{env}\n      injections:\n        - kind: bearer_header\n          domain: {domain}"
             ));
         }
     }
@@ -296,14 +296,9 @@ fn project_declares_connector(world: &mut E2eWorld, id: String) {
     world.project_connectors.push(id);
 }
 
-#[given(regex = r#"^the project definition requires credential "([^"]+)" injected as "([^"]+)"$"#)]
-fn project_requires_credential(world: &mut E2eWorld, id: String, env: String) {
-    world.project_credentials.push((id, env, true));
-}
-
-#[given(regex = r#"^the project definition declares credential "([^"]+)" injected as "([^"]+)"$"#)]
-fn project_declares_credential(world: &mut E2eWorld, id: String, env: String) {
-    world.project_credentials.push((id, env, false));
+#[given(regex = r#"^the project definition declares credential "([^"]+)" for "([^"]+)"$"#)]
+fn project_declares_credential(world: &mut E2eWorld, env: String, domain: String) {
+    world.project_credentials.push((env, domain));
 }
 
 #[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]
@@ -325,7 +320,7 @@ fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: Strin
         .as_ref()
         .expect("Given a clean lns cache home before writing a catalog");
     let catalog = format!(
-        "connectors:\n  - id: {id}\n    authKind: oauth\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n"
+        "connectors:\n  - id: {id}\n    authKind: oauth\n    routes:\n      - match: api.{id}.example\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
     );
     std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
         .expect("write the user connector catalog");
