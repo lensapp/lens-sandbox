@@ -5,12 +5,6 @@ use std::collections::BTreeMap;
 pub const API_VERSION: &str = "lens.dev/v1alpha1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Class {
-    Runtime,
-    Application,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Sandbox,
     FileSet,
@@ -30,13 +24,6 @@ impl Kind {
         match self {
             Kind::Sandbox => "sandbox",
             Kind::FileSet => "fileset",
-        }
-    }
-
-    pub fn class(self) -> Class {
-        match self {
-            Kind::FileSet => Class::Application,
-            _ => Class::Runtime,
         }
     }
 
@@ -82,13 +69,6 @@ pub struct Mount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Isolation {
-    Microvm,
-    Container,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum Quantity {
     Int(i64),
@@ -102,20 +82,6 @@ pub struct Resources {
     pub cpu: Option<Quantity>,
     #[serde(default)]
     pub memory: Option<Quantity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxSpec {
-    #[serde(rename = "baseImage", default)]
-    pub base_image: Option<String>,
-    pub isolation: Isolation,
-    #[serde(default)]
-    pub resources: Option<Resources>,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(rename = "supervisorVersion", default)]
-    pub supervisor_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -136,12 +102,6 @@ pub struct Port {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sandbox {
-    pub metadata: Metadata,
-    pub spec: SandboxSpec,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSet {
     pub metadata: Metadata,
     pub mount: Mount,
@@ -157,7 +117,9 @@ struct Doc {
     metadata: Metadata,
     #[serde(default)]
     mount: Option<Mount>,
-    spec: serde_json::Value,
+    // Every FileSet artifact ever published carries `spec: {}`, so the strict decoder has to know the key even though nothing reads it.
+    #[serde(rename = "spec", default)]
+    _spec: serde::de::IgnoredAny,
 }
 
 fn parse_doc(config_json: &[u8], expected: Kind) -> Result<Doc> {
@@ -178,31 +140,7 @@ fn parse_doc(config_json: &[u8], expected: Kind) -> Result<Doc> {
     if !is_valid_name(&doc.metadata.name) {
         bail!("invalid metadata.name {:?}", doc.metadata.name);
     }
-    if expected.class() == Class::Runtime && doc.mount.is_some() {
-        bail!(
-            "{} is a runtime-layer artifact and must not carry a mount",
-            expected.as_str()
-        );
-    }
     Ok(doc)
-}
-
-pub fn parse_sandbox(config_json: &[u8]) -> Result<Sandbox> {
-    let doc = parse_doc(config_json, Kind::Sandbox)?;
-    let spec: SandboxSpec = serde_json::from_value(doc.spec).context("parsing sandbox spec")?;
-    if spec.isolation != Isolation::Microvm {
-        bail!("sandbox isolation must be microvm; lns runs workloads only inside a microVM");
-    }
-    let Some(image) = &spec.base_image else {
-        bail!("microvm sandbox must carry a baseImage; the workload rootfs lives on the sandbox");
-    };
-    if !is_digest_pinned_image(image) {
-        bail!("sandbox baseImage {image} must be digest-pinned (…@sha256:<64 hex>)");
-    }
-    Ok(Sandbox {
-        metadata: doc.metadata,
-        spec,
-    })
 }
 
 pub fn validate_mount_path(path: &str) -> Result<()> {
@@ -245,19 +183,6 @@ pub fn read_kind(config_json: &[u8]) -> Result<Kind> {
     Kind::from_kind_str(&kind).ok_or_else(|| anyhow::anyhow!("unknown artifact kind {kind:?}"))
 }
 
-/// Run the schema + cross-field guards for whatever kind the document declares.
-pub fn validate_any(config_json: &[u8]) -> Result<()> {
-    match read_kind(config_json)? {
-        Kind::Sandbox => {
-            parse_sandbox(config_json)?;
-        }
-        Kind::FileSet => {
-            parse_fileset(config_json)?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn is_valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
@@ -295,11 +220,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kind_maps_family_class_and_media_types() {
+    fn kind_maps_family_and_media_types() {
         assert_eq!(Kind::Sandbox.family(), "sandbox");
         assert_eq!(Kind::Sandbox.as_str(), "Sandbox");
-        assert_eq!(Kind::Sandbox.class(), Class::Runtime);
-        assert_eq!(Kind::FileSet.class(), Class::Application);
         assert_eq!(
             Kind::Sandbox.artifact_type(),
             "application/vnd.lens.sandbox.v1+json"
@@ -356,93 +279,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_doc_rejects_wrong_api_version_kind_name_and_mount() {
-        let bad_api = br#"{"apiVersion":"v0","kind":"Sandbox","metadata":{"name":"x"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_sandbox(bad_api).unwrap_err()).contains("apiVersion"));
-        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"x"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_sandbox(bad_kind).unwrap_err()).contains("expected kind"));
-        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"-bad"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_sandbox(bad_name).unwrap_err()).contains("metadata.name"));
-        let runtime_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"x"},"mount":{"path":"/x"},"spec":{}}"#;
-        assert!(
-            format!("{:#}", parse_sandbox(runtime_mount).unwrap_err())
-                .contains("must not carry a mount")
-        );
+    fn parse_doc_rejects_wrong_api_version_kind_and_name() {
+        let bad_api = br#"{"apiVersion":"v0","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_fileset(bad_api).unwrap_err()).contains("apiVersion"));
+        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_fileset(bad_kind).unwrap_err()).contains("expected kind"));
+        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"-bad"},"mount":{"path":"/skills"},"spec":{}}"#;
+        assert!(format!("{:#}", parse_fileset(bad_name).unwrap_err()).contains("metadata.name"));
     }
 
     #[test]
     fn parse_doc_rejects_malformed_json() {
         assert!(
-            format!("{:#}", parse_sandbox(b"not json").unwrap_err()).contains("parsing artifact")
-        );
-    }
-
-    #[test]
-    fn versioned_artifacts_reject_unknown_fields_recursively() {
-        let digest = format!("reg/base@sha256:{}", "a".repeat(64));
-        let sandbox_docs = [
-            format!(
-                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}"}},"unexpected":true}}"#
-            ),
-            format!(
-                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox","unexpected":true}},"spec":{{"isolation":"microvm","baseImage":"{digest}"}}}}"#
-            ),
-            format!(
-                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}","unexpected":true}}}}"#
-            ),
-            format!(
-                r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{digest}","resources":{{"cpu":1,"unexpected":true}}}}}}"#
-            ),
-        ];
-        for doc in sandbox_docs {
-            let err = parse_sandbox(doc.as_bytes()).unwrap_err();
-            assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
-        }
-
-        let fileset = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/skills","readOlny":true},"spec":{}}"#;
-        let err = parse_fileset(fileset).unwrap_err();
-        assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
-    }
-
-    #[test]
-    fn parse_sandbox_accepts_a_digest_pinned_base_image() {
-        let json = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}","resources":{{"cpu":2,"memory":"1Gi"}}}}}}"#,
-            "a".repeat(64)
-        );
-        let sandbox = parse_sandbox(json.as_bytes()).unwrap();
-        assert_eq!(sandbox.spec.isolation, Isolation::Microvm);
-        assert!(sandbox.spec.base_image.is_some());
-        assert_eq!(sandbox.spec.resources.unwrap().cpu, Some(Quantity::Int(2)));
-    }
-
-    #[test]
-    fn parse_sandbox_rejects_a_floating_base_image() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm","baseImage":"reg/base:1"}}"#;
-        let err = parse_sandbox(json).unwrap_err();
-        assert!(format!("{err:#}").contains("digest-pinned"));
-    }
-
-    #[test]
-    fn parse_sandbox_rejects_a_non_microvm_isolation() {
-        let json = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"container","baseImage":"reg/base@sha256:{}"}}}}"#,
-            "a".repeat(64)
-        );
-        let err = parse_sandbox(json.as_bytes()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("isolation must be microvm"),
-            "lns is microVM-only, so a container sandbox must be refused: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_sandbox_requires_a_base_image() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm"}}"#;
-        let err = parse_sandbox(json).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must carry a baseImage"),
-            "a rootless microvm sandbox has nothing to boot; got: {err:#}"
+            format!("{:#}", parse_fileset(b"not json").unwrap_err()).contains("parsing artifact")
         );
     }
 
@@ -507,26 +356,5 @@ mod tests {
             assert_eq!(Kind::from_kind_str(kind.as_str()), Some(kind));
         }
         assert_eq!(Kind::from_kind_str("Sorcery"), None);
-    }
-
-    #[test]
-    fn validate_any_dispatches_to_each_kind_parser() {
-        let base = format!("reg/base@sha256:{}", "a".repeat(64));
-        let sandbox = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{base}"}}}}"#
-        );
-        validate_any(sandbox.as_bytes()).unwrap();
-        validate_any(br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills"},"spec":{}}"#).unwrap();
-    }
-
-    #[test]
-    fn validate_any_rejects_an_unknown_kind_and_unparseable_json() {
-        let unknown = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sorcery","metadata":{"name":"x"},"spec":{}}"#;
-        assert!(
-            format!("{:#}", validate_any(unknown).unwrap_err()).contains("unknown artifact kind")
-        );
-        assert!(
-            format!("{:#}", validate_any(b"nope").unwrap_err()).contains("parsing artifact kind")
-        );
     }
 }

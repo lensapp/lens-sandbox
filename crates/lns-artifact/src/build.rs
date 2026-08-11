@@ -209,7 +209,7 @@ mod tests {
 
     fn sandbox() -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}"}}}}"#,
+            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"reg/base@sha256:{}"}}}}"#,
             "a".repeat(64)
         )
         .into_bytes()
@@ -287,17 +287,31 @@ mod tests {
 
     #[test]
     fn build_artifact_refuses_an_invalid_manifest() {
-        let floating = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"isolation":"microvm","baseImage":"reg/base:1"}}"#;
-        let err = build_artifact(floating).unwrap_err();
-        assert!(format!("{err:#}").contains("digest-pinned"), "got: {err:#}");
+        let imageless = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{}}"#;
+        let err = build_artifact(imageless).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must carry an image"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
     fn build_artifact_refuses_an_unknown_kind() {
-        let doc = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sorcery","metadata":{"name":"x"},"spec":{}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","metadata":{"name":"x"},"spec":{"image":"reg/base:1"}}"#;
         let err = build_artifact(doc).unwrap_err();
+        assert!(format!("{err:#}").contains("kind"), "got: {err:#}");
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_document_no_verb_can_run() {
+        // Publishing a retired-group document would put an artifact in a registry that `lns run` and `lns inspect` both refuse to read.
+        let doc = format!(
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}"}}}}"#,
+            "a".repeat(64)
+        );
+        let err = build_artifact(doc.as_bytes()).unwrap_err();
         assert!(
-            format!("{err:#}").contains("unknown artifact kind"),
+            format!("{err:#}").contains(crate::sandbox::API_VERSION),
             "got: {err:#}"
         );
     }
