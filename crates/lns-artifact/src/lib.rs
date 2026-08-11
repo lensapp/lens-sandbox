@@ -1,5 +1,6 @@
 pub mod build;
 pub mod memory;
+pub mod merge;
 pub mod registry;
 pub mod resources;
 pub mod sandbox;
