@@ -18,6 +18,8 @@ pub struct BehaviourWorld {
     pub argv: Vec<String>,
     pub cwd: Option<TempDir>,
     pub summary_output: String,
+    pub port_composition_error: Option<String>,
+    pub composed_ports: Vec<lns_ipc::PortPublish>,
     pub phase_output: Vec<u8>,
     pub detached_stdout: Vec<u8>,
     pub pipe: Option<PhasePipe>,

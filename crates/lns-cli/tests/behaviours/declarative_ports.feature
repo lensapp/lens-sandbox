@@ -41,3 +41,18 @@ Feature: declared ports publish like compose locally and like docker run when pu
     Given an lns.yaml declaring ports 3003
     When the local sandbox is run with `-P`
     Then a Ports line shows `127.0.0.1:3003 -> 3003`
+
+  Scenario: two mappings on one host port are refused before boot
+    Given an lns.yaml declaring ports 3003
+    When the local sandbox is run with `-p 3003:9999` and the ports are composed
+    Then composing the ports is refused, naming host port 3003
+
+  Scenario: an explicit -p reusing a declared host port is refused
+    Given an lns.yaml declaring ports 8080:9090
+    When the local sandbox is run with `-p 8080:7000` and the ports are composed
+    Then composing the ports is refused, naming host port 8080
+
+  Scenario: the same mapping asked for twice is published once
+    Given an lns.yaml declaring ports 3003
+    When the local sandbox is run with `-p 4000:5000 -p 4000:5000` and the ports are composed
+    Then `127.0.0.1:4000 -> 5000` is published exactly once

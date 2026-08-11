@@ -142,10 +142,45 @@ pub fn compose_ports(
             .into_iter()
             .filter(|port| !substituted.contains(&port.container_port)),
     );
+    let published = dedupe_identical(published);
+    refuse_host_port_collision(&published)?;
     Ok(ComposedPorts {
         published,
         declared_unpublished,
     })
+}
+
+/// The same mapping asked for twice is one binding, not a collision — the second bind would fail on a port the user did ask for.
+fn dedupe_identical(published: Vec<lns_ipc::PortPublish>) -> Vec<lns_ipc::PortPublish> {
+    let mut unique: Vec<lns_ipc::PortPublish> = Vec::new();
+    for port in published {
+        if !unique.contains(&port) {
+            unique.push(port);
+        }
+    }
+    unique
+}
+
+/// The per-document check covers the declared entries alone, so only the merge with `-p` can put two container ports on one host binding — and the bind that loses is one the user never typed.
+fn refuse_host_port_collision(published: &[lns_ipc::PortPublish]) -> Result<()> {
+    for (index, port) in published.iter().enumerate() {
+        let clash = published[..index].iter().find(|held| {
+            held.host_ip == port.host_ip
+                && held.host_port == port.host_port
+                && held.protocol == port.protocol
+                && held.container_port != port.container_port
+        });
+        if let Some(clash) = clash {
+            bail!(
+                "{}:{} is asked to forward to container port {} and container port {}; publish them on different host ports",
+                port.host_ip,
+                port.host_port,
+                clash.container_port,
+                port.container_port
+            );
+        }
+    }
+    Ok(())
 }
 
 fn declared_port(value: i64, side: &str) -> Result<u16> {

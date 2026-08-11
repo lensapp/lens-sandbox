@@ -8,6 +8,8 @@ use lns_cli::run::summary::print_run_summary;
 
 use crate::world::{BehaviourWorld, TEST_HOST};
 
+const TEST_LOOPBACK: &str = "127.0.0.1";
+
 fn ports_yaml(ports: &str) -> String {
     let entries: String = ports
         .split(" and ")
@@ -146,6 +148,62 @@ fn summary_notes_declared_unpublished(
         Err(format!(
             "expected a declared-but-unpublished note for port {port} in:\n{}",
             world.summary_output
+        ))
+    }
+}
+
+fn compose(world: &mut BehaviourWorld, flags: &str) {
+    let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
+    let mut argv = vec!["lns".to_string(), "run".to_string()];
+    argv.extend(flags.split_whitespace().map(str::to_string));
+    let mut args: RunArgs = parse_args(&argv).expect("port flags must parse");
+    match compose_ports(&defaults.ports, std::mem::take(&mut args.publish), true) {
+        Ok(composed) => world.composed_ports = composed.published,
+        Err(e) => world.port_composition_error = Some(format!("{e:#}")),
+    }
+}
+
+#[when(regex = r"^the local sandbox is run with `([^`]+)` and the ports are composed$")]
+fn compose_with_flags(world: &mut BehaviourWorld, flags: String) {
+    compose(world, &flags);
+}
+
+#[then(regex = r"^composing the ports is refused, naming host port (\d+)$")]
+fn composition_refused(world: &mut BehaviourWorld, port: String) -> Result<(), String> {
+    let binding = format!("{TEST_LOOPBACK}:{port} is asked to forward");
+    match &world.port_composition_error {
+        Some(message) if message.contains(&binding) => Ok(()),
+        Some(message) => Err(format!(
+            "the refusal must name the {TEST_LOOPBACK}:{port} binding: {message}"
+        )),
+        None => Err(format!(
+            "two mappings on host port {port} must be refused before boot"
+        )),
+    }
+}
+
+#[then(regex = r"^`([\d.]+):(\d+) -> (\d+)` is published exactly once$")]
+fn published_exactly_once(
+    world: &mut BehaviourWorld,
+    ip: String,
+    host: u16,
+    container: u16,
+) -> Result<(), String> {
+    let matching = world
+        .composed_ports
+        .iter()
+        .filter(|port| {
+            port.host_ip.to_string() == ip
+                && port.host_port == host
+                && port.container_port == container
+        })
+        .count();
+    if matching == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{ip}:{host} -> {container} must be published once, not {matching} times: {:?}",
+            world.composed_ports
         ))
     }
 }
