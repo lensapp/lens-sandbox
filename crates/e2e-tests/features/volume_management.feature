@@ -23,6 +23,14 @@ Feature: volume lifecycle management end to end
     When I run "lns volume ls"
     Then the output does not contain "prism-data"
 
+  # The service's own writer is the only thing that puts a journal in the
+  # image, and the superblock is readable without booting a guest, so this
+  # runs in `make e2e` rather than behind @microvm.
+  Scenario: a created volume image carries an internal journal
+    When I run "lns volume create prism-data"
+    Then the exit code is 0
+    And the backing image for volume "prism-data" declares an internal journal
+
   Scenario: prune reclaims every idle volume
     When I run "lns volume create prism-data"
     And I run "lns volume create scratch"

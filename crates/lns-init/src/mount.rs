@@ -25,6 +25,7 @@ const UPPER_MOUNTPOINT: &str = "/mnt/upper";
 const NEWROOT: &str = "/newroot";
 const INIT_BROKER_PATH: &str = "/init-broker";
 const VOLUME_SEED_MOUNT: &str = "/mnt/vol-seed";
+const VOLUME_MOUNT_OPTS: &str = "errors=remount-ro";
 const PROC_CMDLINE: &str = "/proc/cmdline";
 const CMDLINE_MASK_FILE: &str = "/.lens/.cmdline";
 const DEV_FD_LINKS: &[(&str, &str)] = &[
@@ -543,7 +544,14 @@ fn mount_volumes(
             true => MountFlags::read_only().nosuid().nodev(),
             false => MountFlags::none().nosuid().nodev(),
         };
-        do_mount(sys, &vol.dev, &target, "ext4", flags, None)?;
+        do_mount(
+            sys,
+            &vol.dev,
+            &target,
+            "ext4",
+            flags,
+            Some(VOLUME_MOUNT_OPTS),
+        )?;
         if !vol.read_only {
             reconcile_volume_owner(sys, &target, run_ids);
         }
@@ -655,7 +663,7 @@ fn seed_volume_if_pristine(
         VOLUME_SEED_MOUNT,
         "ext4",
         MountFlags::none().nosuid().nodev(),
-        None,
+        Some(VOLUME_MOUNT_OPTS),
     )?;
     let (uid, gid) = run_ids.unwrap_or((0, 0));
     let result = sys.seed_pristine_volume(VOLUME_SEED_MOUNT, image_target, uid, gid);
@@ -807,7 +815,7 @@ fn mount_composefs_and_exec_broker_inner(
         UPPER_MOUNTPOINT,
         "ext4",
         MountFlags::none().nosuid().nodev(),
-        None,
+        Some(VOLUME_MOUNT_OPTS),
     )?;
 
     let upper_upper = format!("{UPPER_MOUNTPOINT}/upper");
@@ -2590,6 +2598,69 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Call::Mount { target, flags, .. }
             if target == "/newroot/cache" && *flags == MountFlags::read_only().nosuid().nodev()))
+        );
+    }
+
+    #[test]
+    fn the_upper_mount_also_remounts_read_only_on_error() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+
+        let upper = sys
+            .calls()
+            .into_iter()
+            .find(
+                |c| matches!(c, Call::Mount { target, fstype, .. } if fstype == "ext4" && target == UPPER_MOUNTPOINT),
+            )
+            .expect("the upper image is mounted as ext4");
+        assert!(
+            matches!(&upper, Call::Mount { data, .. } if data.as_deref() == Some(VOLUME_MOUNT_OPTS)),
+            "the upper carries a journal like every other image we write, so it takes the same errors= treatment: {upper:?}"
+        );
+    }
+
+    #[test]
+    fn volume_mounts_ask_the_kernel_to_remount_read_only_on_error() {
+        let sys = FakeSyscalls::new();
+        let volumes = vec![
+            volume("/dev/vdc", "/data", false),
+            volume("/dev/vdd", "/cache", true),
+        ];
+        mount_volumes(&sys, &volumes, "/newroot", None).unwrap();
+
+        let ext4: Vec<_> = sys
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, Call::Mount { target, fstype, .. } if fstype == "ext4" && target.starts_with("/newroot")))
+            .collect();
+        assert_eq!(ext4.len(), 2, "one mount per volume: {ext4:?}");
+        for call in &ext4 {
+            assert!(
+                matches!(call, Call::Mount { data, .. } if data.as_deref() == Some(VOLUME_MOUNT_OPTS)),
+                "a volume left inconsistent by a killed run keeps taking writes without errors=remount-ro: {call:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seed_mount_also_remounts_read_only_on_error() {
+        let sys = FakeSyscalls::new();
+        seed_volume_if_pristine(&sys, "/dev/vdc", "/newroot/data", None).unwrap();
+
+        let seed = sys
+            .calls()
+            .into_iter()
+            .find(|c| matches!(c, Call::Mount { target, .. } if target == VOLUME_SEED_MOUNT))
+            .expect("the seed staging mount happens");
+        assert!(
+            matches!(&seed, Call::Mount { data, .. } if data.as_deref() == Some(VOLUME_MOUNT_OPTS)),
+            "seeding writes to the volume too, so it needs the same protection: {seed:?}"
         );
     }
 

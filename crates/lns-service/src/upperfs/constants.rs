@@ -21,6 +21,23 @@ pub const LOST_FOUND_INO: u32 = 11;
 
 pub const LOST_FOUND_BLOCKS: u32 = 4;
 
+pub const JOURNAL_INO: u32 = 8;
+
+// JBD2 refuses to recover a journal shorter than 1024 blocks.
+pub const JBD2_MIN_JOURNAL_BLOCKS: u32 = 1024;
+
+pub const JOURNAL_TARGET_BLOCKS: u32 = 4096;
+
+// Every JBD2 field is big-endian, unlike every other structure in this image.
+pub const JBD2_MAGIC: u32 = 0xC03B_3998;
+pub const JBD2_SUPERBLOCK_V2: u32 = 4;
+pub const JBD2_FIRST_LOG_BLOCK: u32 = 1;
+pub const JBD2_FIRST_SEQUENCE: u32 = 1;
+pub const JBD2_SINGLE_USER: u32 = 1;
+
+// `COMPAT_HAS_JOURNAL` MUST NOT be set without a valid JBD2 block at the reserved run — the kernel then refuses the rw mount outright.
+pub const FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+
 // `COMPAT_EXT_ATTR` MUST be set — without it fsck rejects `trusted.overlay.*` xattrs that overlayfs writes to the upper.
 pub const FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
 
@@ -34,7 +51,7 @@ pub const FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 
 pub const FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 
-pub const SB_FEATURE_COMPAT: u32 = FEATURE_COMPAT_EXT_ATTR;
+pub const SB_FEATURE_COMPAT: u32 = FEATURE_COMPAT_EXT_ATTR | FEATURE_COMPAT_HAS_JOURNAL;
 pub const SB_FEATURE_INCOMPAT: u32 = FEATURE_INCOMPAT_FILETYPE | FEATURE_INCOMPAT_EXTENTS;
 pub const SB_FEATURE_RO_COMPAT: u32 = FEATURE_RO_COMPAT_SPARSE_SUPER | FEATURE_RO_COMPAT_LARGE_FILE;
 
@@ -51,3 +68,4 @@ pub const EXT2_DYNAMIC_REV: u32 = 1;
 
 pub const FT_DIR: u8 = 2;
 pub const S_IFDIR: u16 = 0o0040000;
+pub const S_IFREG: u16 = 0o0100000;

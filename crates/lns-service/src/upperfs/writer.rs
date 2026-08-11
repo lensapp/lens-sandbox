@@ -4,6 +4,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::upperfs::constants::*;
+use crate::upperfs::journal;
 use crate::upperfs::plan::{
     Plan, block_bitmap, group_block_layout, group_descriptor, inode_bitmap,
 };
@@ -81,8 +82,19 @@ fn write_metadata(f: &mut File, plan: &Plan) -> Result<()> {
                 itab_off + (LOST_FOUND_INO as u64 - 1) * INODE_SIZE as u64,
                 &plan.lost_found_inode.to_bytes(),
             )?;
+            write_at(
+                f,
+                itab_off + (JOURNAL_INO as u64 - 1) * INODE_SIZE as u64,
+                &plan.journal_inode.to_bytes(),
+            )?;
         }
     }
+
+    write_at(
+        f,
+        plan.journal_first_block() as u64 * BLOCK_SIZE as u64,
+        &journal::superblock_block(plan.journal_blocks(), plan.superblock.uuid),
+    )?;
 
     write_at(
         f,
@@ -128,7 +140,7 @@ mod tests {
     fn build_and_read(image_size: u64) -> (tempfile::TempDir, Plan, Vec<u8>) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("upper.img");
-        let plan = Plan::new(image_size, [0xAA; 16], "lns-upper", 0x12345678);
+        let plan = Plan::new(image_size, [0xAA; 16], "lns-upper", 0x12345678).expect("plan");
         write_ext4(&plan, &path).expect("write_ext4");
         let mut buf = Vec::new();
         File::open(&path)
@@ -191,13 +203,13 @@ mod tests {
     fn block_bitmap_at_block_2_for_group_0() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
         let bbmp = &bytes[4096 * 2..4096 * 3];
-        for bit in 0..=136 {
+        for bit in 0..=1160 {
             let set = (bbmp[bit / 8] >> (bit % 8)) & 1 == 1;
             assert!(set, "block bitmap bit {bit} should be set");
         }
-        let bit = 137;
+        let bit = 1161;
         let set = (bbmp[bit / 8] >> (bit % 8)) & 1 == 1;
-        assert!(!set, "bit 137 should be clear (first free block)");
+        assert!(!set, "bit 1161 should be clear (first free block)");
     }
 
     #[test]
@@ -243,6 +255,55 @@ mod tests {
         assert_eq!(read_u32(&bytes, off + 0x34), 0, "ee_block");
         assert_eq!(read_u16(&bytes, off + 0x38), 4, "ee_len");
         assert_eq!(read_u32(&bytes, off + 0x3C), 133, "ee_start_lo");
+    }
+
+    fn inode_table_offset(plan: &Plan) -> usize {
+        group_block_layout(&plan.layout, 0).itab_first_block as usize * BLOCK_SIZE as usize
+    }
+
+    #[test]
+    fn the_written_image_contains_the_journal_inode_in_group_zero() {
+        let (_d, plan, bytes) = build_and_read(32 * 1024 * 1024);
+        let off = inode_table_offset(&plan) + (JOURNAL_INO as usize - 1) * INODE_SIZE as usize;
+        assert_eq!(
+            &bytes[off..off + INODE_SIZE as usize],
+            &plan.journal_inode.to_bytes()
+        );
+    }
+
+    #[test]
+    fn the_written_image_starts_the_journal_with_a_valid_jbd2_superblock() {
+        let (_d, plan, bytes) = build_and_read(32 * 1024 * 1024);
+        let off = plan.journal_first_block() as usize * BLOCK_SIZE as usize;
+        assert_eq!(&bytes[off..off + 4], &JBD2_MAGIC.to_be_bytes());
+        assert_eq!(
+            u32::from_be_bytes([
+                bytes[off + 0x10],
+                bytes[off + 0x11],
+                bytes[off + 0x12],
+                bytes[off + 0x13]
+            ]),
+            plan.journal_blocks(),
+            "s_maxlen must match the extent the inode reserved"
+        );
+    }
+
+    #[test]
+    fn the_journal_flag_and_the_jbd2_block_come_from_one_plan() {
+        let (_d, plan, bytes) = build_and_read(32 * 1024 * 1024);
+        assert_eq!(
+            read_u32(&bytes, 1024 + 0x5C) & FEATURE_COMPAT_HAS_JOURNAL,
+            FEATURE_COMPAT_HAS_JOURNAL,
+            "a flag with no journal behind it makes the kernel refuse the rw mount outright"
+        );
+        let inum = read_u32(&bytes, 1024 + 0xE0);
+        let inode_off = inode_table_offset(&plan) + (inum as usize - 1) * INODE_SIZE as usize;
+        let first_block = read_u32(&bytes, inode_off + 0x3C) as usize;
+        assert_eq!(
+            &bytes[first_block * BLOCK_SIZE as usize..first_block * BLOCK_SIZE as usize + 4],
+            &JBD2_MAGIC.to_be_bytes(),
+            "the block the advertised inode points at must hold the JBD2 superblock"
+        );
     }
 
     #[test]
@@ -293,7 +354,7 @@ mod tests {
     fn no_tmp_file_left_after_success() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("upper.img");
-        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0);
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0).expect("plan");
         write_ext4(&plan, &path).expect("write");
         assert!(path.exists(), "image exists");
         let tmp = tmp_path(&path);
@@ -306,7 +367,7 @@ mod tests {
         let path = dir.path().join("upper.img");
         let tmp = tmp_path(&path);
         std::fs::write(&tmp, b"stale junk").expect("seed stale tmp");
-        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0);
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0).expect("plan");
         write_ext4(&plan, &path).expect("write should succeed despite stale tmp");
         assert!(path.exists());
         assert!(!tmp.exists());

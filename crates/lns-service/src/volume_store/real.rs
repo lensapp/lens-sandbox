@@ -54,7 +54,7 @@ impl Fs for RealFs {
             .unwrap_or(0);
         let path = p.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let plan = Plan::new(size_bytes, uuid, "lns-vol", mkfs_time);
+            let plan = Plan::new(size_bytes, uuid, "lns-vol", mkfs_time)?;
             write_ext4(&plan, &path)
         })
         .await
