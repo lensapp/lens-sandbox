@@ -95,6 +95,18 @@ fn lns_yaml_with_ref_fileset(w: &mut BehaviourWorld, reference: String, mount: S
     );
 }
 
+#[given(
+    regex = r#"^an lns\.yaml declaring a hostPath fileset "([^"]+)" mounted at "([^"]+)" and optional$"#
+)]
+fn lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String, mount: String) {
+    seed(
+        w,
+        &fileset_yaml(&format!(
+            "    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
+        )),
+    );
+}
+
 #[given("an lns.yaml declaring a fileset entry with both path and ref")]
 fn lns_yaml_with_conflicting_fileset(w: &mut BehaviourWorld) {
     seed(

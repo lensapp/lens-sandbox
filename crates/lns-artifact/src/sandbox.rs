@@ -74,11 +74,18 @@ pub struct Volume {
     /// Subpaths of a bind the workload must not see, relative to the bind root; masked in the guest exactly as a `.lensignore` entry is.
     #[serde(default)]
     exclude: Vec<String>,
+    /// A bind source the running machine does not have is skipped instead of refusing the run.
+    #[serde(default)]
+    optional: bool,
 }
 
 impl Volume {
     pub fn exclude(&self) -> &[String] {
         &self.exclude
+    }
+
+    pub fn optional(&self) -> bool {
+        self.optional
     }
 
     pub fn source(&self) -> &str {
@@ -130,7 +137,7 @@ pub struct SandboxSpec {
     pub ports: Vec<Port>,
 }
 
-/// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath.
+/// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesetEntry {
@@ -140,10 +147,15 @@ pub struct FilesetEntry {
     pub reference: Option<String>,
     #[serde(default)]
     pub inline: Option<BTreeMap<String, String>>,
+    #[serde(rename = "hostPath", default)]
+    pub host_path: Option<String>,
     #[serde(rename = "mountPath")]
     pub mount_path: String,
     #[serde(default)]
     pub owner: FilesetOwner,
+    /// A hostPath the running machine does not have is skipped instead of refusing the run.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// Who owns the materialized files in the guest: the run-as workload user (so the workload can rewrite its own seeded state), or root (pinned inputs the workload must not touch).
@@ -291,21 +303,44 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
     let source_count = usize::from(fileset.path.is_some())
         + usize::from(fileset.reference.is_some())
-        + usize::from(fileset.inline.is_some());
+        + usize::from(fileset.inline.is_some())
+        + usize::from(fileset.host_path.is_some());
     if source_count != 1 || fileset.inline.as_ref().is_some_and(BTreeMap::is_empty) {
         bail!(
-            "fileset targeting {} must set exactly one of path, ref, or inline",
+            "fileset targeting {} must set exactly one of path, ref, inline, or hostPath",
             fileset.mount_path
         );
     }
-    if fileset.path.as_ref().is_some_and(String::is_empty) {
-        bail!("fileset path must not be empty");
+    if let Some(path) = &fileset.path {
+        if path.is_empty() {
+            bail!("fileset path must not be empty");
+        }
+        if path.starts_with('~') {
+            bail!(
+                "fileset path {path:?} is packed from a directory beside this document, so it cannot be home-anchored; use hostPath to read one file from the machine that runs the sandbox"
+            );
+        }
     }
     if fileset.reference.as_ref().is_some_and(String::is_empty) {
         bail!("fileset ref must not be empty");
     }
     if let Some(inline) = &fileset.inline {
         validate_inline_files(inline)?;
+    }
+    match &fileset.host_path {
+        Some(host_path) => {
+            validate_host_source(host_path)?;
+            if fileset.mount_path.ends_with('/') {
+                bail!(
+                    "fileset hostPath {host_path} names a guest file, so mountPath {} must not end in `/`",
+                    fileset.mount_path
+                );
+            }
+        }
+        None if fileset.optional => bail!(
+            "optional applies to a hostPath fileset only; a packed or inline fileset always ships"
+        ),
+        None => {}
     }
     spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")?;
     if overlaps_runtime_namespace(&fileset.mount_path) {
@@ -461,6 +496,11 @@ fn validate_volume(volume: &Volume) -> Result<()> {
     if !volume.exclude.is_empty() && !volume.is_bind() {
         bail!("exclude applies to a bind volume only; a named volume has no host subpaths to hide");
     }
+    if volume.optional && !volume.is_bind() {
+        bail!(
+            "optional applies to a bind volume only; a named volume is created on demand, never absent"
+        );
+    }
     for entry in &volume.exclude {
         validate_bind_relative_path(entry)?;
     }
@@ -512,9 +552,13 @@ fn validate_bind_relative_path(entry: &str) -> Result<()> {
     Ok(())
 }
 
+/// A `~/` source is the one form a published definition can aim at the consumer's own home, and the keep/drop scan it meets later reads top-level names only, so a secret-shaped segment is refused here; an absolute or project-relative source keeps the rules it already had.
 fn validate_bind_source(source: &str) -> Result<()> {
     if source.is_empty() {
         bail!("bind source must not be empty");
+    }
+    if source.starts_with('~') && !source.starts_with("~/") {
+        bail!("invalid bind source {source:?}: only `~/` is supported, not another user's home");
     }
     if source
         .chars()
@@ -525,7 +569,41 @@ fn validate_bind_source(source: &str) -> Result<()> {
     if source.split('/').any(|segment| segment == "..") {
         bail!("bind source {source:?} must not contain a `..` path segment");
     }
+    if source.starts_with("~/") {
+        refuse_secret_shaped_segment("bind source", source)?;
+    }
     Ok(())
+}
+
+fn refuse_secret_shaped_segment(kind: &str, source: &str) -> Result<()> {
+    if let Some(secret) = source.split('/').find(|s| looks_like_secret_name(s)) {
+        bail!(
+            "{kind} {source} is secret-shaped ({secret}) — real secrets stay outside the workload"
+        );
+    }
+    Ok(())
+}
+
+/// A hostPath names one file on the machine that runs the definition; it must anchor somewhere portable, stay inside what it anchors to, and never be secret-shaped — a hostPath file gets no KEEP/DROP prompt, so its name is the only guard it has.
+pub fn validate_host_source(source: &str) -> Result<()> {
+    if source.starts_with('~') && !source.starts_with("~/") {
+        bail!("invalid hostPath {source:?}: only `~/` is supported, not another user's home");
+    }
+    if !(source.starts_with('/') || source.starts_with("~/")) {
+        bail!("invalid hostPath {source:?}: must start with `/` or `~/`");
+    }
+    if source.split('/').any(|segment| segment == "..") {
+        bail!("invalid hostPath {source:?}: must not contain a `..` path segment");
+    }
+    if source
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
+    {
+        bail!(
+            "invalid hostPath {source:?}: must be free of whitespace, quotes, and control characters"
+        );
+    }
+    refuse_secret_shaped_segment("hostPath", source)
 }
 
 fn validate_volume_name(name: &str) -> Result<()> {
@@ -959,6 +1037,91 @@ mod tests {
     }
 
     #[test]
+    fn a_home_rooted_bind_source_parses() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/home/agent/.claude"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.volumes[0].source(),
+            "~/.claude",
+            "the tilde travels verbatim; the CLI anchors it to this machine's home"
+        );
+    }
+
+    #[test]
+    fn a_user_relative_bind_source_is_refused() {
+        for source in ["~alice/.claude", "~"] {
+            let spec = format!(
+                r#"{{"image":"x:1","volumes":[{{"type":"bind","source":"{source}","target":"/work"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("only `~/` is supported"),
+                "source {source} would otherwise bind a literal {source:?} directory under the project: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_rooted_bind_source_naming_a_secret_store_is_refused() {
+        for source in [
+            "~/.ssh",
+            "~/.gnupg",
+            "~/.aws",
+            "~/.gnupg/private-keys-v1.d",
+            "~/.ssh/id_rsa",
+        ] {
+            let spec = format!(
+                r#"{{"image":"x:1","volumes":[{{"type":"bind","source":"{source}","target":"/work"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("secret-shaped"),
+                "`~/` is the first form that lets a pulled sandbox name the consumer's own home, and the bind's top-level scan never reaches a nested key store — {source}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absolute_bind_source_keeps_the_rules_it_already_had() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"/srv/.ssh","target":"/work"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.volumes[0].source(),
+            "/srv/.ssh",
+            "an absolute source names the author's own machine and cannot travel; tightening it is a separate change"
+        );
+    }
+
+    #[test]
+    fn an_optional_bind_parses_and_defaults_to_required() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/home/agent/.claude","optional":true},{"type":"bind","source":".","target":"/workspace"}]}"#,
+        ))
+        .unwrap();
+        assert!(def.spec.volumes[0].optional());
+        assert!(
+            !def.spec.volumes[1].optional(),
+            "a bind whose host path is missing must refuse the run unless the author opted out"
+        );
+    }
+
+    #[test]
+    fn optional_is_refused_on_a_named_volume() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"volume","source":"cache","target":"/cache","optional":true}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("bind volume only"),
+            "a named volume is created on demand, so it is never absent: got {err:#}"
+        );
+    }
+
+    #[test]
     fn parse_accepts_an_exclude_list_on_a_bind_volume() {
         let def = parse(&def_json(
             r#"{"image":"x:1","volumes":[{"type":"bind","source":".","target":"/workspace","exclude":[".cargo","tmp/scratch"]}]}"#,
@@ -1085,10 +1248,178 @@ mod tests {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("exactly one of path, ref, or inline"),
+                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
                 "got: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn a_home_anchored_fileset_path_is_refused_for_the_reason_it_cannot_work() {
+        for source in ["~/skills", "~", "~alice/skills"] {
+            let spec =
+                format!(r#"{{"image":"x:1","filesets":[{{"path":"{source}","mountPath":"/s"}}]}}"#);
+            let message = format!("{:#}", parse(&def_json(&spec)).unwrap_err());
+            assert!(
+                message.contains("packed from a directory beside") && message.contains("hostPath"),
+                "a packed path is never home-anchored, so the launch-time refusal claimed this machine has no home directory on a machine that plainly has one — {source}: got {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_fileset_parses_with_its_mount_path() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.filesets[0].host_path.as_deref(),
+            Some("~/.gitconfig"),
+            "the declared host path travels verbatim; expansion is a launch-time concern"
+        );
+        assert!(def.spec.filesets[0].optional);
+    }
+
+    #[test]
+    fn a_host_path_fileset_is_required_unless_it_says_otherwise() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"hostPath":"/etc/gitconfig","mountPath":"/etc/gitconfig"}]}"#,
+        ))
+        .unwrap();
+        assert!(
+            !def.spec.filesets[0].optional,
+            "an absent host path must refuse the run unless the author opted out"
+        );
+    }
+
+    #[test]
+    fn a_host_path_fileset_ships_the_field_under_its_camel_case_name() {
+        let entry: FilesetEntry = serde_json::from_str(
+            r#"{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig"}"#,
+        )
+        .expect("hostPath is the wire name; host_path would silently drop the source");
+        assert_eq!(entry.host_path.as_deref(), Some("~/.gitconfig"));
+    }
+
+    #[test]
+    fn a_fileset_setting_both_host_path_and_path_is_refused() {
+        for entry in [
+            r#"{"hostPath":"~/.gitconfig","path":"./skills","mountPath":"/s"}"#,
+            r#"{"hostPath":"~/.gitconfig","ref":"reg/skills@sha256:abc","mountPath":"/s"}"#,
+            r#"{"hostPath":"~/.gitconfig","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
+        ] {
+            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_must_be_absolute_or_home_rooted() {
+        for source in ["./x", "../x", "~", "~alice/x", "x", ""] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"mountPath":"/s"}}]}}"#,
+                serde_json::to_string(source).unwrap()
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("hostPath"),
+                "source {source:?}: got {err:#}"
+            );
+        }
+        for source in ["/etc/gitconfig", "~/.gitconfig"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+            );
+            parse(&def_json(&spec)).unwrap_or_else(|e| panic!("source {source}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn a_user_relative_host_path_names_the_one_form_that_is_supported() {
+        for source in ["~", "~alice/x"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("only `~/` is supported"),
+                "source {source}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_naming_a_secret_shaped_file_is_refused() {
+        for source in ["~/.npmrc", "~/.ssh/id_rsa", "~/.aws/credentials", "/x/.env"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("secret-shaped"),
+                "a hostPath file gets no KEEP/DROP prompt, so the name check is its only guard — {source}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_that_could_split_the_guest_cmdline_is_refused() {
+        for source in ["/etc/git config", "/etc/\"gitconfig", "/etc/../shadow"] {
+            let spec = format!(
+                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"mountPath":"/s"}}]}}"#,
+                serde_json::to_string(source).unwrap()
+            );
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("hostPath"),
+                "source {source:?}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_mount_path_naming_a_directory_is_refused() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("names a guest file"),
+            "a hostPath fileset copies one file to one guest path, so a directory mountPath has no meaning: {err:#}"
+        );
+    }
+
+    #[test]
+    fn optional_is_refused_on_a_fileset_without_a_host_path() {
+        for entry in [
+            r#"{"path":"./skills","mountPath":"/s","optional":true}"#,
+            r#"{"ref":"reg/skills@sha256:abc","mountPath":"/s","optional":true}"#,
+            r#"{"inline":{"settings.json":"{}"},"mountPath":"/s","optional":true}"#,
+        ] {
+            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
+            let err = parse(&def_json(&spec)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("optional applies to a hostPath fileset only"),
+                "got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_path_fileset_still_collides_with_another_mount_target() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"hostPath":"~/.gitconfig","mountPath":"/s"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate mount target /s"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -1252,7 +1583,7 @@ mod tests {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("exactly one of path, ref, or inline"),
+                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
                 "got: {err:#}"
             );
         }

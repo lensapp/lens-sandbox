@@ -98,8 +98,13 @@ pub fn format_summary(
     for bind in &binds {
         writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
     }
-    for (source, mount, owner) in &args.filesets {
-        writeln!(s, "  Fileset:   {source} -> {mount} (owner: {owner})").unwrap();
+    for fileset in &args.filesets {
+        writeln!(
+            s,
+            "  Fileset:   {} -> {} (owner: {})",
+            fileset.source, fileset.mount_path, fileset.owner
+        )
+        .unwrap();
     }
     if !args.tools.is_empty() {
         writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
@@ -188,12 +193,14 @@ fn flags_line(args: &RunArgs) -> String {
     }
 }
 
-/// The summary shows a path verbatim, shortens a ref digest to 12 characters, and names embedded files as inline.
+/// The summary shows a path verbatim, shortens a ref digest to 12 characters, names embedded files as inline, and names a host file as one so the operator sees which of their files a sandbox reads.
 pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
     fileset_display(
         fileset.path.as_deref(),
         fileset.reference.as_deref(),
         fileset.inline.is_some(),
+        fileset.host_path.as_deref(),
+        fileset.optional,
     )
 }
 
@@ -209,6 +216,8 @@ pub fn fileset_view_source_display(fileset: &lns_ipc::SandboxFileset) -> String 
         fileset.path.as_deref(),
         fileset.reference.as_deref(),
         fileset.inline,
+        fileset.host_path.as_deref(),
+        fileset.optional,
     )
 }
 
@@ -219,16 +228,24 @@ pub fn fileset_view_owner_display(owner: lns_ipc::SandboxFilesetOwner) -> &'stat
     }
 }
 
+/// One disclosed fileset. `from_host` separates a file read off the machine running the sandbox from the files the document itself ships.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesetSummary {
+    pub source: String,
+    pub mount_path: String,
+    pub owner: String,
+    pub from_host: bool,
+}
+
 /// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
-pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<(String, String, String)> {
+pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<FilesetSummary> {
     view.filesets
         .iter()
-        .map(|fileset| {
-            (
-                fileset_view_source_display(fileset),
-                fileset.mount_path.clone(),
-                fileset_view_owner_display(fileset.owner).to_string(),
-            )
+        .map(|fileset| FilesetSummary {
+            source: fileset_view_source_display(fileset),
+            mount_path: fileset.mount_path.clone(),
+            owner: fileset_view_owner_display(fileset.owner).to_string(),
+            from_host: fileset.host_path.is_some(),
         })
         .collect()
 }
@@ -238,7 +255,17 @@ pub fn tools_from_view(view: &lns_ipc::SandboxView) -> Vec<String> {
     view.tools.clone()
 }
 
-fn fileset_display(path: Option<&str>, reference: Option<&str>, inline: bool) -> String {
+fn fileset_display(
+    path: Option<&str>,
+    reference: Option<&str>,
+    inline: bool,
+    host_path: Option<&str>,
+    optional: bool,
+) -> String {
+    if let Some(host_path) = host_path {
+        let suffix = if optional { " (optional)" } else { "" };
+        return format!("host file {host_path}{suffix}");
+    }
     if let Some(path) = path {
         return path.to_string();
     }
@@ -399,8 +426,10 @@ mod tests {
             path: path.map(str::to_string),
             reference: reference.map(str::to_string),
             inline: None,
+            host_path: None,
             mount_path: "/s".into(),
             owner: lns_artifact::sandbox::FilesetOwner::default(),
+            optional: false,
         }
     }
 
@@ -414,6 +443,24 @@ mod tests {
         assert_eq!(
             fileset_source_display(&fileset_entry(None, Some(&long))),
             format!("reg/skills@sha256:{}…", "a".repeat(12))
+        );
+    }
+
+    #[test]
+    fn fileset_display_names_a_host_file_and_marks_it_optional() {
+        let mut fileset = fileset_entry(None, None);
+        fileset.host_path = Some("~/.gitconfig".into());
+
+        assert_eq!(
+            fileset_source_display(&fileset),
+            "host file ~/.gitconfig",
+            "the tilde stays verbatim so the operator recognizes the file the sandbox asked for"
+        );
+
+        fileset.optional = true;
+        assert_eq!(
+            fileset_source_display(&fileset),
+            "host file ~/.gitconfig (optional)"
         );
     }
 
@@ -458,8 +505,10 @@ mod tests {
                 path: None,
                 reference: None,
                 inline: true,
+                host_path: None,
                 mount_path: "/etc/agent".into(),
                 owner: lns_ipc::SandboxFilesetOwner::Root,
+                optional: false,
             }],
             connectors: Vec::new(),
             env: Vec::new(),
@@ -472,11 +521,12 @@ mod tests {
 
         assert_eq!(
             fileset_summaries_from_view(&view),
-            vec![(
-                "inline".to_string(),
-                "/etc/agent".to_string(),
-                "root".to_string()
-            )]
+            vec![FilesetSummary {
+                source: "inline".to_string(),
+                mount_path: "/etc/agent".to_string(),
+                owner: "root".to_string(),
+                from_host: false,
+            }]
         );
     }
 
@@ -601,6 +651,7 @@ mod tests {
             target: "/work".into(),
             read_only: false,
             exclude: Vec::new(),
+            optional: false,
         })];
         let s = summary_of(
             &args,
@@ -622,6 +673,7 @@ mod tests {
             target: "/cfg".into(),
             read_only: true,
             exclude: Vec::new(),
+            optional: false,
         })];
         let s = summary_of(
             &args,

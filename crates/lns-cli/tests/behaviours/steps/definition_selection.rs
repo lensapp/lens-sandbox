@@ -92,6 +92,7 @@ fn request_roots_sources_at(w: &mut BehaviourWorld, dir: String) -> Result<(), S
         &Defaults::from_definition(&def, Some(TEST_HOST)),
         &project,
         None,
+        None,
         Vec::new(),
     )
     .map_err(|e| format!("declarative settings did not resolve: {e:#}"))?;

@@ -11,6 +11,7 @@ pub struct MountDefault {
     pub target: String,
     pub read_only: bool,
     pub exclude: Vec<String>,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,7 @@ impl Defaults {
                     target: volume.target.clone(),
                     read_only: volume.read_only(),
                     exclude: volume.exclude().to_vec(),
+                    optional: volume.optional(),
                 })
                 .collect(),
             ports: definition
@@ -79,6 +81,7 @@ impl Defaults {
                     target: mount.target.clone(),
                     read_only: mount.read_only,
                     exclude: mount.exclude.clone(),
+                    optional: mount.optional,
                 })
                 .collect(),
             ports: view
@@ -161,6 +164,7 @@ pub struct Resolved {
 pub fn resolve(
     defaults: &Defaults,
     project_dir: &Path,
+    home: Option<&Path>,
     explicit_workdir: Option<String>,
     explicit_mounts: Vec<lns_ipc::MountSpec>,
 ) -> Result<Resolved> {
@@ -172,7 +176,7 @@ pub fn resolve(
         .mounts
         .iter()
         .filter(|mount| !overridden_targets.contains(mount.target.as_str()))
-        .map(|mount| resolve_mount(mount, project_dir))
+        .map(|mount| resolve_mount(mount, project_dir, home))
         .collect::<Result<Vec<_>>>()?;
     mounts.extend(explicit_mounts);
     Ok(Resolved {
@@ -181,16 +185,21 @@ pub fn resolve(
     })
 }
 
-fn resolve_mount(mount: &MountDefault, project_dir: &Path) -> Result<lns_ipc::MountSpec> {
+fn resolve_mount(
+    mount: &MountDefault,
+    project_dir: &Path,
+    home: Option<&Path>,
+) -> Result<lns_ipc::MountSpec> {
     lns_ipc::validate_volume_target(&mount.target).map_err(anyhow::Error::msg)?;
     if mount.bind {
-        let source = resolve_bind_source(&mount.source, project_dir)?;
+        let source = resolve_bind_source(&mount.source, project_dir, home)?;
         lns_ipc::validate_bind_source(&source).map_err(anyhow::Error::msg)?;
         return Ok(lns_ipc::MountSpec::Bind(lns_ipc::BindSpec {
             host_source: source,
             target: mount.target.clone(),
             read_only: mount.read_only,
             exclude: mount.exclude.clone(),
+            optional: mount.optional,
         }));
     }
     lns_ipc::validate_volume_name(&mount.source).map_err(anyhow::Error::msg)?;
@@ -201,15 +210,28 @@ fn resolve_mount(mount: &MountDefault, project_dir: &Path) -> Result<lns_ipc::Mo
     }))
 }
 
-pub(crate) fn resolve_bind_source(source: &str, project_dir: &Path) -> Result<String> {
+pub(crate) fn resolve_bind_source(
+    source: &str,
+    project_dir: &Path,
+    home: Option<&Path>,
+) -> Result<String> {
+    if let Some(under_home) = source.strip_prefix("~/") {
+        let home = home.with_context(|| {
+            format!("cannot resolve {source}: this machine has no home directory")
+        })?;
+        return normalized_utf8(&home.join(under_home));
+    }
     let source = Path::new(source);
     let joined = if source.is_absolute() {
         source.to_path_buf()
     } else {
         project_dir.join(source)
     };
-    let normalized = normalize_absolute(&joined)?;
-    normalized
+    normalized_utf8(&joined)
+}
+
+fn normalized_utf8(path: &Path) -> Result<String> {
+    normalize_absolute(path)?
         .into_os_string()
         .into_string()
         .map_err(|_| anyhow::anyhow!("bind source is not valid UTF-8"))
@@ -243,7 +265,7 @@ mod tests {
     #[test]
     fn relative_bind_sources_are_normalized_under_the_project_directory() {
         assert_eq!(
-            resolve_bind_source("./src", Path::new("/work/project")).unwrap(),
+            resolve_bind_source("./src", Path::new("/work/project"), None).unwrap(),
             "/work/project/src"
         );
     }
@@ -251,15 +273,38 @@ mod tests {
     #[test]
     fn absolute_bind_sources_are_normalized_without_using_the_project_directory() {
         assert_eq!(
-            resolve_bind_source("/work/./project", Path::new("/elsewhere")).unwrap(),
+            resolve_bind_source("/work/./project", Path::new("/elsewhere"), None).unwrap(),
             "/work/project"
         );
     }
 
     #[test]
     fn resolution_rejects_a_relative_project_directory() {
-        let err = resolve_bind_source(".", Path::new("relative")).unwrap_err();
+        let err = resolve_bind_source(".", Path::new("relative"), None).unwrap_err();
         assert!(format!("{err:#}").contains("project directory must be absolute"));
+    }
+
+    #[test]
+    fn a_home_rooted_source_resolves_against_the_invoking_users_home_not_the_project() {
+        assert_eq!(
+            resolve_bind_source(
+                "~/.claude",
+                Path::new("/work/project"),
+                Some(Path::new("/home/some-user"))
+            )
+            .unwrap(),
+            "/home/some-user/.claude"
+        );
+    }
+
+    #[test]
+    fn a_home_rooted_source_without_a_known_home_is_refused() {
+        let err = resolve_bind_source("~/.claude", Path::new("/work/project"), None).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("~/.claude"),
+            "the refusal must name the path, so nothing ever binds a literal `~` directory under the project: {message}"
+        );
     }
 
     #[test]

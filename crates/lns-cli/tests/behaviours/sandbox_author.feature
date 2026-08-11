@@ -111,7 +111,7 @@ Feature: authoring a sandbox
     Given an lns.yaml declaring a fileset entry with both path and ref
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
-    And the output contains "exactly one of path, ref, or inline"
+    And the output contains "exactly one of path, ref, inline, or hostPath"
 
   Scenario: validate refuses a relative fileset mountPath
     Given an lns.yaml declaring fileset "./skills" mounted at "skills"
@@ -148,7 +148,7 @@ Feature: authoring a sandbox
     Given an lns.yaml declaring a fileset entry with inline content and path
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
-    And the output contains "exactly one of path, ref, or inline"
+    And the output contains "exactly one of path, ref, inline, or hostPath"
 
   Scenario Outline: validate refuses an unsafe inline file path
     Given an lns.yaml declaring an inline fileset with path "<path>" at "/home/sandbox"

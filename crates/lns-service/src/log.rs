@@ -327,6 +327,28 @@ where
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// The frames `f`'s `crate::log` events reach the CLI as, captured by running it inside a run span wired exactly as the run orchestrator wires one.
+    pub(crate) fn capture_run_frames<T>(f: impl FnOnce() -> T) -> Vec<WireFrame> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WireFrame>(16);
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("lns.run");
+            let _entered = span.enter();
+            attach_to_run_span(tx);
+            f();
+        });
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

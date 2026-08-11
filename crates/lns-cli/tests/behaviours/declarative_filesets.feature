@@ -48,3 +48,25 @@ Feature: declared filesets ship files inside the sandbox artifact
     When the pulled sandbox run is prepared
     Then the run summary discloses an inline fileset at "/home/sandbox" owned by root
     And the run summary does not contain the inline file content
+
+  Scenario: a local run discloses a host file source and that it is optional
+    Given an lns.yaml declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig" and optional
+    When the local sandbox run is prepared
+    Then the run summary shows a Fileset line `host file ~/.gitconfig (optional) -> /home/agent/.gitconfig`
+
+  Scenario: a pulled sandbox's host file is named in the disclosure before it boots
+    Given a pulled sandbox whose view declares a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig" and optional
+    When the pulled sandbox effects are confirmed with no answer
+    Then the disclosure names the host file "host file ~/.gitconfig (optional) → /home/agent/.gitconfig"
+    And the run is refused without a confirmation
+
+  Scenario: the disclosure says a host file is read from this machine, not shipped by the author
+    Given a pulled sandbox whose view declares a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig" and optional
+    When the pulled sandbox effects are confirmed with no answer
+    Then the disclosure names the host file "read from this machine at launch"
+    And the disclosure does not call the host file author-published
+
+  Scenario: the disclosure still calls a packed fileset author-published
+    Given a pulled sandbox whose view declares an inline fileset at "/home/sandbox" owned by root
+    When the pulled sandbox effects are confirmed with no answer
+    Then the disclosure names the host file "author-published files"

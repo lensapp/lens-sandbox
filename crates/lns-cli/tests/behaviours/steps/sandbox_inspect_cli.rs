@@ -44,6 +44,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
                 target: "/workspace".into(),
                 read_only: false,
                 exclude: Vec::new(),
+                optional: false,
             },
             SandboxMount {
                 kind: SandboxMountKind::Volume,
@@ -51,6 +52,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
                 target: "/home/node/.cache".into(),
                 read_only: true,
                 exclude: Vec::new(),
+                optional: false,
             },
         ],
         ports: Vec::new(),
@@ -118,6 +120,8 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
                 "a".repeat(64)
             )),
             inline: false,
+            host_path: None,
+            optional: false,
             mount_path: mount,
             owner: lns_ipc::SandboxFilesetOwner::Workload,
         }],

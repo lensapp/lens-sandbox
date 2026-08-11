@@ -211,7 +211,7 @@ pub struct RunArgs {
     pub declared_unpublished: Vec<u16>,
 
     #[arg(skip)]
-    pub filesets: Vec<(String, String, String)>,
+    pub filesets: Vec<crate::run::summary::FilesetSummary>,
 
     #[arg(skip)]
     pub tools: Vec<String>,
@@ -737,6 +737,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: true,
                 exclude: Vec::new(),
+                optional: false,
             })
         );
     }
@@ -802,6 +803,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 exclude: Vec::new(),
+                optional: false,
             })
         );
     }

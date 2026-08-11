@@ -131,7 +131,15 @@ pub fn resolve_binds(
     for spec in specs {
         let root = Path::new(&spec.host_source);
         if !scan.exists(root) {
-            bail!("host path does not exist: {}", spec.host_source);
+            if !spec.optional {
+                bail!("host path does not exist: {}", spec.host_source);
+            }
+            writeln!(
+                output,
+                "lns: skipping optional bind {} — not present on this host",
+                spec.host_source
+            )?;
+            continue;
         }
         if !scan.is_dir(root) {
             bail!(
@@ -276,6 +284,7 @@ mod tests {
             target: target.into(),
             read_only: false,
             exclude: Vec::new(),
+            optional: false,
         }
     }
 

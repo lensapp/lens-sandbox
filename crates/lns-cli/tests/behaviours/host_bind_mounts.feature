@@ -104,3 +104,40 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then the summary shows a bind line "/Users/me/proj → /work (read-write)"
     And the summary shows ".env: kept (exposed)"
+
+  Scenario: A home-rooted declared bind resolves against this machine's home
+    Given a definition declaring a bind from "~/.claude" to "/home/agent/.claude"
+    And this machine's home directory is "/home/some-user"
+    When the declared mounts resolve
+    Then the host bind source is "/home/some-user/.claude"
+
+  Scenario: A project-relative declared bind still resolves against the project directory
+    Given a definition declaring a bind from "./src" to "/work"
+    And this machine's home directory is "/home/some-user"
+    When the declared mounts resolve
+    Then the host bind source is "/work/project/src"
+
+  Scenario: A home-rooted declared bind on a machine with no home is refused
+    Given a definition declaring a bind from "~/.claude" to "/home/agent/.claude"
+    And this machine has no home directory
+    When the declared mounts resolve
+    Then the mount resolution fails naming "~/.claude"
+
+  Scenario: An optional bind whose host path is missing is skipped and the run continues
+    Given an optional declared bind from "/Users/me/.claude" to "/home/agent/.claude"
+    And the host path "/Users/me/.claude" does not exist
+    When the declared binds are resolved interactively
+    Then no host bind is resolved
+    And the output says the bind was skipped because it is not present on this host
+
+  Scenario: A required bind whose host path is missing still fails the run
+    Given a required declared bind from "/Users/me/.claude" to "/home/agent/.claude"
+    And the host path "/Users/me/.claude" does not exist
+    When the declared binds are resolved interactively
+    Then the command fails with "host path does not exist"
+
+  Scenario: An optional bind whose host path is present is mounted like any other
+    Given an optional declared bind from "/Users/me/.claude" to "/home/agent/.claude"
+    And the host directory "/Users/me/.claude" contains no secret-shaped files
+    When the declared binds are resolved interactively
+    Then the resolved host binds are exactly "/Users/me/.claude -> /home/agent/.claude"
