@@ -1,0 +1,19 @@
+[package]
+name = "lns-spec"
+version = "0.0.0"
+edition = "2024"
+description = "The lns.run/v1 document grammar — the shared definitions every kind is built from (docs/sandbox-spec.md)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+
+[lints.clippy]
+cognitive_complexity = { level = "deny", priority = 1 }

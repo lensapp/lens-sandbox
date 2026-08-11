@@ -11,6 +11,7 @@ members = [
     "crates/lns-service",
     "crates/lns-session",
     "crates/lns-session-broker",
+    "crates/lns-spec",
     "crates/lns-supervisor",
     "crates/bump-kernel",
     "crates/bump-mise",
@@ -40,6 +41,7 @@ default-members = [
     "crates/lns-service",
     "crates/lns-session",
     "crates/lns-session-broker",
+    "crates/lns-spec",
 ]
 
 [profile.release]

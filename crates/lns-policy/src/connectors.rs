@@ -48,14 +48,7 @@ impl ConnectorRoute {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialAuth {
-    pub env_var: String,
-    pub placeholder: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub injections: Vec<InjectionDef>,
-}
+pub use lns_spec::Credential as CredentialAuth;
 
 /// Which interactive sign-in an `oauth` connector uses: the RFC 8628 device flow (default) or the browser-redirect authorization-code + PKCE flow.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

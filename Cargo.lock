@@ -3353,6 +3353,7 @@ version = "0.0.0"
 dependencies = [
  "ipnet",
  "libc",
+ "lns-spec",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3440,6 +3441,14 @@ dependencies = [
  "libc",
  "lns-session",
  "tempfile",
+]
+
+[[package]]
+name = "lns-spec"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
