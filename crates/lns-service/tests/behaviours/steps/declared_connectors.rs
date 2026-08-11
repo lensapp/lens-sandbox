@@ -6,13 +6,13 @@ use lns_policy::grants::{GrantRecord, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::{InjectionDef, InjectionKind};
 use lns_policy::{Policy, Verdict};
 use lns_service::artifact::credential_boot::{
-    BootGate, SlotPlan, boot_gate, gate_required_slots, plan_declared_connectors, sign_in_gate_ids,
+    BootGate, SlotPlan, boot_gate, plan_declared_connectors, sign_in_gate_ids,
 };
 use lns_service::artifact::policy::merge_effective;
 use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
 use lns_service::credential_flow::connectors::{
-    boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_slots,
-    resolve_connectable_with_slots, run_providers, unknown_connector_ids,
+    boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_credentials,
+    resolve_connectable_with_credentials, run_providers, unknown_connector_ids,
     unknown_connectors_refusal,
 };
 use lns_service::credential_flow::providers::Provider;
@@ -74,23 +74,18 @@ fn launch(
             return;
         }
     };
-    let mut declared = resolved
+    let declared = resolved
         .policy
         .as_ref()
         .map(|p| p.connectors.clone())
         .unwrap_or_default();
-    declared.extend(resolved.credentials.iter().map(|slot| slot.name.clone()));
     let unknown = unknown_connector_ids(&declared, &rig.catalog);
     if !unknown.is_empty() {
         rig.error = Some(unknown_connectors_refusal(&unknown));
         return;
     }
-    if let Err(failure) = gate_required_slots(&resolved.credentials, &rig.catalog, &rig.store) {
-        rig.error = Some(failure.as_message());
-        return;
-    }
     let plans = plan_declared_connectors(
-        &sign_in_gate_ids(&resolved.credentials),
+        &sign_in_gate_ids(&resolved.credentials, &rig.catalog),
         &rig.catalog,
         &rig.store,
     );
@@ -102,7 +97,7 @@ fn launch(
         return;
     }
     let mut policy = merge_effective(resolved.policy.as_ref(), &rig.overlay);
-    let applied = resolve_applied_with_slots(&policy, &resolved.credentials, &rig.catalog);
+    let applied = resolve_applied_with_credentials(&policy, &resolved.credentials, &rig.catalog);
     policy
         .network
         .egress
@@ -113,7 +108,7 @@ fn launch(
         .as_ref()
         .map(|p| p.connectors.clone())
         .unwrap_or_default();
-    let connectable = resolve_connectable_with_slots(
+    let connectable = resolve_connectable_with_credentials(
         &policy,
         &resolved.credentials,
         &declared_connectors,
@@ -674,18 +669,16 @@ fn connector_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String
     }
 }
 
-fn definition_with_credential_slot(id: &str, env: &str) -> String {
+fn definition_with_credential_on(env: &str, domain: &str) -> String {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"name":"{id}","env":"{env}"}}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env}","placeholder":"lns-placeholder-{env}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
     )
 }
 
-#[given(
-    regex = r#"^the sandbox definition declares an optional credential slot "([^"]+)" injected as "([^"]+)"$"#
-)]
-fn definition_declares_credential_slot(w: &mut BehaviourWorld, id: String, env: String) {
+#[given(regex = r#"^the sandbox definition declares a credential "([^"]+)" for "([^"]+)"$"#)]
+fn definition_declares_credential_for(w: &mut BehaviourWorld, env: String, domain: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
-    rig.definition = Some(definition_with_credential_slot(&id, &env));
+    rig.definition = Some(definition_with_credential_on(&env, &domain));
 }
 
 #[then(regex = r#"^"([^"]+)" is not offered for a reactive connect$"#)]

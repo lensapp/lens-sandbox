@@ -4,6 +4,7 @@ use lns_policy::connectors::{AuthKind, Connector, OauthAuth, OauthFlow};
 use lns_policy::grants::{GrantRecord, GrantVerdict, WorkloadGrantFile, WorkloadIdentity};
 use lns_policy::providers::ProviderDef;
 use lns_policy::{Policy, RouteRule};
+use lns_spec::Credential;
 
 use crate::credential_flow::providers::{DefProvider, Provider};
 
@@ -122,29 +123,84 @@ pub fn resolve_applied_connectors(policy: &Policy, catalog: &[Connector]) -> App
     out
 }
 
-/// A definition's credential slots resolve like declared connectors, with each slot's env name overriding the catalog default and winning over a same-id declared entry so the remap holds.
-pub fn resolve_applied_with_slots(
+fn claims_a_domain_of(integ: &Connector, credential: &Credential) -> bool {
+    claimed_domains(integ).any(|claimed| {
+        credential
+            .injections
+            .iter()
+            .any(|injection| domains_overlap(claimed, &injection.domain))
+    })
+}
+
+/// Pairs each declaration with the connector that can supply its value: the first in the catalog claiming a domain the credential injects on. A declaration never names a connector, so the machine's catalog decides — and a domain two connectors both claim is refused at install, so catalog order settles what remains.
+///
+/// A connector supplies at most one declaration. It holds one value, so arming two variables from it would put the same secret in a variable no consent card ever named — and one value key per provider is what keeps a grant, a card and a stored value addressing the same thing.
+pub fn declared_suppliers<'a>(
+    credentials: &'a [Credential],
+    catalog: &'a [Connector],
+) -> Vec<(&'a Credential, Option<&'a Connector>)> {
+    let mut taken: HashSet<&str> = HashSet::new();
+    credentials
+        .iter()
+        .map(|credential| {
+            let supplier = catalog.iter().find(|integ| {
+                !taken.contains(integ.id.as_str()) && claims_a_domain_of(integ, credential)
+            });
+            if let Some(integ) = supplier {
+                taken.insert(integ.id.as_str());
+            }
+            (credential, supplier)
+        })
+        .collect()
+}
+
+/// The value key a declaration resolves under: a supplying connector owns the stored value and this workload's grant, so one `lns connector connect` serves every sandbox declaring a domain it claims; with no supplier the declaration answers for itself, under the variable it names. The `env:` prefix keeps that keyspace apart from connector ids, which can hold neither a colon nor an uppercase letter.
+pub fn declared_provider_ids(credentials: &[Credential], catalog: &[Connector]) -> Vec<String> {
+    declared_suppliers(credentials, catalog)
+        .into_iter()
+        .map(|(credential, supplier)| declared_provider_def(credential, supplier).id)
+        .collect()
+}
+
+fn declared_provider_def(credential: &Credential, supplier: Option<&Connector>) -> ProviderDef {
+    ProviderDef {
+        id: supplier.map_or_else(
+            || format!("env:{}", credential.env_var),
+            |integ| integ.id.clone(),
+        ),
+        env_var: credential.env_var.clone(),
+        placeholder: credential.placeholder.clone(),
+        injections: credential.injections.clone(),
+    }
+}
+
+/// A declared credential is the injection contract itself, so its wire provider is built from the declaration — env var, placeholder and injections all as written. The catalog contributes only what a declaration cannot: the value, and the egress that reaches the service.
+pub fn resolve_applied_with_credentials(
     policy: &Policy,
-    slots: &[lns_artifact::spec::CredentialSlot],
+    credentials: &[Credential],
     catalog: &[Connector],
 ) -> AppliedConnectors {
-    let slot_ids: HashSet<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    let supplied = declared_suppliers(credentials, catalog);
+    let supplier_ids: HashSet<&str> = supplied
+        .iter()
+        .filter_map(|(_, supplier)| supplier.map(|integ| integ.id.as_str()))
+        .collect();
     let mut base = policy.clone();
-    base.connectors.retain(|id| !slot_ids.contains(id.as_str()));
+    base.connectors
+        .retain(|id| !supplier_ids.contains(id.as_str()));
     let mut out = resolve_applied_connectors(&base, catalog);
-    // `base` drops the slot's id so its env remap cannot double-seed a provider, but the reach a connect earned is not the slot's to withdraw.
+    // `base` drops the supplier so its own env var cannot double-seed beside the declaration's, but the reach a connect earned is not the declaration's to withdraw.
     out.routes = applied_connector_routes(&policy.connectors, catalog);
     let ceiling_denies = crate::artifact::policy::is_closed(policy);
-    for slot in slots {
-        let Some(integ) = catalog.iter().find(|i| i.id == slot.name) else {
+    for (credential, supplier) in supplied {
+        out.providers.push(DefProvider::new(declared_provider_def(
+            credential, supplier,
+        )));
+        let Some(integ) = supplier else {
             continue;
         };
-        if let Some(mut def) = wire_provider_def(integ) {
-            def.env_var = slot.env.clone();
-            out.providers.push(DefProvider::new(def));
-        }
-        // A slot is artifact-declared, so its route must not widen the user's lockdown — a connector connected here already carries its own.
-        let connected_here = policy.connectors.contains(&slot.name);
+        // A declaration is artifact-authored, so its supplier's route must not widen the user's lockdown — a connector connected here already carries its own.
+        let connected_here = policy.connectors.contains(&integ.id);
         if !ceiling_denies && !connected_here {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));
@@ -159,24 +215,27 @@ pub fn resolve_applied_with_slots(
     out
 }
 
-/// A slot's connector is already reachable through the definition, so it is never offered as a fresh connect.
-pub fn resolve_connectable_with_slots(
+/// A declaration's supplier is already reachable through the definition, so it is never offered as a fresh connect — and because the supplier joins the protected set, no second connector claiming the same domain is offered either.
+pub fn resolve_connectable_with_credentials(
     policy: &Policy,
-    slots: &[lns_artifact::spec::CredentialSlot],
+    credentials: &[Credential],
     declared: &[String],
     catalog: &[Connector],
 ) -> ConnectableConnectors {
     let mut owned = policy.clone();
-    owned
-        .connectors
-        .extend(slots.iter().map(|s| s.name.clone()));
+    owned.connectors.extend(
+        declared_suppliers(credentials, catalog)
+            .into_iter()
+            .filter_map(|(_, supplier)| supplier)
+            .map(|integ| integ.id.clone()),
+    );
     resolve_connectable_with_declared(&owned, declared, catalog)
 }
 
 /// A run's wire provider set and the consent boundary derived from it, composed in exactly one place so the Layer 2 rig and production cannot drift apart on who may arm a machine-stored value.
 pub struct RunProviders {
     pub providers: Vec<DefProvider>,
-    /// The ids consented at boot — only the applied (overlay-connected + slot) providers; a connectable id, declared or not, joins live on connect.
+    /// The value keys consented at boot — only the applied (overlay-connected + declared) providers; a connectable id, declared or not, joins live on connect.
     pub armed: HashSet<String>,
     pub connectable_ids: HashSet<String>,
 }
@@ -337,7 +396,7 @@ mod tests {
     use crate::credential_flow::providers::Provider;
     use lns_policy::connectors::{ConnectorRoute, CredentialAuth, OauthAuth, OauthFlow};
     use lns_policy::grants::GrantRecord;
-    use lns_policy::providers::{InjectionDef, InjectionKind};
+    use lns_spec::{InjectionDef, InjectionKind};
 
     fn cred_connector(id: &str, env_var: &str, domain: &str) -> Connector {
         Connector {
@@ -597,14 +656,15 @@ mod tests {
     }
 
     #[test]
-    fn boot_sign_in_grant_records_the_slot_remapped_env_var_not_the_catalog_default() {
+    fn boot_sign_in_grant_records_the_declared_env_var_not_the_catalog_default() {
         let catalog = vec![oauth_connector(
             "some-oauth",
             "SOME_OAUTH_TOKEN",
             "api.some-oauth.example",
         )];
-        let slots = vec![slot("some-oauth", "REMAPPED_TOKEN", true)];
-        let providers = resolve_applied_with_slots(&Policy::default(), &slots, &catalog).providers;
+        let declared = vec![declaration("REMAPPED_TOKEN", "api.some-oauth.example")];
+        let providers =
+            resolve_applied_with_credentials(&Policy::default(), &declared, &catalog).providers;
         let workload = WorkloadIdentity::Definition {
             dir: "/proj".into(),
         };
@@ -613,13 +673,45 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(
             records[0].env_var, "REMAPPED_TOKEN",
-            "the grant must pin the slot's effective env var, or a remapped slot's grant never matches at the next boot"
+            "the grant must pin the declaration's own env var, or its grant never matches at the next boot"
         );
         let mut grants = WorkloadGrantFile::default();
         grants.upsert(records[0].clone());
         let applied: HashSet<String> = ["some-oauth".to_string()].into_iter().collect();
         let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
         assert_eq!(armed, applied);
+    }
+
+    #[test]
+    fn a_completed_boot_sign_in_arms_even_when_a_second_declaration_names_the_same_domain() {
+        let catalog = vec![oauth_connector(
+            "some-oauth",
+            "SOME_OAUTH_TOKEN",
+            "api.some-oauth.example",
+        )];
+        let declared = vec![
+            declaration("FIRST_TOKEN", "api.some-oauth.example"),
+            declaration("SECOND_TOKEN", "api.some-oauth.example"),
+        ];
+        let run = resolve_applied_with_credentials(&Policy::default(), &declared, &catalog);
+        let applied: HashSet<String> = run.providers.iter().map(|p| p.id().to_string()).collect();
+        let workload = WorkloadIdentity::Definition {
+            dir: "/proj".into(),
+        };
+        let mut grants = WorkloadGrantFile::default();
+        for record in boot_sign_in_grants(
+            &["some-oauth".to_string()],
+            &run.providers,
+            "proj",
+            &workload,
+        ) {
+            grants.upsert(record);
+        }
+        let armed = gate_armed_by_grant(&applied, &run.providers, "proj", &workload, &grants);
+        assert!(
+            armed.contains("some-oauth"),
+            "the sidecar holds one grant per value key, and arming requires it to match every provider under that key — so a second declaration sharing the supplier would strand the sign-in the developer just completed, and every later run would re-ask a question the machine can already answer: armed {armed:?}"
+        );
     }
 
     #[test]
@@ -856,7 +948,7 @@ mod tests {
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let c = resolve_connectable_with_slots(
+        let c = resolve_connectable_with_credentials(
             &policy_applying(&[]),
             &[],
             &["some-provider".to_string()],
@@ -1077,62 +1169,130 @@ mod tests {
         );
     }
 
-    fn slot(name: &str, env: &str, required: bool) -> lns_artifact::spec::CredentialSlot {
-        lns_artifact::spec::CredentialSlot {
-            name: name.into(),
-            env: env.into(),
-            required,
+    fn declaration(env_var: &str, domain: &str) -> Credential {
+        Credential {
+            env_var: env_var.into(),
+            placeholder: format!("lns-placeholder-{env_var}"),
+            injections: vec![InjectionDef {
+                kind: InjectionKind::BearerHeader,
+                domain: domain.into(),
+                header: None,
+            }],
         }
     }
 
     #[test]
-    fn a_slot_seeds_its_provider_under_the_slot_env_name_with_the_catalog_placeholder() {
+    fn the_value_keys_a_reload_retains_are_the_ones_the_providers_carry() {
         let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let out = resolve_applied_with_slots(
+        let declared = vec![
+            declaration("PROVIDER_KEY", "api.example.test"),
+            declaration("OTHER_TOKEN", "api.nobody-claims.example"),
+        ];
+        let wired = resolve_applied_with_credentials(&policy_applying(&[]), &declared, &catalog);
+        let carried: Vec<&str> = wired.providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            declared_provider_ids(&declared, &catalog),
+            carried,
+            "a reload retains declared credentials by these keys, so a key that disagrees with the provider's own would disarm a credential the run already consented to"
+        );
+    }
+
+    #[test]
+    fn one_connector_supplies_one_declaration_so_every_value_key_is_distinct() {
+        let catalog = vec![oauth_connector(
+            "some-oauth",
+            "SOME_OAUTH_TOKEN",
+            "api.some-oauth.example",
+        )];
+        let declared = vec![
+            declaration("FIRST_TOKEN", "api.some-oauth.example"),
+            declaration("SECOND_TOKEN", "api.some-oauth.example"),
+        ];
+        let out = resolve_applied_with_credentials(&policy_applying(&[]), &declared, &catalog);
+        let ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            ["some-oauth", "env:SECOND_TOKEN"],
+            "a connector holds one value, and a grant, a card and a stored value all address a provider by its key — two providers under one key can never both be armed, and the second variable would take a secret no card named"
+        );
+    }
+
+    #[test]
+    fn a_declaration_is_wired_as_written_rather_than_from_the_catalog() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_credentials(
             &policy_applying(&[]),
-            &[slot("some-provider", "PROVIDER_KEY", false)],
+            &[declaration("PROVIDER_KEY", "api.example.test")],
             &catalog,
         );
         assert_eq!(out.providers.len(), 1);
-        assert_eq!(out.providers[0].id(), "some-provider");
-        assert_eq!(
-            out.providers[0].env_var(),
-            "PROVIDER_KEY",
-            "the slot's env remap must win over the catalog default"
-        );
+        assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
         assert_eq!(
             out.providers[0].placeholder(),
-            "lns-some-provider-placeholder",
-            "the placeholder stays the catalog's so the boundary still detects it"
+            "lns-placeholder-PROVIDER_KEY",
+            "the declaration is the injection contract, so its own placeholder is what the workload holds and the boundary substitutes"
+        );
+        assert_eq!(
+            out.providers[0].id(),
+            "some-provider",
+            "the connector claiming the domain owns the stored value, so one connect serves every sandbox declaring it"
         );
         assert_eq!(
             out.routes.len(),
             1,
-            "a slot allows its routes like a declared id"
+            "the supplier's egress arrives with the declaration it supplies"
         );
         assert_eq!(out.routes[0].match_pattern, "api.example.test");
     }
 
     #[test]
-    fn a_slot_wins_over_a_same_id_declared_connector_so_the_remap_holds() {
+    fn a_declaration_no_connector_supplies_still_wires_its_own_injection() {
+        let out = resolve_applied_with_credentials(
+            &policy_applying(&[]),
+            &[declaration("SOME_TOKEN", "api.nobody-claims.example")],
+            &[],
+        );
+        assert_eq!(
+            out.providers.len(),
+            1,
+            "a credential is complete on its own: an empty catalog must not leave the declaration unwired"
+        );
+        assert_eq!(
+            out.providers[0].id(),
+            "env:SOME_TOKEN",
+            "with no supplier the declaration answers for itself, in a keyspace no connector id can reach"
+        );
+        assert_eq!(out.providers[0].unarmed_injections().len(), 1);
+        assert!(
+            out.routes.is_empty(),
+            "a declaration carries no egress of its own; the destination is asked about like any other"
+        );
+    }
+
+    #[test]
+    fn a_declaration_and_its_connected_supplier_do_not_double_seed() {
         let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &policy_applying(&["some-provider"]),
-            &[slot("some-provider", "PROVIDER_KEY", true)],
+            &[declaration("PROVIDER_KEY", "api.example.test")],
             &catalog,
         );
         assert_eq!(
             out.providers.len(),
             1,
-            "the slot and the declared id must not double-seed"
+            "the supplier's own env var must not be seeded beside the declaration's"
         );
         assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
     }
@@ -1145,57 +1305,52 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_does_not_withdraw_the_reach_the_users_own_connect_earned() {
+    fn a_declaration_does_not_withdraw_the_reach_the_users_own_connect_earned() {
         let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &closed_policy_applying(&["some-provider"]),
-            &[slot("some-provider", "PROVIDER_KEY", false)],
+            &[declaration("PROVIDER_KEY", "api.example.test")],
             &catalog,
         );
         assert_eq!(
             out.routes.len(),
             1,
-            "the connector stays connected, so declaring a slot for it must not silently stop it working"
+            "the connector stays connected, so declaring a credential it supplies must not silently stop it working"
         );
         assert_eq!(out.routes[0].match_pattern, "api.example.test");
-        assert_eq!(
-            out.providers[0].env_var(),
-            "PROVIDER_KEY",
-            "the slot's env remap still wins"
-        );
     }
 
     #[test]
-    fn a_slot_alone_still_cannot_widen_a_locked_down_directory() {
+    fn a_declaration_alone_still_cannot_widen_a_locked_down_directory() {
         let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &closed_policy_applying(&[]),
-            &[slot("some-provider", "SOME_TOKEN", false)],
+            &[declaration("SOME_TOKEN", "api.example.test")],
             &catalog,
         );
         assert!(
             out.routes.is_empty(),
-            "an artifact-declared slot the user never connected must not open a closed policy"
+            "an artifact-declared credential whose supplier the user never connected must not open a closed policy"
         );
     }
 
     #[test]
-    fn a_slot_alongside_a_different_declared_connector_unions_without_loss() {
+    fn a_declaration_alongside_a_different_connected_connector_unions_without_loss() {
         let catalog = vec![
             cred_connector("some-provider", "SOME_TOKEN", "api.example.test"),
             cred_connector("other-provider", "OTHER_TOKEN", "api.other.example"),
         ];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &policy_applying(&["other-provider"]),
-            &[slot("some-provider", "SOME_TOKEN", false)],
+            &[declaration("SOME_TOKEN", "api.example.test")],
             &catalog,
         );
         let mut ids: Vec<&str> = out.providers.iter().map(|p| p.id()).collect();
@@ -1204,29 +1359,15 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_naming_an_unknown_id_contributes_nothing_here() {
-        let out = resolve_applied_with_slots(
-            &policy_applying(&[]),
-            &[slot("some-unknown", "SOME_TOKEN", true)],
-            &[],
-        );
-        assert!(
-            out.providers.is_empty(),
-            "unknown ids are the refusal's job"
-        );
-        assert!(out.routes.is_empty());
-    }
-
-    #[test]
-    fn an_oauth_slot_surfaces_its_sign_in_config_under_the_slot_env() {
+    fn an_oauth_supplier_surfaces_its_sign_in_config_for_the_launch_gate() {
         let catalog = vec![oauth_connector(
             "some-oauth",
             "SOME_OAUTH_TOKEN",
             "api.some-oauth.example",
         )];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &policy_applying(&[]),
-            &[slot("some-oauth", "OAUTH_KEY", true)],
+            &[declaration("OAUTH_KEY", "api.some-oauth.example")],
             &catalog,
         );
         assert_eq!(out.providers[0].env_var(), "OAUTH_KEY");
@@ -1237,15 +1378,15 @@ mod tests {
     }
 
     #[test]
-    fn a_pkce_oauth_slot_surfaces_its_pkce_config() {
+    fn a_pkce_supplier_surfaces_its_pkce_config() {
         let catalog = vec![pkce_connector(
             "somepkce",
             "SOMEPKCE_TOKEN",
             "api.somepkce.com",
         )];
-        let out = resolve_applied_with_slots(
+        let out = resolve_applied_with_credentials(
             &policy_applying(&[]),
-            &[slot("somepkce", "SOMEPKCE_TOKEN", false)],
+            &[declaration("SOMEPKCE_TOKEN", "api.somepkce.com")],
             &catalog,
         );
         assert!(out.pkce_configs.contains_key("somepkce"));
@@ -1253,21 +1394,40 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_named_connector_is_not_offered_as_a_fresh_connect() {
+    fn a_declarations_supplier_is_not_offered_as_a_fresh_connect() {
         let catalog = vec![cred_connector(
             "some-provider",
             "SOME_TOKEN",
             "api.example.test",
         )];
-        let c = resolve_connectable_with_slots(
+        let c = resolve_connectable_with_credentials(
             &policy_applying(&[]),
-            &[slot("some-provider", "SOME_TOKEN", false)],
+            &[declaration("SOME_TOKEN", "api.example.test")],
             &[],
             &catalog,
         );
         assert!(
             c.providers.is_empty(),
-            "a slot's connector is already reachable, never a fresh offer"
+            "a declaration's supplier is already reachable, never a fresh offer"
+        );
+    }
+
+    #[test]
+    fn no_second_claimant_of_a_declarations_domain_is_offered_either() {
+        let catalog = vec![
+            cred_connector("some-primary", "PRIMARY_TOKEN", "api.example.test"),
+            cred_connector("some-secondary", "SECONDARY_TOKEN", "api.example.test"),
+        ];
+        let c = resolve_connectable_with_credentials(
+            &policy_applying(&[]),
+            &[declaration("SOME_TOKEN", "api.example.test")],
+            &[],
+            &catalog,
+        );
+        let offered: Vec<&str> = c.providers.iter().map(|p| p.id()).collect();
+        assert!(
+            offered.is_empty(),
+            "the declaration's supplier is protected and the other claims the same domain, so offering it would let its machine-global value inject over the credential that owns that domain: {offered:?}"
         );
     }
 

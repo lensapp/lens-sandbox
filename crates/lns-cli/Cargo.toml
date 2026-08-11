@@ -26,6 +26,7 @@ lns-ipc    = { path = "../lns-ipc" }
 lns-artifact = { path = "../lns-artifact" }
 lns-audit  = { path = "../lns-audit" }
 lns-policy = { path = "../lns-policy" }
+lns-spec = { path = "../lns-spec" }
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "time", "sync"] }
 anyhow     = "1"
 dirs       = "5"

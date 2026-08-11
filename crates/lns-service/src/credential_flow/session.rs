@@ -183,7 +183,7 @@ pub struct CredentialSession {
     bundled_ids: HashSet<String>,
     connectable: HashSet<String>,
     armed: Mutex<HashSet<String>>,
-    slot_ids: HashSet<String>,
+    declared_ids: HashSet<String>,
     grant_binding: Option<GrantBinding>,
     run_grants: Mutex<HashMap<String, GrantRecord>>,
     connect: ConnectEmitter,
@@ -233,7 +233,7 @@ impl CredentialSession {
             bundled_ids: HashSet::new(),
             connectable: HashSet::new(),
             armed: Mutex::new(HashSet::new()),
-            slot_ids: HashSet::new(),
+            declared_ids: HashSet::new(),
             grant_binding: None,
             run_grants: Mutex::new(HashMap::new()),
             connect: Box::new(|_| {}),
@@ -340,9 +340,9 @@ impl CredentialSession {
         self
     }
 
-    /// The run's artifact-declared credential slot ids, which `lns-policy.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the slot was granted at boot or consented at first use.
-    pub fn with_slot_ids(mut self, slots: HashSet<String>) -> Self {
-        self.slot_ids = slots;
+    /// The value keys of the run's artifact-declared credentials, which `lns-policy.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the credential was granted at boot or consented at first use.
+    pub fn with_declared_ids(mut self, declared: HashSet<String>) -> Self {
+        self.declared_ids = declared;
         self
     }
 
@@ -385,7 +385,7 @@ impl CredentialSession {
     pub fn reconcile_armed(&self, granted: &[String], reloaded: &[String]) {
         let reloaded_set: HashSet<&str> = reloaded.iter().map(String::as_str).collect();
         let mut armed = self.armed.lock().expect("armed mutex poisoned");
-        armed.retain(|id| reloaded_set.contains(id.as_str()) || self.slot_ids.contains(id));
+        armed.retain(|id| reloaded_set.contains(id.as_str()) || self.declared_ids.contains(id));
         armed.extend(granted.iter().cloned());
     }
 
@@ -4325,7 +4325,7 @@ mod tests {
             tx,
             TEST_TIMEOUT,
         )
-        .with_slot_ids(HashSet::from(["some-slot".to_string()]))
+        .with_declared_ids(HashSet::from(["some-slot".to_string()]))
         .with_armed_ids(HashSet::from([
             "some-slot".to_string(),
             "gitlab".to_string(),
@@ -4357,7 +4357,7 @@ mod tests {
             TEST_TIMEOUT,
         )
         .with_custom_providers(Arc::new(vec![some_provider()]))
-        .with_slot_ids(HashSet::from(["some-provider".to_string()]));
+        .with_declared_ids(HashSet::from(["some-provider".to_string()]));
         assert!(
             !session.armed_ids().contains("some-provider"),
             "an ungranted slot boots unarmed"

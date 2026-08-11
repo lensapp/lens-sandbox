@@ -5,4 +5,6 @@
 
 pub mod credential;
 
-pub use credential::{Credential, InjectionDef, InjectionKind, is_self_identifying};
+pub use credential::{
+    Credential, InjectionDef, InjectionKind, is_legal_env_var_name, is_self_identifying,
+};

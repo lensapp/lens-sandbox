@@ -43,22 +43,22 @@ fn lns_yaml_with_user(w: &mut BehaviourWorld, user: String) {
     );
 }
 
-#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" credential as "([^"]+)"$"#)]
-fn lns_yaml_with_credential(w: &mut BehaviourWorld, name: String, env: String) {
+#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" credential for "([^"]+)"$"#)]
+fn lns_yaml_with_credential(w: &mut BehaviourWorld, env_var: String, domain: String) {
     seed(
         w,
         &format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - name: {name}\n      env: {env}\n"
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n      injections:\n        - kind: bearer_header\n          domain: {domain}\n"
         ),
     );
 }
 
-#[given(regex = r#"^an lns\.yaml declaring the required "([^"]+)" credential as "([^"]+)"$"#)]
-fn lns_yaml_with_required_credential(w: &mut BehaviourWorld, name: String, env: String) {
+#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" credential with no destination$"#)]
+fn lns_yaml_with_credential_without_injections(w: &mut BehaviourWorld, env_var: String) {
     seed(
         w,
         &format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - name: {name}\n      env: {env}\n      required: true\n"
+            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n"
         ),
     );
 }

@@ -83,18 +83,18 @@ Feature: authoring a sandbox
     And the output contains "user:         root"
     And the service received no request
 
-  Scenario: inspect discloses every declared credential slot
-    Given an lns.yaml declaring the "some-provider" credential as "SOME_TOKEN"
+  Scenario: inspect discloses every declared credential and where its value may travel
+    Given an lns.yaml declaring the "SOME_TOKEN" credential for "api.some-provider.example"
     When the user runs sandbox command "inspect"
     Then the exit code is 0
-    And the output contains "credential: some-provider -> SOME_TOKEN"
+    And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
     And the service received no request
 
-  Scenario: inspect identifies a required credential slot
-    Given an lns.yaml declaring the required "some-provider" credential as "SOME_TOKEN"
+  Scenario: inspect says so when a declared credential's value travels nowhere
+    Given an lns.yaml declaring the "SOME_TOKEN" credential with no destination
     When the user runs sandbox command "inspect"
     Then the exit code is 0
-    And the output contains "credential: some-provider -> SOME_TOKEN (required)"
+    And the output contains "credential: SOME_TOKEN (travels nowhere)"
     And the service received no request
 
   Scenario: inspect of a path-shaped target renders the definition offline

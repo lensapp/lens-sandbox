@@ -72,9 +72,9 @@ pub struct SupervisorSession {
     pub placeholder_env: Vec<(String, String)>,
 }
 
-/// The run's consent inputs: the definition's credential slots, the identity its grants key against, the slot ids whose boot-gate sign-in the user completed this launch, and each connector's forget count as the gate found it.
+/// The run's consent inputs: the definition's declared credentials, the identity its grants key against, the connector ids whose boot-gate sign-in the user completed this launch, and each connector's forget count as the gate found it.
 pub struct RunConsent<'a> {
-    pub credentials: &'a [lns_artifact::spec::CredentialSlot],
+    pub credentials: &'a [lns_spec::Credential],
     pub workload: lns_policy::grants::WorkloadIdentity,
     pub signed_in: Vec<String>,
     pub revocations_at_gate: std::collections::HashMap<String, u64>,
@@ -539,7 +539,7 @@ mod tests {
         );
     }
 
-    fn test_consent(credentials: &[lns_artifact::spec::CredentialSlot]) -> RunConsent<'_> {
+    fn test_consent(credentials: &[lns_spec::Credential]) -> RunConsent<'_> {
         RunConsent {
             credentials,
             workload: lns_policy::grants::WorkloadIdentity::Definition {
@@ -550,11 +550,11 @@ mod tests {
         }
     }
 
-    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start` drives a required slot's boot sign-in through the real grant sidecar.
+    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start` drives a declared credential's boot sign-in through the real grant sidecar.
     struct BootSignInFixture {
         dir: tempfile::TempDir,
         policy_path: PathBuf,
-        slot: lns_artifact::spec::CredentialSlot,
+        credential: lns_spec::Credential,
         _guards: Vec<crate::test_env::EnvVarGuard>,
     }
 
@@ -608,10 +608,14 @@ mod tests {
         BootSignInFixture {
             dir,
             policy_path,
-            slot: lns_artifact::spec::CredentialSlot {
-                name: "some-oauth".into(),
-                env: "SOME_OAUTH_TOKEN".into(),
-                required: true,
+            credential: lns_spec::Credential {
+                env_var: "SOME_OAUTH_TOKEN".into(),
+                placeholder: "lns-placeholder-some-oauth".into(),
+                injections: vec![lns_spec::InjectionDef {
+                    kind: lns_spec::InjectionKind::BearerHeader,
+                    domain: "api.some-oauth.example".into(),
+                    header: None,
+                }],
             },
             _guards: guards,
         }
@@ -627,7 +631,7 @@ mod tests {
             Some(&fixture.policy_path),
             None,
             RunConsent {
-                credentials: std::slice::from_ref(&fixture.slot),
+                credentials: std::slice::from_ref(&fixture.credential),
                 workload: workload.clone(),
                 signed_in: vec!["some-oauth".into()],
                 revocations_at_gate: std::collections::HashMap::new(),
@@ -660,7 +664,7 @@ mod tests {
         assert_eq!(grant.verdict, GrantVerdict::Allow);
         assert_eq!(
             grant.env_var, "SOME_OAUTH_TOKEN",
-            "the grant pins the slot's effective env var, not the catalog default"
+            "the grant pins the declaration's own env var, not the catalog default"
         );
         drop(session);
         tokio::task::yield_now().await;

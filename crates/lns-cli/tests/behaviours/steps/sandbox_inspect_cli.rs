@@ -159,35 +159,13 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
 }
 
 #[given(
-    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the "([^"]+)" credential as "([^"]+)"$"#
+    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the "([^"]+)" credential for "([^"]+)"$"#
 )]
 fn inspects_sandbox_credential(
     world: &mut BehaviourWorld,
     reference: String,
-    name: String,
-    env: String,
-) {
-    inspects_sandbox_credential_with_requirement(world, reference, name, env, false);
-}
-
-#[given(
-    regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the required "([^"]+)" credential as "([^"]+)"$"#
-)]
-fn inspects_sandbox_required_credential(
-    world: &mut BehaviourWorld,
-    reference: String,
-    name: String,
-    env: String,
-) {
-    inspects_sandbox_credential_with_requirement(world, reference, name, env, true);
-}
-
-fn inspects_sandbox_credential_with_requirement(
-    world: &mut BehaviourWorld,
-    reference: String,
-    name: String,
-    env: String,
-    required: bool,
+    env_var: String,
+    domain: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         reference: reference.clone(),
@@ -200,10 +178,14 @@ fn inspects_sandbox_credential_with_requirement(
         filesets: Vec::new(),
         connectors: Vec::new(),
         env: Vec::new(),
-        credentials: vec![lns_ipc::SandboxCredential {
-            name,
-            env,
-            required,
+        credentials: vec![lns_spec::Credential {
+            placeholder: format!("lns-placeholder-{env_var}"),
+            env_var,
+            injections: vec![lns_spec::InjectionDef {
+                kind: lns_spec::InjectionKind::BearerHeader,
+                domain,
+                header: None,
+            }],
         }],
         tools: Vec::new(),
         policy_flags: Vec::new(),

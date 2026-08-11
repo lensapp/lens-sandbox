@@ -95,11 +95,7 @@ async fn orchestrate(
     let mut signed_in = Vec::new();
     let mut revocations_at_gate = std::collections::HashMap::new();
     if let Some(plan) = &sandbox_plan {
-        crate::artifact::real::refuse_unknown_connectors(
-            plan.workload.policy.as_ref(),
-            &plan.workload.credentials,
-        )?;
-        crate::artifact::real::refuse_unbound_required_credentials(&plan.workload.credentials)?;
+        crate::artifact::real::refuse_unknown_connectors(plan.workload.policy.as_ref())?;
         // Read before the gate opens: a device flow can hold it for minutes, and a disconnect landing inside that window must win over the grant the sign-in earns.
         revocations_at_gate = policy
             .as_deref()
@@ -536,14 +532,13 @@ async fn orchestrate(
     Ok(session_code)
 }
 
-/// Block the boot on any required oauth-kind credential slot with no armed machine grant: drive its sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. Returns the ids whose sign-in the user completed this launch — that consent becomes the workload's grant, so the slot arms now and the next run skips the sign-in. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
+/// Block the boot on any declared credential whose supplying connector signs in with oauth and holds no armed machine grant: drive that sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. Returns the ids whose sign-in the user completed this launch — that consent becomes the workload's grant, so the credential arms now and the next run skips the sign-in. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
 async fn gate_declared_sign_ins(
-    credentials: &[lns_artifact::spec::CredentialSlot],
+    credentials: &[lns_spec::Credential],
     frame_tx: &Sender<WireFrame>,
 ) -> Result<Vec<String>> {
     use crate::artifact::credential_boot::{
-        BootGate, ConnectChoice, SlotPlan, boot_gate, plan_declared_connectors, resolve_connect,
-        sign_in_gate_ids,
+        BootGate, SlotPlan, boot_gate, plan_declared_connectors, sign_in_gate_ids,
     };
     use crate::credential_flow::store::{
         CredentialStore, JsonFileCredentialStore, default_credentials_path,
@@ -551,8 +546,7 @@ async fn gate_declared_sign_ins(
     use lns_ipc::Response;
 
     let mut signed_in = Vec::new();
-    let declared = sign_in_gate_ids(credentials);
-    if declared.is_empty() {
+    if credentials.is_empty() {
         return Ok(signed_in);
     }
     let user = lns_policy::connectors::Catalog::load_or_default(
@@ -560,6 +554,10 @@ async fn gate_declared_sign_ins(
     )
     .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
+    let declared = sign_in_gate_ids(credentials, &catalog);
+    if declared.is_empty() {
+        return Ok(signed_in);
+    }
     let state = JsonFileCredentialStore::new(default_credentials_path())
         .load()
         .unwrap_or_default();
@@ -606,9 +604,7 @@ async fn gate_declared_sign_ins(
                     .await;
             }
             Response::OauthSignInFailed { reason } => {
-                if resolve_connect(&prompt, ConnectChoice::Decline).starts_workload() {
-                    continue;
-                }
+                // Every declared credential is a requirement, so a sign-in the user abandons refuses the run rather than starting a workload that cannot reach its service.
                 anyhow::bail!(
                     "sign-in for connector {id} did not complete ({reason}); launch aborted"
                 );

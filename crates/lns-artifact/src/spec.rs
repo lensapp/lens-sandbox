@@ -86,15 +86,6 @@ pub struct Resources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CredentialSlot {
-    pub name: String,
-    pub env: String,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Port {
     #[serde(default)]
     pub host: Option<i64>,

@@ -949,14 +949,7 @@ fn render_cached_inspect<W: std::io::Write>(
             }
             render_connectors(out, &view.connectors)?;
             for credential in &view.credentials {
-                let required = if credential.required {
-                    " (required)"
-                } else {
-                    ""
-                };
-                let name = &credential.name;
-                let env = &credential.env;
-                writeln!(out, "credential: {name} -> {env}{required}")?;
+                writeln!(out, "credential: {}", credential_disclosure(credential))?;
             }
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
@@ -981,6 +974,19 @@ fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What a declared credential discloses: the variable the workload reads, and every destination its value may travel to — the two things a reader has to weigh before running it.
+pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String {
+    if credential.injections.is_empty() {
+        return format!("{} (travels nowhere)", credential.env_var);
+    }
+    let domains: Vec<&str> = credential
+        .injections
+        .iter()
+        .map(|injection| injection.domain.as_str())
+        .collect();
+    format!("{} -> {}", credential.env_var, domains.join(", "))
 }
 
 fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
