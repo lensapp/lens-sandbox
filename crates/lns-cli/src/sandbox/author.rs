@@ -158,7 +158,7 @@ pub fn validate<F: Fs, W: Write>(
         Err(problems) => problems,
     };
     if problems.is_empty()
-        && let Ok(def) = lns_artifact::sandbox::parse(&json)
+        && let Ok(def) = lns_artifact::sandbox::parse_document(&json)
     {
         problems.extend(super::fileset::path_fileset_problems(fs, project_dir, &def));
     }
@@ -195,6 +195,9 @@ pub fn inspect_local<F: Fs, W: Write>(
 fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut W) -> Result<()> {
     writeln!(out, "Sandbox: {}", def.metadata.name)?;
     writeln!(out, "  image:        {}", def.spec.image)?;
+    for mixin in &def.spec.mixins {
+        writeln!(out, "  mixin: {mixin}")?;
+    }
     if let Some(command) = &def.spec.command {
         writeln!(out, "  command:      {command}")?;
     }
@@ -434,6 +437,19 @@ mod tests {
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
+    }
+
+    #[test]
+    fn inspect_local_lists_the_mixins_the_definition_layers_on() {
+        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  mixins:\n    - ./mixins/postgres-tools/\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("mixin: ./mixins/postgres-tools/"),
+            "a run refuses this definition over its mixins, so the local view has to name them rather than read as though it declared none: {text}"
+        );
     }
 
     #[test]

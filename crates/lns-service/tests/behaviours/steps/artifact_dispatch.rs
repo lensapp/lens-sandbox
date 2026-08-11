@@ -18,6 +18,11 @@ async fn fileset_artifact(world: &mut BehaviourWorld) {
     world.artifact().artifact_type = Some(Kind::FileSet.artifact_type());
 }
 
+#[given("a pulled reference whose manifest is a mixin artifact")]
+async fn mixin_artifact(world: &mut BehaviourWorld) {
+    world.artifact().artifact_type = Some(Kind::Mixin.artifact_type());
+}
+
 #[given("a pulled reference whose manifest is a sandbox artifact")]
 async fn sandbox_artifact(world: &mut BehaviourWorld) {
     world.artifact().artifact_type = Some(Kind::Sandbox.artifact_type());

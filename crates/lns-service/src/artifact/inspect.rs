@@ -44,6 +44,7 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
+                    mixins: def.spec.mixins.clone(),
                     reference: image_ref.to_string(),
                     digest,
                     cpus: declared_size.cpus,
@@ -214,6 +215,7 @@ mod tests {
         mounts: Vec<SandboxMount>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -232,8 +234,30 @@ mod tests {
         }))
     }
 
+    fn sandbox_view_with_mixins(mixins: Vec<String>) -> ArtifactInspection {
+        ArtifactInspection::Sandbox(Box::new(SandboxView {
+            mixins,
+            reference: "registry.example.test/team/sandbox:latest".into(),
+            digest: digest(),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: None,
+            user: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            connectors: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: Vec::new(),
+            policy_flags: Vec::new(),
+            cpus: None,
+            mem_mib: None,
+        }))
+    }
+
     fn sandbox_view_with_filesets(filesets: Vec<SandboxFileset>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -250,6 +274,19 @@ mod tests {
             cpus: None,
             mem_mib: None,
         }))
+    }
+
+    #[test]
+    fn a_sandbox_projects_the_mixins_it_declared_so_inspect_and_run_answer_alike() {
+        let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
+        assert_eq!(
+            project_sandbox(&format!(
+                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"registry.example.test/runtime:1","mixins":["{pinned}"]}}}}"#
+            ))
+            .unwrap(),
+            sandbox_view_with_mixins(vec![pinned]),
+            "the run refuses this document over its mixins, so an inspect that omits them tells a reader the opposite of what the launch will say"
+        );
     }
 
     #[test]
@@ -378,6 +415,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -456,6 +494,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -492,6 +531,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -520,6 +560,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),

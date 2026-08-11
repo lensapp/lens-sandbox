@@ -9,7 +9,7 @@ use lns_service::artifact::credential_boot::{
     BootGate, SlotPlan, boot_gate, plan_declared_connectors, sign_in_gate_ids,
 };
 use lns_service::artifact::policy::merge_effective;
-use lns_service::artifact::{plan_local_sandbox, resolved_from_sandbox};
+use lns_service::artifact::{plan_local_sandbox, plan_published_sandbox};
 use lns_service::credential_flow::connectors::{
     boot_sign_in_grants, gate_armed_by_grant, resolve_applied_with_credentials,
     resolve_connectable_with_credentials, run_providers, unknown_connector_ids,
@@ -234,8 +234,13 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
         .definition
         .clone()
         .expect("a Given step must declare the definition");
-    let resolved = lns_artifact::sandbox::parse(definition.as_bytes());
-    launch(w, resolved.map(|def| resolved_from_sandbox(&def)));
+    launch(
+        w,
+        plan_published_sandbox(
+            definition.as_bytes(),
+            "registry.example.test/some-sandbox:1",
+        ),
+    );
 }
 
 fn oauth_connector(id: &str) -> Connector {

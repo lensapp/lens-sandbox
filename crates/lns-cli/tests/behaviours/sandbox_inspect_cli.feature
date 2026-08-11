@@ -1,7 +1,7 @@
 Feature: inspecting a typed artifact before running it
   `lns inspect <ref>` is the type-aware, pre-run view of a cached artifact: it
   names the kind, and for a published sandbox it lists the base image, declared
-  mounts, ports, and filesets with their mount paths, plus the connectors, and
+  mounts, ports, filesets with their mount paths, and mixins, plus the connectors, and
   it flags an over-broad shipped policy. It lets a consumer review the pieces
   before trusting a configured sandbox.
 
@@ -54,6 +54,12 @@ Feature: inspecting a typed artifact before running it
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
     Then the exit code is 0
     And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
+
+  Scenario: inspecting a sandbox lists the mixins it layers on
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
+    Then the exit code is 0
+    And the output contains "mixin: ghcr.io/acme/postgres-tools@sha256:"
 
   Scenario: inspecting a sandbox flags a permissive shipped policy
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy allows every destination

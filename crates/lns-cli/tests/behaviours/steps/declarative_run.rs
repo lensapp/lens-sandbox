@@ -178,6 +178,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         Some(TEST_HOST),
     );
     lns_ipc::SandboxView {
+        mixins: def.spec.mixins.clone(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: def.spec.image.clone(),

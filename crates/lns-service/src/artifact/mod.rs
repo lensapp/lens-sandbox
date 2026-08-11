@@ -166,10 +166,31 @@ pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
     problems
 }
 
+/// A document may declare the mixins it layers on, but nothing resolves them yet — so a run refuses rather than booting a sandbox without the capabilities its own document names.
+pub fn refuse_unresolved_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
+    if def.spec.mixins.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this sandbox declares mixins ({}) and startup resolution is not implemented yet; \
+         remove them, or inline what they contribute, to run it today",
+        def.spec.mixins.join(", ")
+    )
+}
+
+/// Plan a published sandbox's config blob: the one place the pulled path turns a document into a run, so every guard between the two applies to a stranger's artifact as much as to a local file.
+pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<ResolvedSandbox> {
+    let def = lns_artifact::sandbox::parse(config_json)
+        .with_context(|| format!("parsing published sandbox {image_ref}"))?;
+    refuse_unresolved_mixins(&def)?;
+    Ok(resolved_from_sandbox(&def))
+}
+
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
 pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
+    refuse_unresolved_mixins(&def)?;
     Ok(resolved_from_sandbox(&def))
 }
 

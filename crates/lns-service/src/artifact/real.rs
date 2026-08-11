@@ -1,6 +1,6 @@
 use crate::artifact::assembly::{self, AssembledWorkload, ResolvedSandbox};
 use crate::artifact::fileset::{FilesetBudget, fileset_runtime_specs_with_budget};
-use crate::artifact::{RunPath, dispatch_run, resolved_from_sandbox};
+use crate::artifact::{RunPath, dispatch_run};
 use crate::image::{RealRegistry, Registry, registry_auth_for};
 use crate::runtime_layer::RuntimeFileSpec;
 use anyhow::{Context, Result};
@@ -40,9 +40,8 @@ pub(crate) async fn peek_and_plan(
     )? {
         RunPath::SingleImage => Ok(None),
         RunPath::Sandbox => {
-            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
-                .with_context(|| format!("parsing published sandbox {image_ref}"))?;
-            let resolved = resolved_from_sandbox(&def);
+            let resolved =
+                crate::artifact::plan_published_sandbox(config_json.as_bytes(), image_ref)?;
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
                 .await

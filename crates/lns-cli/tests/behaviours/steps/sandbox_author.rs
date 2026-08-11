@@ -63,6 +63,22 @@ fn lns_yaml_with_credential_without_injections(w: &mut BehaviourWorld, env_var: 
     );
 }
 
+#[given("an lns.yaml holding a mixin document")]
+fn lns_yaml_holding_a_mixin(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        "apiVersion: lns.run/v1\nkind: Mixin\nmetadata:\n  name: postgres-tools\nspec:\n  tools:\n    - node@22\n",
+    );
+}
+
+#[given("an lns.yaml holding a mixin document that declares an image")]
+fn lns_yaml_holding_a_mixin_with_an_image(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        "apiVersion: lns.run/v1\nkind: Mixin\nmetadata:\n  name: postgres-tools\nspec:\n  image: ghcr.io/team/base:1\n",
+    );
+}
+
 #[given("an lns.yaml written against the retired lens.dev/v1alpha1 group")]
 fn lns_yaml_from_the_retired_group(w: &mut BehaviourWorld) {
     seed(
