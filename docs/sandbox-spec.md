@@ -924,7 +924,7 @@ injections:
 | `placeholder` | string | REQUIRED. The literal value the workload reads. MUST self-identify as fake — it contains `placeholder` or `lns`, case-insensitively — and MUST be at least 16 characters, so a stream is unlikely to carry the marker by accident. |
 | `injections` | list | optional. Where the real value replaces the placeholder, host by host. |
 | `injections[].kind` | string | REQUIRED. See the two families below. |
-| `injections[].domain` | string | REQUIRED. The destination this injection applies to, port included for a raw stream. |
+| `injections[].domain` | string | REQUIRED. The destination this injection applies to, port included for a raw stream. A wildcard may name a family of hosts, but never the catch-all `*`: an injection states where a secret may travel, and a catch-all states nothing while putting the real value on every host the workload reaches. |
 | `injections[].header` | string | Conditional. `api_key_header` only. |
 
 The definition names the shape of a secret without containing one. The real value
@@ -1063,8 +1063,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   non-empty and names kernel-resolvable paths.
 - **credentials**: every `envVar` is a legal environment-variable name; every
   `placeholder` self-identifies as fake and is at least 16 characters; every
-  `injections[].domain` is set, and `header` appears only on `api_key_header`;
-  no two entries share an `envVar`.
+  `injections[].domain` is set and is not the catch-all `*`, and `header`
+  appears only on `api_key_header`; no two entries share an `envVar`.
 - **tools**: every entry parses as portable `name@version`; one entry per name.
 - **volumes**: each `target` is a legal mount path outside `/.lens`; the
   `type`/`source`/`name` combination is one of the three legal shapes; volume
