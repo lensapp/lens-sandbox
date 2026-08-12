@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 
 use crate::sandbox::{FilesetEntry, SandboxSpec, Volume};
+use crate::spec::Port;
 
 /// One layer of a resolved sandbox, labelled with where it came from so a disclosure can attribute every entry it shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +89,7 @@ fn expand(
 }
 
 /// Merge an ordered source list per §3.3.2: the last source to say something about a thing wins, and every keyed block unions by its key.
-pub fn merge(sources: &[Source]) -> Merged {
+pub fn merge(sources: &[Source]) -> Result<Merged> {
     let mut contributions = Vec::new();
     let mut spec = SandboxSpec::default();
 
@@ -131,13 +132,15 @@ pub fn merge(sources: &[Source]) -> Merged {
         &mut contributions,
     );
     (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions);
-    spec.ports = fold(
+    let ports = fold_labelled(
         sources,
         "ports",
         |s| &s.ports,
         |p| p.container.to_string(),
         &mut contributions,
     );
+    refuse_a_host_port_two_sources_publish(&ports)?;
+    spec.ports = ports.into_iter().map(|(port, _)| port).collect();
 
     // A later source's entries are placed ahead of an earlier one's, so the latest entry matching a destination is the one that decides.
     for source in sources.iter().rev() {
@@ -171,10 +174,10 @@ pub fn merge(sources: &[Source]) -> Merged {
 
     // The mixins are what produced this document, so the resolved one declares none of its own.
     spec.mixins = Vec::new();
-    Merged {
+    Ok(Merged {
         spec,
         contributions,
-    }
+    })
 }
 
 /// A mount, whichever block claimed it: one target is one keyspace across `volumes` and `filesets`, so a later source's claim of either kind displaces an earlier source's claim of either kind.
@@ -252,6 +255,20 @@ fn fold<T: Clone>(
     key: fn(&T) -> String,
     contributions: &mut Vec<Contribution>,
 ) -> Vec<T> {
+    fold_labelled(sources, block, items, key, contributions)
+        .into_iter()
+        .map(|(item, _)| item)
+        .collect()
+}
+
+/// [`fold`], keeping the source each winner came from, for a block whose winners still have to answer for one another.
+fn fold_labelled<T: Clone>(
+    sources: &[Source],
+    block: &'static str,
+    items: fn(&SandboxSpec) -> &Vec<T>,
+    key: fn(&T) -> String,
+    contributions: &mut Vec<Contribution>,
+) -> Vec<(T, String)> {
     let mut order: Vec<String> = Vec::new();
     let mut winners: BTreeMap<String, (T, String)> = BTreeMap::new();
     for source in sources {
@@ -271,8 +288,20 @@ fn fold<T: Clone>(
     }
     order
         .into_iter()
-        .filter_map(|key| winners.remove(&key).map(|(item, _)| item))
+        .filter_map(|key| winners.remove(&key))
         .collect()
+}
+
+/// A host port is one socket, so precedence cannot settle two sources publishing onto it: keeping the later mapping would silently unpublish a port the sandbox declared, and the resolved document would claim a host port twice — which `sandbox::parse` itself refuses.
+fn refuse_a_host_port_two_sources_publish(ports: &[(Port, String)]) -> Result<()> {
+    let mut held: BTreeMap<i64, &str> = BTreeMap::new();
+    for (port, label) in ports {
+        let Some(host) = port.host else { continue };
+        if let Some(holder) = held.insert(host, label) {
+            bail!("{holder} and {label} both publish host port {host}; one of them has to move it");
+        }
+    }
+    Ok(())
 }
 
 fn record(
@@ -394,9 +423,13 @@ mod tests {
             .collect()
     }
 
+    fn merged(sources: &[Source]) -> Merged {
+        merge(sources).expect("these sources resolve")
+    }
+
     #[test]
     fn env_unions_by_key_and_the_last_source_to_set_one_wins() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             ("base", r#"{"env":{"MODE":"research","KEEP":"1"}}"#),
             ("later", r#"{"env":{"MODE":"strict"}}"#),
         ]));
@@ -409,7 +442,7 @@ mod tests {
 
     #[test]
     fn a_credential_is_replaced_whole_rather_than_field_by_field() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-base","injections":[{"kind":"bearer_header","domain":"api.base.example"}]}]}"#,
@@ -432,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_tool_is_keyed_by_name_so_a_later_version_replaces_it() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             ("base", r#"{"tools":["node@20","python@3.12"]}"#),
             ("later", r#"{"tools":["node@22"]}"#),
         ]));
@@ -441,7 +474,7 @@ mod tests {
 
     #[test]
     fn a_mount_target_is_owned_by_the_last_source_to_claim_it() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"volumes":[{"type":"volume","name":"base","target":"/cache"}],"filesets":[{"inline":{"a.md":"base"},"mountPath":"/notes"}]}"#,
@@ -462,7 +495,7 @@ mod tests {
 
     #[test]
     fn a_fileset_can_take_over_a_target_an_earlier_source_gave_a_volume() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"volumes":[{"type":"volume","name":"base","target":"/notes"}]}"#,
@@ -491,7 +524,7 @@ mod tests {
 
     #[test]
     fn a_volume_can_take_over_a_target_an_earlier_source_gave_a_fileset() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"filesets":[{"inline":{"a.md":"base"},"mountPath":"/notes"}]}"#,
@@ -508,7 +541,7 @@ mod tests {
 
     #[test]
     fn a_third_source_displaces_the_second_rather_than_the_first() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             ("first", r#"{"env":{"MODE":"a"}}"#),
             ("second", r#"{"env":{"MODE":"b"}}"#),
             ("third", r#"{"env":{"MODE":"c"}}"#),
@@ -528,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_port_is_keyed_by_its_container_number() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             ("base", r#"{"ports":[{"container":8080,"host":18080}]}"#),
             ("later", r#"{"ports":[{"container":8080,"host":28080}]}"#),
         ]));
@@ -537,8 +570,54 @@ mod tests {
     }
 
     #[test]
+    fn two_sources_publishing_one_host_port_refuse_the_resolution() {
+        let err = merge(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"image":"x:1","ports":[{"container":8080,"host":18080}]}"#,
+            ),
+            ("later", r#"{"ports":[{"container":9090,"host":18080}]}"#),
+        ]))
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("host port 18080")
+                && message.contains(ROOT_LABEL)
+                && message.contains("later"),
+            "a host port is one socket, so precedence cannot settle two claims on it — and keeping the later mapping would silently unpublish a port the sandbox declared; the refusal has to name both sources so the author knows which to move: got {message}"
+        );
+    }
+
+    #[test]
+    fn a_host_port_a_later_source_remaps_is_an_override_rather_than_a_collision() {
+        let merged = merged(&sources(&[
+            ("base", r#"{"ports":[{"container":8080,"host":18080}]}"#),
+            ("later", r#"{"ports":[{"container":8080,"host":18080}]}"#),
+        ]));
+        assert_eq!(
+            merged.spec.ports.len(),
+            1,
+            "the later entry replaced the earlier one by container, so one mapping holds the host port and nothing collides"
+        );
+    }
+
+    #[test]
+    fn a_host_port_only_an_earlier_source_still_holds_is_kept() {
+        let merged = merged(&sources(&[
+            ("base", r#"{"ports":[{"container":8080,"host":18080}]}"#),
+            ("later", r#"{"ports":[{"container":8080,"host":28080}]}"#),
+            ("last", r#"{"ports":[{"container":9090,"host":18080}]}"#),
+        ]));
+        assert_eq!(
+            merged.spec.ports.len(),
+            2,
+            "the source that held 18080 was overridden off it, so the claim it no longer makes must not refuse a later one"
+        );
+    }
+
+    #[test]
     fn a_later_sources_egress_is_placed_ahead_so_it_decides() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}]}}}"#,
@@ -559,7 +638,7 @@ mod tests {
 
     #[test]
     fn a_raw_table_merges_by_the_same_rule_as_the_http_one() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "base",
                 r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"deny"}]}}}"#,
@@ -583,7 +662,7 @@ mod tests {
 
     #[test]
     fn a_resolved_sandbox_keeps_the_connector_list_its_own_document_declared() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "the sandbox",
                 r#"{"image":"x:1","connectors":["some-provider"]}"#,
@@ -599,7 +678,7 @@ mod tests {
 
     #[test]
     fn one_documents_own_order_survives_inside_its_own_entries() {
-        let merged = merge(&sources(&[(
+        let merged = merged(&sources(&[(
             "base",
             r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}}"#,
         )]));
@@ -620,7 +699,7 @@ mod tests {
 
     #[test]
     fn the_resolved_document_declares_no_mixins_of_its_own() {
-        let merged = merge(&sources(&[("base", r#"{"image":"x:1","mixins":["own"]}"#)]));
+        let merged = merged(&sources(&[("base", r#"{"image":"x:1","mixins":["own"]}"#)]));
         assert!(
             merged.spec.mixins.is_empty(),
             "the mixins are what produced this document, so carrying them would ask a run to resolve them twice"
@@ -629,7 +708,7 @@ mod tests {
 
     #[test]
     fn only_the_sandbox_contributes_the_blocks_that_describe_one_launch() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             (
                 "the sandbox",
                 r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","resources":{"cpu":2}}"#,
@@ -645,7 +724,7 @@ mod tests {
 
     #[test]
     fn a_contribution_names_its_source_and_what_it_displaced() {
-        let merged = merge(&sources(&[
+        let merged = merged(&sources(&[
             ("base", r#"{"tools":["node@20"],"env":{"MODE":"research"}}"#),
             ("later", r#"{"tools":["node@22"],"env":{"MODE":"strict"}}"#),
         ]));
@@ -670,14 +749,14 @@ mod tests {
 
     #[test]
     fn a_first_contribution_displaces_nothing() {
-        let merged = merge(&sources(&[("base", r#"{"tools":["node@20"]}"#)]));
+        let merged = merged(&sources(&[("base", r#"{"tools":["node@20"]}"#)]));
         assert_eq!(merged.contributions.len(), 1);
         assert_eq!(merged.contributions[0].replaced, None);
     }
 
     #[test]
     fn a_merged_document_round_trips_through_its_own_serialization() {
-        let merged = merge(&sources(&[(
+        let merged = merged(&sources(&[(
             "base",
             r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
         )]));
