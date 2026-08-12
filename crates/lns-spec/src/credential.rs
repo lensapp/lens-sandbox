@@ -20,23 +20,27 @@ impl Credential {
                 self.env_var
             ));
         }
-        if self.placeholder.len() < MIN_PLACEHOLDER_LEN {
-            return Err(format!(
-                "credential {} placeholder {:?} must be at least {MIN_PLACEHOLDER_LEN} characters: the proxy finds this marker by substring in outbound bytes, so a short one would be substituted where it was never meant to be",
-                self.env_var, self.placeholder
-            ));
-        }
-        if !is_self_identifying(&self.placeholder) {
-            return Err(format!(
-                "credential {} placeholder {:?} must self-identify as fake: it has to contain \"placeholder\" or \"lns\", so a document that publishes to a registry cannot carry a real token as one",
-                self.env_var, self.placeholder
-            ));
-        }
+        validate_placeholder(&self.placeholder, &self.env_var)?;
         for injection in &self.injections {
             injection.validate(&self.env_var)?;
         }
         Ok(())
     }
+}
+
+/// The two rules a placeholder obeys wherever it is written, because the boundary substitutes it by substring and the document carrying it may be published.
+pub fn validate_placeholder(placeholder: &str, owner: &str) -> Result<(), String> {
+    if placeholder.len() < MIN_PLACEHOLDER_LEN {
+        return Err(format!(
+            "placeholder {placeholder:?} for {owner} must be at least {MIN_PLACEHOLDER_LEN} characters: the proxy finds this marker by substring in outbound bytes, so a short one would be substituted where it was never meant to be"
+        ));
+    }
+    if !is_self_identifying(placeholder) {
+        return Err(format!(
+            "placeholder {placeholder:?} for {owner} must self-identify as fake: it has to contain \"placeholder\" or \"lns\", so a document that publishes to a registry cannot carry a real token as one"
+        ));
+    }
+    Ok(())
 }
 
 /// Validate a document's whole `credentials` block: every entry on its own, plus the per-document rule that no two claim one variable.
@@ -52,6 +56,17 @@ pub fn validate_all(credentials: &[Credential]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A connector id is one DNS label, which is also what keeps it out of the `env:<var>` keyspace an unsupplied declaration answers under.
+pub fn is_legal_connector_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && is_alnum(bytes[0])
+        && is_alnum(bytes[bytes.len() - 1])
+        && bytes.iter().all(|&b| is_alnum(b) || b == b'-')
 }
 
 /// The grammar every kind shares for a variable the guest environment has to be able to hold.
@@ -79,6 +94,11 @@ impl InjectionDef {
                 "credential {env_var} injection must name the domain it applies to"
             ));
         }
+        if self.domain.trim() == CATCH_ALL_DOMAIN {
+            return Err(format!(
+                "credential {env_var} injection must name one destination, not {CATCH_ALL_DOMAIN:?}: a catch-all would put the real value on every host the workload reaches"
+            ));
+        }
         match (self.kind, &self.header) {
             (InjectionKind::ApiKeyHeader, None) => Err(format!(
                 "credential {env_var}: an api_key_header injection must name the header it sets"
@@ -104,6 +124,9 @@ pub enum InjectionKind {
 
 /// Long enough that a stream cannot carry the marker by accident; every bundled connector's placeholder is more than twice this.
 pub const MIN_PLACEHOLDER_LEN: usize = 16;
+
+/// The egress pattern that matches every host, which an injection may never name.
+pub const CATCH_ALL_DOMAIN: &str = "*";
 
 /// A placeholder must self-identify as fake so no real credential can leak into a document that gets published.
 pub fn is_self_identifying(placeholder: &str) -> bool {
@@ -331,6 +354,39 @@ mod tests {
     }
 
     #[test]
+    fn an_injection_onto_every_destination_is_refused() {
+        let error = credential(
+            "SOME_TOKEN",
+            "some_LNSPLACEHOLDER0000",
+            vec![injection(InjectionKind::BearerHeader, "*", None)],
+        )
+        .validate()
+        .expect_err("a catch-all destination is not a destination");
+        assert!(
+            error.contains("must name one destination"),
+            "an injection describes where a secret may travel, so a catch-all would put the real value on every host the workload reaches; got: {error}"
+        );
+    }
+
+    #[test]
+    fn an_injection_onto_a_family_of_hosts_still_validates() {
+        assert_eq!(
+            credential(
+                "SOME_TOKEN",
+                "some_LNSPLACEHOLDER0000",
+                vec![injection(
+                    InjectionKind::BearerHeader,
+                    "api.*.example.test",
+                    None
+                )],
+            )
+            .validate(),
+            Ok(()),
+            "a service that spreads over a host family is one destination; only the catch-all is none"
+        );
+    }
+
+    #[test]
     fn a_header_name_on_a_kind_that_cannot_use_one_is_refused() {
         for kind in [
             InjectionKind::BearerHeader,
@@ -399,6 +455,22 @@ mod tests {
         ])
         .expect_err("a per-entry rule holds for every entry, not just the first");
         assert!(error.contains("must self-identify as fake"), "got: {error}");
+    }
+
+    #[test]
+    fn a_connector_id_is_a_dns_label_so_it_can_never_reach_the_env_var_keyspace() {
+        assert!(is_legal_connector_id("some-provider"));
+        assert!(is_legal_connector_id("a1"));
+        assert!(!is_legal_connector_id(""));
+        assert!(!is_legal_connector_id("-a"));
+        assert!(!is_legal_connector_id("a-"));
+        assert!(!is_legal_connector_id("a_b"));
+        assert!(!is_legal_connector_id(&"a".repeat(64)));
+        assert!(
+            !is_legal_connector_id("env:SOME_TOKEN"),
+            "a declaration nothing supplies answers under env:<var>, so an id that could spell one would let a catalog entry take over its value"
+        );
+        assert!(!is_legal_connector_id("Some-Provider"));
     }
 
     #[test]

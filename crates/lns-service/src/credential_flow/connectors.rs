@@ -123,16 +123,17 @@ pub fn resolve_applied_connectors(policy: &Policy, catalog: &[Connector]) -> App
     out
 }
 
+/// The connector's claim is the pattern and the declared domain the host — never the reverse, or a declaration could widen its own domain until it described whichever connector the catalog lists first.
 fn claims_a_domain_of(integ: &Connector, credential: &Credential) -> bool {
     claimed_domains(integ).any(|claimed| {
         credential
             .injections
             .iter()
-            .any(|injection| domains_overlap(claimed, &injection.domain))
+            .any(|injection| lns_policy::matching::domain_matches(claimed, &injection.domain))
     })
 }
 
-/// Pairs each declaration with the connector that can supply its value: the first in the catalog claiming a domain the credential injects on. A declaration never names a connector, so the machine's catalog decides — and a domain two connectors both claim is refused at install, so catalog order settles what remains.
+/// Pairs each declaration with the connector that can supply its value: the first in the catalog claiming a domain the credential injects on. A declaration never names a connector, so the machine's catalog decides, and where two entries claim one domain the catalog's own order settles it.
 ///
 /// A connector supplies at most one declaration. It holds one value, so arming two variables from it would put the same secret in a variable no consent card ever named — and one value key per provider is what keeps a grant, a card and a stored value addressing the same thing.
 pub fn declared_suppliers<'a>(
@@ -1274,6 +1275,44 @@ mod tests {
         assert!(
             out.routes.is_empty(),
             "a declaration carries no egress of its own; the destination is asked about like any other"
+        );
+    }
+
+    #[test]
+    fn a_declaration_cannot_broaden_its_domain_to_capture_a_supplier() {
+        let catalog = vec![cred_connector(
+            "some-provider",
+            "SOME_TOKEN",
+            "api.example.test",
+        )];
+        let out = resolve_applied_with_credentials(
+            &policy_applying(&[]),
+            &[declaration("SOME_TOKEN", "*.example.test")],
+            &catalog,
+        );
+        assert_eq!(
+            out.providers[0].id(),
+            "env:SOME_TOKEN",
+            "the connector's claim is the pattern and the declared domain the host, never the other way round — a declaration that matched by widening its own domain would name the machine's connectors by describing them, and the widest declaration would take whichever secret the catalog lists first"
+        );
+        assert!(
+            out.routes.is_empty(),
+            "nothing supplies this declaration, so no connector's egress arrives with it"
+        );
+    }
+
+    #[test]
+    fn a_supplier_claiming_a_wildcard_still_covers_a_concrete_declared_domain() {
+        let catalog = vec![cred_connector("some-provider", "SOME_TOKEN", "*.some.test")];
+        let out = resolve_applied_with_credentials(
+            &policy_applying(&[]),
+            &[declaration("SOME_TOKEN", "api.some.test")],
+            &catalog,
+        );
+        assert_eq!(
+            out.providers[0].id(),
+            "some-provider",
+            "a connector claims a family of hosts on purpose, so a declaration inside that family is still its to supply"
         );
     }
 

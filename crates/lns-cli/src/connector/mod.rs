@@ -8,7 +8,6 @@ use lns_policy::connectors::{
     effective_connectors,
 };
 use lns_policy::grants::{GrantRecord, GrantStore, GrantVerdict, JsonFileGrantStore, project_key};
-use lns_policy::providers::is_self_identifying;
 
 use crate::command::{CommandSpec, subcommand};
 use crate::run::summary::policy_path;
@@ -67,7 +66,7 @@ pub struct ConnectorAddArgs {
     pub route: Vec<String>,
     #[arg(
         long,
-        help = "Placeholder value; auto-generated (self-identifying) when omitted."
+        help = "Placeholder value: at least 16 characters and containing \"placeholder\" or \"lns\"; auto-generated when omitted."
     )]
     pub placeholder: Option<String>,
 }
@@ -239,6 +238,12 @@ fn kind_word(kind: AuthKind) -> &'static str {
 }
 
 fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+    if !lns_spec::is_legal_connector_id(&args.id) {
+        bail!(
+            "invalid connector id {:?}: an id is one lowercase DNS label of alphanumerics and '-'",
+            args.id
+        );
+    }
     if is_bundled(&args.id) {
         bail!(
             "{:?} is a bundled connector and cannot be redeclared",
@@ -250,10 +255,12 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
         bail!("connector {:?} already exists in your catalog", args.id);
     }
     let placeholder = match &args.placeholder {
-        Some(p) if !is_self_identifying(p) => bail!(
-            "placeholder {p:?} must self-identify as fake (contain \"placeholder\" or \"lns\")"
-        ),
-        Some(p) => p.clone(),
+        Some(p) => {
+            if let Err(problem) = lns_spec::credential::validate_placeholder(p, &args.id) {
+                bail!(problem);
+            }
+            p.clone()
+        }
         None => generate_placeholder(&args.id),
     };
     let routes = args
@@ -761,7 +768,11 @@ mod tests {
         assert_eq!(acme.routes[0].match_pattern, "api.acme.corp");
         let cred = acme.credential.as_ref().unwrap();
         assert_eq!(cred.env_var, "ACME_API_KEY");
-        assert!(is_self_identifying(&cred.placeholder));
+        assert_eq!(
+            lns_spec::credential::validate_placeholder(&cred.placeholder, "acme"),
+            Ok(()),
+            "a generated placeholder must satisfy the same rule the catalog enforces on load"
+        );
     }
 
     #[test]
@@ -788,6 +799,24 @@ mod tests {
         args.placeholder = Some("real-looking-token".into());
         let err = add(&args, &catalog_at(dir.path()), &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("self-identify"));
+    }
+
+    #[test]
+    fn add_rejects_what_the_catalog_would_refuse_to_load_again() {
+        let dir = TempDir::new().unwrap();
+        let path = catalog_at(dir.path());
+        let mut short = add_args("acme");
+        short.placeholder = Some("lns-short".into());
+        let err = add(&short, &path, &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("at least"),
+            "a connector saved here and refused on the next load would break every later command; got: {err:#}"
+        );
+        let err = add(&add_args("Acme:1"), &path, &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid connector id"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -856,7 +885,7 @@ mod tests {
                 routes: Vec::new(),
                 credential: Some(CredentialAuth {
                     env_var: "EVIL".into(),
-                    placeholder: "lns-evil".into(),
+                    placeholder: "lns-evil-placeholder".into(),
                     injections: Vec::new(),
                 }),
                 oauth: None,
