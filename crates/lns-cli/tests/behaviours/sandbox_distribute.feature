@@ -119,10 +119,17 @@ Feature: distributing a sandbox
     And the service received a request to pull "ghcr.io/team/hermes:1.4.0"
 
   Scenario: tag re-refs a cached sandbox
-    Given the sandbox "hermes:1.4.0" is cached
-    When the user runs sandbox command "tag hermes:1.4.0 hermes:latest"
+    Given the sandbox "ghcr.io/team/hermes:1.4.0" is cached
+    When the user runs sandbox command "tag ghcr.io/team/hermes:1.4.0 ghcr.io/team/hermes:latest"
     Then the exit code is 0
-    And the sandbox "hermes:latest" resolves to the same cached artifact
+    And the sandbox "ghcr.io/team/hermes:latest" resolves to the same cached artifact
+
+  Scenario: a bare tag pair re-refs within the Lens hub
+    Given the sandbox "hub.lns.run/hchen/claude:0.0.4" is cached
+    When the user runs sandbox command "tag hchen/claude:0.0.4 hchen/claude:latest"
+    Then the exit code is 0
+    And the sandbox "hub.lns.run/hchen/claude:latest" resolves to the same cached artifact
+    And the service received a request to tag from "hub.lns.run/hchen/claude:0.0.4"
 
   Scenario: push carries a hostPath fileset verbatim and packs nothing for it
     Given a valid lns.yaml in the current directory declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig"

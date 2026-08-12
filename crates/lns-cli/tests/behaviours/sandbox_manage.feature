@@ -29,6 +29,18 @@ Feature: managing cached sandboxes
     And the output contains "kind: Sandbox"
     And the output contains "image"
 
+  Scenario: a bare inspect reference resolves against the Lens hub
+    Given the reference "hub.lns.run/hchen/claude:0.0.4" resolves to a cached sandbox
+    When the user runs "lns inspect hchen/claude:0.0.4"
+    Then the exit code is 0
+    And the service received a request to inspect "hub.lns.run/hchen/claude:0.0.4"
+
+  Scenario: a run name is inspected as a run, never registry-qualified
+    Given the reference "reviewer" resolves to a running sandbox
+    When the user runs "lns inspect reviewer"
+    Then the exit code is 0
+    And the service received a request to inspect run "reviewer"
+
   Scenario: rm refuses a running sandbox
     Given the reference "reviewer" resolves to a running sandbox
     When the user runs sandbox command "rm reviewer"
@@ -41,6 +53,12 @@ Feature: managing cached sandboxes
     Then the exit code is 0
     And the output contains "removed"
     And the output reports reclaimed base-image layers
+
+  Scenario: a bare rm reference removes the Lens hub sandbox
+    Given the sandbox "hub.lns.run/hchen/claude:0.0.4" is cached and no other sandbox shares its base-image layers
+    When the user runs sandbox command "rm hchen/claude:0.0.4"
+    Then the exit code is 0
+    And the service received a request to remove "hub.lns.run/hchen/claude:0.0.4"
 
   Scenario: prune sweeps the reconstructible cache and reports reclaimed bytes
     Given two cached sandboxes and one running sandbox

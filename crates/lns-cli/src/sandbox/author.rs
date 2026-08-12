@@ -286,6 +286,7 @@ mod tests {
         SandboxCommand::Inspect(crate::sandbox::SandboxInspectArgs {
             run: target.map(str::to_string),
             file: None,
+            registry: None,
         })
     }
 
@@ -594,6 +595,7 @@ mod tests {
             crate::sandbox::SandboxInspectArgs {
                 run: None,
                 file: Some(std::path::PathBuf::from("lns.dev.yaml")),
+                registry: None,
             }
         )));
     }

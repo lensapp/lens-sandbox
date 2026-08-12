@@ -83,6 +83,51 @@ fn cached_sandbox_names_a_volume(w: &mut BehaviourWorld, _volume: String) {
     });
 }
 
+#[then(regex = r#"^the service received a request to inspect "([^"]+)"$"#)]
+fn service_received_inspect_image(w: &mut BehaviourWorld, reference: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::InspectImage { image } if *image == reference))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected an InspectImage request for {reference:?} among {requests:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the service received a request to inspect run "([^"]+)"$"#)]
+fn service_received_inspect_run(w: &mut BehaviourWorld, target: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::InspectRun { run } if *run == target))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected an InspectRun request for {target:?} among {requests:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the service received a request to remove "([^"]+)"$"#)]
+fn service_received_remove_image(w: &mut BehaviourWorld, reference: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::RemoveImage { image } if *image == reference))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a RemoveImage request for {reference:?} among {requests:?}"
+        ))
+    }
+}
+
 #[then("the output reports reclaimed base-image layers")]
 fn reports_reclaimed_layers(w: &mut BehaviourWorld) -> Result<(), String> {
     let out = &w.result.as_ref().ok_or("no CLI run captured")?.output;

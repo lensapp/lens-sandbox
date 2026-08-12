@@ -552,11 +552,14 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let mut command = SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+        run: Some(reference),
+        file: None,
+        registry: None,
+    });
+    lns_cli::sandbox::apply_registry_default(&mut command, None);
     let result = run_with_writers(
-        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
-            run: Some(reference),
-            file: None,
-        }),
+        &command,
         &svc,
         TermInfo::default(),
         &mut std::io::Cursor::new(""),

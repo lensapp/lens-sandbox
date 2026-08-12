@@ -802,8 +802,10 @@ lns push ghcr.io/acme/reviewer:1.0.0
 ```
 
 A reference that names no registry (`lns push acme/reviewer:1.0.0`) resolves
-against the Lens hub, `hub.lns.run` — set `run.registry` (or pass `--registry`
-on `lns run`) to point bare references somewhere else:
+against the Lens hub, `hub.lns.run` — the same for every verb that addresses a
+sandbox by reference (`push`, `pull`, `run`, `inspect`, `tag`, `rm`). Set
+`run.registry` (or pass `--registry` on `lns run`) to point bare references
+somewhere else:
 
 ```bash
 lns config set run.registry ghcr.io

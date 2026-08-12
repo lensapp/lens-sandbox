@@ -198,7 +198,7 @@ pub struct SandboxAttachArgs {
 pub struct SandboxInspectArgs {
     #[arg(
         value_name = "TARGET",
-        help = "A running run's id/name (live state), a cached sandbox reference (its definition), or a path to a local definition (., lns.yaml, ./dir, ./lns.dev.yaml — rendered offline). Omit to render ./lns.yaml."
+        help = "A running run's id/name (live state), a sandbox reference (its definition — a bare one resolves against the `run.registry` default, else hub.lns.run), or a path to a local definition (., lns.yaml, ./dir, ./lns.dev.yaml — rendered offline). Omit to render ./lns.yaml."
     )]
     pub run: Option<String>,
 
@@ -210,15 +210,21 @@ pub struct SandboxInspectArgs {
         help = "Definition file to render instead of ./lns.yaml, offline. Cannot be combined with TARGET."
     )]
     pub file: Option<PathBuf>,
+
+    #[arg(skip)]
+    pub registry: Option<String>,
 }
 
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
     #[arg(
         value_name = "REF",
-        help = "Cached sandbox reference (or a running sandbox's id/name, which is refused)."
+        help = "Cached sandbox reference — a bare one resolves against the `run.registry` default, else hub.lns.run (or a running sandbox's id/name, which is refused)."
     )]
     pub run: String,
+
+    #[arg(skip)]
+    pub registry: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -232,14 +238,23 @@ pub struct SandboxPruneArgs {
     pub force: bool,
 }
 
-/// Qualifies the registry coordinate a distribution verb addresses with `registry`, or the built-in default when nothing is configured; the local-cache verbs take an id-or-ref the service resolves, so they are left alone.
+/// Qualifies the registry coordinate a verb addresses with `registry`, or the built-in default when nothing is configured.
 pub fn apply_registry_default(command: &mut SandboxCommand, registry: Option<&str>) {
-    let reference = match command {
-        SandboxCommand::Push(args) => &mut args.reference,
-        SandboxCommand::Pull(args) => &mut args.reference,
-        _ => return,
+    let qualify = |reference: &mut String| {
+        *reference = crate::config::resolve_default_registry(reference, registry);
     };
-    *reference = crate::config::resolve_default_registry(reference, registry);
+    match command {
+        SandboxCommand::Push(args) => qualify(&mut args.reference),
+        SandboxCommand::Pull(args) => qualify(&mut args.reference),
+        SandboxCommand::Tag(args) => {
+            qualify(&mut args.from);
+            qualify(&mut args.to);
+        }
+        // Inspect and rm take an id-or-ref, so the default can only be applied once the service has reported no such run — it rides along instead of rewriting the target.
+        SandboxCommand::Inspect(args) => args.registry = registry.map(str::to_string),
+        SandboxCommand::Rm(args) => args.registry = registry.map(str::to_string),
+        _ => {}
+    }
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -447,7 +462,7 @@ where
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
             };
-            inspect(svc, target, out).await
+            inspect(svc, target, args.registry.as_deref(), out).await
         }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -771,7 +786,9 @@ async fn rm<W: std::io::Write>(
         Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
         // A reference the service knows no run for is a cached sandbox; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
-            remove_cached(svc, &args.run, out).await
+            let reference =
+                crate::config::resolve_default_registry(&args.run, args.registry.as_deref());
+            remove_cached(svc, &reference, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -856,6 +873,7 @@ async fn prune<W: std::io::Write>(
 async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
     target: &str,
+    registry: Option<&str>,
     out: &mut W,
 ) -> Result<i32> {
     match svc
@@ -875,7 +893,8 @@ async fn inspect<W: std::io::Write>(
         }
         // A reference the service knows no run for is a cached artifact; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
-            inspect_cached(svc, target, out).await
+            let reference = crate::config::resolve_default_registry(target, registry);
+            inspect_cached(svc, &reference, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -1391,6 +1410,7 @@ mod tests {
             SandboxCommand::Inspect(SandboxInspectArgs {
                 run: None,
                 file: None,
+                registry: None,
             }),
         ] {
             let mut out = Vec::new();
@@ -1982,7 +2002,7 @@ mod tests {
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", None, &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -1992,7 +2012,7 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", None, &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
@@ -2024,7 +2044,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(&svc, "hermes:1.4.0", &mut out).await.unwrap();
+        let code = inspect(&svc, "hermes:1.4.0", None, &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Sandbox"), "got: {text}");
@@ -2050,7 +2070,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        inspect(&image, "x", &mut out).await.unwrap();
+        inspect(&image, "x", None, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
@@ -2065,7 +2085,7 @@ mod tests {
             Response::Pong,
         );
         let mut out = Vec::new();
-        let err = inspect(&svc, "x", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "x", None, &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2075,7 +2095,7 @@ mod tests {
             message: "daemon busy".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "reviewer", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "reviewer", None, &mut out).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("daemon busy"),
             "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
@@ -2113,6 +2133,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2138,6 +2159,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "hermes:1.4.0".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2159,6 +2181,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2188,6 +2211,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2222,6 +2246,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2241,6 +2266,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2253,9 +2279,16 @@ mod tests {
     async fn rm_rejects_an_unrelated_inspect_response() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "1".into(),
+                registry: None,
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2274,6 +2307,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "ghcr.io/team/x:1".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2295,6 +2329,7 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                registry: None,
             },
             &mut out,
         )
@@ -2499,7 +2534,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, "1", &mut out).await.unwrap();
+        let code = inspect(&svc, "1", None, &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

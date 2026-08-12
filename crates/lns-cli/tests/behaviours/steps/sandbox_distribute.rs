@@ -162,6 +162,21 @@ fn service_received_pull(w: &mut BehaviourWorld, reference: String) -> Result<()
     }
 }
 
+#[then(regex = r#"^the service received a request to tag from "([^"]+)"$"#)]
+fn service_received_tag_from(w: &mut BehaviourWorld, from: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::TagImage { from: f, .. } if *f == from))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a TagImage request sourced at {from:?} among {requests:?}"
+        ))
+    }
+}
+
 #[then(regex = r#"^the sandbox "([^"]+)" resolves to the same cached artifact$"#)]
 fn sandbox_resolves_to_same_artifact(w: &mut BehaviourWorld, to: String) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();

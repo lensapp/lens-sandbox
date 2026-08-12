@@ -84,17 +84,20 @@ pub fn run_kill<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxRmArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Rm(args), ctx.input).await
+        let mut command = super::SandboxCommand::Rm(args);
+        qualify_references(&mut command)?;
+        dispatch_command(command, ctx.input).await
     })
 }
 
 pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxInspectArgs::from_arg_matches(matches)?;
-        let command = super::SandboxCommand::Inspect(args);
+        let mut command = super::SandboxCommand::Inspect(args);
         if super::author::is_offline(&command) {
             return run_author(&command, ctx);
         }
+        qualify_references(&mut command)?;
         dispatch_command(command, ctx.input).await
     })
 }
@@ -128,16 +131,19 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 
 pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let mut args = super::SandboxPullArgs::from_arg_matches(matches)?;
-        args.reference = qualified_reference(&args.reference)?;
-        dispatch_command(super::SandboxCommand::Pull(args), ctx.input).await
+        let args = super::SandboxPullArgs::from_arg_matches(matches)?;
+        let mut command = super::SandboxCommand::Pull(args);
+        qualify_references(&mut command)?;
+        dispatch_command(command, ctx.input).await
     })
 }
 
 pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxTagArgs::from_arg_matches(matches)?;
-        dispatch_command(super::SandboxCommand::Tag(args), ctx.input).await
+        let mut command = super::SandboxCommand::Tag(args);
+        qualify_references(&mut command)?;
+        dispatch_command(command, ctx.input).await
     })
 }
 

@@ -102,6 +102,7 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
         &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
             run: Some(TOOLS_REFERENCE.into()),
             file: None,
+            registry: None,
         }),
         &svc,
         TermInfo::default(),
