@@ -103,8 +103,14 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     cached_artifact(world, &reference, inspection);
 }
 
-#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring the mixin "([^"]+)"$"#)]
-fn inspects_sandbox_mixins(world: &mut BehaviourWorld, reference: String, mixin: String) {
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox resolved from the mixin "([^"]+)"$"#
+)]
+fn inspects_sandbox_resolved_from_a_mixin(
+    world: &mut BehaviourWorld,
+    reference: String,
+    mixin: String,
+) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: vec![mixin],
         reference: reference.clone(),

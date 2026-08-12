@@ -109,6 +109,9 @@ pub fn format_summary(
     if !args.tools.is_empty() {
         writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
     }
+    if !args.mixins.is_empty() {
+        writeln!(s, "  Mixins:    {}", args.mixins.join(", ")).unwrap();
+    }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
@@ -366,6 +369,7 @@ mod tests {
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
+            mixins: Vec::new(),
             image: image.map(str::to_string),
             file: None,
             name: None,
@@ -539,6 +543,29 @@ mod tests {
             format!("reg/skills@sha256:{}é…", "a".repeat(11)),
             "a crafted pulled fileset digest must truncate by chars, never panic on a byte boundary"
         );
+    }
+
+    #[test]
+    fn the_mixins_line_names_what_a_composed_sandbox_resolved_into() {
+        let mut args = run_args(Some("prism"));
+        args.mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()];
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Mixins:    ghcr.io/acme/postgres-tools@sha256:c41e8b7d"),
+            "the resolved document declares no mixins of its own, so without this line a composed sandbox reads as an authored one and a tool the user did not expect has nowhere to be traced to; got: {s}"
+        );
+        let authored = summary_of(
+            &run_args(Some("prism")),
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(!authored.contains("Mixins:"), "got: {authored}");
     }
 
     #[test]

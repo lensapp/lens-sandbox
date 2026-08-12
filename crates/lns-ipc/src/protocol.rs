@@ -271,7 +271,7 @@ pub struct SandboxView {
     #[serde(default)]
     pub digest: String,
     pub image: String,
-    /// The mixins the document declares, so a reader sees the capabilities it layers on before trusting it.
+    /// The mixins this sandbox resolved into, since the merged document declares none of its own.
     #[serde(default)]
     pub mixins: Vec<String>,
     #[serde(default)]
@@ -515,12 +515,18 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
+/// Splits a `:ro`/`:rw` suffix off a mount spec, so the two parsers cannot drift on which suffixes mean read-only.
+fn split_read_only(spec: &str) -> (&str, bool) {
+    let body = spec
+        .strip_suffix(":ro")
+        .or_else(|| spec.strip_suffix(":rw"))
+        .unwrap_or(spec);
+    (body, spec.ends_with(":ro"))
+}
+
 impl VolumeMount {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let body = spec
-            .strip_suffix(":ro")
-            .or_else(|| spec.strip_suffix(":rw"))
-            .unwrap_or(spec);
+        let (body, read_only) = split_read_only(spec);
         let (name, target) = body
             .split_once(':')
             .ok_or_else(|| format!("invalid volume {spec:?}: expected name:/path[:ro]"))?;
@@ -529,7 +535,7 @@ impl VolumeMount {
         Ok(Self {
             name: name.to_string(),
             target: target.to_string(),
-            read_only: spec.ends_with(":ro"),
+            read_only,
         })
     }
 }
@@ -640,21 +646,17 @@ pub struct BindSpec {
 
 impl BindSpec {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let read_only = spec.ends_with(":ro");
-        let body = spec
-            .strip_suffix(":ro")
-            .or_else(|| spec.strip_suffix(":rw"))
-            .unwrap_or(spec);
+        let (body, read_only) = split_read_only(spec);
         let (source, target) = body
             .split_once(':')
             .ok_or_else(|| format!("invalid host bind {spec:?}: expected /host-path:/path[:ro]"))?;
         validate_volume_target(target)?;
         validate_bind_source(source)?;
+        // A `-v` carries neither exclude nor optional; the definition is the author surface for both.
         Ok(Self {
             host_source: source.to_string(),
             target: target.to_string(),
             read_only,
-            // A `-v` carries neither exclude nor optional; the definition is the author surface for both.
             exclude: Vec::new(),
             optional: false,
         })
@@ -1371,7 +1373,7 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
-            mixins: Vec::new(),
+            mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             reference: "registry.example.test/team/sandbox:1".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),

@@ -216,6 +216,10 @@ pub struct RunArgs {
     #[arg(skip)]
     pub tools: Vec<String>,
 
+    /// The mixins a pulled sandbox resolved into; the merged document declares none of its own, so this is the only place a composed sandbox says so.
+    #[arg(skip)]
+    pub mixins: Vec<String>,
+
     #[arg(
         short = 'v',
         long = "volume",

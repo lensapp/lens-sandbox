@@ -40,8 +40,11 @@ pub(crate) async fn peek_and_plan(
     )? {
         RunPath::SingleImage => Ok(None),
         RunPath::Sandbox => {
-            let resolved =
-                crate::artifact::plan_published_sandbox(config_json.as_bytes(), image_ref)?;
+            let document = crate::artifact::mixin::resolve(config_json.as_bytes(), &RegistryMixins)
+                .await
+                .with_context(|| format!("resolving {image_ref}"))?
+                .document;
+            let resolved = crate::artifact::plan_published_sandbox(&document, image_ref)?;
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
                 .await
@@ -158,6 +161,16 @@ pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> 
         return Ok(());
     }
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
+}
+
+/// Pulls a declared mixin's document from the registry it names, through the manifest cache so a digest-pinned graph pulled once resolves offline.
+pub(crate) struct RegistryMixins;
+
+impl crate::artifact::mixin::MixinSource for RegistryMixins {
+    async fn fetch(&self, reference: &str) -> Result<String> {
+        let registry = crate::image::caching_registry_for(reference)?;
+        crate::image::pull_mixin_with(&registry, reference).await
+    }
 }
 
 fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
@@ -319,12 +332,22 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
         .await
         .with_context(|| format!("inspecting {image_ref}"))?;
     crate::image::verify_digest_pin(&reference, &digest, image_ref)?;
+    // The preflight view is where a run's mounts and ports come from, so it has to describe the resolved sandbox — otherwise what a mixin contributes to them is dropped without a word.
+    let resolution = crate::artifact::mixin::resolve_if_a_sandbox(
+        manifest.artifact_type.as_deref(),
+        Some(manifest.config.media_type.as_str()),
+        config_json.as_bytes(),
+        &RegistryMixins,
+    )
+    .await
+    .with_context(|| format!("resolving {image_ref}"))?;
     crate::artifact::inspect::project_inspection(
         image_ref,
         digest,
         manifest.artifact_type.as_deref(),
         &manifest.config.media_type,
-        &config_json,
+        &resolution.document,
+        &resolution.mixins,
         lns_artifact::resources::host::probe(),
     )
 }

@@ -131,6 +131,7 @@ struct PublishedTarget {
     defaults: crate::run::declarative::Defaults,
     filesets: Vec<crate::run::summary::FilesetSummary>,
     tools: Vec<String>,
+    mixins: Vec<String>,
 }
 
 fn published_target(
@@ -150,6 +151,7 @@ fn published_target(
                 defaults: crate::run::declarative::Defaults::from_view(&view),
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
                 tools: crate::run::summary::tools_from_view(&view),
+                mixins: view.mixins.clone(),
             })
         }
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
@@ -256,6 +258,11 @@ pub async fn run_image(
         (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
+    // Only a pulled sandbox resolves its mixins today; a local document still declares them and is refused.
+    args.mixins = published
+        .as_ref()
+        .map(|published| published.mixins.clone())
+        .unwrap_or_default();
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
@@ -1129,7 +1136,7 @@ mod tests {
         let target = published_target(
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
-                mixins: Vec::new(),
+                mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()],
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1183,6 +1190,11 @@ mod tests {
                 owner: "workload".to_string(),
                 from_host: false,
             }]
+        );
+        assert_eq!(
+            target.mixins,
+            ["ghcr.io/acme/postgres-tools@sha256:c41e8b7d"],
+            "the run summary names what a composed sandbox resolved into, and this is the only hop that carries it there"
         );
     }
 

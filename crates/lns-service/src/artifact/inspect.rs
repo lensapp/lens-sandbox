@@ -26,7 +26,8 @@ pub(crate) fn project_inspection(
     digest: String,
     artifact_type: Option<&str>,
     config_media_type: &str,
-    config_json: &str,
+    config_json: &[u8],
+    mixins: &[String],
     host: Option<lns_artifact::resources::HostCapacity>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
@@ -35,7 +36,7 @@ pub(crate) fn project_inspection(
             digest,
         })),
         RunPath::Sandbox => {
-            let def = lns_artifact::sandbox::parse(config_json.as_bytes())
+            let def = lns_artifact::sandbox::parse(config_json)
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
             let (declared_size, _) = lns_artifact::resources::DeclaredSize::from_resources(
@@ -44,7 +45,7 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
-                    mixins: def.spec.mixins.clone(),
+                    mixins: mixins.to_vec(),
                     reference: image_ref.to_string(),
                     digest,
                     cpus: declared_size.cpus,
@@ -139,6 +140,14 @@ mod tests {
         config: &str,
         host: Option<lns_artifact::resources::HostCapacity>,
     ) -> Result<ArtifactInspection> {
+        project_sandbox_resolved_from(config, &[], host)
+    }
+
+    fn project_sandbox_resolved_from(
+        config: &str,
+        mixins: &[String],
+        host: Option<lns_artifact::resources::HostCapacity>,
+    ) -> Result<ArtifactInspection> {
         let artifact_type = lns_artifact::spec::Kind::Sandbox.artifact_type();
         let config_media_type = lns_artifact::spec::Kind::Sandbox.config_media_type();
         project_inspection(
@@ -146,7 +155,8 @@ mod tests {
             digest(),
             Some(&artifact_type),
             &config_media_type,
-            config,
+            config.as_bytes(),
+            mixins,
             host,
         )
     }
@@ -158,7 +168,8 @@ mod tests {
             digest(),
             None,
             "application/vnd.oci.image.config.v1+json",
-            "{}",
+            b"{}",
+            &[],
             None,
         )
         .unwrap();
@@ -179,7 +190,8 @@ mod tests {
             digest(),
             Some("application/vnd.acme.thing"),
             "application/vnd.oci.image.config.v1+json",
-            "{}",
+            b"{}",
+            &[],
             None,
         )
         .unwrap_err();
@@ -277,15 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn a_sandbox_projects_the_mixins_it_declared_so_inspect_and_run_answer_alike() {
+    fn a_sandbox_projects_the_mixins_it_resolved_into_so_inspect_and_run_answer_alike() {
         let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
         assert_eq!(
-            project_sandbox(&format!(
-                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"registry.example.test/runtime:1","mixins":["{pinned}"]}}}}"#
-            ))
+            project_sandbox_resolved_from(
+                r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#,
+                std::slice::from_ref(&pinned),
+                None,
+            )
             .unwrap(),
             sandbox_view_with_mixins(vec![pinned]),
-            "the run refuses this document over its mixins, so an inspect that omits them tells a reader the opposite of what the launch will say"
+            "the resolved document declares no mixins of its own, so only the list travelling beside it can tell a reader what this sandbox layers on"
         );
     }
 

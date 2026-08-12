@@ -5,6 +5,7 @@ pub mod audit;
 pub mod credential_boot;
 pub mod fileset;
 pub mod inspect;
+pub mod mixin;
 pub mod policy;
 pub mod real;
 pub mod resources;
@@ -166,31 +167,35 @@ pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
     problems
 }
 
-/// A document may declare the mixins it layers on, but nothing resolves them yet — so a run refuses rather than booting a sandbox without the capabilities its own document names.
-pub fn refuse_unresolved_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
-    if def.spec.mixins.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "this sandbox declares mixins ({}) and startup resolution is not implemented yet; \
-         remove them, or inline what they contribute, to run it today",
-        def.spec.mixins.join(", ")
-    )
-}
-
 /// Plan a published sandbox's config blob: the one place the pulled path turns a document into a run, so every guard between the two applies to a stranger's artifact as much as to a local file.
 pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .with_context(|| format!("parsing published sandbox {image_ref}"))?;
-    refuse_unresolved_mixins(&def)?;
+    if !def.spec.mixins.is_empty() {
+        anyhow::bail!(
+            "published sandbox {image_ref} reached the plan without being resolved; it still declares mixins ({}), and running it now would drop what they contribute",
+            def.spec.mixins.join(", ")
+        );
+    }
     Ok(resolved_from_sandbox(&def))
+}
+
+/// A local document's mixins are not resolved yet: a local run's mounts and ports are built by the CLI from the document it parsed itself, so resolving only service-side would drop what a mixin contributes to them without saying so.
+pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
+    if def.spec.mixins.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this local sandbox declares mixins ({}) and a local document's mixins are not resolved yet; publish it and run it by reference to use them",
+        def.spec.mixins.join(", ")
+    )
 }
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
 pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
-    refuse_unresolved_mixins(&def)?;
+    refuse_unresolved_local_mixins(&def)?;
     Ok(resolved_from_sandbox(&def))
 }
 
@@ -325,6 +330,23 @@ mod tests {
         assert!(
             format!("{err:#}").contains("must carry an image"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_published_document_reaching_the_plan_unresolved_refuses_rather_than_dropping_its_mixins() {
+        let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
+        let err = plan_published_sandbox(
+            format!(
+                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{pinned}"]}}}}"#
+            )
+            .as_bytes(),
+            "registry.example.test/team/sandbox:1",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reached the plan without being resolved"),
+            "resolution is what empties this list, so a document that still carries one never went through it and would boot without what its mixins contribute; got: {err:#}"
         );
     }
 
