@@ -320,6 +320,7 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
             cwd,
             args.run.as_deref(),
             args.file.as_deref(),
+            &args.mixins,
             &mut out,
         ),
         _ => unreachable!("run_author_verb is only called for the offline author verbs"),
@@ -480,7 +481,7 @@ fn service_received_no_pull(w: &mut BehaviourWorld) {
 fn pull_is_bound_to_inspected_digest(w: &mut BehaviourWorld) {
     let requests = w.sandbox.requests.lock().unwrap();
     let inspected = requests.iter().find_map(|request| match request {
-        Request::InspectImage { image } => Some(image),
+        Request::InspectImage { image, .. } => Some(image),
         _ => None,
     });
     let pulled = requests.iter().find_map(|request| match request {
@@ -547,14 +548,24 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
 }
 
 #[when(regex = r#"^the user runs "lns inspect ([^"]+)"$"#)]
-async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
+async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
+    let mut reference = None;
+    let mut mixins = Vec::new();
+    let mut words = tail.split_whitespace();
+    while let Some(word) = words.next() {
+        match word {
+            "--mixin" => mixins.extend(words.next().map(str::to_string)),
+            target => reference = Some(target.to_string()),
+        }
+    }
     let svc = fake_sandbox_service(w);
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
         &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
-            run: Some(reference),
+            run: reference,
+            mixins,
             file: None,
         }),
         &svc,

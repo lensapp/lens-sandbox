@@ -19,6 +19,7 @@ pub(crate) struct SandboxPlan {
 pub(crate) async fn peek_and_plan(
     image_ref: &str,
     verify_sandbox: bool,
+    mixins: &[String],
     run_id: &str,
     microvm: &str,
 ) -> Result<Option<SandboxPlan>> {
@@ -38,12 +39,17 @@ pub(crate) async fn peek_and_plan(
         image_ref,
         verify_sandbox,
     )? {
-        RunPath::SingleImage => Ok(None),
+        RunPath::SingleImage => {
+            crate::artifact::mixin::refuse_mixins_without_a_document(mixins)?;
+            Ok(None)
+        }
         RunPath::Sandbox => {
-            let document = crate::artifact::mixin::resolve(config_json.as_bytes(), &RegistryMixins)
-                .await
-                .with_context(|| format!("resolving {image_ref}"))?
-                .document;
+            crate::artifact::mixin::require_pinned_extras(mixins)?;
+            let document =
+                crate::artifact::mixin::resolve(config_json.as_bytes(), mixins, &RegistryMixins)
+                    .await
+                    .with_context(|| format!("resolving {image_ref}"))?
+                    .document;
             let resolved = crate::artifact::plan_published_sandbox(&document, image_ref)?;
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
@@ -167,7 +173,7 @@ pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> 
 pub(crate) struct RegistryMixins;
 
 impl crate::artifact::mixin::MixinSource for RegistryMixins {
-    async fn fetch(&self, reference: &str) -> Result<String> {
+    async fn fetch(&self, reference: &str) -> Result<crate::artifact::mixin::FetchedMixin> {
         let registry = crate::image::caching_registry_for(reference)?;
         crate::image::pull_mixin_with(&registry, reference).await
     }
@@ -322,7 +328,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     }
 }
 
-pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
+pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -337,6 +343,7 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
         config_json.as_bytes(),
+        mixins,
         &RegistryMixins,
     )
     .await
@@ -346,8 +353,7 @@ pub(crate) async fn inspect(image_ref: &str) -> Result<ArtifactInspection> {
         digest,
         manifest.artifact_type.as_deref(),
         &manifest.config.media_type,
-        &resolution.document,
-        &resolution.mixins,
+        &resolution,
         lns_artifact::resources::host::probe(),
     )
 }

@@ -210,6 +210,13 @@ pub struct SandboxInspectArgs {
         help = "Definition file to render instead of ./lns.yaml, offline. Cannot be combined with TARGET."
     )]
     pub file: Option<PathBuf>,
+
+    #[arg(
+        long = "mixin",
+        value_name = "REF",
+        help = "Resolve this mixin into the sandbox before rendering it, as `lns run --mixin` would. Repeatable."
+    )]
+    pub mixins: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -447,7 +454,7 @@ where
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
             };
-            inspect(svc, target, out).await
+            inspect(svc, target, &args.mixins, out).await
         }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -476,6 +483,7 @@ where
     let inspection = svc
         .one_shot(Request::InspectImage {
             image: args.reference.clone(),
+            mixins: Vec::new(),
         })
         .await?;
     let (digest, tools) = match inspection {
@@ -853,9 +861,20 @@ async fn prune<W: std::io::Write>(
     }
 }
 
+/// `--mixin` composes a document before it boots, so a run that has already booted and a local file nothing resolved yet can only refuse it.
+pub fn refuse_mixins_unless_published(mixins: &[String]) -> Result<()> {
+    if mixins.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "--mixin applies to a published sandbox reference: a live run has already booted with what it merged, and a local document's mixins are not resolved yet"
+    )
+}
+
 async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
     target: &str,
+    mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
     match svc
@@ -865,6 +884,7 @@ async fn inspect<W: std::io::Write>(
         .await?
     {
         Response::RunInspect { details } => {
+            refuse_mixins_unless_published(mixins)?;
             let policy = details
                 .config
                 .policy_path
@@ -875,7 +895,7 @@ async fn inspect<W: std::io::Write>(
         }
         // A reference the service knows no run for is a cached artifact; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
-            inspect_cached(svc, target, out).await
+            inspect_cached(svc, target, mixins, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -885,16 +905,18 @@ async fn inspect<W: std::io::Write>(
 async fn inspect_cached<W: std::io::Write>(
     svc: &impl SandboxService,
     reference: &str,
+    mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
     match svc
         .one_shot(Request::InspectImage {
             image: reference.to_string(),
+            mixins: mixins.to_vec(),
         })
         .await?
     {
         Response::ImageInspected { inspection } => {
-            render_cached_inspect(&inspection, out)?;
+            render_cached_inspect(&inspection, mixins, out)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -904,6 +926,7 @@ async fn inspect_cached<W: std::io::Write>(
 
 fn render_cached_inspect<W: std::io::Write>(
     inspection: &lns_ipc::ArtifactInspection,
+    typed: &[String],
     out: &mut W,
 ) -> Result<()> {
     match inspection {
@@ -914,7 +937,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
-            for mixin in &view.mixins {
+            for mixin in
+                crate::run::summary::mixin_display(&view.mixins, typed, &view.pinned_mixins)
+            {
                 writeln!(out, "mixin: {mixin}")?;
             }
             if let Some(user) = &view.user {
@@ -1250,6 +1275,7 @@ mod tests {
         Response::ImageInspected {
             inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
@@ -1390,6 +1416,7 @@ mod tests {
             SandboxCommand::Validate(SandboxValidateArgs { file: None }),
             SandboxCommand::Inspect(SandboxInspectArgs {
                 run: None,
+                mixins: Vec::new(),
                 file: None,
             }),
         ] {
@@ -1480,7 +1507,7 @@ mod tests {
         assert!(matches!(
             svc.requests.lock().unwrap().as_slice(),
             [
-                Request::InspectImage { image },
+                Request::InspectImage { image, .. },
                 Request::PullImage {
                     image: pulled,
                     expected_digest
@@ -1979,10 +2006,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_of_a_live_run_refuses_a_mixin_rather_than_ignoring_it() {
+        let svc = CannedService::new(Response::RunInspect {
+            details: Box::new(RunDetails {
+                summary: lns_ipc::RunSummary {
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
+                    name: "reviewer".into(),
+                    image: "some-image".into(),
+                    command: String::new(),
+                    status: lns_ipc::RunStatus::Running,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: lns_ipc::RunConfig {
+                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    ..Default::default()
+                },
+            }),
+        });
+        let mut out = Vec::new();
+        let err = inspect(&svc, "1", &["ghcr.io/acme/obs:2".to_string()], &mut out)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--mixin applies to a published sandbox reference"),
+            "a live run has already booted, so rendering it as though the flag applied would describe a composition that never ran; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -1992,7 +2047,7 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
@@ -2005,6 +2060,7 @@ mod tests {
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                     mixins: Vec::new(),
+                    pinned_mixins: Vec::new(),
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2024,7 +2080,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(&svc, "hermes:1.4.0", &mut out).await.unwrap();
+        let code = inspect(&svc, "hermes:1.4.0", &[], &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Sandbox"), "got: {text}");
@@ -2050,7 +2106,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        inspect(&image, "x", &mut out).await.unwrap();
+        inspect(&image, "x", &[], &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
@@ -2065,7 +2121,7 @@ mod tests {
             Response::Pong,
         );
         let mut out = Vec::new();
-        let err = inspect(&svc, "x", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "x", &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2075,7 +2131,7 @@ mod tests {
             message: "daemon busy".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "reviewer", &mut out).await.unwrap_err();
+        let err = inspect(&svc, "reviewer", &[], &mut out).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("daemon busy"),
             "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
@@ -2499,7 +2555,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, "1", &mut out).await.unwrap();
+        let code = inspect(&svc, "1", &[], &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

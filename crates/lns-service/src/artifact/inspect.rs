@@ -26,8 +26,7 @@ pub(crate) fn project_inspection(
     digest: String,
     artifact_type: Option<&str>,
     config_media_type: &str,
-    config_json: &[u8],
-    mixins: &[String],
+    resolution: &crate::artifact::mixin::Resolution,
     host: Option<lns_artifact::resources::HostCapacity>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
@@ -36,7 +35,7 @@ pub(crate) fn project_inspection(
             digest,
         })),
         RunPath::Sandbox => {
-            let def = lns_artifact::sandbox::parse(config_json)
+            let def = lns_artifact::sandbox::parse(&resolution.document)
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
             let (declared_size, _) = lns_artifact::resources::DeclaredSize::from_resources(
@@ -45,7 +44,8 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
-                    mixins: mixins.to_vec(),
+                    mixins: resolution.mixins.clone(),
+                    pinned_mixins: resolution.pinned_extra.clone(),
                     reference: image_ref.to_string(),
                     digest,
                     cpus: declared_size.cpus,
@@ -132,6 +132,14 @@ mod tests {
             mem_mib: 16384,
         };
 
+    fn resolution(config: &str, mixins: &[String]) -> crate::artifact::mixin::Resolution {
+        crate::artifact::mixin::Resolution {
+            document: config.as_bytes().to_vec(),
+            mixins: mixins.to_vec(),
+            pinned_extra: Vec::new(),
+        }
+    }
+
     fn project_sandbox(config: &str) -> Result<ArtifactInspection> {
         project_sandbox_on(config, None)
     }
@@ -155,8 +163,7 @@ mod tests {
             digest(),
             Some(&artifact_type),
             &config_media_type,
-            config.as_bytes(),
-            mixins,
+            &resolution(config, mixins),
             host,
         )
     }
@@ -168,8 +175,7 @@ mod tests {
             digest(),
             None,
             "application/vnd.oci.image.config.v1+json",
-            b"{}",
-            &[],
+            &resolution("{}", &[]),
             None,
         )
         .unwrap();
@@ -190,8 +196,7 @@ mod tests {
             digest(),
             Some("application/vnd.acme.thing"),
             "application/vnd.oci.image.config.v1+json",
-            b"{}",
-            &[],
+            &resolution("{}", &[]),
             None,
         )
         .unwrap_err();
@@ -228,6 +233,7 @@ mod tests {
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -246,9 +252,10 @@ mod tests {
         }))
     }
 
-    fn sandbox_view_with_mixins(mixins: Vec<String>) -> ArtifactInspection {
+    fn sandbox_view_with_mixins(mixins: Vec<String>, pinned: Vec<String>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins,
+            pinned_mixins: pinned,
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -270,6 +277,7 @@ mod tests {
     fn sandbox_view_with_filesets(filesets: Vec<SandboxFileset>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -289,6 +297,29 @@ mod tests {
     }
 
     #[test]
+    fn a_view_separates_what_the_user_named_from_everything_the_merge_reached() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        let declared = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            project_inspection(
+                "registry.example.test/team/sandbox:latest",
+                digest(),
+                Some(&lns_artifact::spec::Kind::Sandbox.artifact_type()),
+                &lns_artifact::spec::Kind::Sandbox.config_media_type(),
+                &crate::artifact::mixin::Resolution {
+                    document: br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#.to_vec(),
+                    mixins: vec![declared.clone(), pinned.clone()],
+                    pinned_extra: vec![pinned.clone()],
+                },
+                None,
+            )
+            .unwrap(),
+            sandbox_view_with_mixins(vec![declared, pinned.clone()], vec![pinned]),
+            "only the references the user named can be shown beside the tag they typed, so the two lists cannot be one"
+        );
+    }
+
+    #[test]
     fn a_sandbox_projects_the_mixins_it_resolved_into_so_inspect_and_run_answer_alike() {
         let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
         assert_eq!(
@@ -298,7 +329,7 @@ mod tests {
                 None,
             )
             .unwrap(),
-            sandbox_view_with_mixins(vec![pinned]),
+            sandbox_view_with_mixins(vec![pinned], Vec::new()),
             "the resolved document declares no mixins of its own, so only the list travelling beside it can tell a reader what this sandbox layers on"
         );
     }
@@ -430,6 +461,7 @@ mod tests {
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -509,6 +541,7 @@ mod tests {
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -546,6 +579,7 @@ mod tests {
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -575,6 +609,7 @@ mod tests {
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),

@@ -67,6 +67,23 @@ pub fn resolved_size(
     )
 }
 
+/// How the disclosure names each source: a reference the user typed as a tag reads as `typed -> pinned`, so what they approve names bytes without losing what they asked for.
+pub fn mixin_display(resolved: &[String], typed: &[String], pinned: &[String]) -> Vec<String> {
+    resolved
+        .iter()
+        .map(|entry| {
+            match typed
+                .iter()
+                .zip(pinned)
+                .find(|(typed, pin)| *pin == entry && *typed != entry)
+            {
+                Some((typed, _)) => format!("{typed} \u{2192} {entry}"),
+                None => entry.clone(),
+            }
+        })
+        .collect()
+}
+
 pub fn print_run_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
@@ -109,8 +126,8 @@ pub fn format_summary(
     if !args.tools.is_empty() {
         writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
     }
-    if !args.mixins.is_empty() {
-        writeln!(s, "  Mixins:    {}", args.mixins.join(", ")).unwrap();
+    if !args.resolved_mixins.is_empty() {
+        writeln!(s, "  Mixins:    {}", args.resolved_mixins.join(", ")).unwrap();
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -370,6 +387,8 @@ mod tests {
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
             mixins: Vec::new(),
+            resolved_mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             image: image.map(str::to_string),
             file: None,
             name: None,
@@ -499,6 +518,7 @@ mod tests {
     fn pulled_fileset_summaries_disclose_inline_source_and_root_owner() {
         let view = lns_ipc::SandboxView {
             mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: "sha256:abc".into(),
             image: "registry.example.test/runtime:1".into(),
@@ -546,9 +566,39 @@ mod tests {
     }
 
     #[test]
+    fn a_digest_the_user_typed_reads_once_rather_than_pointing_at_itself() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        assert_eq!(
+            mixin_display(
+                std::slice::from_ref(&pinned),
+                std::slice::from_ref(&pinned),
+                std::slice::from_ref(&pinned),
+            ),
+            [pinned],
+            "a user who typed the digest already sees the bytes, so repeating it either side of an arrow says nothing"
+        );
+    }
+
+    #[test]
+    fn a_tag_the_user_named_reads_as_the_tag_and_the_digest_it_pinned_to() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        let declared = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
+        let shown = mixin_display(
+            &[declared.clone(), pinned.clone()],
+            &["obs-tools:2".to_string()],
+            std::slice::from_ref(&pinned),
+        );
+        assert_eq!(
+            shown,
+            [declared, format!("obs-tools:2 \u{2192} {pinned}")],
+            "the user approves bytes, but a line that dropped the tag they typed would not tell them which flag produced it"
+        );
+    }
+
+    #[test]
     fn the_mixins_line_names_what_a_composed_sandbox_resolved_into() {
         let mut args = run_args(Some("prism"));
-        args.mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()];
+        args.resolved_mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()];
         let s = summary_of(
             &args,
             &Policy::default(),

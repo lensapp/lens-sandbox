@@ -298,6 +298,7 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
             &cwd,
             args.run.as_deref(),
             args.file.as_deref(),
+            &args.mixins,
             &mut out,
         ),
         _ => unreachable!("run_author is only called for offline author verbs"),

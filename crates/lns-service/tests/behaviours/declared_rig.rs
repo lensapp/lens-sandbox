@@ -33,4 +33,10 @@ pub struct DeclaredRig {
     pub mixins: std::collections::BTreeMap<String, String>,
     /// The tools the resolved document asks for, so a scenario can see what a mixin contributed.
     pub tools: Vec<String>,
+    /// What a reference resolves to, so a scenario can publish a mixin under a tag.
+    pub mixin_pins: std::collections::BTreeMap<String, String>,
+    /// Every source the resolution merged, as the disclosure names them.
+    pub resolved_mixins: Vec<String>,
+    /// The pins for the references the user named, in the order they named them.
+    pub pinned_extra: Vec<String>,
 }

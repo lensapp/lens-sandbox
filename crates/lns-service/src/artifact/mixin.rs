@@ -4,9 +4,19 @@ use anyhow::{Context, Result, bail};
 use lns_artifact::merge::{MAX_DEPTH, Source, flatten, merge};
 use lns_artifact::sandbox::{Definition, SandboxSpec};
 
-/// Where a declared mixin's document comes from: a registry for a digest-pinned reference, the local filesystem for a directory beside the definition.
+/// A mixin's document and the reference that names exactly those bytes, since a user may ask for one by tag and what they approve has to name the bytes.
+#[derive(Debug)]
+pub struct FetchedMixin {
+    pub pinned: String,
+    pub document: String,
+}
+
+/// Where a mixin's document comes from: a registry for a digest-pinned reference, the local filesystem for a directory beside the definition.
 pub trait MixinSource: Send + Sync {
-    fn fetch(&self, reference: &str) -> impl std::future::Future<Output = Result<String>> + Send;
+    fn fetch(
+        &self,
+        reference: &str,
+    ) -> impl std::future::Future<Output = Result<FetchedMixin>> + Send;
 }
 
 /// Whether a pulled manifest is a mixin artifact, decided on the media types alone so the refusal reads the same whether the artifact is mistyped or another kind entirely.
@@ -18,38 +28,103 @@ pub fn is_a_mixin_artifact(artifact_type: Option<&str>, config_media_type: Optio
     }
 }
 
+/// The graph every ordering rule decides against, keyed by the pinned reference each source resolved to, with every reference that names a source translated to the same key.
+struct Fetched {
+    graph: BTreeMap<String, SandboxSpec>,
+    pinned_roots: Vec<String>,
+    pinned_extra: Vec<String>,
+}
+
+/// What one walk of the graph carries: the sources fetched so far, keyed by the reference that pins them, and the references still to visit.
+struct Walk {
+    graph: BTreeMap<String, SandboxSpec>,
+    pins: BTreeMap<String, String>,
+    frontier: Vec<String>,
+}
+
 /// Fetch every mixin the ordering rules can reach, so they decide against a complete graph rather than one that is still arriving.
 async fn collect<S: MixinSource>(
     roots: &[String],
+    extra: &[String],
     source: &S,
-) -> Result<BTreeMap<String, SandboxSpec>> {
-    let mut graph: BTreeMap<String, SandboxSpec> = BTreeMap::new();
-    let mut frontier: Vec<String> = roots.to_vec();
-    let mut depth = 1;
-    while !frontier.is_empty() && depth <= MAX_DEPTH {
-        let mut next = Vec::new();
-        for reference in frontier {
-            if graph.contains_key(&reference) {
-                continue;
-            }
-            if lns_artifact::sandbox::names_a_local_directory(&reference) {
-                bail!(
-                    "mixin {reference} names a local directory, which has no meaning on the machine that pulled this sandbox; a published document pins every mixin by digest"
-                );
-            }
-            let document = source
-                .fetch(&reference)
-                .await
-                .with_context(|| format!("resolving mixin {reference}"))?;
-            let mixin = lns_artifact::sandbox::parse_mixin(document.as_bytes())
-                .with_context(|| format!("reading mixin {reference}"))?;
-            next.extend(mixin.spec.mixins.iter().cloned());
-            graph.insert(reference, mixin.spec);
+) -> Result<Fetched> {
+    let mut walk = Walk {
+        graph: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        frontier: Vec::new(),
+    };
+    let mut pinned_extra = Vec::new();
+    for reference in extra {
+        pinned_extra.push(visit(&mut walk, reference, true, source).await?);
+    }
+    for reference in roots {
+        visit(&mut walk, reference, false, source).await?;
+    }
+    let mut depth = 2;
+    while !walk.frontier.is_empty() && depth <= MAX_DEPTH {
+        for reference in std::mem::take(&mut walk.frontier) {
+            visit(&mut walk, &reference, false, source).await?;
         }
-        frontier = next;
         depth += 1;
     }
-    Ok(graph)
+    let mut graph = walk.graph;
+    for spec in graph.values_mut() {
+        spec.mixins = pinned(&spec.mixins, &walk.pins);
+    }
+    Ok(Fetched {
+        pinned_roots: pinned(roots, &walk.pins),
+        graph,
+        pinned_extra,
+    })
+}
+
+/// Say every reference the way the registry answered for it, so the walk and the graph agree on one identity per source; a reference nothing fetched is left alone for the depth limit to refuse.
+fn pinned(references: &[String], pins: &BTreeMap<String, String>) -> Vec<String> {
+    references
+        .iter()
+        .map(|reference| pins.get(reference).unwrap_or(reference).clone())
+        .collect()
+}
+
+/// Fetch one reference and answer with what pins it, reading each reference once however many documents name it.
+async fn visit<S: MixinSource>(
+    walk: &mut Walk,
+    reference: &str,
+    the_user_named_it: bool,
+    source: &S,
+) -> Result<String> {
+    if let Some(pinned) = walk.pins.get(reference) {
+        return Ok(pinned.clone());
+    }
+    refuse_a_directory(reference, the_user_named_it)?;
+    let fetched = source
+        .fetch(reference)
+        .await
+        .with_context(|| format!("resolving mixin {reference}"))?;
+    walk.pins
+        .insert(reference.to_string(), fetched.pinned.clone());
+    if !walk.graph.contains_key(&fetched.pinned) {
+        let mixin = lns_artifact::sandbox::parse_mixin(fetched.document.as_bytes())
+            .with_context(|| format!("reading mixin {reference}"))?;
+        walk.frontier.extend(mixin.spec.mixins.iter().cloned());
+        walk.graph.insert(fetched.pinned.clone(), mixin.spec);
+    }
+    Ok(fetched.pinned)
+}
+
+/// A directory has no published identity, so neither kind of reference may name one — but only one of them is the user's to correct.
+fn refuse_a_directory(reference: &str, the_user_named_it: bool) -> Result<()> {
+    if !lns_artifact::sandbox::names_a_local_directory(reference) {
+        return Ok(());
+    }
+    if the_user_named_it {
+        bail!(
+            "mixin {reference} cannot name a local directory: a run merges published bytes, so name a reference the disclosure can pin"
+        );
+    }
+    bail!(
+        "mixin {reference} names a local directory, which has no meaning on the machine that pulled this sandbox; a published document pins every mixin by digest"
+    )
 }
 
 /// Resolve a pulled artifact's mixins when it is a sandbox; a plain image has no document to merge and is returned untouched.
@@ -57,18 +132,21 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
     artifact_type: Option<&str>,
     config_media_type: Option<&str>,
     config_json: &[u8],
+    extra: &[String],
     source: &S,
 ) -> Result<Resolution> {
     if !matches!(
         crate::artifact::dispatch(artifact_type, config_media_type),
         Ok(crate::artifact::RunPath::Sandbox)
     ) {
+        refuse_mixins_without_a_document(extra)?;
         return Ok(Resolution {
             document: config_json.to_vec(),
             mixins: Vec::new(),
+            pinned_extra: Vec::new(),
         });
     }
-    resolve(config_json, source).await
+    resolve(config_json, extra, source).await
 }
 
 /// What a run boots, and the mixins that produced it — the merged document declares none of its own, so the references travel beside it.
@@ -76,20 +154,29 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
 pub struct Resolution {
     pub document: Vec<u8>,
     pub mixins: Vec<String>,
+    /// What each reference the user named resolved to, in the order they named them, so the boot merges the bytes the preflight showed.
+    pub pinned_extra: Vec<String>,
 }
 
 /// Resolve a published definition and every mixin it layers on into the one document a run boots (`docs/sandbox-spec.md` §3.3), returned as a definition the rest of the plan path reads exactly as it reads an authored one.
-pub async fn resolve<S: MixinSource>(config_json: &[u8], source: &S) -> Result<Resolution> {
+pub async fn resolve<S: MixinSource>(
+    config_json: &[u8],
+    extra: &[String],
+    source: &S,
+) -> Result<Resolution> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("reading the published sandbox document")?;
-    if def.spec.mixins.is_empty() {
+    if def.spec.mixins.is_empty() && extra.is_empty() {
         return Ok(Resolution {
             document: config_json.to_vec(),
             mixins: Vec::new(),
+            pinned_extra: Vec::new(),
         });
     }
-    let graph = collect(&def.spec.mixins, source).await?;
-    let sources = flatten(&def.spec, &[], &graph)?;
+    let fetched = collect(&def.spec.mixins, extra, source).await?;
+    let mut root = def.spec.clone();
+    root.mixins = fetched.pinned_roots;
+    let sources = flatten(&root, &fetched.pinned_extra, &fetched.graph)?;
     let merged = merge(&sources)?;
     let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
@@ -100,7 +187,32 @@ pub async fn resolve<S: MixinSource>(config_json: &[u8], source: &S) -> Result<R
             .skip(1)
             .map(|source| source.label.clone())
             .collect(),
+        pinned_extra: fetched.pinned_extra,
     })
+}
+
+/// Only a sandbox document has blocks to merge into, so a run of anything else has to refuse what it was given rather than boot without it.
+pub fn refuse_mixins_without_a_document(extra: &[String]) -> Result<()> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "this reference has no sandbox document to merge into, so it cannot take the {} mixin(s) named for it",
+        extra.len()
+    )
+}
+
+/// The preflight pins what it showed, and the boot merges that — so a reference reaching the boot unpinned was never disclosed, whoever sent it.
+pub fn require_pinned_extras(extra: &[String]) -> Result<()> {
+    match extra
+        .iter()
+        .find(|reference| !lns_artifact::spec::is_digest_pinned_image(reference))
+    {
+        None => Ok(()),
+        Some(unpinned) => bail!(
+            "mixin {unpinned} reached the run unpinned; a run merges the digest its preflight showed, so pin it by digest"
+        ),
+    }
 }
 
 /// The resolved document is what boots, so it has to be one an author could have written — an override is normal, but its result still has to hold.
@@ -130,6 +242,7 @@ mod tests {
 
     struct Fake {
         documents: BTreeMap<String, String>,
+        pins: BTreeMap<String, String>,
         fetched: Mutex<Vec<String>>,
     }
 
@@ -147,21 +260,36 @@ mod tests {
                         )
                     })
                     .collect(),
+                pins: BTreeMap::new(),
                 fetched: Mutex::new(Vec::new()),
             }
+        }
+
+        fn pinning(mut self, reference: &str, pinned: &str) -> Self {
+            self.pins.insert(reference.to_string(), pinned.to_string());
+            self
         }
     }
 
     impl MixinSource for Fake {
-        async fn fetch(&self, reference: &str) -> Result<String> {
+        async fn fetch(&self, reference: &str) -> Result<FetchedMixin> {
             self.fetched
                 .lock()
                 .expect("fetch log poisoned")
                 .push(reference.to_string());
-            self.documents
+            let document = self
+                .documents
                 .get(reference)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no such mixin here"))
+                .ok_or_else(|| anyhow::anyhow!("no such mixin here"))?;
+            Ok(FetchedMixin {
+                pinned: self
+                    .pins
+                    .get(reference)
+                    .cloned()
+                    .unwrap_or_else(|| reference.to_string()),
+                document,
+            })
         }
     }
 
@@ -204,7 +332,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let out = resolve(&sandbox(&spec), &Fake::new(&refs)).await?;
+        let out = resolve(&sandbox(&spec), &[], &Fake::new(&refs)).await?;
         lns_artifact::sandbox::parse(&out.document)
     }
 
@@ -212,7 +340,7 @@ mod tests {
     async fn a_document_with_no_mixins_is_returned_untouched() {
         let source = Fake::new(&[]);
         let original = sandbox(r#"{"image":"x:1"}"#);
-        let out = resolve(&original, &source).await.unwrap();
+        let out = resolve(&original, &[], &source).await.unwrap();
         assert_eq!(
             out.document, original,
             "nothing to resolve means nothing to rewrite"
@@ -231,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_image_is_passed_through_without_a_fetch() {
         let source = Fake::new(&[]);
-        let out = resolve_if_a_sandbox(None, None, b"{}", &source)
+        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &source)
             .await
             .expect("an image has no document to merge");
         assert_eq!(out.document, b"{}");
@@ -251,6 +379,7 @@ mod tests {
             Some(&sandbox_type),
             None,
             &sandbox(r#"{"image":"x:1"}"#),
+            &[],
             &Fake::new(&[]),
         )
         .await
@@ -309,7 +438,7 @@ mod tests {
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
         let source = Fake::new(&refs);
-        let resolution = resolve(&sandbox(&spec), &source)
+        let resolution = resolve(&sandbox(&spec), &[], &source)
             .await
             .expect("a diamond resolves");
         assert_eq!(
@@ -331,6 +460,7 @@ mod tests {
         let absent = pinned("absent");
         let err = resolve(
             &sandbox(&format!(r#"{{"image":"x:1","mixins":["{absent}"]}}"#)),
+            &[],
             &Fake::new(&[]),
         )
         .await
@@ -345,6 +475,7 @@ mod tests {
     async fn a_reference_that_is_not_a_mixin_document_refuses_the_run() {
         let reference = pinned("a-sandbox");
         let source = Fake {
+            pins: BTreeMap::new(),
             documents: BTreeMap::from([(
                 reference.clone(),
                 String::from_utf8(sandbox(r#"{"image":"x:1"}"#)).expect("utf-8 fixture"),
@@ -353,6 +484,7 @@ mod tests {
         };
         let err = resolve(
             &sandbox(&format!(r#"{{"image":"x:1","mixins":["{reference}"]}}"#)),
+            &[],
             &source,
         )
         .await
@@ -367,6 +499,7 @@ mod tests {
     async fn a_local_directory_reached_from_a_published_document_refuses_the_run() {
         let err = resolve(
             &sandbox(r#"{"image":"x:1","mixins":["./mixins/postgres-tools/"]}"#),
+            &[],
             &Fake::new(&[]),
         )
         .await
@@ -414,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_document_that_will_not_parse_is_blamed_on_itself_and_not_on_its_mixins() {
-        let err = resolve(b"{}", &Fake::new(&[])).await.unwrap_err();
+        let err = resolve(b"{}", &[], &Fake::new(&[])).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("reading the published sandbox document"),
             "a document that will not parse has no mixins to blame, and naming them sends a publisher looking in the wrong place; got: {err:#}"
@@ -432,6 +565,82 @@ mod tests {
         assert!(
             format!("{err:#}").contains("both publish host port 18080"),
             "ports merge by container number, so two sources can claim one host port without either document repeating one, and the run has to refuse rather than silently unpublish one of them; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_image_refuses_the_mixins_the_user_named_rather_than_dropping_them() {
+        let sandbox_only = resolve_if_a_sandbox(None, None, b"{}", &[pinned("m")], &Fake::new(&[]))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{sandbox_only:#}").contains("no sandbox document to merge into"),
+            "an image has nothing to merge, so silently running it without what the user asked for is the refusal this exists to make; got: {sandbox_only:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_pin_the_registry_renders_differently_still_resolves() {
+        let declared = format!("ghcr.io/acme/m:17@sha256:{}", "c".repeat(64));
+        let rendered = format!("ghcr.io/acme/m@sha256:{}", "c".repeat(64));
+        let source = Fake::new(&[(declared.as_str(), r#"{"tools":["python@3.12"]}"#)])
+            .pinning(&declared, &rendered);
+        let out = resolve(
+            &sandbox(&format!(r#"{{"image":"x:1","mixins":["{declared}"]}}"#)),
+            &[],
+            &source,
+        )
+        .await
+        .expect("a document may pin a mixin in any form the registry accepts");
+        assert_eq!(
+            out.mixins,
+            [rendered],
+            "the disclosure names the identity the registry answered with, and the declared spelling has to reach it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tag_the_user_names_reaches_the_merge_pinned() {
+        let tagged = "ghcr.io/acme/obs-tools:2";
+        let source =
+            Fake::new(&[(tagged, r#"{"tools":["python@3.12"]}"#)]).pinning(tagged, &pinned("obs"));
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &[tagged.to_string()],
+            &source,
+        )
+        .await
+        .expect("a tag resolves");
+        assert_eq!(
+            out.pinned_extra,
+            [pinned("obs")],
+            "the boot merges what the preflight pinned, so the tag has to be answered here and not resolved twice"
+        );
+        assert_eq!(
+            out.mixins,
+            [pinned("obs")],
+            "the disclosure names bytes, so a tag that reached it unresolved could move after the user approved it"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_document_to_merge_into_refuses_the_mixins_named_for_it() {
+        refuse_mixins_without_a_document(&[]).expect("a run naming none is untouched");
+        let err = refuse_mixins_without_a_document(&[pinned("m")]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no sandbox document to merge into"),
+            "a plain image has no blocks to merge, so running it while dropping what the request named would be a silent lie; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_reference_reaching_the_run_unpinned_is_refused_before_it_merges() {
+        require_pinned_extras(&[pinned("m")])
+            .expect("a pinned reference is what a preflight sends");
+        let err = require_pinned_extras(&["ghcr.io/acme/obs-tools:2".to_string()]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reached the run unpinned"),
+            "a client that skipped the preflight would boot bytes nobody disclosed; got: {err:#}"
         );
     }
 
