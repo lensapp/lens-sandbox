@@ -66,7 +66,7 @@ Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
 | `lns stop <RUN>`           | `lns sandbox stop <RUN>`          |
 | `lns logs <RUN>`           | `lns sandbox logs <RUN>`          |
 | `lns attach <RUN>`         | `lns sandbox attach <RUN>`        |
-| `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET>`    |
+| `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET> [--mixin <REF>]`    |
 | `lns rm <REF>`             | `lns sandbox rm <REF>`            |
 
 The lns-native verbs `validate`, `ls`, and `prune` live under `lns sandbox`
@@ -101,6 +101,7 @@ the `./lns.yaml` definition with its command overridden.
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
 | `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with no rules if absent.                      |
+| `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Published sandboxes only. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`. |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
@@ -149,7 +150,7 @@ lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
 lns sandbox logs [-f] <RUN>
 lns sandbox attach <RUN> [--detach-keys <CHORD>]
-lns sandbox inspect <TARGET>
+lns sandbox inspect <TARGET> [--mixin <REF>]
 
 # cache
 lns sandbox rm <REF>
@@ -174,7 +175,7 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), and any over-broad-policy flag; or a plain `Image`. |
+| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; or a plain `Image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
 | `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Requires `-f`/`--force` — there is no interactive prompt. |
 

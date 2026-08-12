@@ -35,6 +35,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             reference,
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "docker.io/library/alpine@sha256:abc".into(),

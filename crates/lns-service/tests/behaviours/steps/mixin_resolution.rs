@@ -1,31 +1,56 @@
 use cucumber::{given, then, when};
-use lns_service::artifact::mixin::MixinSource;
+use lns_service::artifact::mixin::{FetchedMixin, MixinSource};
 
 use crate::world::BehaviourWorld;
 
 /// The one mixin every scenario declares, digest-pinned because a published document may reference nothing else.
-const MIXIN: &str = "ghcr.io/acme/some-mixin@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582";
+pub(crate) const MIXIN: &str = "ghcr.io/acme/some-mixin@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582";
 
-/// Serves the mixin documents a scenario installed, standing in for the registry the run pulls from.
-struct Installed(std::collections::BTreeMap<String, String>);
+/// Serves the mixin documents a scenario installed, answering for a tag under the pinned identity a registry would report.
+pub(crate) struct Installed {
+    documents: std::collections::BTreeMap<String, String>,
+    pins: std::collections::BTreeMap<String, String>,
+}
 
-impl MixinSource for Installed {
-    async fn fetch(&self, reference: &str) -> anyhow::Result<String> {
-        self.0
-            .get(reference)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("nothing here answers for {reference}"))
+impl Installed {
+    pub(crate) fn from_rig(rig: &crate::declared_rig::DeclaredRig) -> Self {
+        Self {
+            documents: rig.mixins.clone(),
+            pins: rig.mixin_pins.clone(),
+        }
     }
 }
 
-fn install(w: &mut BehaviourWorld, spec: &str) {
+impl MixinSource for Installed {
+    async fn fetch(&self, reference: &str) -> anyhow::Result<FetchedMixin> {
+        let document = self
+            .documents
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("nothing here answers for {reference}"))?;
+        Ok(FetchedMixin {
+            pinned: self
+                .pins
+                .get(reference)
+                .cloned()
+                .unwrap_or_else(|| reference.to_string()),
+            document,
+        })
+    }
+}
+
+pub(crate) fn install_at(w: &mut BehaviourWorld, reference: &str, name: &str, spec: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.mixins.insert(
-        MIXIN.to_string(),
+        reference.to_string(),
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"some-mixin"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
         ),
     );
+}
+
+fn install(w: &mut BehaviourWorld, spec: &str) {
+    install_at(w, MIXIN, "some-mixin", spec);
 }
 
 fn definition(w: &mut BehaviourWorld, spec: &str) {
@@ -92,11 +117,11 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             rig.definition
                 .clone()
                 .expect("a Given step must declare the definition"),
-            Installed(rig.mixins.clone()),
+            Installed::from_rig(rig),
         )
     };
     let planned =
-        match lns_service::artifact::mixin::resolve(definition.as_bytes(), &installed).await {
+        match lns_service::artifact::mixin::resolve(definition.as_bytes(), &[], &installed).await {
             Ok(resolution) => lns_service::artifact::plan_published_sandbox(
                 &resolution.document,
                 "registry.example.test/some-sandbox:1",

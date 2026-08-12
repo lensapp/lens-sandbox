@@ -79,10 +79,19 @@ async fn orchestrate(
     // A local definition plans directly; a published sandbox reference boots its base image; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
     let sandbox_plan = match (args.definition.as_deref(), resolved_image) {
-        (Some(definition), _) => Some(crate::artifact::real::plan_local(definition).await?),
+        (Some(definition), _) => {
+            crate::artifact::mixin::refuse_mixins_without_a_document(&args.mixins)?;
+            Some(crate::artifact::real::plan_local(definition).await?)
+        }
         (None, Some(image_ref)) => {
-            crate::artifact::real::peek_and_plan(image_ref, args.verify_sandbox, &run_id, &microvm)
-                .await?
+            crate::artifact::real::peek_and_plan(
+                image_ref,
+                args.verify_sandbox,
+                &args.mixins,
+                &run_id,
+                &microvm,
+            )
+            .await?
         }
         (None, None) => None,
     };

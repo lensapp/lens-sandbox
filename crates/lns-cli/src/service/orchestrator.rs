@@ -132,6 +132,7 @@ struct PublishedTarget {
     filesets: Vec<crate::run::summary::FilesetSummary>,
     tools: Vec<String>,
     mixins: Vec<String>,
+    pinned_mixins: Vec<String>,
 }
 
 fn published_target(
@@ -152,6 +153,7 @@ fn published_target(
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
                 tools: crate::run::summary::tools_from_view(&view),
                 mixins: view.mixins.clone(),
+                pinned_mixins: view.pinned_mixins.clone(),
             })
         }
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
@@ -160,9 +162,14 @@ fn published_target(
     }
 }
 
-async fn preflight_published(socket: &Path, reference: &str) -> Result<PublishedTarget> {
+async fn preflight_published(
+    socket: &Path,
+    reference: &str,
+    mixins: &[String],
+) -> Result<PublishedTarget> {
     let request = Request::InspectImage {
         image: reference.to_string(),
+        mixins: mixins.to_vec(),
     };
     await_published_preflight(reference, real::send_request(socket, &request)).await
 }
@@ -196,9 +203,10 @@ pub async fn run_image(
     let client = real_client()?;
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
-            Some(preflight_published(client.socket(), reference).await?)
+            Some(preflight_published(client.socket(), reference, &args.mixins).await?)
         }
         crate::run::target::RunTarget::Local { .. } => {
+            crate::run::target::refuse_mixins_on_a_local_run(&args.mixins)?;
             // A path-shaped REF resolved to a definition; the summary names its image, not the path.
             if args.image.is_some() {
                 args.image = Some(target.image());
@@ -259,9 +267,19 @@ pub async fn run_image(
         _ => Vec::new(),
     };
     // Only a pulled sandbox resolves its mixins today; a local document still declares them and is refused.
-    args.mixins = published
+    args.pinned_mixins = published
         .as_ref()
-        .map(|published| published.mixins.clone())
+        .map(|published| published.pinned_mixins.clone())
+        .unwrap_or_default();
+    args.resolved_mixins = published
+        .as_ref()
+        .map(|published| {
+            crate::run::summary::mixin_display(
+                &published.mixins,
+                &args.mixins,
+                &published.pinned_mixins,
+            )
+        })
         .unwrap_or_default();
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
@@ -333,6 +351,7 @@ pub async fn run_image(
         env: args.env,
         image: Some(target.image()),
         resolved_image: published.as_ref().map(|published| published.image.clone()),
+        mixins: args.pinned_mixins,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
@@ -1137,6 +1156,7 @@ mod tests {
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()],
+                pinned_mixins: vec!["ghcr.io/acme/obs@sha256:5b9e1f0a".into()],
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1192,6 +1212,11 @@ mod tests {
             }]
         );
         assert_eq!(
+            target.pinned_mixins,
+            ["ghcr.io/acme/obs@sha256:5b9e1f0a"],
+            "the run boots the digest its preflight pinned, and this is the only hop that carries it there"
+        );
+        assert_eq!(
             target.mixins,
             ["ghcr.io/acme/postgres-tools@sha256:c41e8b7d"],
             "the run summary names what a composed sandbox resolved into, and this is the only hop that carries it there"
@@ -1217,6 +1242,7 @@ mod tests {
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),

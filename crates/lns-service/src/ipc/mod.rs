@@ -212,8 +212,8 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
-        Request::InspectImage { image } => image_response(
-            crate::artifact::real::inspect(image)
+        Request::InspectImage { image, mixins } => image_response(
+            crate::artifact::real::inspect(image, mixins)
                 .await
                 .map(|inspection| Response::ImageInspected { inspection }),
         ),
@@ -546,6 +546,7 @@ mod tests {
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
                 image: None,
                 resolved_image: None,
+                mixins: Vec::new(),
                 name: None,
                 cpus: 1,
                 mem: 0,
@@ -2100,6 +2101,7 @@ mod tests {
             handle_request(
                 &Request::InspectImage {
                     image: "###".into(),
+                    mixins: Vec::new(),
                 },
                 Instant::now(),
             )

@@ -155,9 +155,29 @@ impl RunTarget {
     }
 }
 
+/// A local run's mounts and ports come from the document the CLI parsed itself, so a mixin it never merged would be dropped without a word.
+pub fn refuse_mixins_on_a_local_run(mixins: &[String]) -> Result<()> {
+    if mixins.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "--mixin needs a published sandbox: a local document's mixins are not resolved yet, so publish it and run it by reference to use them"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_run_refuses_the_mixins_the_user_named_rather_than_dropping_them() {
+        refuse_mixins_on_a_local_run(&[]).expect("a run with no flag is untouched");
+        let err = refuse_mixins_on_a_local_run(&["ghcr.io/acme/obs:2".to_string()]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--mixin needs a published sandbox"),
+            "a local run builds its mounts and ports from the document the CLI parsed, so accepting the flag here would drop what it contributes; got: {err:#}"
+        );
+    }
 
     use crate::sandbox::test_support::MapFs;
 

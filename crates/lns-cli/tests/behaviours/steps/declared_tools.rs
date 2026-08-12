@@ -67,6 +67,7 @@ fn validation_fails_naming_shape(w: &mut BehaviourWorld) -> Result<(), String> {
 fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
     let view = SandboxView {
         mixins: Vec::new(),
+        pinned_mixins: Vec::new(),
         reference: TOOLS_REFERENCE.into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
@@ -101,6 +102,7 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
     let result = run_with_writers(
         &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
             run: Some(TOOLS_REFERENCE.into()),
+            mixins: Vec::new(),
             file: None,
         }),
         &svc,

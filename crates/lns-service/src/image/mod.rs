@@ -277,7 +277,10 @@ pub(crate) async fn pull_sandbox_with<R: Registry>(
 }
 
 /// Pull a declared mixin's document. The pin is verified before the type, because for a mixin the bytes are the identity: a reference that does not name exactly these bytes has nothing to be typed.
-pub(crate) async fn pull_mixin_with<R: Registry>(client: &R, reference: &str) -> Result<String> {
+pub(crate) async fn pull_mixin_with<R: Registry>(
+    client: &R,
+    reference: &str,
+) -> Result<crate::artifact::mixin::FetchedMixin> {
     let parsed: Reference = reference
         .parse()
         .with_context(|| format!("invalid mixin reference {reference}"))?;
@@ -289,7 +292,10 @@ pub(crate) async fn pull_mixin_with<R: Registry>(client: &R, reference: &str) ->
     ) {
         anyhow::bail!("{reference} is not a mixin artifact");
     }
-    Ok(config_json)
+    Ok(crate::artifact::mixin::FetchedMixin {
+        pinned: parsed.clone_with_digest(manifest_digest).to_string(),
+        document: config_json,
+    })
 }
 
 fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
@@ -1184,8 +1190,16 @@ mod tests {
         ensure_global_trace_subscriber();
         let registry = build_mixin_artifact().into_registry();
         let pinned = format!("registry.example.test/m@sha256:{}", "c".repeat(64));
-        let document = pull_mixin_with(&registry, &pinned).await.unwrap();
-        assert!(document.contains(r#""kind":"Mixin""#), "got: {document}");
+        let fetched = pull_mixin_with(&registry, &pinned).await.unwrap();
+        assert!(
+            fetched.document.contains(r#""kind":"Mixin""#),
+            "got: {}",
+            fetched.document
+        );
+        assert_eq!(
+            fetched.pinned, pinned,
+            "a reference that already names the bytes answers as itself"
+        );
         assert_eq!(
             registry.calls.lock().unwrap().as_slice(),
             ["manifest"],
