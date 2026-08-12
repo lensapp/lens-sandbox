@@ -184,17 +184,21 @@ pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
     parse_of_kind(config_json, spec::Kind::Mixin)
 }
 
+/// Whether a mixin entry names a directory rather than a registry coordinate — the one predicate validation, rooting and resolution all read, so they cannot disagree about which entries are local.
+pub fn names_a_local_directory(reference: &str) -> bool {
+    reference == "."
+        || reference == ".."
+        || reference.starts_with("./")
+        || reference.starts_with("../")
+        || reference.starts_with('/')
+}
+
 /// A remote mixin reference must be digest-pinned, because a published document has to resolve to the same thing for everyone.
 fn validate_mixin_reference(reference: &str) -> Result<()> {
     if reference.trim().is_empty() {
         bail!("a mixin entry must name a directory or an OCI reference");
     }
-    let is_local_directory = reference == "."
-        || reference == ".."
-        || reference.starts_with("./")
-        || reference.starts_with("../")
-        || reference.starts_with('/');
-    if !is_local_directory && !spec::is_digest_pinned_image(reference) {
+    if !names_a_local_directory(reference) && !spec::is_digest_pinned_image(reference) {
         bail!(
             "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local directory starts with `./`, `../` or `/`"
         );

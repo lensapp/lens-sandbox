@@ -9,7 +9,7 @@ pub mod forward;
 pub mod host_binds;
 pub mod image_management;
 pub mod ipc;
-pub mod mixin_documents;
+pub mod mixin_resolution;
 pub mod oauth_connector;
 pub mod pkce_connector;
 pub mod policy_guardrail;

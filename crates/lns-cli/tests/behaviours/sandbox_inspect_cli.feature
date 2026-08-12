@@ -55,11 +55,11 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
-  Scenario: inspecting a sandbox lists the mixins it layers on
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
+  Scenario: inspecting a published sandbox names the mixins it resolved into
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox resolved from the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
     Then the exit code is 0
-    And the output contains "mixin: ghcr.io/acme/postgres-tools@sha256:"
+    And the output contains "mixin: ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
 
   Scenario: inspecting a sandbox flags a permissive shipped policy
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy allows every destination

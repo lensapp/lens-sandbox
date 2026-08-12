@@ -29,4 +29,8 @@ pub struct DeclaredRig {
     pub error: Option<String>,
     /// The definition bytes as authored, for pinning that nothing writes back to it.
     pub definition_snapshot: Option<String>,
+    /// Mixin documents this machine can resolve, keyed by reference.
+    pub mixins: std::collections::BTreeMap<String, String>,
+    /// The tools the resolved document asks for, so a scenario can see what a mixin contributed.
+    pub tools: Vec<String>,
 }

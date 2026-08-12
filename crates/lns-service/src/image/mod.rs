@@ -276,6 +276,22 @@ pub(crate) async fn pull_sandbox_with<R: Registry>(
     })
 }
 
+/// Pull a declared mixin's document. The pin is verified before the type, because for a mixin the bytes are the identity: a reference that does not name exactly these bytes has nothing to be typed.
+pub(crate) async fn pull_mixin_with<R: Registry>(client: &R, reference: &str) -> Result<String> {
+    let parsed: Reference = reference
+        .parse()
+        .with_context(|| format!("invalid mixin reference {reference}"))?;
+    let (manifest, manifest_digest, config_json) = client.pull_manifest_and_config(&parsed).await?;
+    verify_digest_pin(&parsed, &manifest_digest, reference)?;
+    if !crate::artifact::mixin::is_a_mixin_artifact(
+        manifest.artifact_type.as_deref(),
+        Some(manifest.config.media_type.as_str()),
+    ) {
+        anyhow::bail!("{reference} is not a mixin artifact");
+    }
+    Ok(config_json)
+}
+
 fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!("{e:#}").context("this reference is not a supported Lens Sandbox artifact")
 }
@@ -1140,6 +1156,89 @@ mod tests {
             calls,
             vec!["manifest"],
             "a config-only artifact must not pull layer blobs",
+        );
+    }
+
+    fn build_mixin_artifact() -> FakeImage {
+        let document = r#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"tools":["node@22"]}}"#.to_string();
+        let manifest = OciImageManifest {
+            artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
+            config: OciDescriptor {
+                media_type: "application/vnd.lens.mixin.config.v1+json".into(),
+                digest: sha256_hex(document.as_bytes()),
+                size: document.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        FakeImage {
+            manifest,
+            config_json: document,
+            manifest_digest: format!("sha256:{}", "c".repeat(64)),
+            blobs: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_mixin_returns_the_document_a_matching_pin_names() {
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let pinned = format!("registry.example.test/m@sha256:{}", "c".repeat(64));
+        let document = pull_mixin_with(&registry, &pinned).await.unwrap();
+        assert!(document.contains(r#""kind":"Mixin""#), "got: {document}");
+        assert_eq!(
+            registry.calls.lock().unwrap().as_slice(),
+            ["manifest"],
+            "a mixin is config-only, so no layer blob is fetched",
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_mixin_refuses_a_pin_the_registry_did_not_answer_with() {
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let pinned = format!("registry.example.test/m@sha256:{}", "d".repeat(64));
+        let err = pull_mixin_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "for a mixin the bytes are the identity, so the pin has to gate their use before anything reads them; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_mixin_refuses_an_artifact_of_another_kind() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let pinned = format!("registry.example.test/m@sha256:{}", "c".repeat(64));
+        let err = pull_mixin_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not a mixin artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_mixin_answers_with_the_pin_when_the_type_is_wrong_too() {
+        ensure_global_trace_subscriber();
+        let registry = build_sandbox_artifact().into_registry();
+        let pinned = format!("registry.example.test/m@sha256:{}", "d".repeat(64));
+        let err = pull_mixin_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "for a mixin the bytes are the identity, so a reference that names other bytes has nothing to be typed and the pin has to answer first; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_mixin_refuses_a_reference_that_does_not_parse() {
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let err = pull_mixin_with(&registry, "not a reference")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid mixin reference"),
+            "got: {err:#}"
         );
     }
 
