@@ -67,8 +67,8 @@ A connector reaches a project's workloads in any of three ways:
 - **Asked for by a declared credential.** A definition's `spec.credentials`
   entry states the whole injection contract itself — the variable the workload
   reads, the placeholder it holds, and the domains the real value may travel to
-  — and names no connector. A connector that claims one of those domains
-  supplies the value: it is injected under the *declared* variable, with the
+  — and names no connector. A connector whose own claim covers one of those
+  domains supplies the value: it is injected under the *declared* variable, with the
   *declared* placeholder, once this workload has been
   [granted](credentials.md#workload-grants) it; until then it is offered on
   first use like any other. With no connector claiming the domain the

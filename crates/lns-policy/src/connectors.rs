@@ -125,8 +125,15 @@ impl Connector {
         self.name.as_deref().unwrap_or(&self.id)
     }
 
-    /// Each authKind must carry its matching block, and an oauth block must carry the endpoint its `flow` needs.
+    /// Each authKind must carry its matching block, an oauth block must carry the endpoint its `flow` needs, and the id and placeholder obey the grammar every keyspace and the boundary depend on.
     pub fn validate(&self) -> Result<(), String> {
+        if !lns_spec::is_legal_connector_id(&self.id) {
+            return Err(format!(
+                "invalid connector id {:?}: an id is one lowercase DNS label, which is what keeps it out of the keyspace a declared credential answers under",
+                self.id
+            ));
+        }
+        self.validate_placeholders()?;
         match self.auth_kind {
             AuthKind::Credential if self.credential.is_none() => Err(format!(
                 "connector {:?} declares authKind credential but has no `credential:` block",
@@ -135,6 +142,18 @@ impl Connector {
             AuthKind::Oauth => self.validate_oauth(),
             _ => Ok(()),
         }
+    }
+
+    fn validate_placeholders(&self) -> Result<(), String> {
+        for placeholder in self
+            .credential
+            .iter()
+            .map(|c| &c.placeholder)
+            .chain(self.oauth.iter().map(|o| &o.placeholder))
+        {
+            lns_spec::credential::validate_placeholder(placeholder, &self.id)?;
+        }
+        Ok(())
     }
 
     fn validate_oauth(&self) -> Result<(), String> {
@@ -1186,6 +1205,53 @@ mod tests {
         fs::write(&path, "connectors:\n  - id: x\n    authKind: credential\n").unwrap();
         let err = Catalog::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn load_or_default_rejects_an_id_that_reaches_another_keyspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("colliding.yaml");
+        fs::write(
+            &path,
+            "connectors:\n  - id: \"env:SOME_TOKEN\"\n    authKind: credential\n    credential:\n      envVar: SOME_TOKEN\n      placeholder: some_LNSPLACEHOLDER0000\n",
+        )
+        .unwrap();
+        let err = Catalog::load_or_default(&path).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "a declaration nothing supplies answers under env:<var>, so an entry spelling one would take over that value; got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_a_placeholder_a_stream_could_carry_by_accident() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("short.yaml");
+        fs::write(
+            &path,
+            "connectors:\n  - id: some-provider\n    authKind: credential\n    credential:\n      envVar: SOME_TOKEN\n      placeholder: lns-short\n",
+        )
+        .unwrap();
+        let err = Catalog::load_or_default(&path).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "the boundary substitutes this marker by substring in outbound bytes, whichever document declared it; got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_a_placeholder_a_real_token_could_pass_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("real-looking.yaml");
+        fs::write(
+            &path,
+            "connectors:\n  - id: some-provider\n    authKind: credential\n    credential:\n      envVar: SOME_TOKEN\n      placeholder: sk-live-0123456789\n",
+        )
+        .unwrap();
+        let err = Catalog::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "got: {err}");
     }
 
     #[test]
