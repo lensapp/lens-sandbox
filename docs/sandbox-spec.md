@@ -870,6 +870,12 @@ Uniqueness is a **per-document** rule: one document may not name the same
 because nothing inside one file disambiguates them. Across sources, the same
 collision is the override mechanism, not an error.
 
+A `host` port is the one exception, because it is a machine resource rather than
+a setting. Two sources publishing different `container` ports onto one `host`
+port both want the same socket, and precedence cannot settle that — keeping the
+later mapping would silently unpublish a port the sandbox declared. Resolution
+**refuses**, naming both sources, so the author moves one.
+
 Overriding is therefore normal and expected, which is exactly why the resolved
 sandbox is presented before boot: the disclosure shows what each source
 contributed and what it replaced, so an override nobody intended is visible while
