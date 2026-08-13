@@ -45,11 +45,15 @@ pub(crate) async fn peek_and_plan(
         }
         RunPath::Sandbox => {
             crate::artifact::mixin::require_pinned_extras(mixins)?;
-            let document =
-                crate::artifact::mixin::resolve(config_json.as_bytes(), mixins, &RegistryMixins)
-                    .await
-                    .with_context(|| format!("resolving {image_ref}"))?
-                    .document;
+            let document = crate::artifact::mixin::resolve(
+                config_json.as_bytes(),
+                mixins,
+                &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
+                &RegistryMixins,
+            )
+            .await
+            .with_context(|| format!("resolving {image_ref}"))?
+            .document;
             let resolved = crate::artifact::plan_published_sandbox(&document, image_ref)?;
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
@@ -169,13 +173,32 @@ pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> 
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
 }
 
+/// Reads a directory mixin off this machine's filesystem.
+pub(crate) struct RealMixinDir;
+
+impl crate::artifact::mixin_dir::MixinDir for RealMixinDir {
+    fn read(&self, path: &std::path::Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+}
+
 /// Pulls a declared mixin's document from the registry it names, through the manifest cache so a digest-pinned graph pulled once resolves offline.
 pub(crate) struct RegistryMixins;
 
 impl crate::artifact::mixin::MixinSource for RegistryMixins {
-    async fn fetch(&self, reference: &str) -> Result<crate::artifact::mixin::FetchedMixin> {
-        let registry = crate::image::caching_registry_for(reference)?;
-        crate::image::pull_mixin_with(&registry, reference).await
+    async fn fetch(
+        &self,
+        locator: &crate::artifact::mixin::Locator,
+    ) -> Result<crate::artifact::mixin::FetchedMixin> {
+        match locator {
+            crate::artifact::mixin::Locator::Reference(reference) => {
+                let registry = crate::image::caching_registry_for(reference)?;
+                crate::image::pull_mixin_with(&registry, reference).await
+            }
+            crate::artifact::mixin::Locator::Directory(dir) => {
+                crate::artifact::mixin_dir::read_directory_mixin(&RealMixinDir, dir)
+            }
+        }
     }
 }
 
@@ -328,6 +351,25 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     }
 }
 
+/// Resolve a local definition's mixins the same way a published one's resolve, so what a local run boots is the merged document and not the file the CLI happened to parse.
+pub(crate) async fn resolve_definition(
+    definition: &str,
+    project_dir: &str,
+    mixins: &[String],
+) -> Result<lns_ipc::Response> {
+    let home = crate::artifact::mixin::Locator::Directory(std::path::PathBuf::from(project_dir));
+    let resolution =
+        crate::artifact::mixin::resolve(definition.as_bytes(), mixins, &home, &RegistryMixins)
+            .await
+            .with_context(|| format!("resolving the definition in {project_dir}"))?;
+    Ok(lns_ipc::Response::DefinitionResolved {
+        definition: String::from_utf8(resolution.document)
+            .context("the resolved definition is not utf-8")?,
+        mixins: resolution.mixins,
+        pinned_mixins: resolution.pinned_extra,
+    })
+}
+
 pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
@@ -344,6 +386,7 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         Some(manifest.config.media_type.as_str()),
         config_json.as_bytes(),
         mixins,
+        &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
         &RegistryMixins,
     )
     .await

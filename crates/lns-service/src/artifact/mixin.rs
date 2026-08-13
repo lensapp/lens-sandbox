@@ -4,6 +4,23 @@ use anyhow::{Context, Result, bail};
 use lns_artifact::merge::{MAX_DEPTH, Source, flatten, merge};
 use lns_artifact::sandbox::{Definition, SandboxSpec};
 
+/// What a document was read from, which is both its identity in the graph and what roots any directory it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Locator {
+    Reference(String),
+    Directory(std::path::PathBuf),
+}
+
+impl Locator {
+    /// The one string every rule reads this source by: the reference the registry answered with, or the directory's absolute path.
+    pub fn key(&self) -> String {
+        match self {
+            Locator::Reference(reference) => reference.clone(),
+            Locator::Directory(path) => path.display().to_string(),
+        }
+    }
+}
+
 /// A mixin's document and the reference that names exactly those bytes, since a user may ask for one by tag and what they approve has to name the bytes.
 #[derive(Debug)]
 pub struct FetchedMixin {
@@ -11,11 +28,11 @@ pub struct FetchedMixin {
     pub document: String,
 }
 
-/// Where a mixin's document comes from: a registry for a digest-pinned reference, the local filesystem for a directory beside the definition.
+/// Where a mixin's document comes from: a registry for a reference, this machine's filesystem for a directory.
 pub trait MixinSource: Send + Sync {
     fn fetch(
         &self,
-        reference: &str,
+        locator: &Locator,
     ) -> impl std::future::Future<Output = Result<FetchedMixin>> + Send;
 }
 
@@ -28,103 +45,136 @@ pub fn is_a_mixin_artifact(artifact_type: Option<&str>, config_media_type: Optio
     }
 }
 
-/// The graph every ordering rule decides against, keyed by the pinned reference each source resolved to, with every reference that names a source translated to the same key.
+/// Resolve one reference against the document that named it: a directory is meaningful only to a document this machine read, and it roots where that document lives.
+fn locate(reference: &str, home: &Locator, the_user_named_it: bool) -> Result<Locator> {
+    if !lns_artifact::sandbox::names_a_local_directory(reference) {
+        return Ok(Locator::Reference(reference.to_string()));
+    }
+    let Locator::Directory(dir) = home else {
+        bail!(
+            "mixin {reference} is a directory, and this run's sandbox is published; a directory merges only into a document this machine read, so run the definition it belongs to"
+        );
+    };
+    if the_user_named_it {
+        if !std::path::Path::new(reference).is_absolute() {
+            bail!(
+                "mixin {reference} reached the run as a relative directory; a run merges the absolute path its preflight showed"
+            );
+        }
+        return Ok(Locator::Directory(lns_artifact::sandbox::fold_path(
+            std::path::Path::new(reference),
+        )));
+    }
+    Ok(Locator::Directory(lns_artifact::sandbox::fold_path(
+        &dir.join(reference),
+    )))
+}
+
+/// The graph every ordering rule decides against, keyed by the identity each source resolved to, with every reference that names a source translated to the same key.
 struct Fetched {
     graph: BTreeMap<String, SandboxSpec>,
     pinned_roots: Vec<String>,
     pinned_extra: Vec<String>,
 }
 
-/// What one walk of the graph carries: the sources fetched so far, keyed by the reference that pins them, and the references still to visit.
+/// What one walk of the graph carries: the sources fetched so far, what each reference resolved to under the document that named it, and the references still to visit.
 struct Walk {
     graph: BTreeMap<String, SandboxSpec>,
-    pins: BTreeMap<String, String>,
-    frontier: Vec<String>,
+    visited: BTreeMap<String, String>,
+    keys: BTreeMap<(String, String), String>,
+    frontier: Vec<(String, Locator)>,
 }
 
 /// Fetch every mixin the ordering rules can reach, so they decide against a complete graph rather than one that is still arriving.
 async fn collect<S: MixinSource>(
     roots: &[String],
     extra: &[String],
+    home: &Locator,
     source: &S,
 ) -> Result<Fetched> {
     let mut walk = Walk {
         graph: BTreeMap::new(),
-        pins: BTreeMap::new(),
+        visited: BTreeMap::new(),
+        keys: BTreeMap::new(),
         frontier: Vec::new(),
     };
     let mut pinned_extra = Vec::new();
     for reference in extra {
-        pinned_extra.push(visit(&mut walk, reference, true, source).await?);
+        pinned_extra.push(visit(&mut walk, reference, home, true, source).await?);
     }
+    let mut pinned_roots = Vec::new();
     for reference in roots {
-        visit(&mut walk, reference, false, source).await?;
+        pinned_roots.push(visit(&mut walk, reference, home, false, source).await?);
     }
     let mut depth = 2;
     while !walk.frontier.is_empty() && depth <= MAX_DEPTH {
-        for reference in std::mem::take(&mut walk.frontier) {
-            visit(&mut walk, &reference, false, source).await?;
+        for (reference, parent) in std::mem::take(&mut walk.frontier) {
+            visit(&mut walk, &reference, &parent, false, source).await?;
         }
         depth += 1;
     }
+    let keys = walk.keys;
     let mut graph = walk.graph;
-    for spec in graph.values_mut() {
-        spec.mixins = pinned(&spec.mixins, &walk.pins);
+    for (key, spec) in graph.iter_mut() {
+        spec.mixins = spec
+            .mixins
+            .iter()
+            .map(|reference| {
+                keys.get(&(key.clone(), reference.clone()))
+                    .unwrap_or(reference)
+                    .clone()
+            })
+            .collect();
     }
     Ok(Fetched {
-        pinned_roots: pinned(roots, &walk.pins),
         graph,
+        pinned_roots,
         pinned_extra,
     })
 }
 
-/// Say every reference the way the registry answered for it, so the walk and the graph agree on one identity per source; a reference nothing fetched is left alone for the depth limit to refuse.
-fn pinned(references: &[String], pins: &BTreeMap<String, String>) -> Vec<String> {
-    references
-        .iter()
-        .map(|reference| pins.get(reference).unwrap_or(reference).clone())
-        .collect()
-}
-
-/// Fetch one reference and answer with what pins it, reading each reference once however many documents name it.
+/// Fetch one reference and answer with the identity every rule reads it by, reading each one once however many documents name it.
 async fn visit<S: MixinSource>(
     walk: &mut Walk,
     reference: &str,
+    home: &Locator,
     the_user_named_it: bool,
     source: &S,
 ) -> Result<String> {
-    if let Some(pinned) = walk.pins.get(reference) {
-        return Ok(pinned.clone());
+    let seen = (home.key(), reference.to_string());
+    let locator = locate(reference, home, the_user_named_it)?;
+    if let Some(key) = walk.visited.get(&locator.key()) {
+        let key = key.clone();
+        walk.keys.insert(seen, key.clone());
+        return Ok(key);
     }
-    refuse_a_directory(reference, the_user_named_it)?;
     let fetched = source
-        .fetch(reference)
+        .fetch(&locator)
         .await
         .with_context(|| format!("resolving mixin {reference}"))?;
-    walk.pins
-        .insert(reference.to_string(), fetched.pinned.clone());
-    if !walk.graph.contains_key(&fetched.pinned) {
+    let key = match &locator {
+        Locator::Reference(_) => fetched.pinned,
+        Locator::Directory(path) => path.display().to_string(),
+    };
+    walk.visited.insert(locator.key(), key.clone());
+    walk.keys.insert(seen, key.clone());
+    if !walk.graph.contains_key(&key) {
         let mixin = lns_artifact::sandbox::parse_mixin(fetched.document.as_bytes())
             .with_context(|| format!("reading mixin {reference}"))?;
-        walk.frontier.extend(mixin.spec.mixins.iter().cloned());
-        walk.graph.insert(fetched.pinned.clone(), mixin.spec);
-    }
-    Ok(fetched.pinned)
-}
-
-/// A directory has no published identity, so neither kind of reference may name one — but only one of them is the user's to correct.
-fn refuse_a_directory(reference: &str, the_user_named_it: bool) -> Result<()> {
-    if !lns_artifact::sandbox::names_a_local_directory(reference) {
-        return Ok(());
-    }
-    if the_user_named_it {
-        bail!(
-            "mixin {reference} cannot name a local directory: a run merges published bytes, so name a reference the disclosure can pin"
+        let child_home = match locator {
+            Locator::Directory(path) => Locator::Directory(path),
+            Locator::Reference(_) => Locator::Reference(key.clone()),
+        };
+        walk.frontier.extend(
+            mixin
+                .spec
+                .mixins
+                .iter()
+                .map(|child| (child.clone(), child_home.clone())),
         );
+        walk.graph.insert(key.clone(), mixin.spec);
     }
-    bail!(
-        "mixin {reference} names a local directory, which has no meaning on the machine that pulled this sandbox; a published document pins every mixin by digest"
-    )
+    Ok(key)
 }
 
 /// Resolve a pulled artifact's mixins when it is a sandbox; a plain image has no document to merge and is returned untouched.
@@ -133,6 +183,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
     config_media_type: Option<&str>,
     config_json: &[u8],
     extra: &[String],
+    home: &Locator,
     source: &S,
 ) -> Result<Resolution> {
     if !matches!(
@@ -146,7 +197,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             pinned_extra: Vec::new(),
         });
     }
-    resolve(config_json, extra, source).await
+    resolve(config_json, extra, home, source).await
 }
 
 /// What a run boots, and the mixins that produced it — the merged document declares none of its own, so the references travel beside it.
@@ -162,10 +213,10 @@ pub struct Resolution {
 pub async fn resolve<S: MixinSource>(
     config_json: &[u8],
     extra: &[String],
+    home: &Locator,
     source: &S,
 ) -> Result<Resolution> {
-    let def = lns_artifact::sandbox::parse(config_json)
-        .context("reading the published sandbox document")?;
+    let def = lns_artifact::sandbox::parse(config_json).context("reading the sandbox document")?;
     if def.spec.mixins.is_empty() && extra.is_empty() {
         return Ok(Resolution {
             document: config_json.to_vec(),
@@ -173,7 +224,7 @@ pub async fn resolve<S: MixinSource>(
             pinned_extra: Vec::new(),
         });
     }
-    let fetched = collect(&def.spec.mixins, extra, source).await?;
+    let fetched = collect(&def.spec.mixins, extra, home, source).await?;
     let mut root = def.spec.clone();
     root.mixins = fetched.pinned_roots;
     let sources = flatten(&root, &fetched.pinned_extra, &fetched.graph)?;
@@ -204,13 +255,13 @@ pub fn refuse_mixins_without_a_document(extra: &[String]) -> Result<()> {
 
 /// The preflight pins what it showed, and the boot merges that — so a reference reaching the boot unpinned was never disclosed, whoever sent it.
 pub fn require_pinned_extras(extra: &[String]) -> Result<()> {
-    match extra
-        .iter()
-        .find(|reference| !lns_artifact::spec::is_digest_pinned_image(reference))
-    {
+    match extra.iter().find(|reference| {
+        !lns_artifact::spec::is_digest_pinned_image(reference)
+            && !std::path::Path::new(reference).is_absolute()
+    }) {
         None => Ok(()),
         Some(unpinned) => bail!(
-            "mixin {unpinned} reached the run unpinned; a run merges the digest its preflight showed, so pin it by digest"
+            "mixin {unpinned} reached the run neither pinned nor rooted; a run merges the digest or the absolute path its preflight showed"
         ),
     }
 }
@@ -272,25 +323,27 @@ mod tests {
     }
 
     impl MixinSource for Fake {
-        async fn fetch(&self, reference: &str) -> Result<FetchedMixin> {
+        async fn fetch(&self, locator: &Locator) -> Result<FetchedMixin> {
+            let reference = locator.key();
             self.fetched
                 .lock()
                 .expect("fetch log poisoned")
-                .push(reference.to_string());
+                .push(reference.clone());
             let document = self
                 .documents
-                .get(reference)
+                .get(&reference)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no such mixin here"))?;
             Ok(FetchedMixin {
-                pinned: self
-                    .pins
-                    .get(reference)
-                    .cloned()
-                    .unwrap_or_else(|| reference.to_string()),
+                pinned: self.pins.get(&reference).cloned().unwrap_or(reference),
                 document,
             })
         }
+    }
+
+    /// Every scenario here resolves a published document unless it says otherwise.
+    fn published() -> Locator {
+        Locator::Reference("registry.example.test/team/sandbox:1".to_string())
     }
 
     /// A digest-pinned reference for a fixture name, since validation refuses anything a consumer could not resolve identically.
@@ -332,7 +385,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let out = resolve(&sandbox(&spec), &[], &Fake::new(&refs)).await?;
+        let out = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs)).await?;
         lns_artifact::sandbox::parse(&out.document)
     }
 
@@ -340,7 +393,9 @@ mod tests {
     async fn a_document_with_no_mixins_is_returned_untouched() {
         let source = Fake::new(&[]);
         let original = sandbox(r#"{"image":"x:1"}"#);
-        let out = resolve(&original, &[], &source).await.unwrap();
+        let out = resolve(&original, &[], &published(), &source)
+            .await
+            .unwrap();
         assert_eq!(
             out.document, original,
             "nothing to resolve means nothing to rewrite"
@@ -359,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_image_is_passed_through_without_a_fetch() {
         let source = Fake::new(&[]);
-        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &source)
+        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &published(), &source)
             .await
             .expect("an image has no document to merge");
         assert_eq!(out.document, b"{}");
@@ -380,6 +435,7 @@ mod tests {
             None,
             &sandbox(r#"{"image":"x:1"}"#),
             &[],
+            &published(),
             &Fake::new(&[]),
         )
         .await
@@ -438,7 +494,7 @@ mod tests {
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
         let source = Fake::new(&refs);
-        let resolution = resolve(&sandbox(&spec), &[], &source)
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &source)
             .await
             .expect("a diamond resolves");
         assert_eq!(
@@ -461,6 +517,7 @@ mod tests {
         let err = resolve(
             &sandbox(&format!(r#"{{"image":"x:1","mixins":["{absent}"]}}"#)),
             &[],
+            &published(),
             &Fake::new(&[]),
         )
         .await
@@ -485,6 +542,7 @@ mod tests {
         let err = resolve(
             &sandbox(&format!(r#"{{"image":"x:1","mixins":["{reference}"]}}"#)),
             &[],
+            &published(),
             &source,
         )
         .await
@@ -500,12 +558,14 @@ mod tests {
         let err = resolve(
             &sandbox(r#"{"image":"x:1","mixins":["./mixins/postgres-tools/"]}"#),
             &[],
+            &published(),
             &Fake::new(&[]),
         )
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("has no meaning on the machine that pulled this sandbox"),
+            format!("{err:#}")
+                .contains("a directory merges only into a document this machine read"),
             "a directory beside the author's file is not something a consumer can resolve, and reading whatever host path it names would be worse than refusing; got: {err:#}"
         );
     }
@@ -547,9 +607,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_document_that_will_not_parse_is_blamed_on_itself_and_not_on_its_mixins() {
-        let err = resolve(b"{}", &[], &Fake::new(&[])).await.unwrap_err();
+        let err = resolve(b"{}", &[], &published(), &Fake::new(&[]))
+            .await
+            .unwrap_err();
         assert!(
-            format!("{err:#}").contains("reading the published sandbox document"),
+            format!("{err:#}").contains("reading the sandbox document"),
             "a document that will not parse has no mixins to blame, and naming them sends a publisher looking in the wrong place; got: {err:#}"
         );
     }
@@ -570,9 +632,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_image_refuses_the_mixins_the_user_named_rather_than_dropping_them() {
-        let sandbox_only = resolve_if_a_sandbox(None, None, b"{}", &[pinned("m")], &Fake::new(&[]))
-            .await
-            .unwrap_err();
+        let sandbox_only = resolve_if_a_sandbox(
+            None,
+            None,
+            b"{}",
+            &[pinned("m")],
+            &published(),
+            &Fake::new(&[]),
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{sandbox_only:#}").contains("no sandbox document to merge into"),
             "an image has nothing to merge, so silently running it without what the user asked for is the refusal this exists to make; got: {sandbox_only:#}"
@@ -588,6 +657,7 @@ mod tests {
         let out = resolve(
             &sandbox(&format!(r#"{{"image":"x:1","mixins":["{declared}"]}}"#)),
             &[],
+            &published(),
             &source,
         )
         .await
@@ -607,6 +677,7 @@ mod tests {
         let out = resolve(
             &sandbox(r#"{"image":"x:1"}"#),
             &[tagged.to_string()],
+            &published(),
             &source,
         )
         .await
@@ -633,13 +704,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn one_relative_reference_under_two_mixins_names_two_directories() {
+        let source = Fake::new(&[
+            ("/work/a", r#"{"mixins":["./m"]}"#),
+            ("/work/b", r#"{"mixins":["./m"]}"#),
+            ("/work/a/m", r#"{"tools":["python@3.12"]}"#),
+            ("/work/b/m", r#"{"tools":["node@22"]}"#),
+        ]);
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1","mixins":["./a","./b"]}"#),
+            &[],
+            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &source,
+        )
+        .await
+        .expect("each mixin roots its own references");
+        assert!(
+            out.mixins.contains(&"/work/a/m".to_string())
+                && out.mixins.contains(&"/work/b/m".to_string()),
+            "`./m` means a different directory under each mixin that names it, so one identity for both would merge the wrong document; got {:?}",
+            out.mixins
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relative_directory_the_user_names_refuses_rather_than_guessing_a_root() {
+        let err = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &["./mixins/pg".to_string()],
+            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &Fake::new(&[]),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("relative directory"),
+            "only the caller knows the directory the user typed it from, so rooting it here would read some other directory with the same name; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_the_user_names_is_read_from_this_machine() {
+        let source = Fake::new(&[("/work/mixins/pg", r#"{"tools":["python@3.12"]}"#)]);
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &["/work/mixins/./pg".to_string()],
+            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &source,
+        )
+        .await
+        .expect("a directory the user named beside their own definition is theirs to merge");
+        assert_eq!(
+            out.mixins,
+            ["/work/mixins/pg"],
+            "a directory has no digest, so the folded absolute path is the identity the disclosure names"
+        );
+    }
+
     #[test]
     fn a_reference_reaching_the_run_unpinned_is_refused_before_it_merges() {
         require_pinned_extras(&[pinned("m")])
             .expect("a pinned reference is what a preflight sends");
         let err = require_pinned_extras(&["ghcr.io/acme/obs-tools:2".to_string()]).unwrap_err();
         assert!(
-            format!("{err:#}").contains("reached the run unpinned"),
+            format!("{err:#}").contains("neither pinned nor rooted"),
             "a client that skipped the preflight would boot bytes nobody disclosed; got: {err:#}"
         );
     }

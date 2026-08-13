@@ -162,6 +162,61 @@ fn published_target(
     }
 }
 
+/// A local run sends the merged document, so the mixins that produced it are already in it; a published one sends the pins its preflight showed, because the service merges them itself.
+fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String]) -> Vec<String> {
+    match target {
+        crate::run::target::RunTarget::Local { .. } => Vec::new(),
+        crate::run::target::RunTarget::Reference(_) => pinned.to_vec(),
+    }
+}
+
+/// What the service answered for a local definition: the merged document, and the sources that produced it.
+struct ResolvedDefinition {
+    definition: String,
+    mixins: Vec<String>,
+    pinned_mixins: Vec<String>,
+}
+
+/// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
+async fn preflight_local(
+    socket: &Path,
+    definition: &str,
+    project_dir: &Path,
+    mixins: &[String],
+) -> Result<ResolvedDefinition> {
+    let request = Request::ResolveDefinition {
+        definition: definition.to_string(),
+        project_dir: project_dir.display().to_string(),
+        mixins: mixins.to_vec(),
+    };
+    match timeout(
+        PUBLISHED_PREFLIGHT_TIMEOUT,
+        real::send_request(socket, &request),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "resolving this definition's mixins timed out after {}s",
+            PUBLISHED_PREFLIGHT_TIMEOUT.as_secs()
+        )
+    })? {
+        Some(Response::DefinitionResolved {
+            definition,
+            mixins,
+            pinned_mixins,
+        }) => Ok(ResolvedDefinition {
+            definition,
+            mixins,
+            pinned_mixins,
+        }),
+        Some(Response::Error { message }) => anyhow::bail!("{message}"),
+        Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        None => {
+            anyhow::bail!("the service did not answer while resolving this definition's mixins")
+        }
+    }
+}
+
 async fn preflight_published(
     socket: &Path,
     reference: &str,
@@ -196,17 +251,34 @@ async fn await_published_preflight(
 
 pub async fn run_image(
     mut args: RunArgs,
-    target: crate::run::target::RunTarget,
+    mut target: crate::run::target::RunTarget,
     cwd: std::path::PathBuf,
     debug: bool,
 ) -> Result<i32> {
     let client = real_client()?;
+    args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
+    if let crate::run::target::RunTarget::Local {
+        def,
+        json,
+        project_dir,
+    } = &mut target
+        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty())
+    {
+        let resolved = preflight_local(client.socket(), json, project_dir, &args.mixins).await?;
+        **def = lns_artifact::sandbox::parse(resolved.definition.as_bytes())
+            .context("reading the resolved definition")?;
+        *json = resolved.definition;
+        crate::run::summary::adopt_pinned_mixins(
+            &mut args,
+            &resolved.mixins,
+            &resolved.pinned_mixins,
+        );
+    }
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
             Some(preflight_published(client.socket(), reference, &args.mixins).await?)
         }
         crate::run::target::RunTarget::Local { .. } => {
-            crate::run::target::refuse_mixins_on_a_local_run(&args.mixins)?;
             // A path-shaped REF resolved to a definition; the summary names its image, not the path.
             if args.image.is_some() {
                 args.image = Some(target.image());
@@ -266,7 +338,7 @@ pub async fn run_image(
         (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
-    // Only a pulled sandbox resolves its mixins today; a local document still declares them and is refused.
+    // A local run resolved before this point; a published one resolves in its preflight.
     if let Some(published) = published.as_ref() {
         crate::run::summary::adopt_pinned_mixins(
             &mut args,
@@ -344,7 +416,7 @@ pub async fn run_image(
         env: args.env,
         image: Some(target.image()),
         resolved_image: published.as_ref().map(|published| published.image.clone()),
-        mixins: args.mixins,
+        mixins: mixins_for_the_run(&target, &args.mixins),
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
@@ -1141,6 +1213,33 @@ fn phrase_for_verb(verb: &str) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn a_local_run_sends_no_mixins_because_its_document_already_carries_them() {
+        let pinned = vec!["/work/mixins/pg".to_string()];
+        let local = crate::run::target::RunTarget::Local {
+            def: Box::new(
+                lns_artifact::sandbox::parse(
+                    br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#,
+                )
+                .expect("the fixture is a valid definition"),
+            ),
+            json: String::new(),
+            project_dir: std::path::PathBuf::from("/work"),
+        };
+        assert!(
+            mixins_for_the_run(&local, &pinned).is_empty(),
+            "the local preflight already merged them, so sending them again asks the service to merge a document it was not given"
+        );
+        assert_eq!(
+            mixins_for_the_run(
+                &crate::run::target::RunTarget::Reference("ghcr.io/acme/agent:1".into()),
+                &pinned
+            ),
+            pinned,
+            "a published run merges service-side, so the boot needs the pins its preflight showed"
+        );
+    }
 
     #[test]
     fn published_sandbox_preflight_pins_the_artifact_and_keeps_launch_defaults() {

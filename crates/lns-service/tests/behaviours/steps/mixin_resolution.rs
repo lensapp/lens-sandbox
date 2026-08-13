@@ -1,5 +1,5 @@
 use cucumber::{given, then, when};
-use lns_service::artifact::mixin::{FetchedMixin, MixinSource};
+use lns_service::artifact::mixin::{FetchedMixin, Locator, MixinSource};
 
 use crate::world::BehaviourWorld;
 
@@ -22,21 +22,23 @@ impl Installed {
 }
 
 impl MixinSource for Installed {
-    async fn fetch(&self, reference: &str) -> anyhow::Result<FetchedMixin> {
+    async fn fetch(&self, locator: &Locator) -> anyhow::Result<FetchedMixin> {
+        let reference = locator.key();
         let document = self
             .documents
-            .get(reference)
+            .get(&reference)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("nothing here answers for {reference}"))?;
         Ok(FetchedMixin {
-            pinned: self
-                .pins
-                .get(reference)
-                .cloned()
-                .unwrap_or_else(|| reference.to_string()),
+            pinned: self.pins.get(&reference).cloned().unwrap_or(reference),
             document,
         })
     }
+}
+
+/// A scenario that does not say otherwise resolves a published document.
+pub(crate) fn published() -> Locator {
+    Locator::Reference("registry.example.test/some-sandbox:1".to_string())
 }
 
 pub(crate) fn install_at(w: &mut BehaviourWorld, reference: &str, name: &str, spec: &str) {
@@ -120,14 +122,20 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             Installed::from_rig(rig),
         )
     };
-    let planned =
-        match lns_service::artifact::mixin::resolve(definition.as_bytes(), &[], &installed).await {
-            Ok(resolution) => lns_service::artifact::plan_published_sandbox(
-                &resolution.document,
-                "registry.example.test/some-sandbox:1",
-            ),
-            Err(e) => Err(e),
-        };
+    let planned = match lns_service::artifact::mixin::resolve(
+        definition.as_bytes(),
+        &[],
+        &published(),
+        &installed,
+    )
+    .await
+    {
+        Ok(resolution) => lns_service::artifact::plan_published_sandbox(
+            &resolution.document,
+            "registry.example.test/some-sandbox:1",
+        ),
+        Err(e) => Err(e),
+    };
     crate::steps::declared_connectors::launch_resolved(w, planned);
 }
 
@@ -183,15 +191,17 @@ fn error_says_unresolvable(w: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
-#[then("the error says a local document's mixins are not resolved yet")]
-fn error_says_local_mixins_are_unresolved(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the error says the definition reached the plan unresolved")]
+fn error_says_the_definition_reached_the_plan_unresolved(
+    w: &mut BehaviourWorld,
+) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let error = rig.error.as_deref().ok_or("no launch error was recorded")?;
-    if error.contains("a local document's mixins are not resolved yet") {
+    if error.contains("reached the plan without being resolved") {
         Ok(())
     } else {
         Err(format!(
-            "a local run's mounts and ports come from the document the CLI parsed itself, so booting one that declares mixins would drop what they contribute without a word: {error}"
+            "a run whose document still declares a mixin never merged it, so booting would drop what it contributes without a word: {error}"
         ))
     }
 }

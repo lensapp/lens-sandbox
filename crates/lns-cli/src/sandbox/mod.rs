@@ -861,13 +861,13 @@ async fn prune<W: std::io::Write>(
     }
 }
 
-/// `--mixin` composes a document before it boots, so a run that has already booted and a local file nothing resolved yet can only refuse it.
+/// `--mixin` composes a document before it boots, and neither a run that has already booted nor a file rendered offline can honour it.
 pub fn refuse_mixins_unless_published(mixins: &[String]) -> Result<()> {
     if mixins.is_empty() {
         return Ok(());
     }
     bail!(
-        "--mixin applies to a published sandbox reference: a live run has already booted with what it merged, and a local document's mixins are not resolved yet"
+        "--mixin applies to a sandbox reference: a live run has already booted with what it merged, and a local definition renders offline, without resolving anything"
     )
 }
 
@@ -2028,7 +2028,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("--mixin applies to a published sandbox reference"),
+            format!("{err:#}").contains("--mixin applies to a sandbox reference"),
             "a live run has already booted, so rendering it as though the flag applied would describe a composition that never ran; got: {err:#}"
         );
     }
