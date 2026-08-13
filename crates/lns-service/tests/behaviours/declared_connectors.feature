@@ -66,6 +66,16 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And the boundary injection for "some-provider" stays unarmed
 
+  Scenario: A grant the bare run earned does not arm a run that layers a mixin onto it
+    Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
+    And the sandbox definition declares connector "some-provider"
+    And the directory's lns-policy.yaml connects "some-provider"
+    And the per-machine credential store has a stored value for "some-provider"
+    And the run composes the mixin "ghcr.io/acme/obs-tools"
+    When the sandbox is launched
+    Then the workload's environment contains the "SOME_TOKEN" placeholder
+    And the boundary injection for "some-provider" stays unarmed
+
   Scenario: A declared connector's machine-stored value stays unarmed until connected
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider" and allows the "api.some-provider.example" route

@@ -408,6 +408,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_published_document_declaring_an_unpinned_mixin_refuses_before_it_is_fetched() {
+        let source = Fake::new(&[]);
+        let err = resolve(
+            &sandbox(r#"{"image":"x:1","mixins":["ghcr.io/acme/obs:2"]}"#),
+            &[],
+            &published(),
+            &source,
+        )
+        .await
+        .expect_err("a tag a published document declares resolves differently for each consumer");
+        assert!(
+            format!("{err:#}").contains("must be digest-pinned"),
+            "got: {err:#}"
+        );
+        assert!(
+            source
+                .fetched
+                .lock()
+                .expect("fetch log poisoned")
+                .is_empty(),
+            "the refusal has to land before the network, or a stranger's document chooses what this run pulls"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mixin_declaring_an_unpinned_mixin_refuses_the_graph_below_it() {
+        let (spec, documents) = resolve_named(
+            r#"{"image":"x:1","mixins":["a"]}"#,
+            &[("a", r#"{"mixins":["ghcr.io/acme/obs:2"]}"#)],
+        );
+        let refs: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
+        let err = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+            .await
+            .expect_err("a pinned mixin naming a tag reopens exactly what pinning it closed");
+        assert!(
+            format!("{err:#}").contains("must be digest-pinned"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_document_with_no_mixins_is_returned_untouched() {
         let source = Fake::new(&[]);
         let original = sandbox(r#"{"image":"x:1"}"#);

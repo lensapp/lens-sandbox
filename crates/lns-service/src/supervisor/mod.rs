@@ -542,9 +542,7 @@ mod tests {
     fn test_consent(credentials: &[lns_spec::Credential]) -> RunConsent<'_> {
         RunConsent {
             credentials,
-            workload: lns_policy::grants::WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            workload: lns_policy::grants::WorkloadIdentity::definition("/proj"),
             signed_in: vec![],
             revocations_at_gate: std::collections::HashMap::new(),
         }
@@ -650,9 +648,7 @@ mod tests {
             GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
         };
         let fixture = boot_sign_in_fixture();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
 
         let session = start_with_boot_sign_in(&fixture, &workload).await;
 
@@ -681,9 +677,7 @@ mod tests {
 
         let session = start_with_boot_sign_in(
             &fixture,
-            &lns_policy::grants::WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            &lns_policy::grants::WorkloadIdentity::definition("/proj"),
         )
         .await;
 

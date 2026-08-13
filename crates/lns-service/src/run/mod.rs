@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lns_ipc::{Response, WireFrame};
 use lns_policy::grants::WorkloadIdentity;
 use tokio::sync::mpsc::Sender;
@@ -183,19 +183,21 @@ fn canonical_dir_key(dir: &str) -> String {
 
 /// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers). A run resolving neither refuses — plain-image runs are retired, and a shared fallback bucket would let one run's grant arm another's without a card.
 pub(super) fn workload_identity(
-    definition_dir: Option<&str>,
+    args: &lns_ipc::RunImageArgs,
     resolved_ref: Option<&str>,
     digest: Option<&str>,
 ) -> Result<WorkloadIdentity> {
-    if let Some(dir) = definition_dir {
-        Ok(WorkloadIdentity::Definition {
-            dir: canonical_dir_key(dir),
-        })
+    // A grant keys on what the run is composed of, never on `mixins`, which is only what the boot still has to merge — a local run sends that empty because its document already carries them.
+    crate::artifact::mixin::require_pinned_extras(&args.composed_mixins)
+        .context("keying this run's connector grants")?;
+    let composed = args.composed_mixins.clone();
+    if let Some(dir) = args.definition_dir.as_deref() {
+        Ok(WorkloadIdentity::definition(canonical_dir_key(dir)).composed_with(composed))
     } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
-        Ok(WorkloadIdentity::Reference {
-            repo: normalize_repo(reference),
-            digest: digest.to_string(),
-        })
+        Ok(
+            WorkloadIdentity::reference(normalize_repo(reference), digest.to_string())
+                .composed_with(composed),
+        )
     } else {
         anyhow::bail!(
             "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference, and if `lns` was upgraded while this service kept running, restart it (`lns service stop` then `lns service start`) so the two match"
@@ -230,16 +232,62 @@ mod tests {
         );
     }
 
+    /// A run request carrying only what the identity reads, so a test can vary the definition dir and the composition without spelling forty launch settings.
+    fn run_args(definition_dir: Option<&str>, composed: &[String]) -> lns_ipc::RunImageArgs {
+        serde_json::from_value(serde_json::json!({
+            "image": "x:1",
+            "cpus": 2,
+            "mem": 2048,
+            "policy_path": null,
+            "cmd": [],
+            "debug": false,
+            "definition_dir": definition_dir,
+            "composed_mixins": composed,
+        }))
+        .expect("the fixture names every field the wire requires")
+    }
+
     #[test]
     fn workload_identity_keys_a_local_definition_by_its_directory() {
-        let id = workload_identity(Some("/Users/me/app"), Some("ghcr.io/team/base:1"), None)
-            .expect("a definition dir identifies the run");
+        let id = workload_identity(
+            &run_args(Some("/Users/me/app"), &[]),
+            Some("ghcr.io/team/base:1"),
+            None,
+        )
+        .expect("a definition dir identifies the run");
         assert_eq!(
             id,
-            WorkloadIdentity::Definition {
-                dir: "/Users/me/app".into()
-            },
+            WorkloadIdentity::definition("/Users/me/app"),
             "a local definition keys by its dir even though it carries a base image"
+        );
+    }
+
+    #[test]
+    fn workload_identity_carries_the_mixins_the_run_was_composed_with() {
+        let composed = [format!("ghcr.io/acme/obs@sha256:{}", "d".repeat(64))];
+        let id = workload_identity(&run_args(Some("/Users/me/app"), &composed), None, None)
+            .expect("a definition dir identifies the run");
+        assert_ne!(
+            id,
+            workload_identity(&run_args(Some("/Users/me/app"), &[]), None, None)
+                .expect("a definition dir identifies the run"),
+            "a run the user layered a mixin onto must not spend the grant the bare run earned"
+        );
+    }
+
+    #[test]
+    fn workload_identity_refuses_a_composition_named_by_a_moving_reference() {
+        let err = workload_identity(
+            &run_args(Some("/Users/me/app"), &["ghcr.io/acme/obs:2".to_string()]),
+            None,
+            None,
+        )
+        .expect_err(
+            "a tag resolves to different bytes tomorrow, so a grant keyed on it means nothing",
+        );
+        assert!(
+            format!("{err:#}").contains("keying this run's connector grants"),
+            "got: {err:#}"
         );
     }
 
@@ -251,9 +299,9 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&real, &link).expect("create symlink");
 
-        let via_link = workload_identity(Some(link.to_str().unwrap()), None, None)
+        let via_link = workload_identity(&run_args(Some(link.to_str().unwrap()), &[]), None, None)
             .expect("a definition dir identifies the run");
-        let via_real = workload_identity(Some(real.to_str().unwrap()), None, None)
+        let via_real = workload_identity(&run_args(Some(real.to_str().unwrap()), &[]), None, None)
             .expect("a definition dir identifies the run");
         assert_eq!(
             via_link, via_real,
@@ -264,31 +312,30 @@ mod tests {
     #[test]
     fn workload_identity_falls_back_to_the_raw_dir_when_it_cannot_be_canonicalized() {
         assert_eq!(
-            workload_identity(Some("/no/such/project/dir"), None, None)
+            workload_identity(&run_args(Some("/no/such/project/dir"), &[]), None, None)
                 .expect("a definition dir identifies the run"),
-            WorkloadIdentity::Definition {
-                dir: "/no/such/project/dir".into()
-            }
+            WorkloadIdentity::definition("/no/such/project/dir")
         );
     }
 
     #[test]
     fn workload_identity_keys_a_published_reference_by_repo_and_digest() {
-        let id = workload_identity(None, Some("ghcr.io/acme/agent:1.4.0"), Some("sha256:abc"))
-            .expect("a resolved digest identifies the run");
+        let id = workload_identity(
+            &run_args(None, &[]),
+            Some("ghcr.io/acme/agent:1.4.0"),
+            Some("sha256:abc"),
+        )
+        .expect("a resolved digest identifies the run");
         assert_eq!(
             id,
-            WorkloadIdentity::Reference {
-                repo: "ghcr.io/acme/agent".into(),
-                digest: "sha256:abc".into()
-            }
+            WorkloadIdentity::reference("ghcr.io/acme/agent", "sha256:abc")
         );
     }
 
     #[test]
     fn workload_identity_refuses_a_run_without_a_definition_or_a_resolved_digest() {
         for (definition_dir, resolved_ref) in [(None, None), (None, Some("ghcr.io/acme/agent:1"))] {
-            let err = workload_identity(definition_dir, resolved_ref, None)
+            let err = workload_identity(&run_args(definition_dir, &[]), resolved_ref, None)
                 .expect_err("an unidentifiable run must refuse, never share a grant bucket");
             assert!(
                 format!("{err:#}").contains("cannot hold connector grants"),
@@ -299,7 +346,8 @@ mod tests {
 
     #[test]
     fn workload_identity_refusal_names_the_service_restart_a_stale_service_needs() {
-        let err = workload_identity(None, None, None).expect_err("an unidentifiable run refuses");
+        let err = workload_identity(&run_args(None, &[]), None, None)
+            .expect_err("an unidentifiable run refuses");
         assert!(
             format!("{err:#}").contains("lns service stop"),
             "a matching CLI always resolves an identity, so the developer who sees this is most likely running an upgraded `lns` against a service left running from before; got: {err:#}"

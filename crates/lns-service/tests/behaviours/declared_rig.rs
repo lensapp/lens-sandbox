@@ -31,6 +31,8 @@ pub struct DeclaredRig {
     pub definition_snapshot: Option<String>,
     /// Mixin documents this machine can resolve, keyed by reference.
     pub mixins: std::collections::BTreeMap<String, String>,
+    /// Pinned `--mixin` references this run is composed of; the rig grants the bare identity, so a composed launch models a grant an earlier bare run earned.
+    pub composed_mixins: Vec<String>,
     /// The tools the resolved document asks for, so a scenario can see what a mixin contributed.
     pub tools: Vec<String>,
     /// What a reference resolves to, so a scenario can publish a mixin under a tag.

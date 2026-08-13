@@ -513,6 +513,9 @@ pub struct RunImageArgs {
     /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
     #[serde(default)]
     pub mixins: Vec<String>,
+    /// The same references, still named for a local run whose document the preflight already merged: a connector grant keys on the composition, so layering one more mixin is asked about instead of inheriting the bare run's answer.
+    #[serde(default)]
+    pub composed_mixins: Vec<String>,
     #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
@@ -871,6 +874,7 @@ mod tests {
             image: Some("prism".into()),
             resolved_image: None,
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -908,6 +912,7 @@ mod tests {
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -1038,6 +1043,7 @@ mod tests {
             image: Some("some-image:1".into()),
             resolved_image: None,
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 2,
             mem: 1024,

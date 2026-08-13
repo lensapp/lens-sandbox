@@ -166,10 +166,19 @@ fn published_target(
 }
 
 /// A local run sends the merged document, so the mixins that produced it are already in it; a published one sends the pins its preflight showed, because the service merges them itself.
-fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String]) -> Vec<String> {
-    match target {
-        crate::run::target::RunTarget::Local { .. } => Vec::new(),
-        crate::run::target::RunTarget::Reference(_) => pinned.to_vec(),
+/// What a run request says about mixins: the boot merges `to_merge`, and a connector grant keys on `composed`.
+struct RunMixins {
+    to_merge: Vec<String>,
+    composed: Vec<String>,
+}
+
+fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String]) -> RunMixins {
+    RunMixins {
+        to_merge: match target {
+            crate::run::target::RunTarget::Local { .. } => Vec::new(),
+            crate::run::target::RunTarget::Reference(_) => pinned.to_vec(),
+        },
+        composed: pinned.to_vec(),
     }
 }
 
@@ -409,6 +418,7 @@ pub async fn run_image(
     let detach_chord = args.detach_keys.0.clone();
     let sandbox_user = args.effective_sandbox_user();
     let sandbox_uid = args.effective_sandbox_uid();
+    let run_mixins = mixins_for_the_run(&target, &args.mixins);
 
     let request = Request::RunImage(Box::new(RunImageArgs {
         cpus: args.effective_cpus(),
@@ -419,7 +429,8 @@ pub async fn run_image(
         env: args.env,
         image: Some(target.image()),
         resolved_image: published.as_ref().map(|published| published.image.clone()),
-        mixins: mixins_for_the_run(&target, &args.mixins),
+        mixins: run_mixins.to_merge,
+        composed_mixins: run_mixins.composed,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
@@ -1231,16 +1242,22 @@ mod tests {
             project_dir: std::path::PathBuf::from("/work"),
         };
         assert!(
-            mixins_for_the_run(&local, &pinned).is_empty(),
+            mixins_for_the_run(&local, &pinned).to_merge.is_empty(),
             "the local preflight already merged them, so sending them again asks the service to merge a document it was not given"
         );
         assert_eq!(
             mixins_for_the_run(
                 &crate::run::target::RunTarget::Reference("ghcr.io/acme/agent:1".into()),
                 &pinned
-            ),
+            )
+            .to_merge,
             pinned,
             "a published run merges service-side, so the boot needs the pins its preflight showed"
+        );
+        assert_eq!(
+            mixins_for_the_run(&local, &pinned).composed,
+            pinned,
+            "a local run is still composed of what it merged, and a connector grant keys on that — sending nothing here spends the bare run's grant on a mixin the user added"
         );
     }
 
