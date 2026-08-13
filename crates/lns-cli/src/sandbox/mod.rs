@@ -486,12 +486,17 @@ where
             mixins: Vec::new(),
         })
         .await?;
+    // A mixin pull installs nothing: it caches documents, so there is no effect to consent to and its tools are disclosed where they are installed.
     let (digest, tools) = match inspection {
         Response::ImageInspected {
             inspection: lns_ipc::ArtifactInspection::Sandbox(view),
         } if !view.digest.is_empty() => (view.digest, view.tools),
         Response::ImageInspected {
-            inspection: lns_ipc::ArtifactInspection::Sandbox(_),
+            inspection: lns_ipc::ArtifactInspection::Mixin(view),
+        } if !view.digest.is_empty() => (view.digest, Vec::new()),
+        Response::ImageInspected {
+            inspection:
+                lns_ipc::ArtifactInspection::Mixin(_) | lns_ipc::ArtifactInspection::Sandbox(_),
         } => bail!(
             "the registry did not provide a digest for {}",
             args.reference
@@ -525,6 +530,18 @@ where
         })
         .await?;
     match response {
+        Response::MixinPulled {
+            reference,
+            digest,
+            cached_mixins,
+        } => {
+            writeln!(out, "pulled {reference}")?;
+            writeln!(out, "digest: {digest}")?;
+            if cached_mixins > 0 {
+                writeln!(out, "cached {cached_mixins} mixin(s) it layers on")?;
+            }
+            Ok(0)
+        }
         Response::ImagePulled { image, warnings } => {
             writeln!(out, "pulled {}", image.reference)?;
             writeln!(out, "digest: {}", image.digest)?;
@@ -951,31 +968,37 @@ fn render_cached_inspect<W: std::io::Write>(
             for entry in &view.env {
                 writeln!(out, "env: {entry}")?;
             }
-            for mount in &view.mounts {
-                let kind = match mount.kind {
-                    lns_ipc::SandboxMountKind::Bind => "bind",
-                    lns_ipc::SandboxMountKind::Volume => "volume",
-                };
-                let mode = if mount.read_only { " (read-only)" } else { "" };
-                writeln!(
-                    out,
-                    "mount: {kind} {} -> {}{mode}",
-                    mount.source, mount.target
-                )?;
-            }
+            render_mounts(out, &view.mounts)?;
             if !view.ports.is_empty() {
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
-            for fileset in &view.filesets {
-                let source = crate::run::summary::fileset_view_source_display(fileset);
-                let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
-                writeln!(
-                    out,
-                    "fileset: {source} -> {} (owner: {owner})",
-                    fileset.mount_path
-                )?;
-            }
+            render_filesets(out, &view.filesets)?;
             render_connectors(out, &view.connectors)?;
+            for credential in &view.credentials {
+                writeln!(out, "credential: {}", credential_disclosure(credential))?;
+            }
+            for tool in &view.tools {
+                writeln!(out, "tool: {tool}")?;
+            }
+            render_policy_flags(out, &view.policy_flags)?;
+        }
+        lns_ipc::ArtifactInspection::Mixin(view) => {
+            writeln!(out, "kind: Mixin")?;
+            writeln!(out, "reference: {}", view.reference)?;
+            if !view.digest.is_empty() {
+                writeln!(out, "digest: {}", view.digest)?;
+            }
+            for mixin in &view.mixins {
+                writeln!(out, "mixin: {mixin}")?;
+            }
+            for entry in &view.env {
+                writeln!(out, "env: {entry}")?;
+            }
+            render_mounts(out, &view.mounts)?;
+            if !view.ports.is_empty() {
+                writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
+            }
+            render_filesets(out, &view.filesets)?;
             for credential in &view.credentials {
                 writeln!(out, "credential: {}", credential_disclosure(credential))?;
             }
@@ -989,6 +1012,39 @@ fn render_cached_inspect<W: std::io::Write>(
             writeln!(out, "reference: {}", view.reference)?;
             writeln!(out, "digest: {}", view.digest)?;
         }
+    }
+    Ok(())
+}
+
+/// One renderer for both kinds, since a mixin's mounts read exactly as a sandbox's do.
+fn render_mounts<W: std::io::Write>(out: &mut W, mounts: &[lns_ipc::SandboxMount]) -> Result<()> {
+    for mount in mounts {
+        let kind = match mount.kind {
+            lns_ipc::SandboxMountKind::Bind => "bind",
+            lns_ipc::SandboxMountKind::Volume => "volume",
+        };
+        let mode = if mount.read_only { " (read-only)" } else { "" };
+        writeln!(
+            out,
+            "mount: {kind} {} -> {}{mode}",
+            mount.source, mount.target
+        )?;
+    }
+    Ok(())
+}
+
+fn render_filesets<W: std::io::Write>(
+    out: &mut W,
+    filesets: &[lns_ipc::SandboxFileset],
+) -> Result<()> {
+    for fileset in filesets {
+        let source = crate::run::summary::fileset_view_source_display(fileset);
+        let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
+        writeln!(
+            out,
+            "fileset: {source} -> {} (owner: {owner})",
+            fileset.mount_path
+        )?;
     }
     Ok(())
 }

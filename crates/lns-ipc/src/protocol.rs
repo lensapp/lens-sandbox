@@ -210,6 +210,12 @@ pub enum Response {
         image: ImageInfo,
         warnings: Vec<String>,
     },
+    /// A pulled mixin has no index entry: nothing runs it and nothing has to reclaim it, so the answer is what was cached rather than a row.
+    MixinPulled {
+        reference: String,
+        digest: String,
+        cached_mixins: usize,
+    },
     ImageList {
         images: Vec<ImageInfo>,
     },
@@ -275,12 +281,38 @@ pub struct ImageInfo {
 pub enum ArtifactInspection {
     Image(ImageView),
     Sandbox(Box<SandboxView>),
+    Mixin(Box<MixinView>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageView {
     pub reference: String,
     pub digest: String,
+}
+
+/// A published mixin as its author wrote it: everything a sandbox may carry except the blocks that describe one launch, which a mixin may not declare.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixinView {
+    pub reference: String,
+    #[serde(default)]
+    pub digest: String,
+    /// The mixins this one declares, as written — a published mixin is shown unresolved, since what its graph merges to is a launch-time answer.
+    #[serde(default)]
+    pub mixins: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<SandboxMount>,
+    #[serde(default)]
+    pub ports: Vec<SandboxPort>,
+    #[serde(default)]
+    pub filesets: Vec<SandboxFileset>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub credentials: Vec<lns_spec::Credential>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub policy_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

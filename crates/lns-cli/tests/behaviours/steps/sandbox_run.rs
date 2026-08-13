@@ -84,6 +84,48 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
     });
 }
 
+#[given(regex = r#"^the registry serves the mixin "([^"]+)"$"#)]
+fn registry_serves_mixin(w: &mut BehaviourWorld, reference: String) {
+    let digest = format!("sha256:{}", "b".repeat(64));
+    w.sandbox.response = Some(lns_ipc::Response::MixinPulled {
+        reference: reference.clone(),
+        digest: digest.clone(),
+        cached_mixins: 2,
+    });
+    w.sandbox.inspect_image_response = Some(Response::ImageInspected {
+        inspection: lns_ipc::ArtifactInspection::Mixin(Box::new(lns_ipc::MixinView {
+            reference,
+            digest,
+            mixins: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: vec!["some-tool@1.2.3".into()],
+            policy_flags: Vec::new(),
+        })),
+    });
+}
+
+#[given(regex = r#"^the registry serves a mixin with no digest at "([^"]+)"$"#)]
+fn registry_serves_a_digestless_mixin(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.inspect_image_response = Some(Response::ImageInspected {
+        inspection: lns_ipc::ArtifactInspection::Mixin(Box::new(lns_ipc::MixinView {
+            reference,
+            digest: String::new(),
+            mixins: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            tools: Vec::new(),
+            policy_flags: Vec::new(),
+        })),
+    });
+}
+
 #[given(regex = r#"^the reference "([^"]+)" is a plain OCI image, not a sandbox$"#)]
 fn reference_is_plain_image(w: &mut BehaviourWorld, reference: String) {
     w.sandbox_run.refusal = Some(format!(

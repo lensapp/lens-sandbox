@@ -569,6 +569,15 @@ A mixin is a document of `kind: Mixin`. It may carry anything a sandbox can
 except the blocks that describe one launch — `image`, `command`, `workdir`,
 `user`, `resources` — and it may not name a connector.
 
+You publish one the same way you publish a sandbox, because it is the same kind
+of thing:
+
+```bash
+lns push ghcr.io/acme/observability:2 -f observability.yaml
+lns inspect ghcr.io/acme/observability:2   # what it carries, as written
+lns pull ghcr.io/acme/observability:2      # cache it and the mixins it names
+```
+
 **The last source to say something about a thing wins.** Sources are ordered:
 the sandbox first, then each entry in `spec.mixins` in order with that mixin's
 own mixins expanded right after it, then each `--mixin` the user passed.

@@ -105,6 +105,34 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     cached_artifact(world, &reference, inspection);
 }
 
+#[given(regex = r#"^the service inspects "([^"]+)" as a mixin declaring the tool "([^"]+)"$"#)]
+fn inspects_a_published_mixin(world: &mut BehaviourWorld, reference: String, tool: String) {
+    let inspection = ArtifactInspection::Mixin(Box::new(lns_ipc::MixinView {
+        reference: reference.clone(),
+        digest: full_digest(),
+        mixins: vec![format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64))],
+        mounts: Vec::new(),
+        ports: vec![lns_ipc::SandboxPort {
+            host: None,
+            container: 9090,
+        }],
+        filesets: Vec::new(),
+        env: vec!["MODE=research".into()],
+        credentials: vec![lns_spec::Credential {
+            env_var: "SOME_TOKEN".into(),
+            placeholder: "some_LNSPLACEHOLDER0000".into(),
+            injections: vec![lns_spec::InjectionDef {
+                kind: lns_spec::InjectionKind::BearerHeader,
+                domain: "api.some-provider.example".into(),
+                header: None,
+            }],
+        }],
+        tools: vec![tool],
+        policy_flags: Vec::new(),
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
 #[given(
     regex = r#"^the service inspects "([^"]+)" as a sandbox the user's mixin "([^"]+)" resolved into "([^"]+)"$"#
 )]
