@@ -260,6 +260,17 @@ pub async fn warm<S: MixinSource>(roots: &[String], source: &S) -> Result<usize>
     Ok(fetched.graph.len())
 }
 
+/// A declared directory roots at the directory the definition was read from, so that root has to name one directory on this machine, whoever sent it.
+pub fn require_a_rooted_project_dir(project_dir: &std::path::Path) -> Result<()> {
+    if project_dir.is_absolute() {
+        return Ok(());
+    }
+    bail!(
+        "the definition's directory {} is not an absolute directory; a definition's mixins root where it was read from",
+        project_dir.display()
+    )
+}
+
 /// The preflight pins what it showed, and the boot merges that — so a reference reaching the boot unpinned was never disclosed, whoever sent it.
 pub fn require_pinned_extras(extra: &[String]) -> Result<()> {
     match extra.iter().find(|reference| {
@@ -784,6 +795,17 @@ mod tests {
         assert_eq!(
             read, 2,
             "a pull that stopped at the mixin itself would still need the network the first time something merges it"
+        );
+    }
+
+    #[test]
+    fn a_definition_rooted_at_no_one_directory_is_refused_before_anything_is_read() {
+        require_a_rooted_project_dir(std::path::Path::new("/work"))
+            .expect("an absolute directory is what a caller reads a definition from");
+        let err = require_a_rooted_project_dir(std::path::Path::new("work")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not an absolute directory"),
+            "a relative root reads whichever directory of that name the service happens to sit beside, and roots that mixin's filesets and binds under it; got: {err:#}"
         );
     }
 

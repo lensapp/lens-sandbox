@@ -357,11 +357,13 @@ pub(crate) async fn resolve_definition(
     project_dir: &str,
     mixins: &[String],
 ) -> Result<lns_ipc::Response> {
-    let home = crate::artifact::mixin::Locator::Directory(std::path::PathBuf::from(project_dir));
+    let project_dir = std::path::Path::new(project_dir);
+    crate::artifact::mixin::require_a_rooted_project_dir(project_dir)?;
+    let home = crate::artifact::mixin::Locator::Directory(project_dir.to_path_buf());
     let resolution =
         crate::artifact::mixin::resolve(definition.as_bytes(), mixins, &home, &RegistryMixins)
             .await
-            .with_context(|| format!("resolving the definition in {project_dir}"))?;
+            .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
     Ok(lns_ipc::Response::DefinitionResolved {
         definition: String::from_utf8(resolution.document)
             .context("the resolved definition is not utf-8")?,

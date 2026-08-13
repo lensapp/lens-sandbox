@@ -2142,6 +2142,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_request_resolve_refuses_a_definition_directory_that_is_not_absolute() {
+        let resp = as_json(
+            handle_request(
+                &Request::ResolveDefinition {
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
+                    project_dir: "work".into(),
+                    mixins: Vec::new(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("is not an absolute directory"),
+            "a caller that sent no root would have its mixins read from whichever directory of that name the service sits beside; got {resp}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_request_resolve_of_a_broken_definition_surfaces_the_parse_error() {
         let resp = as_json(
             handle_request(
