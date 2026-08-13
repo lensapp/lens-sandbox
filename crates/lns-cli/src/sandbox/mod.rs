@@ -213,9 +213,6 @@ pub struct SandboxInspectArgs {
         help = "Definition file to render instead of ./lns.yaml, offline. Cannot be combined with TARGET."
     )]
     pub file: Option<PathBuf>,
-
-    #[arg(skip)]
-    pub registry: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -225,9 +222,6 @@ pub struct SandboxRmArgs {
         help = "Cached sandbox reference — a bare one resolves against the `run.registry` default, else hub.lns.run (or a running sandbox's id/name, which is refused)."
     )]
     pub run: String,
-
-    #[arg(skip)]
-    pub registry: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -241,7 +235,7 @@ pub struct SandboxPruneArgs {
     pub force: bool,
 }
 
-/// Qualifies the registry coordinate a verb addresses with `registry`, or the built-in default when nothing is configured.
+/// Qualifies the reference a distribution verb addresses with `registry`, or the built-in default when nothing is configured; an id-or-ref verb (inspect, rm) defers until the service reports no such run, taking the registry at dispatch instead.
 pub fn apply_registry_default(command: &mut SandboxCommand, registry: Option<&str>) {
     let qualify = |reference: &mut String| {
         *reference = crate::config::resolve_default_registry(reference, registry);
@@ -257,9 +251,6 @@ pub fn apply_registry_default(command: &mut SandboxCommand, registry: Option<&st
                 crate::config::registry_of(&args.from).or(registry),
             );
         }
-        // Inspect and rm take an id-or-ref, so the default can only be applied once the service has reported no such run — it rides along instead of rewriting the target.
-        SandboxCommand::Inspect(args) => args.registry = registry.map(str::to_string),
-        SandboxCommand::Rm(args) => args.registry = registry.map(str::to_string),
         _ => {}
     }
 }
@@ -434,10 +425,16 @@ pub struct TermInfo {
     pub stdout_is_terminal: bool,
 }
 
+/// Everything a dispatched verb reads besides its own arguments: the service, the terminal, and the configured default registry.
+pub struct DispatchEnv<'a, S> {
+    pub svc: &'a S,
+    pub term: TermInfo,
+    pub registry: Option<&'a str>,
+}
+
 pub async fn run_with_writers<S, I, W, O, E>(
-    cmd: &SandboxCommand,
-    svc: &S,
-    term: TermInfo,
+    mut cmd: SandboxCommand,
+    env: DispatchEnv<'_, S>,
     input: &mut I,
     out: &mut W,
     stdout: &mut O,
@@ -450,7 +447,13 @@ where
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
 {
-    match cmd {
+    let DispatchEnv {
+        svc,
+        term,
+        registry,
+    } = env;
+    apply_registry_default(&mut cmd, registry);
+    match &cmd {
         SandboxCommand::Init | SandboxCommand::Validate(_) => {
             bail!("author commands run offline, not through the service dispatch")
         }
@@ -469,11 +472,11 @@ where
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
             };
-            inspect(svc, target, args.registry.as_deref(), out).await
+            inspect(svc, target, registry, out).await
         }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
-        SandboxCommand::Rm(args) => rm(svc, args, out).await,
+        SandboxCommand::Rm(args) => rm(svc, args, registry, out).await,
         SandboxCommand::Prune(args) => prune(svc, args, out).await,
     }
 }
@@ -772,6 +775,7 @@ pub(crate) fn is_unknown_run(message: &str) -> bool {
 async fn rm<W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxRmArgs,
+    registry: Option<&str>,
     out: &mut W,
 ) -> Result<i32> {
     match svc
@@ -793,8 +797,7 @@ async fn rm<W: std::io::Write>(
         Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
         // A reference the service knows no run for is a cached sandbox; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
-            let reference =
-                crate::config::resolve_default_registry(&args.run, args.registry.as_deref());
+            let reference = crate::config::resolve_default_registry(&args.run, registry);
             remove_cached(svc, &reference, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -1388,9 +1391,12 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let err = run_with_writers(
-            &cmd,
-            &svc,
-            TermInfo::default(),
+            cmd,
+            DispatchEnv {
+                svc: &svc,
+                term: TermInfo::default(),
+                registry: None,
+            },
             &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
@@ -1410,9 +1416,12 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let err = run_with_writers(
-            &cmd,
-            &svc,
-            TermInfo::default(),
+            cmd,
+            DispatchEnv {
+                svc: &svc,
+                term: TermInfo::default(),
+                registry: None,
+            },
             &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
@@ -1432,16 +1441,18 @@ mod tests {
             SandboxCommand::Inspect(SandboxInspectArgs {
                 run: None,
                 file: None,
-                registry: None,
             }),
         ] {
             let mut out = Vec::new();
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let err = run_with_writers(
-                &cmd,
-                &svc,
-                TermInfo::default(),
+                cmd,
+                DispatchEnv {
+                    svc: &svc,
+                    term: TermInfo::default(),
+                    registry: None,
+                },
                 &mut std::io::Cursor::new(""),
                 &mut out,
                 &mut stdout,
@@ -1465,9 +1476,12 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let err = run_with_writers(
-            &cmd,
-            &svc,
-            TermInfo::default(),
+            cmd,
+            DispatchEnv {
+                svc: &svc,
+                term: TermInfo::default(),
+                registry: None,
+            },
             &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
@@ -1499,12 +1513,15 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run_with_writers(
-            &SandboxCommand::Pull(SandboxPullArgs {
+            SandboxCommand::Pull(SandboxPullArgs {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 assume_yes: false,
             }),
-            &svc,
-            TermInfo::default(),
+            DispatchEnv {
+                svc: &svc,
+                term: TermInfo::default(),
+                registry: None,
+            },
             &mut std::io::Cursor::new(""),
             &mut out,
             &mut stdout,
@@ -2155,8 +2172,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2181,8 +2198,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "hermes:1.4.0".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2203,8 +2220,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2233,8 +2250,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2268,8 +2285,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2288,8 +2305,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2301,16 +2318,9 @@ mod tests {
     async fn rm_rejects_an_unrelated_inspect_response() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "1".into(),
-                registry: None,
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
+        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, None, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2329,8 +2339,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "ghcr.io/team/x:1".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await
@@ -2351,8 +2361,8 @@ mod tests {
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
-                registry: None,
             },
+            None,
             &mut out,
         )
         .await

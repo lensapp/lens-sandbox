@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::run::summary::print_run_summary;
-use lns_cli::sandbox::{SandboxCommand, TermInfo, run_with_writers};
+use lns_cli::sandbox::{DispatchEnv, SandboxCommand, TermInfo, run_with_writers};
 use lns_ipc::{ArtifactInspection, Response, SandboxView};
 
 use super::sandbox_cli::fake_sandbox_service;
@@ -99,13 +99,15 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
-        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+        SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
             run: Some(TOOLS_REFERENCE.into()),
             file: None,
-            registry: None,
         }),
-        &svc,
-        TermInfo::default(),
+        DispatchEnv {
+            svc: &svc,
+            term: TermInfo::default(),
+            registry: None,
+        },
         &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,

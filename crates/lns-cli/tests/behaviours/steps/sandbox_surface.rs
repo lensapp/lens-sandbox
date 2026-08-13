@@ -1,6 +1,6 @@
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::sandbox::{SandboxArgs, SandboxCommand, TermInfo, run_with_writers};
+use lns_cli::sandbox::{DispatchEnv, SandboxArgs, SandboxCommand, TermInfo, run_with_writers};
 use lns_ipc::Response;
 
 use crate::steps::sandbox_cli::fake_sandbox_service;
@@ -24,9 +24,12 @@ async fn record_invocation(w: &mut BehaviourWorld, cmd: SandboxCommand) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let _ = run_with_writers(
-        &cmd,
-        &svc,
-        TermInfo::default(),
+        cmd,
+        DispatchEnv {
+            svc: &svc,
+            term: TermInfo::default(),
+            registry: None,
+        },
         &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,

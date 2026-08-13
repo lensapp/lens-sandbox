@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::LocalBoxFuture;
+use lns_cli::sandbox::{DispatchEnv, SandboxService, TermInfo, run_with_writers};
 use lns_cli::sandbox::{SandboxArgs, SandboxCommand, author, distribute};
-use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{
     Request, Response, RunConfig, RunDetails, RunStatsInfo, RunStatus, RunSummary, WireFrame,
@@ -346,7 +346,10 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
     let mut args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
-    lns_cli::sandbox::apply_registry_default(&mut args.command, None);
+    // The push emulation below mirrors push_local, which qualifies before building; every other verb is qualified by run_with_writers itself.
+    if matches!(&args.command, SandboxCommand::Push(_)) {
+        lns_cli::sandbox::apply_registry_default(&mut args.command, None);
+    }
 
     if author::is_offline(&args.command) {
         run_author_verb(w, &args.command);
@@ -416,11 +419,14 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
         .map(|answer| format!("{answer}\n"))
         .unwrap_or_default();
     let result = run_with_writers(
-        &args.command,
-        &svc,
-        TermInfo {
-            stdin_is_tty: w.sandbox.stdin_is_tty,
-            stdout_is_terminal: false,
+        args.command,
+        DispatchEnv {
+            svc: &svc,
+            term: TermInfo {
+                stdin_is_tty: w.sandbox.stdin_is_tty,
+                stdout_is_terminal: false,
+            },
+            registry: None,
         },
         &mut std::io::Cursor::new(answer),
         &mut out,
@@ -552,16 +558,17 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, reference: String) {
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut command = SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+    let command = SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
         run: Some(reference),
         file: None,
-        registry: None,
     });
-    lns_cli::sandbox::apply_registry_default(&mut command, None);
     let result = run_with_writers(
-        &command,
-        &svc,
-        TermInfo::default(),
+        command,
+        DispatchEnv {
+            svc: &svc,
+            term: TermInfo::default(),
+            registry: None,
+        },
         &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
@@ -587,13 +594,16 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
-        &SandboxCommand::Ps(lns_cli::sandbox::PsArgs {
+        SandboxCommand::Ps(lns_cli::sandbox::PsArgs {
             output: lns_cli::output::OutputArgs {
                 format: lns_cli::output::Format::Table,
             },
         }),
-        &svc,
-        TermInfo::default(),
+        DispatchEnv {
+            svc: &svc,
+            term: TermInfo::default(),
+            registry: None,
+        },
         &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,

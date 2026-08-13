@@ -13,8 +13,7 @@ use crate::service::client::BoxFuture;
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let mut args = super::SandboxArgs::from_arg_matches(matches)?;
-        qualify_references(&mut args.command)?;
+        let args = super::SandboxArgs::from_arg_matches(matches)?;
         if let super::SandboxCommand::Run(run_args) = args.command {
             return crate::service::launch_run(*run_args, ctx.debug).await;
         }
@@ -34,18 +33,6 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
 fn configured_registry() -> Result<Option<String>> {
     let path = crate::config::default_config_path()?;
     Ok(crate::config::load_run_defaults(&path)?.registry)
-}
-
-fn qualify_references(command: &mut super::SandboxCommand) -> Result<()> {
-    super::apply_registry_default(command, configured_registry()?.as_deref());
-    Ok(())
-}
-
-fn qualified_reference(reference: &str) -> Result<String> {
-    Ok(crate::config::resolve_default_registry(
-        reference,
-        configured_registry()?.as_deref(),
-    ))
 }
 
 pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -84,20 +71,17 @@ pub fn run_kill<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxRmArgs::from_arg_matches(matches)?;
-        let mut command = super::SandboxCommand::Rm(args);
-        qualify_references(&mut command)?;
-        dispatch_command(command, ctx.input).await
+        dispatch_command(super::SandboxCommand::Rm(args), ctx.input).await
     })
 }
 
 pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxInspectArgs::from_arg_matches(matches)?;
-        let mut command = super::SandboxCommand::Inspect(args);
+        let command = super::SandboxCommand::Inspect(args);
         if super::author::is_offline(&command) {
             return run_author(&command, ctx);
         }
-        qualify_references(&mut command)?;
         dispatch_command(command, ctx.input).await
     })
 }
@@ -120,7 +104,7 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
     Box::pin(async move {
         let args = super::SandboxPushArgs::from_arg_matches(matches)?;
         push_local(
-            &qualified_reference(&args.reference)?,
+            &args.reference,
             args.dry_run,
             args.file.as_deref(),
             ctx.cwd()?,
@@ -132,18 +116,14 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxPullArgs::from_arg_matches(matches)?;
-        let mut command = super::SandboxCommand::Pull(args);
-        qualify_references(&mut command)?;
-        dispatch_command(command, ctx.input).await
+        dispatch_command(super::SandboxCommand::Pull(args), ctx.input).await
     })
 }
 
 pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxTagArgs::from_arg_matches(matches)?;
-        let mut command = super::SandboxCommand::Tag(args);
-        qualify_references(&mut command)?;
-        dispatch_command(command, ctx.input).await
+        dispatch_command(super::SandboxCommand::Tag(args), ctx.input).await
     })
 }
 
@@ -153,6 +133,8 @@ async fn push_local(
     file: Option<&std::path::Path>,
     cwd: PathBuf,
 ) -> Result<i32> {
+    let reference =
+        &crate::config::resolve_default_registry(reference, configured_registry()?.as_deref());
     let path = super::author::selected_definition_path(file, &cwd);
     let project_dir = path.parent().unwrap_or(&cwd).to_path_buf();
     let doc = super::author::load_definition_json_at(&RealFs, &path)?;
@@ -416,14 +398,18 @@ pub async fn dispatch(args: super::SandboxArgs, input: &mut dyn std::io::BufRead
         stdin_is_tty: crate::raw_mode::stdin_is_tty(),
         stdout_is_terminal: std::io::stdout().is_terminal(),
     };
+    let registry = configured_registry()?;
     let mut out = std::io::stdout();
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
     let mut input = input;
     run_with_writers(
-        &command,
-        &svc,
-        term,
+        command,
+        super::DispatchEnv {
+            svc: &svc,
+            term,
+            registry: registry.as_deref(),
+        },
         &mut input,
         &mut out,
         &mut stdout,
