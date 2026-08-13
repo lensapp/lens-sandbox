@@ -68,6 +68,7 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
     let view = SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: TOOLS_REFERENCE.into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),

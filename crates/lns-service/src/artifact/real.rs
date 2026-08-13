@@ -369,6 +369,7 @@ pub(crate) async fn resolve_definition(
             .context("the resolved definition is not utf-8")?,
         mixins: resolution.mixins,
         pinned_mixins: resolution.pinned_extra,
+        contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
     })
 }
 

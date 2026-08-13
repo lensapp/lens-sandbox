@@ -237,6 +237,9 @@ pub enum Response {
         mixins: Vec<String>,
         /// What each mixin the user named resolved to, in the order they named them.
         pinned_mixins: Vec<String>,
+        /// Which source decided each entry of the merged document, so the disclosure can attribute every line it shows.
+        #[serde(default)]
+        contributions: Vec<SourceContribution>,
     },
     ImageTagged {
         from: String,
@@ -315,6 +318,33 @@ pub struct MixinView {
     pub policy_flags: Vec<String>,
 }
 
+/// The block a contribution belongs to, which is what tells a renderer which line to attribute it to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContributionBlock {
+    Credential,
+    Tool,
+    Mount,
+    Port,
+    Egress,
+}
+
+/// One entry of a resolved sandbox, named by the source that decided it and by whatever that decision replaced (`docs/sandbox-spec.md` §1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceContribution {
+    pub block: ContributionBlock,
+    pub key: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displaced: Vec<DisplacedEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplacedEntry {
+    pub source: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxView {
     pub reference: String,
@@ -327,6 +357,9 @@ pub struct SandboxView {
     /// What each mixin the user named resolved to, in the order they named them, so the run boots the bytes its preflight pinned.
     #[serde(default)]
     pub pinned_mixins: Vec<String>,
+    /// Which source decided each entry below, and what that decision replaced.
+    #[serde(default)]
+    pub contributions: Vec<SourceContribution>,
     #[serde(default)]
     pub workdir: Option<String>,
     /// The run-as user the sandbox declared, so a pulled artifact asking for root is visible before it boots.
@@ -1458,6 +1491,7 @@ mod tests {
         let view = SandboxView {
             mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:1".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),

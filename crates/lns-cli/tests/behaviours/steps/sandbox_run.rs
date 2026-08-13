@@ -65,6 +65,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference,
             digest,
             image: "docker.io/library/alpine@sha256:abc".into(),

@@ -133,6 +133,7 @@ struct PublishedTarget {
     tools: Vec<String>,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
+    contributions: Vec<lns_ipc::SourceContribution>,
 }
 
 fn published_target(
@@ -154,6 +155,7 @@ fn published_target(
                 tools: crate::run::summary::tools_from_view(&view),
                 mixins: view.mixins.clone(),
                 pinned_mixins: view.pinned_mixins.clone(),
+                contributions: view.contributions.clone(),
             })
         }
         lns_ipc::ArtifactInspection::Mixin(_) => anyhow::bail!(
@@ -187,6 +189,7 @@ struct ResolvedDefinition {
     definition: String,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
+    contributions: Vec<lns_ipc::SourceContribution>,
 }
 
 /// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
@@ -216,10 +219,12 @@ async fn preflight_local(
             definition,
             mixins,
             pinned_mixins,
+            contributions,
         }) => Ok(ResolvedDefinition {
             definition,
             mixins,
             pinned_mixins,
+            contributions,
         }),
         Some(Response::Error { message }) => anyhow::bail!("{message}"),
         Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
@@ -284,6 +289,7 @@ pub async fn run_image(
             &mut args,
             &resolved.mixins,
             &resolved.pinned_mixins,
+            &resolved.contributions,
         );
     }
     let published = match &target {
@@ -356,8 +362,10 @@ pub async fn run_image(
             &mut args,
             &published.mixins,
             &published.pinned_mixins,
+            &published.contributions,
         );
     }
+    crate::run::summary::drop_overridden_mounts(&mut args, &consumer_mount_targets);
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
@@ -1269,6 +1277,7 @@ mod tests {
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()],
                 pinned_mixins: vec!["ghcr.io/acme/obs@sha256:5b9e1f0a".into()],
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1355,6 +1364,7 @@ mod tests {
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),

@@ -224,6 +224,10 @@ pub struct RunArgs {
     #[arg(skip)]
     pub resolved_mixins: Vec<String>,
 
+    /// Which source decided each entry the summary shows, and what that decision replaced.
+    #[arg(skip)]
+    pub contributions: Vec<lns_ipc::SourceContribution>,
+
     #[arg(
         short = 'v',
         long = "volume",

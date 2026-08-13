@@ -20,12 +20,13 @@ pub use paths::{
     cache_root, connection_ledger, connection_ledger_anchor, data_root, short_run_id,
 };
 pub use protocol::{
-    ArtifactInspection, BindMount, BindSpec, CredentialBindDecision, ExecImageArgs, ImageInfo,
-    ImageView, LogLevel, MixinView, MountSpec, PortPublish, Protocol, Request, Response, RunConfig,
-    RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset,
-    SandboxFilesetOwner, SandboxMount, SandboxMountKind, SandboxPort, SandboxView, SignalKind,
-    StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure, cmdline_unsafe_char,
-    validate_bind_source, validate_run_name, validate_volume_name, validate_volume_target,
+    ArtifactInspection, BindMount, BindSpec, ContributionBlock, CredentialBindDecision,
+    DisplacedEntry, ExecImageArgs, ImageInfo, ImageView, LogLevel, MixinView, MountSpec,
+    PortPublish, Protocol, Request, Response, RunConfig, RunDetails, RunImageArgs, RunStatsInfo,
+    RunStatus, RunSummary, SandboxFileset, SandboxFilesetOwner, SandboxMount, SandboxMountKind,
+    SandboxPort, SandboxView, SignalKind, SourceContribution, StatusInfo, VolumeInfo, VolumeMount,
+    VolumePruneFailure, cmdline_unsafe_char, validate_bind_source, validate_run_name,
+    validate_volume_name, validate_volume_target,
 };
 pub use socket::{SocketPathError, default_socket_path};
 pub use update::{NO_UPDATE_CHECK_ENV, UpdateStatus};

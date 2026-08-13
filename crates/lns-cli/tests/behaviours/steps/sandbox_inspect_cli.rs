@@ -34,6 +34,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -77,6 +78,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -145,6 +147,7 @@ fn inspects_sandbox_with_a_pinned_flag_mixin(
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: vec![pinned.clone()],
         pinned_mixins: vec![pinned],
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -175,6 +178,7 @@ fn inspects_sandbox_resolved_from_a_mixin(
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: vec![mixin],
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -201,6 +205,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -236,6 +241,7 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -267,6 +273,7 @@ fn inspects_sandbox_credential(
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -301,6 +308,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
@@ -327,6 +335,7 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: reference.clone(),
         digest: full_digest(),
         image: "registry.example.test/runtime:1".into(),
