@@ -267,20 +267,13 @@ pub async fn run_image(
         _ => Vec::new(),
     };
     // Only a pulled sandbox resolves its mixins today; a local document still declares them and is refused.
-    args.pinned_mixins = published
-        .as_ref()
-        .map(|published| published.pinned_mixins.clone())
-        .unwrap_or_default();
-    args.resolved_mixins = published
-        .as_ref()
-        .map(|published| {
-            crate::run::summary::mixin_display(
-                &published.mixins,
-                &args.mixins,
-                &published.pinned_mixins,
-            )
-        })
-        .unwrap_or_default();
+    if let Some(published) = published.as_ref() {
+        crate::run::summary::adopt_pinned_mixins(
+            &mut args,
+            &published.mixins,
+            &published.pinned_mixins,
+        );
+    }
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
@@ -351,7 +344,7 @@ pub async fn run_image(
         env: args.env,
         image: Some(target.image()),
         resolved_image: published.as_ref().map(|published| published.image.clone()),
-        mixins: args.pinned_mixins,
+        mixins: args.mixins,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,

@@ -691,7 +691,6 @@ mod tests {
         RunArgs {
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
-            pinned_mixins: Vec::new(),
             image: Some("alpine".to_string()),
             file: None,
             name: None,
