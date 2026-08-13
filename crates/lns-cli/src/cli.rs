@@ -216,17 +216,13 @@ pub struct RunArgs {
     #[arg(skip)]
     pub tools: Vec<String>,
 
-    /// Merge a mixin into this run, after the ones the document declares. Repeatable; a tag is pinned before the run reports it.
+    /// Merge a mixin into this run, after the ones the document declares. Repeatable; a tag is pinned before the run reports it, and the pin is what the run carries.
     #[arg(long = "mixin", value_name = "REF")]
     pub mixins: Vec<String>,
 
     /// The mixins a pulled sandbox resolved into, ready to display; the merged document declares none of its own, so this is the only place a composed sandbox says so.
     #[arg(skip)]
     pub resolved_mixins: Vec<String>,
-
-    /// What each `--mixin` resolved to, in flag order, so the run boots the bytes its preflight pinned.
-    #[arg(skip)]
-    pub pinned_mixins: Vec<String>,
 
     #[arg(
         short = 'v',
