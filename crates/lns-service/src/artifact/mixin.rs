@@ -229,14 +229,14 @@ pub async fn resolve<S: MixinSource>(
     root.mixins = fetched.pinned_roots;
     let sources = flatten(&root, &fetched.pinned_extra, &fetched.graph)?;
     let merged = merge(&sources)?;
-    let document = document(&def, &merged.spec)?;
+    let document = document(&def, &merged)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
     Ok(Resolution {
         document,
         mixins: sources
             .iter()
             .skip(1)
-            .map(|source| source.label.clone())
+            .map(|source| source.label.to_string())
             .collect(),
         pinned_extra: fetched.pinned_extra,
     })
@@ -497,12 +497,12 @@ mod tests {
         let resolution = resolve(&sandbox(&spec), &[], &published(), &source)
             .await
             .expect("a diamond resolves");
-        assert_eq!(
-            resolution.mixins.len(),
-            4,
-            "the disclosure names every source that contributed, including a mixin reached twice"
-        );
         let shared = pinned("shared");
+        assert_eq!(
+            resolution.mixins,
+            [pinned("a"), pinned("b"), shared.clone()],
+            "the disclosure names every source that contributed, and a mixin two documents reach contributed once — naming it twice would tell a reader it merged twice"
+        );
         let fetched = source.fetched.lock().expect("fetch log poisoned");
         assert_eq!(
             fetched.iter().filter(|r| **r == shared).count(),
@@ -778,14 +778,16 @@ mod tests {
         let document = sandbox(
             r#"{"image":"x:1","volumes":[{"name":"data","target":"/data"}],"filesets":[{"path":"./skills","mountPath":"/data"}]}"#,
         );
+        let empty = SandboxSpec::default();
+        let mixin = pinned("m");
         let sources = [
             Source {
-                label: lns_artifact::merge::ROOT_LABEL.to_string(),
-                spec: SandboxSpec::default(),
+                label: lns_artifact::merge::ROOT_LABEL,
+                spec: &empty,
             },
             Source {
-                label: pinned("m"),
-                spec: SandboxSpec::default(),
+                label: &mixin,
+                spec: &empty,
             },
         ];
         let err = refuse_what_no_sandbox_could_be(&document, &sources).unwrap_err();
