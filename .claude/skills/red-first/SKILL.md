@@ -1,7 +1,7 @@
 ---
 name: red-first
 description: Red-test-first fix loop for bugs and behavior changes — state the defect as a claim, write the failing test before any production code, watch it fail for the stated reason, then make the smallest change that turns it green. Includes follow-up sweeps (coverage of new properties, side-effect accounting, fixture reality checks), mutation proofs for green-on-arrival tests, and a strictly bounded, optional end-to-end phase used only when a contract crosses a component boundary. Use this whenever the user reports a bug, asks to fix an issue, asks whether a finding is real and then wants it fixed, asks to verify a fix with tests, or asks to harden tests against regressions — even if they don't say "TDD" or "red test".
-argument-hint: [issue description] [optional: suspected cause or proposed fix]
+argument-hint: "[issue description] [optional: suspected cause or proposed fix]"
 ---
 
 # Red-First Fix Loop
