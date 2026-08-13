@@ -1247,9 +1247,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("grants.json");
         let store = JsonFileGrantStore::new(path.clone());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut file = WorkloadGrantFile::default();
         file.upsert(GrantRecord::allow(
             "proj",
@@ -1613,9 +1611,7 @@ mod tests {
     }
 
     fn acme_workload() -> WorkloadIdentity {
-        WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        }
+        WorkloadIdentity::definition("/proj")
     }
 
     fn acme_grants(workload: &WorkloadIdentity) -> WorkloadGrantFile {

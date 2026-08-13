@@ -138,9 +138,7 @@ fn launch(
         .collect();
     rig.offered = run.connectable_ids.iter().cloned().collect();
     // The launch consents to its applied connectors by default (the grant a prior first-use card would have left); a scenario withholds an id to model a cloned overlay or a slot with no machine-local grant, and the gate then keeps it unarmed.
-    let workload = WorkloadIdentity::Definition {
-        dir: "/rig/project".into(),
-    };
+    let workload = WorkloadIdentity::definition("/rig/project");
     let mut grants = WorkloadGrantFile::default();
     for p in &run.providers {
         if run.armed.contains(p.id()) && !rig.withhold_grants.contains(p.id()) {
@@ -154,15 +152,16 @@ fn launch(
             ));
         }
     }
+    let composed = workload.clone().composed_with(rig.composed_mixins.clone());
     // A completed boot-gate sign-in grants the workload even where a prior grant was withheld, exactly as adapter::start records it before the gate.
-    for record in boot_sign_in_grants(&rig.signed_in, &run.providers, "rig-project", &workload) {
+    for record in boot_sign_in_grants(&rig.signed_in, &run.providers, "rig-project", &composed) {
         grants.upsert(record);
     }
     let armed = gate_armed_by_grant(
         &run.armed,
         &run.providers,
         "rig-project",
-        &workload,
+        &composed,
         &grants,
     );
     rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &armed, &|_| None);
@@ -216,6 +215,13 @@ fn overlay_connects_nothing(w: &mut BehaviourWorld) {
 fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.connectors.push(id);
+}
+
+#[given(regex = r#"^the run composes the mixin "([^"]+)"$"#)]
+fn run_composes_mixin(w: &mut BehaviourWorld, reference: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.composed_mixins
+        .push(format!("{reference}@sha256:{}", "d".repeat(64)));
 }
 
 #[given(regex = r#"^this workload has no grant for "([^"]+)"$"#)]

@@ -564,6 +564,7 @@ mod tests {
                 image: None,
                 resolved_image: None,
                 mixins: Vec::new(),
+                composed_mixins: Vec::new(),
                 name: None,
                 cpus: 1,
                 mem: 0,

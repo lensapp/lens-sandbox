@@ -7,19 +7,54 @@ use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-/// What a sandbox run is, for the purpose of remembering a connector grant against it.
+/// Separates a composed mixin from what precedes it; a NUL, because neither a path nor an OCI reference may contain one, so no directory name can spell a key that belongs to another composition.
+const MIXIN: char = '\0';
+
+/// What a sandbox run is, for the purpose of remembering a connector grant against it: the workload, and the mixins the user composed onto it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkloadIdentity {
+pub struct WorkloadIdentity {
+    workload: Workload,
+    mixins: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Workload {
     Definition { dir: String },
     Reference { repo: String, digest: String },
 }
 
 impl WorkloadIdentity {
-    pub fn key(&self) -> String {
-        match self {
-            WorkloadIdentity::Definition { dir } => format!("def:{dir}"),
-            WorkloadIdentity::Reference { repo, digest } => format!("ref:{repo}@{digest}"),
+    pub fn definition(dir: impl Into<String>) -> Self {
+        Self {
+            workload: Workload::Definition { dir: dir.into() },
+            mixins: Vec::new(),
         }
+    }
+
+    pub fn reference(repo: impl Into<String>, digest: impl Into<String>) -> Self {
+        Self {
+            workload: Workload::Reference {
+                repo: repo.into(),
+                digest: digest.into(),
+            },
+            mixins: Vec::new(),
+        }
+    }
+
+    /// The `--mixin` references the preflight pinned, in flag order, because the order decides the merge and so decides what boots.
+    pub fn composed_with(mut self, mixins: Vec<String>) -> Self {
+        self.mixins = mixins;
+        self
+    }
+
+    pub fn key(&self) -> String {
+        let workload = match &self.workload {
+            Workload::Definition { dir } => format!("def:{dir}"),
+            Workload::Reference { repo, digest } => format!("ref:{repo}@{digest}"),
+        };
+        self.mixins
+            .iter()
+            .fold(workload, |key, mixin| format!("{key}{MIXIN}{mixin}"))
     }
 }
 
@@ -319,14 +354,15 @@ mod tests {
     use serde_json::json;
 
     fn def(dir: &str) -> WorkloadIdentity {
-        WorkloadIdentity::Definition { dir: dir.into() }
+        WorkloadIdentity::definition(dir)
     }
 
     fn reference(repo: &str, digest: &str) -> WorkloadIdentity {
-        WorkloadIdentity::Reference {
-            repo: repo.into(),
-            digest: digest.into(),
-        }
+        WorkloadIdentity::reference(repo, digest)
+    }
+
+    fn mixin(name: &str) -> String {
+        format!("ghcr.io/acme/{name}@sha256:{}", "d".repeat(64))
     }
 
     #[test]
@@ -339,6 +375,79 @@ mod tests {
         assert_eq!(
             reference("ghcr.io/acme/agent", "sha256:abc").key(),
             "ref:ghcr.io/acme/agent@sha256:abc"
+        );
+    }
+
+    #[test]
+    fn a_composed_run_keys_apart_from_the_bare_one() {
+        assert_ne!(
+            def("/work").key(),
+            def("/work").composed_with(vec![mixin("obs")]).key(),
+            "a grant the developer gave the bare run would otherwise arm the same credential for whatever a mixin adds to it, with no card"
+        );
+    }
+
+    #[test]
+    fn a_published_sandbox_composed_by_a_flag_keys_apart_from_the_bare_one() {
+        let bare = reference("ghcr.io/acme/agent", "sha256:abc");
+        assert_ne!(
+            bare.key(),
+            bare.clone().composed_with(vec![mixin("obs")]).key(),
+            "a published digest pins the mixins the document declared, never the ones the user added on the command line"
+        );
+    }
+
+    #[test]
+    fn flag_order_decides_the_key_because_it_decides_the_merge() {
+        assert_ne!(
+            def("/work")
+                .composed_with(vec![mixin("a"), mixin("b")])
+                .key(),
+            def("/work")
+                .composed_with(vec![mixin("b"), mixin("a")])
+                .key(),
+            "the later mixin wins the merge, so two orders are two different sandboxes"
+        );
+    }
+
+    #[test]
+    fn no_directory_name_can_spell_another_compositions_key() {
+        let composed = def("/parent/work").composed_with(vec![mixin("obs")]);
+        assert_ne!(
+            composed.key(),
+            def(&format!("/parent/work+mixin:{}", mixin("obs"))).key(),
+            "a checkout can create that directory, and a key it collides with is a connector armed with no card"
+        );
+    }
+
+    #[test]
+    fn a_bare_run_keys_as_it_did_before_a_mixin_could_compose_one() {
+        assert_eq!(
+            def("/Users/me/app").composed_with(Vec::new()).key(),
+            "def:/Users/me/app",
+            "composing nothing must not re-key an existing grant, or every developer is asked again for a run that has not changed"
+        );
+    }
+
+    #[test]
+    fn one_composed_grant_does_not_answer_for_another_composition() {
+        let mut file = WorkloadGrantFile::default();
+        let granted = def("/work").composed_with(vec![mixin("obs")]);
+        file.upsert(GrantRecord::allow(
+            "/work",
+            &granted,
+            "some-provider",
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ));
+        assert!(
+            file.lookup(
+                "/work",
+                &def("/work").composed_with(vec![mixin("evil")]),
+                "some-provider"
+            )
+            .is_none(),
+            "the whole point of keying on the composition is that a different one has to be asked about"
         );
     }
 

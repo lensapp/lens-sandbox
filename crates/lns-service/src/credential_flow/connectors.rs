@@ -476,9 +476,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -499,9 +497,7 @@ mod tests {
             provider_of("some-provider", "OTHER_TOKEN", "api.some-provider.example"),
         ];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -523,9 +519,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let armed = gate_armed_by_grant(
             &applied,
             &providers,
@@ -547,9 +541,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut grants = WorkloadGrantFile::default();
         grants.upsert(GrantRecord::deny(
             "proj",
@@ -570,9 +562,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -594,9 +584,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(&workload, "some-provider", "SOME_TOKEN", "api.old.example");
         let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
         assert!(
@@ -612,9 +600,7 @@ mod tests {
             "SOME_TOKEN",
             "api.some-provider.example",
         )];
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -635,9 +621,7 @@ mod tests {
             "SOME_TOKEN",
             "api.some-provider.example",
         )];
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records = boot_sign_in_grants(
             &["some-provider".to_string()],
             &providers,
@@ -666,9 +650,7 @@ mod tests {
         let declared = vec![declaration("REMAPPED_TOKEN", "api.some-oauth.example")];
         let providers =
             resolve_applied_with_credentials(&Policy::default(), &declared, &catalog).providers;
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records =
             boot_sign_in_grants(&["some-oauth".to_string()], &providers, "proj", &workload);
         assert_eq!(records.len(), 1);
@@ -696,9 +678,7 @@ mod tests {
         ];
         let run = resolve_applied_with_credentials(&Policy::default(), &declared, &catalog);
         let applied: HashSet<String> = run.providers.iter().map(|p| p.id().to_string()).collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut grants = WorkloadGrantFile::default();
         for record in boot_sign_in_grants(
             &["some-oauth".to_string()],
@@ -717,9 +697,7 @@ mod tests {
 
     #[test]
     fn boot_sign_in_grants_skip_an_id_that_resolved_no_provider() {
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records = boot_sign_in_grants(&["some-oauth".to_string()], &[], "proj", &workload);
         assert!(
             records.is_empty(),

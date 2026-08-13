@@ -26,9 +26,7 @@ fn workload_of(key: &str) -> WorkloadIdentity {
     let dir = key
         .strip_prefix("def:")
         .unwrap_or_else(|| panic!("unrecognized workload key {key}"));
-    WorkloadIdentity::Definition {
-        dir: dir.to_string(),
-    }
+    WorkloadIdentity::definition(dir)
 }
 
 fn seed(world: &mut BehaviourWorld, record: GrantRecord) {
@@ -111,9 +109,7 @@ fn other_project_granted(world: &mut BehaviourWorld, project: String, id: String
         world,
         GrantRecord::allow(
             project,
-            &WorkloadIdentity::Definition {
-                dir: "/work/other".into(),
-            },
+            &WorkloadIdentity::definition("/work/other"),
             id,
             "SOME_TOKEN",
             vec!["api.some-provider.example".into()],
