@@ -12,7 +12,7 @@ use crate::oci_layer_cache::LayerCache;
 pub(crate) mod manifest_cache;
 mod real;
 pub(crate) use real::{RealRegistry, caching_registry_for, pull_dependency, registry_auth_for};
-pub use real::{pull, pull_sandbox, verify_login};
+pub use real::{pull, pull_kit, verify_login};
 
 pub(crate) trait Registry: Send + Sync {
     fn pull_manifest_and_config(
@@ -246,10 +246,40 @@ pub struct PulledArtifact {
     pub tools: Vec<String>,
 }
 
-pub(crate) async fn pull_sandbox_with<R: Registry>(
-    client: &R,
-    image: &str,
-) -> Result<PulledArtifact> {
+/// What a published kit reference resolved to: a sandbox a run can boot, or a mixin something else layers on.
+#[derive(Debug)]
+pub enum PulledKit {
+    Sandbox(PulledArtifact),
+    Mixin(PulledMixin),
+}
+
+impl PulledKit {
+    /// Answer as a sandbox, or not at all — so a caller that needs one says which kind it expected rather than matching a variant it has no use for.
+    pub fn sandbox(self) -> Option<PulledArtifact> {
+        match self {
+            PulledKit::Sandbox(artifact) => Some(artifact),
+            PulledKit::Mixin(_) => None,
+        }
+    }
+
+    pub fn mixin(self) -> Option<PulledMixin> {
+        match self {
+            PulledKit::Mixin(mixin) => Some(mixin),
+            PulledKit::Sandbox(_) => None,
+        }
+    }
+}
+
+/// A pulled mixin: config-only, so what it carries is the graph it names and the tools a consumer would install.
+#[derive(Debug)]
+pub struct PulledMixin {
+    pub reference: Reference,
+    pub digest: String,
+    pub mixins: Vec<String>,
+    pub tools: Vec<String>,
+}
+
+pub(crate) async fn pull_kit_with<R: Registry>(client: &R, image: &str) -> Result<PulledKit> {
     let reference: Reference = image
         .parse()
         .with_context(|| format!("invalid image reference: {image}"))?;
@@ -260,20 +290,35 @@ pub(crate) async fn pull_sandbox_with<R: Registry>(
         Some(manifest.config.media_type.as_str()),
     )
     .map_err(sandbox_pull_error)?;
-    if path == crate::artifact::RunPath::SingleImage {
-        anyhow::bail!(
-            "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` only accepts published Sandbox artifacts"
-        );
-    }
     verify_digest_pin(&reference, &manifest_digest, image)?;
+    match path {
+        Some(lns_artifact::spec::Kind::Mixin) => {
+            let mixin = lns_artifact::sandbox::parse_mixin(config_str.as_bytes())
+                .with_context(|| format!("parsing published mixin {image}"))?;
+            return Ok(PulledKit::Mixin(PulledMixin {
+                reference,
+                digest: manifest_digest,
+                mixins: mixin.spec.mixins.clone(),
+                tools: mixin.spec.tools.clone(),
+            }));
+        }
+        Some(lns_artifact::spec::Kind::Sandbox) => {}
+        Some(other) => anyhow::bail!(
+            "{image} is a {} artifact; `lns pull` takes a published sandbox or mixin",
+            other.as_str()
+        ),
+        None => anyhow::bail!(
+            "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` takes a published sandbox or mixin"
+        ),
+    }
     let def = lns_artifact::sandbox::parse(config_str.as_bytes())
         .with_context(|| format!("parsing published sandbox {image}"))?;
-    Ok(PulledArtifact {
+    Ok(PulledKit::Sandbox(PulledArtifact {
         reference,
         digest: manifest_digest,
         base_image: def.spec.image,
         tools: def.spec.tools,
-    })
+    }))
 }
 
 /// Pull a declared mixin's document. The pin is verified before the type, because for a mixin the bytes are the identity: a reference that does not name exactly these bytes has nothing to be typed.
@@ -1148,9 +1193,11 @@ mod tests {
     async fn pull_sandbox_accepts_a_published_sandbox_and_names_its_base_image() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let artifact = pull_sandbox_with(&registry, "registry.example.test/sb:1")
+        let artifact = pull_kit_with(&registry, "registry.example.test/sb:1")
             .await
-            .unwrap();
+            .unwrap()
+            .sandbox()
+            .expect("a sandbox artifact pulls as a sandbox");
         assert_eq!(artifact.digest, format!("sha256:{}", "c".repeat(64)));
         assert_eq!(
             artifact.base_image,
@@ -1183,6 +1230,97 @@ mod tests {
             manifest_digest: format!("sha256:{}", "c".repeat(64)),
             blobs: vec![],
         }
+    }
+
+    fn build_fileset_artifact() -> FakeImage {
+        let fileset = lns_artifact::spec::Kind::FileSet;
+        let document = r#"{"apiVersion":"lns.run/v1","kind":"FileSet","metadata":{"name":"skills"},"spec":{"mountPath":"/skills"}}"#.to_string();
+        let manifest = OciImageManifest {
+            artifact_type: Some(fileset.artifact_type()),
+            config: OciDescriptor {
+                media_type: fileset.config_media_type(),
+                digest: sha256_hex(document.as_bytes()),
+                size: document.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        FakeImage {
+            manifest,
+            config_json: document,
+            manifest_digest: format!("sha256:{}", "d".repeat(64)),
+            blobs: vec![],
+        }
+    }
+
+    #[test]
+    fn a_pulled_kit_answers_only_as_the_kind_it_is() {
+        let sandbox = PulledKit::Sandbox(PulledArtifact {
+            reference: "registry.example.test/sb:1".parse().unwrap(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            base_image: "registry.example.test/base:1".into(),
+            tools: Vec::new(),
+        });
+        let mixin = PulledKit::Mixin(PulledMixin {
+            reference: "registry.example.test/m:1".parse().unwrap(),
+            digest: format!("sha256:{}", "b".repeat(64)),
+            mixins: Vec::new(),
+            tools: Vec::new(),
+        });
+        assert!(
+            PulledKit::Sandbox(PulledArtifact {
+                reference: "registry.example.test/sb:1".parse().unwrap(),
+                digest: String::new(),
+                base_image: String::new(),
+                tools: Vec::new(),
+            })
+            .mixin()
+            .is_none(),
+            "a sandbox answering as a mixin would merge a document nothing can boot"
+        );
+        assert!(
+            PulledKit::Mixin(PulledMixin {
+                reference: "registry.example.test/m:1".parse().unwrap(),
+                digest: String::new(),
+                mixins: Vec::new(),
+                tools: Vec::new(),
+            })
+            .sandbox()
+            .is_none(),
+            "a mixin describes no launch, so answering as a sandbox would hand a run a document with no image"
+        );
+        assert!(sandbox.sandbox().is_some());
+        assert!(mixin.mixin().is_some());
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_a_kind_it_has_no_use_for() {
+        ensure_global_trace_subscriber();
+        let registry = build_fileset_artifact().into_registry();
+        let err = pull_kit_with(&registry, "registry.example.test/skills:1")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("takes a published sandbox or mixin"),
+            "a fileset travels inside a kit rather than being pulled on its own, so the refusal has to say what pull does take; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_accepts_a_published_mixin_and_names_the_graph_it_declares() {
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let mixin = pull_kit_with(&registry, "registry.example.test/m:1")
+            .await
+            .unwrap()
+            .mixin()
+            .expect("a mixin artifact pulls as a mixin");
+        assert_eq!(mixin.digest, format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(
+            registry.calls.lock().unwrap().as_slice(),
+            ["manifest"],
+            "a mixin is config-only, so no layer blob is fetched"
+        );
     }
 
     #[tokio::test]
@@ -1260,9 +1398,7 @@ mod tests {
     async fn pull_sandbox_rejects_a_plain_oci_image_before_pulling_layers() {
         ensure_global_trace_subscriber();
         let registry = build_two_layer_image().into_registry();
-        let err = pull_sandbox_with(&registry, "alpine:3.20")
-            .await
-            .unwrap_err();
+        let err = pull_kit_with(&registry, "alpine:3.20").await.unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("OCI image, not a Lens Sandbox artifact"),
@@ -1280,7 +1416,7 @@ mod tests {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
         let pinned = format!("registry.example.test/sb@sha256:{}", "d".repeat(64));
-        let err = pull_sandbox_with(&registry, &pinned).await.unwrap_err();
+        let err = pull_kit_with(&registry, &pinned).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("manifest digest mismatch"),
             "got: {err:#}"
@@ -1292,7 +1428,7 @@ mod tests {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
         let pinned = format!("registry.example.test/sb@sha256:{}", "c".repeat(64));
-        pull_sandbox_with(&registry, &pinned).await.unwrap();
+        pull_kit_with(&registry, &pinned).await.unwrap();
     }
 
     #[tokio::test]
@@ -1301,7 +1437,7 @@ mod tests {
         let mut artifact = build_sandbox_artifact();
         artifact.config_json = "{}".into();
         let registry = artifact.into_registry();
-        let err = pull_sandbox_with(&registry, "registry.example.test/sb:1")
+        let err = pull_kit_with(&registry, "registry.example.test/sb:1")
             .await
             .unwrap_err();
         assert!(
@@ -1316,7 +1452,7 @@ mod tests {
         let mut artifact = build_sandbox_artifact();
         artifact.manifest.artifact_type = Some("application/vnd.acme.surprise.v1+json".into());
         let registry = artifact.into_registry();
-        let err = pull_sandbox_with(&registry, "registry.example.test/odd:1")
+        let err = pull_kit_with(&registry, "registry.example.test/odd:1")
             .await
             .unwrap_err();
         let rendered = format!("{err:#}");
@@ -1331,7 +1467,7 @@ mod tests {
     async fn pull_sandbox_refuses_an_unparseable_reference() {
         ensure_global_trace_subscriber();
         let registry = build_sandbox_artifact().into_registry();
-        let err = pull_sandbox_with(&registry, "###").await.unwrap_err();
+        let err = pull_kit_with(&registry, "###").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("invalid image reference"),
             "got: {err:#}"

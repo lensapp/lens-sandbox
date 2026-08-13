@@ -1,4 +1,4 @@
-use crate::artifact::{RunPath, dispatch, resolved_from_sandbox};
+use crate::artifact::{dispatch, resolved_from_sandbox};
 use anyhow::{Context, Result};
 use lns_ipc::{ArtifactInspection, ImageView, SandboxMount, SandboxMountKind};
 
@@ -20,6 +20,61 @@ fn declared_view_ports(ports: &[lns_artifact::spec::Port]) -> Result<Vec<lns_ipc
         .collect()
 }
 
+/// One projection for both kinds, since a mixin's mounts, filesets and env are the same shapes a sandbox's are.
+fn declared_view_mounts(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<SandboxMount> {
+    spec.volumes
+        .iter()
+        .map(|volume| SandboxMount {
+            kind: if volume.is_bind() {
+                SandboxMountKind::Bind
+            } else {
+                SandboxMountKind::Volume
+            },
+            source: volume.source().to_string(),
+            target: volume.target.clone(),
+            read_only: volume.read_only(),
+            exclude: volume.exclude().to_vec(),
+            optional: volume.optional(),
+        })
+        .collect()
+}
+
+fn declared_view_filesets(
+    spec: &lns_artifact::sandbox::SandboxSpec,
+) -> Vec<lns_ipc::SandboxFileset> {
+    spec.filesets
+        .iter()
+        .map(|fileset| lns_ipc::SandboxFileset {
+            path: fileset.path.clone(),
+            reference: fileset.reference.clone(),
+            inline: fileset.inline.is_some(),
+            host_path: fileset.host_path.clone(),
+            optional: fileset.optional,
+            mount_path: fileset.mount_path.clone(),
+            owner: match fileset.owner {
+                lns_artifact::sandbox::FilesetOwner::Workload => {
+                    lns_ipc::SandboxFilesetOwner::Workload
+                }
+                lns_artifact::sandbox::FilesetOwner::Root => lns_ipc::SandboxFilesetOwner::Root,
+            },
+        })
+        .collect()
+}
+
+fn declared_view_env(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<String> {
+    spec.env
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
+fn declared_policy_flags(policy: &lns_policy::Policy) -> Vec<String> {
+    crate::artifact::policy::guardrail_flags(policy)
+        .iter()
+        .map(|f| f.message().to_string())
+        .collect()
+}
+
 /// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared connectors, and any over-broad-policy flags.
 pub(crate) fn project_inspection(
     image_ref: &str,
@@ -30,11 +85,33 @@ pub(crate) fn project_inspection(
     host: Option<lns_artifact::resources::HostCapacity>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
-        RunPath::SingleImage => Ok(ArtifactInspection::Image(ImageView {
+        None => Ok(ArtifactInspection::Image(ImageView {
             reference: image_ref.to_string(),
             digest,
         })),
-        RunPath::Sandbox => {
+        Some(lns_artifact::spec::Kind::Mixin) => {
+            let mixin = lns_artifact::sandbox::parse_mixin(&resolution.document)
+                .with_context(|| format!("inspecting mixin {image_ref}"))?;
+            Ok(ArtifactInspection::Mixin(Box::new(lns_ipc::MixinView {
+                reference: image_ref.to_string(),
+                digest,
+                mixins: mixin.spec.mixins.clone(),
+                mounts: declared_view_mounts(&mixin.spec),
+                ports: declared_view_ports(&mixin.spec.ports)?,
+                filesets: declared_view_filesets(&mixin.spec),
+                env: declared_view_env(&mixin.spec),
+                credentials: mixin.spec.credentials.clone(),
+                tools: mixin.spec.tools.clone(),
+                policy_flags: declared_policy_flags(&lns_policy::Policy {
+                    network: mixin.spec.policy.clone(),
+                    ..Default::default()
+                }),
+            })))
+        }
+        Some(other) if other != lns_artifact::spec::Kind::Sandbox => {
+            anyhow::bail!("a {} artifact has no definition to show", other.as_str())
+        }
+        Some(_) => {
             let def = lns_artifact::sandbox::parse(&resolution.document)
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def);
@@ -53,63 +130,17 @@ pub(crate) fn project_inspection(
                     image: resolved.base_image,
                     workdir: def.spec.workdir.clone(),
                     user: def.spec.user.clone(),
-                    mounts: def
-                        .spec
-                        .volumes
-                        .iter()
-                        .map(|volume| SandboxMount {
-                            kind: if volume.is_bind() {
-                                SandboxMountKind::Bind
-                            } else {
-                                SandboxMountKind::Volume
-                            },
-                            source: volume.source().to_string(),
-                            target: volume.target.clone(),
-                            read_only: volume.read_only(),
-                            exclude: volume.exclude().to_vec(),
-                            optional: volume.optional(),
-                        })
-                        .collect(),
+                    mounts: declared_view_mounts(&def.spec),
                     ports: declared_view_ports(&def.spec.ports)?,
-                    filesets: def
-                        .spec
-                        .filesets
-                        .iter()
-                        .map(|fileset| lns_ipc::SandboxFileset {
-                            path: fileset.path.clone(),
-                            reference: fileset.reference.clone(),
-                            inline: fileset.inline.is_some(),
-                            host_path: fileset.host_path.clone(),
-                            optional: fileset.optional,
-                            mount_path: fileset.mount_path.clone(),
-                            owner: match fileset.owner {
-                                lns_artifact::sandbox::FilesetOwner::Workload => {
-                                    lns_ipc::SandboxFilesetOwner::Workload
-                                }
-                                lns_artifact::sandbox::FilesetOwner::Root => {
-                                    lns_ipc::SandboxFilesetOwner::Root
-                                }
-                            },
-                        })
-                        .collect(),
-                    connectors: def.spec.connectors,
-                    env: def
-                        .spec
-                        .env
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect(),
+                    filesets: declared_view_filesets(&def.spec),
+                    env: declared_view_env(&def.spec),
+                    connectors: def.spec.connectors.clone(),
                     credentials: def.spec.credentials.clone(),
-                    tools: def.spec.tools,
+                    tools: def.spec.tools.clone(),
                     policy_flags: resolved
                         .policy
                         .as_ref()
-                        .map(|p| {
-                            crate::artifact::policy::guardrail_flags(p)
-                                .iter()
-                                .map(|f| f.message().to_string())
-                                .collect()
-                        })
+                        .map(declared_policy_flags)
                         .unwrap_or_default(),
                 },
             )))
@@ -294,6 +325,86 @@ mod tests {
             cpus: None,
             mem_mib: None,
         }))
+    }
+
+    #[test]
+    fn a_kind_with_no_definition_to_show_is_refused_rather_than_projected() {
+        let fileset = lns_artifact::spec::Kind::FileSet;
+        let err = project_inspection(
+            "ghcr.io/acme/skills:1",
+            digest(),
+            Some(&fileset.artifact_type()),
+            &fileset.config_media_type(),
+            &crate::artifact::mixin::Resolution {
+                document: b"{}".to_vec(),
+                mixins: Vec::new(),
+                pinned_extra: Vec::new(),
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no definition to show"),
+            "a fileset is content, not a document, so projecting one as a sandbox would print fields it never had; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_published_mixin_projects_as_the_document_its_author_wrote() {
+        let pinned = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
+        let document = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"obs-tools"}},"spec":{{"mixins":["{pinned}"],"tools":["node@22"],"env":{{"MODE":"research"}}}}}}"#
+        );
+        let projected = project_inspection(
+            "ghcr.io/acme/obs-tools:2",
+            digest(),
+            Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
+            &lns_artifact::spec::Kind::Mixin.config_media_type(),
+            &crate::artifact::mixin::Resolution {
+                document: document.into_bytes(),
+                mixins: Vec::new(),
+                pinned_extra: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            projected,
+            ArtifactInspection::Mixin(Box::new(lns_ipc::MixinView {
+                reference: "ghcr.io/acme/obs-tools:2".into(),
+                digest: digest(),
+                mixins: vec![pinned],
+                mounts: Vec::new(),
+                ports: Vec::new(),
+                filesets: Vec::new(),
+                env: vec!["MODE=research".into()],
+                credentials: Vec::new(),
+                tools: vec!["node@22".into()],
+                policy_flags: Vec::new(),
+            })),
+            "a published mixin is shown unresolved, so what its own graph merges to stays a launch-time answer"
+        );
+    }
+
+    #[test]
+    fn a_mixin_artifact_carrying_a_launch_block_is_refused_at_inspect() {
+        let err = project_inspection(
+            "ghcr.io/acme/obs-tools:2",
+            digest(),
+            Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
+            &lns_artifact::spec::Kind::Mixin.config_media_type(),
+            &crate::artifact::mixin::Resolution {
+                document: br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"obs"},"spec":{"image":"x:1"}}"#.to_vec(),
+                mixins: Vec::new(),
+                pinned_extra: Vec::new(),
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not declare image"),
+            "the artifact type says mixin, so the document has to hold to a mixin's rules before a reader trusts it; got: {err:#}"
+        );
     }
 
     #[test]

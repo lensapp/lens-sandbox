@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_publishes_a_mixin_under_its_own_artifact_type() {
+    async fn push_publishes_a_mixin_rather_than_refusing_a_kind_it_does_not_run() {
         let producer = FakeProducer::ok(&format!("sha256:{}", "b".repeat(64)));
         let mut out = Vec::new();
         let code = push(

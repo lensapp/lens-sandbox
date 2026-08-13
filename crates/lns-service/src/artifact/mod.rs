@@ -22,7 +22,10 @@ pub enum RunPath {
     Sandbox,
 }
 
-pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) -> Result<RunPath> {
+pub fn dispatch(
+    artifact_type: Option<&str>,
+    config_media_type: Option<&str>,
+) -> Result<Option<Kind>> {
     let artifact_type = artifact_type.filter(|t| !t.is_empty());
     let config_media_type = config_media_type.filter(|t| !t.is_empty());
     // Fall back to the config-blob media type only when artifactType is absent (the oras case), never to second-guess a present-but-unrecognized one.
@@ -30,19 +33,13 @@ pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) ->
         Some(t) => Kind::from_artifact_type(t),
         None => config_media_type.and_then(Kind::from_config_media_type),
     };
-    match kind {
-        Some(Kind::Sandbox) => Ok(RunPath::Sandbox),
-        Some(other) => bail!(
-            "a {} artifact is not directly runnable; lns run takes a published sandbox",
-            other.as_str()
+    match (kind, artifact_type) {
+        (Some(kind), _) => Ok(Some(kind)),
+        (None, Some(unknown)) => bail!(
+            "unsupported artifact type {unknown}; \
+             lns run launches a sandbox"
         ),
-        None => match artifact_type {
-            Some(unknown) => bail!(
-                "unsupported artifact type {unknown}; \
-                 lns run launches a sandbox"
-            ),
-            None => Ok(RunPath::SingleImage),
-        },
+        (None, None) => Ok(None),
     }
 }
 
@@ -53,7 +50,14 @@ pub fn dispatch_run(
     reference: &str,
     verify: bool,
 ) -> Result<RunPath> {
-    let path = dispatch(artifact_type, config_media_type)?;
+    let path = match dispatch(artifact_type, config_media_type)? {
+        Some(Kind::Sandbox) => RunPath::Sandbox,
+        Some(other) => bail!(
+            "a {} artifact is not directly runnable; lns run takes a published sandbox",
+            other.as_str()
+        ),
+        None => RunPath::SingleImage,
+    };
     if verify && path == RunPath::SingleImage {
         bail!(
             "{reference} is not a sandbox; run `lns init` to author an lns.yaml, \
@@ -256,7 +260,7 @@ mod tests {
 
     #[test]
     fn an_empty_artifact_type_and_config_type_is_treated_as_a_plain_image() {
-        assert_eq!(dispatch(Some(""), Some("")).unwrap(), RunPath::SingleImage);
+        assert_eq!(dispatch(Some(""), Some("")).unwrap(), None);
     }
 
     #[test]
@@ -356,7 +360,7 @@ mod tests {
         let sandbox_type = Kind::Sandbox.artifact_type();
         assert_eq!(
             dispatch(Some(&sandbox_type), None).unwrap(),
-            RunPath::Sandbox
+            Some(Kind::Sandbox)
         );
         assert_eq!(
             dispatch_run(Some(&sandbox_type), None, "ghcr.io/team/hermes:1", true).unwrap(),

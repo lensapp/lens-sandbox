@@ -184,9 +184,19 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             image,
             expected_digest,
         } => image_response(crate::image_store::pull(image, expected_digest).await.map(
-            |outcome| Response::ImagePulled {
-                image: outcome.image,
-                warnings: outcome.warnings,
+            |outcome| match outcome {
+                crate::image_store::PullOutcome::Sandbox { image, warnings } => {
+                    Response::ImagePulled { image, warnings }
+                }
+                crate::image_store::PullOutcome::Mixin {
+                    reference,
+                    digest,
+                    cached_mixins,
+                } => Response::MixinPulled {
+                    reference,
+                    digest,
+                    cached_mixins,
+                },
             },
         )),
         Request::ListImages => image_response(
@@ -2228,6 +2238,88 @@ mod tests {
         assert_eq!(resp["type"], "Error", "got {resp}");
         let message = resp["message"].as_str().expect("an error message");
         assert!(message.contains("no such image"), "got: {message}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_pull_of_a_mixin_caches_its_graph_and_records_no_row() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+        let manifest_cache = crate::image::manifest_cache::ManifestCache::new(
+            crate::cache::root().unwrap().join("manifests"),
+        );
+
+        let child = seed_mixin(&manifest_cache, "child", r#"{"tools":["node@22"]}"#);
+        let parent = seed_mixin(
+            &manifest_cache,
+            "parent",
+            &format!(r#"{{"mixins":["{}"]}}"#, child.0),
+        );
+
+        let pulled = as_json(
+            handle_request(
+                &Request::PullImage {
+                    image: parent.0.clone(),
+                    expected_digest: parent.1.clone(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(pulled["type"], "MixinPulled", "got {pulled}");
+        assert_eq!(pulled["reference"], parent.0);
+        assert_eq!(pulled["digest"], parent.1);
+        assert_eq!(
+            pulled["cached_mixins"], 1,
+            "a pull that stopped at the mixin itself would still need the network the first time something merges it"
+        );
+
+        let listed = as_json(handle_request(&Request::ListImages, now).await);
+        assert_eq!(
+            listed["images"].as_array().unwrap().len(),
+            0,
+            "nothing runs a mixin and nothing has to reclaim it, so it takes no index row"
+        );
+    }
+
+    /// Seed a published mixin into the manifest cache, so a pull resolves it with no network; answers with its pinned reference and digest.
+    fn seed_mixin(
+        cache: &crate::image::manifest_cache::ManifestCache,
+        name: &str,
+        spec: &str,
+    ) -> (String, String) {
+        use sha2::Digest;
+        let document = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
+        );
+        let manifest = oci_client::manifest::OciImageManifest {
+            artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
+            config: oci_client::manifest::OciDescriptor {
+                media_type: "application/vnd.lens.mixin.config.v1+json".into(),
+                digest: format!("sha256:{:x}", sha2::Sha256::digest(document.as_bytes())),
+                size: document.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let digest = format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+        );
+        let reference = format!("registry.example.test/cov/{name}@{digest}");
+        cache
+            .put(
+                &reference,
+                &crate::image::manifest_cache::CachedManifest {
+                    manifest,
+                    manifest_digest: digest.clone(),
+                    config: document,
+                },
+            )
+            .unwrap();
+        (reference, digest)
     }
 
     #[tokio::test]

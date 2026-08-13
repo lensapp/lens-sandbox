@@ -21,7 +21,7 @@ pub use paths::{
 };
 pub use protocol::{
     ArtifactInspection, BindMount, BindSpec, CredentialBindDecision, ExecImageArgs, ImageInfo,
-    ImageView, LogLevel, MountSpec, PortPublish, Protocol, Request, Response, RunConfig,
+    ImageView, LogLevel, MixinView, MountSpec, PortPublish, Protocol, Request, Response, RunConfig,
     RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset,
     SandboxFilesetOwner, SandboxMount, SandboxMountKind, SandboxPort, SandboxView, SignalKind,
     StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure, cmdline_unsafe_char,

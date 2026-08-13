@@ -188,7 +188,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
 ) -> Result<Resolution> {
     if !matches!(
         crate::artifact::dispatch(artifact_type, config_media_type),
-        Ok(crate::artifact::RunPath::Sandbox)
+        Ok(Some(lns_artifact::spec::Kind::Sandbox))
     ) {
         refuse_mixins_without_a_document(extra)?;
         return Ok(Resolution {
@@ -251,6 +251,13 @@ pub fn refuse_mixins_without_a_document(extra: &[String]) -> Result<()> {
         "this reference has no sandbox document to merge into, so it cannot take the {} mixin(s) named for it",
         extra.len()
     )
+}
+
+/// Cache every mixin a pulled one names, so a digest-pinned graph pulled once resolves offline afterwards; answers with how many documents it read.
+pub async fn warm<S: MixinSource>(roots: &[String], source: &S) -> Result<usize> {
+    let home = Locator::Reference(String::new());
+    let fetched = collect(roots, &[], &home, source).await?;
+    Ok(fetched.graph.len())
 }
 
 /// The preflight pins what it showed, and the boot merges that — so a reference reaching the boot unpinned was never disclosed, whoever sent it.
@@ -759,6 +766,24 @@ mod tests {
             out.mixins,
             ["/work/mixins/pg"],
             "a directory has no digest, so the folded absolute path is the identity the disclosure names"
+        );
+    }
+
+    #[tokio::test]
+    async fn warming_a_pulled_mixin_reads_every_document_its_graph_reaches() {
+        let source = Fake::new(&[
+            (
+                pinned("a").as_str(),
+                r#"{"mixins":["REPLACED"]}"#.replace("REPLACED", &pinned("b")).as_str(),
+            ),
+            (pinned("b").as_str(), r#"{"tools":["node@22"]}"#),
+        ]);
+        let read = warm(&[pinned("a")], &source)
+            .await
+            .expect("a pulled mixin's graph is what makes it resolve offline later");
+        assert_eq!(
+            read, 2,
+            "a pull that stopped at the mixin itself would still need the network the first time something merges it"
         );
     }
 

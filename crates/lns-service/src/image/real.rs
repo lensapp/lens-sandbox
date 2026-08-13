@@ -12,9 +12,8 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::manifest_cache::{CachingRegistry, ManifestCache};
 use super::{
-    CountingSink, PulledArtifact, PulledImage, Registry, client_config_for,
-    enforce_manifest_doc_size, login_probe_reference, pull_inner, pull_sandbox_with,
-    serialized_len,
+    CountingSink, PulledImage, Registry, client_config_for, enforce_manifest_doc_size,
+    login_probe_reference, pull_inner, pull_kit_with, serialized_len,
 };
 
 pub struct RealRegistry {
@@ -191,10 +190,10 @@ pub(crate) async fn pull_dependency(image: &str, layer_cache: &LayerCache) -> Re
     Ok(pulled)
 }
 
-pub async fn pull_sandbox(image: &str) -> Result<PulledArtifact> {
+pub async fn pull_kit(image: &str) -> Result<super::PulledKit> {
     let _shared = crate::image_store::lock_shared().await;
     let registry = caching_registry_for(image)?;
-    pull_sandbox_with(&registry, image).await
+    pull_kit_with(&registry, image).await
 }
 
 pub(crate) fn caching_registry_for(image: &str) -> Result<CachingRegistry<RealRegistry>> {

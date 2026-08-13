@@ -156,6 +156,9 @@ fn published_target(
                 pinned_mixins: view.pinned_mixins.clone(),
             })
         }
+        lns_ipc::ArtifactInspection::Mixin(_) => anyhow::bail!(
+            "{reference} is a published mixin, which describes no launch; run a sandbox that layers on it, or add it with --mixin"
+        ),
         lns_ipc::ArtifactInspection::Image(_) => anyhow::bail!(
             "{reference} is not a sandbox; run `lns init` to author an lns.yaml, or pass a published sandbox reference"
         ),
