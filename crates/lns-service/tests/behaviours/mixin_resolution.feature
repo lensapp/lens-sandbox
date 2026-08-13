@@ -8,8 +8,9 @@ Feature: a run resolves the mixins its document declares
   once resolves from the manifest cache afterwards, because the digest is the
   whole identity.
 
-  A published sandbox resolves. A local document does not yet, so it is refused
-  rather than booted without what its own mixins contribute.
+  Resolution is what empties a document's mixin list, so one that still carries
+  an entry never went through it and is refused rather than booted without what
+  it contributes.
 
   Scenario: what a mixin declares reaches the run
     Given a mixin declaring the tool "python@3.12"
@@ -49,9 +50,9 @@ Feature: a run resolves the mixins its document declares
     Then the launch is refused
     And the error says the mixin could not be resolved
 
-  Scenario: a local document's mixins refuse the run rather than being dropped
+  Scenario: a document that reached the plan unresolved refuses the run
     Given a mixin declaring the tool "python@3.12"
     And the sandbox definition declares that mixin
     When the sandbox is launched
     Then the launch is refused
-    And the error says a local document's mixins are not resolved yet
+    And the error says the definition reached the plan unresolved

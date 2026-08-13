@@ -24,7 +24,7 @@ Feature: a user adds their own mixins to a run
     Then the resolution reports the mixin pinned by digest
     And the resolution answers for the tag "obs-tools:2"
 
-  Scenario: a directory the user names refuses the run
+  Scenario: a directory named for a published sandbox refuses the run
     When the published sandbox is resolved with the user's mixin "./obs-tools"
     Then the launch is refused
-    And the error says a mixin the user named cannot be a directory
+    And the error says a directory merges only into a document this machine read

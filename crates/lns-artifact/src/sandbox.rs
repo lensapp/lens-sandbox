@@ -193,6 +193,20 @@ pub fn names_a_local_directory(reference: &str) -> bool {
         || reference.starts_with('/')
 }
 
+/// Fold `..` away without touching the filesystem, so one directory named two ways is one path; `components` has already dropped every `.` these callers can pass, since each joins onto an absolute base.
+pub fn fold_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut folded = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
+}
+
 /// A remote mixin reference must be digest-pinned, because a published document has to resolve to the same thing for everyone.
 fn validate_mixin_reference(reference: &str) -> Result<()> {
     if reference.trim().is_empty() {
@@ -662,6 +676,15 @@ pub fn validate(config_json: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folding_a_path_leaves_one_spelling_for_one_directory() {
+        assert_eq!(
+            fold_path(std::path::Path::new("/work/./mixins/../mixins/pg")),
+            std::path::PathBuf::from("/work/mixins/pg"),
+            "two spellings that reach one directory have to fold to one, or a walk would read it twice under two identities"
+        );
+    }
 
     fn def_json(spec: &str) -> Vec<u8> {
         format!(

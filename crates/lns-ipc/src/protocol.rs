@@ -88,6 +88,13 @@ pub enum Request {
         image: String,
     },
     PruneImages,
+    /// Resolve a local definition's mixins, since only the service can pull a reference and read a directory the same way a run will.
+    ResolveDefinition {
+        definition: String,
+        project_dir: String,
+        #[serde(default)]
+        mixins: Vec<String>,
+    },
     InspectImage {
         image: String,
         /// The mixin references the user named on the command line, in flag order, so the preflight describes the document that will boot.
@@ -216,6 +223,14 @@ pub enum Response {
     },
     ImageInspected {
         inspection: ArtifactInspection,
+    },
+    DefinitionResolved {
+        /// The merged document, which declares no mixins of its own.
+        definition: String,
+        /// Every source the merge reached, as the disclosure names them.
+        mixins: Vec<String>,
+        /// What each mixin the user named resolved to, in the order they named them.
+        pinned_mixins: Vec<String>,
     },
     ImageTagged {
         from: String,

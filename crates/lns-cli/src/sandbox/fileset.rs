@@ -110,10 +110,76 @@ pub fn path_fileset_problems<F: Fs + ?Sized>(
         .collect()
 }
 
+/// A directory mixin is a file on this machine, so `validate` can say the document names one that is not there rather than leaving it to the run.
+pub fn directory_mixin_problems<F: Fs + ?Sized>(
+    fs: &F,
+    project_dir: &Path,
+    definition: &lns_artifact::sandbox::Definition,
+) -> Vec<String> {
+    definition
+        .spec
+        .mixins
+        .iter()
+        .filter(|reference| lns_artifact::sandbox::names_a_local_directory(reference))
+        .filter_map(|reference| {
+            let document =
+                lns_artifact::sandbox::fold_path(&project_dir.join(reference)).join("lns.yaml");
+            fs.read_to_string(&document)
+                .err()
+                .map(|e| format!("mixin {reference}: reading {}: {e}", document.display()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sandbox::test_support::MapFs;
+
+    fn definition(mixins: &str) -> lns_artifact::sandbox::Definition {
+        lns_artifact::sandbox::parse(
+            format!(
+                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","mixins":{mixins}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("the fixture is a valid definition")
+    }
+
+    #[test]
+    fn validate_names_a_mixin_directory_that_holds_no_document() {
+        let fs = MapFs::with(&[("/work/mixins/present/lns.yaml", "kind: Mixin")]);
+        let problems = directory_mixin_problems(
+            &fs,
+            Path::new("/work"),
+            &definition(r#"["./mixins/present","./mixins/absent"]"#),
+        );
+        assert_eq!(
+            problems.len(),
+            1,
+            "a typo in a directory name is cheapest to correct at author time; got {problems:?}"
+        );
+        assert!(
+            problems[0].contains("/work/mixins/absent/lns.yaml"),
+            "the refusal has to name the file it looked for; got {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_leaves_a_published_mixin_to_the_run() {
+        let problems = directory_mixin_problems(
+            &MapFs::with(&[]),
+            Path::new("/work"),
+            &definition(&format!(
+                r#"["ghcr.io/acme/obs@sha256:{}"]"#,
+                "c".repeat(64)
+            )),
+        );
+        assert!(
+            problems.is_empty(),
+            "validate reads one document offline, so a reference it would have to pull is not its to check; got {problems:?}"
+        );
+    }
 
     #[test]
     fn walk_snapshots_nested_files_with_project_relative_paths() {

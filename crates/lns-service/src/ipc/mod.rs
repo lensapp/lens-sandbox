@@ -212,6 +212,13 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
+        Request::ResolveDefinition {
+            definition,
+            project_dir,
+            mixins,
+        } => image_response(
+            crate::artifact::real::resolve_definition(definition, project_dir, mixins).await,
+        ),
         Request::InspectImage { image, mixins } => image_response(
             crate::artifact::real::inspect(image, mixins)
                 .await
@@ -2092,6 +2099,58 @@ mod tests {
         assert!(
             message.contains("invalid image reference"),
             "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_resolves_a_definition_that_names_no_mixin_without_touching_a_registry()
+    {
+        let resp = as_json(
+            handle_request(
+                &Request::ResolveDefinition {
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
+                    project_dir: "/work".into(),
+                    mixins: Vec::new(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "DefinitionResolved", "got {resp}");
+        assert!(
+            resp["definition"]
+                .as_str()
+                .expect("the merged document")
+                .contains("ghcr.io/team/base:1"),
+            "the caller runs what comes back, so it has to be the document and not an empty answer; got {resp}"
+        );
+        assert_eq!(
+            resp["mixins"].as_array().expect("a source list").len(),
+            0,
+            "a document naming no mixin resolves to itself, so nothing is pulled and nothing is disclosed"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_resolve_of_a_broken_definition_surfaces_the_parse_error() {
+        let resp = as_json(
+            handle_request(
+                &Request::ResolveDefinition {
+                    definition: "{}".into(),
+                    project_dir: "/work".into(),
+                    mixins: Vec::new(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("reading the sandbox document"),
+            "got {resp}"
         );
     }
 

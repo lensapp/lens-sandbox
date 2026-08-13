@@ -6,6 +6,7 @@ pub mod credential_boot;
 pub mod fileset;
 pub mod inspect;
 pub mod mixin;
+pub mod mixin_dir;
 pub mod policy;
 pub mod real;
 pub mod resources;
@@ -180,13 +181,13 @@ pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<Res
     Ok(resolved_from_sandbox(&def))
 }
 
-/// A local document's mixins are not resolved yet: a local run's mounts and ports are built by the CLI from the document it parsed itself, so resolving only service-side would drop what a mixin contributes to them without saying so.
+/// Resolution is what empties this list, so a definition still carrying one never went through it and would boot without what its mixins contribute.
 pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
     if def.spec.mixins.is_empty() {
         return Ok(());
     }
     anyhow::bail!(
-        "this local sandbox declares mixins ({}) and a local document's mixins are not resolved yet; publish it and run it by reference to use them",
+        "this definition reached the plan without being resolved; it still declares mixins ({})",
         def.spec.mixins.join(", ")
     )
 }

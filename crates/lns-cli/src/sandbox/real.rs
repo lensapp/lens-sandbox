@@ -90,7 +90,11 @@ pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'
 
 pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = super::SandboxInspectArgs::from_arg_matches(matches)?;
+        let mut args = super::SandboxInspectArgs::from_arg_matches(matches)?;
+        args.mixins = crate::run::target::root_named_directories(
+            &args.mixins,
+            &std::env::current_dir().context("reading the current directory")?,
+        )?;
         let command = super::SandboxCommand::Inspect(args);
         if super::author::is_offline(&command) {
             return run_author(&command, ctx);

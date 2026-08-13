@@ -108,7 +108,7 @@ fn yaml_path(cwd: &Path) -> PathBuf {
 /// The `--file` selector names the definition to operate on; the default stays `./lns.yaml`.
 pub fn selected_definition_path(file: Option<&Path>, cwd: &Path) -> PathBuf {
     match file {
-        Some(file) => crate::run::target::normalize(&cwd.join(file)),
+        Some(file) => lns_artifact::sandbox::fold_path(&cwd.join(file)),
         None => yaml_path(cwd),
     }
 }
@@ -161,6 +161,11 @@ pub fn validate<F: Fs, W: Write>(
         && let Ok(def) = lns_artifact::sandbox::parse_document(&json)
     {
         problems.extend(super::fileset::path_fileset_problems(fs, project_dir, &def));
+        problems.extend(super::fileset::directory_mixin_problems(
+            fs,
+            project_dir,
+            &def,
+        ));
     }
     if problems.is_empty() {
         writeln!(out, "{name} is valid.")?;
@@ -438,7 +443,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("--mixin applies to a published sandbox reference"),
+            format!("{err:#}").contains("--mixin applies to a sandbox reference"),
             "this render never resolves anything, so honouring the flag silently would show a composition the file does not describe; got: {err:#}"
         );
     }

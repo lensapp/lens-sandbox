@@ -39,4 +39,6 @@ pub struct DeclaredRig {
     pub resolved_mixins: Vec<String>,
     /// The pins for the references the user named, in the order they named them.
     pub pinned_extra: Vec<String>,
+    /// Where a local definition sits, since a directory it names roots there.
+    pub project_dir: Option<String>,
 }

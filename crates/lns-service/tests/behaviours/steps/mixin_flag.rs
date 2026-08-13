@@ -1,6 +1,6 @@
 use cucumber::{given, then, when};
 
-use crate::steps::mixin_resolution::{Installed, MIXIN, install_at};
+use crate::steps::mixin_resolution::{Installed, MIXIN, install_at, published};
 use crate::world::BehaviourWorld;
 
 /// What a tag the user names resolves to, since a registry answers for one under exact bytes.
@@ -40,20 +40,25 @@ async fn resolve_with(w: &mut BehaviourWorld, extra: &[String]) {
         });
         (definition, Installed::from_rig(rig))
     };
-    let planned =
-        match lns_service::artifact::mixin::resolve(definition.as_bytes(), extra, &installed).await
-        {
-            Ok(resolution) => {
-                let rig = w.declared.get_or_insert_with(Default::default);
-                rig.resolved_mixins.clone_from(&resolution.mixins);
-                rig.pinned_extra.clone_from(&resolution.pinned_extra);
-                lns_service::artifact::plan_published_sandbox(
-                    &resolution.document,
-                    "registry.example.test/some-sandbox:1",
-                )
-            }
-            Err(e) => Err(e),
-        };
+    let planned = match lns_service::artifact::mixin::resolve(
+        definition.as_bytes(),
+        extra,
+        &published(),
+        &installed,
+    )
+    .await
+    {
+        Ok(resolution) => {
+            let rig = w.declared.get_or_insert_with(Default::default);
+            rig.resolved_mixins.clone_from(&resolution.mixins);
+            rig.pinned_extra.clone_from(&resolution.pinned_extra);
+            lns_service::artifact::plan_published_sandbox(
+                &resolution.document,
+                "registry.example.test/some-sandbox:1",
+            )
+        }
+        Err(e) => Err(e),
+    };
     crate::steps::declared_connectors::launch_resolved(w, planned);
 }
 
@@ -86,15 +91,17 @@ fn resolution_answers_for_the_tag(w: &mut BehaviourWorld, tag: String) -> Result
     }
 }
 
-#[then("the error says a mixin the user named cannot be a directory")]
-fn error_says_a_named_mixin_cannot_be_a_directory(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the error says a directory merges only into a document this machine read")]
+fn error_says_a_directory_needs_a_document_this_machine_read(
+    w: &mut BehaviourWorld,
+) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let error = rig.error.as_deref().ok_or("no launch error was recorded")?;
-    if error.contains("cannot name a local directory") {
+    if error.contains("a directory merges only into a document this machine read") {
         Ok(())
     } else {
         Err(format!(
-            "a directory has no published identity to pin, so a run that accepted one would boot bytes no disclosure could name: {error}"
+            "a published sandbox's filesets are pinned by digest, so a working directory merged into one would boot bytes the disclosure cannot account for: {error}"
         ))
     }
 }
