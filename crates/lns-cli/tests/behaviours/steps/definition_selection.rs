@@ -24,8 +24,8 @@ fn pushed_artifact_carries_variant(w: &mut BehaviourWorld, _name: String) -> Res
     Ok(())
 }
 
-const VARIANT_YAML: &str = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n";
-const DEFAULT_YAML: &str = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: sandbox\nspec:\n  image: ghcr.io/team/base:1\n";
+const VARIANT_YAML: &str = "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n";
+const DEFAULT_YAML: &str = "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: sandbox\nspec:\n  image: ghcr.io/team/base:1\n";
 
 #[given(regex = r#"^a sandbox definition file "([^"]+)" in the current directory$"#)]
 fn variant_definition_in_cwd(w: &mut BehaviourWorld, name: String) {
@@ -42,7 +42,7 @@ fn variant_definition_with_relative_sources(w: &mut BehaviourWorld, path: String
         .parent()
         .expect("the fixture path names a file in a directory")
         .to_path_buf();
-    let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
+    let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
     w.author_files.insert(path, yaml.to_string());
     w.author_files
         .insert(dir.join("skills/prompts.md"), "p".to_string());

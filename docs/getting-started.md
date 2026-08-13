@@ -124,7 +124,7 @@ That writes a starter `./lns.yaml`:
 
 ```yaml
 apiVersion: lns.run/v1
-kind: Sandbox
+kind: sandbox
 metadata:
   name: sandbox
 spec:

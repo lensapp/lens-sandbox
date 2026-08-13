@@ -38,7 +38,7 @@ if {![file executable $wrapper]} {
 set project [exec mktemp -d]
 set def [open "$project/lns.yaml" w]
 puts $def "apiVersion: lns.run/v1"
-puts $def "kind: Sandbox"
+puts $def "kind: sandbox"
 puts $def "metadata:"
 puts $def "  name: detach-smoke"
 puts $def "spec:"

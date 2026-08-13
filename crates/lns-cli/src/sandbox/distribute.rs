@@ -405,9 +405,9 @@ mod tests {
     }
 
     const VALID: &[u8] =
-        br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#;
+        br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#;
 
-    const WITH_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}}"#;
+    const WITH_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}}"#;
 
     fn cwd() -> &'static Path {
         Path::new("/work")
@@ -424,7 +424,7 @@ mod tests {
             ""
         };
         let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1"{fileset},"tools":["{tool}@1"]}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1"{fileset},"tools":["{tool}@1"]}}}}"#
         )
         .into_bytes();
         (tool, doc)
@@ -481,7 +481,7 @@ mod tests {
             cwd(),
             &producer,
             &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn pack_preserves_an_explicit_root_owner_on_the_pinned_entry() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
         let (rewritten, packed) =
             pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
         assert_eq!(packed.len(), 1);
@@ -544,7 +544,7 @@ mod tests {
             cwd(),
             &producer,
             &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"env":{"MODE":"research"}}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{"name":"postgres-tools"},"spec":{"env":{"MODE":"research"}}}"#,
             "ghcr.io/acme/postgres-tools:1.4.0",
             &mut out,
         )
@@ -567,7 +567,7 @@ mod tests {
             cwd(),
             &producer,
             &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","mixins":["./mixins/postgres-tools/"]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","mixins":["./mixins/postgres-tools/"]}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
@@ -588,7 +588,7 @@ mod tests {
             cwd(),
             &producer,
             &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
@@ -607,7 +607,7 @@ mod tests {
             "a".repeat(64)
         );
         let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","filesets":[{{"ref":"{pinned}","mountPath":"/s"}}]}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","filesets":[{{"ref":"{pinned}","mountPath":"/s"}}]}}}}"#
         );
         let (rewritten, packed) = pack_path_filesets(
             &fs_with_skills(),
@@ -623,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_refuses_a_declared_fileset_ref_with_a_malformed_digest() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
         let err = pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0")
             .unwrap_err();
         assert!(
@@ -632,7 +632,7 @@ mod tests {
         );
     }
 
-    const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
+    const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
 
     #[tokio::test]
     async fn push_pins_resolved_tool_versions_into_the_published_config() {
@@ -724,7 +724,7 @@ mod tests {
     async fn an_already_exact_pin_publishes_when_the_index_is_unavailable() {
         // Re-publishing must not fail because the index is blocked or has dropped that version.
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
         let mut out = Vec::new();
         push(
             &fs_with_skills(),
@@ -757,7 +757,7 @@ mod tests {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let resolver =
             FakeResolver::with(&[]).verifying("java@temurin-9.9.9+9", IndexVerification::Absent);
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-9.9.9+9"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-9.9.9+9"]}}"#;
         let mut out = Vec::new();
         let code = push(
             &fs_with_skills(),
@@ -789,7 +789,7 @@ mod tests {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let resolver = FakeResolver::with(&[])
             .verifying("java@temurin-21.0.5+11.0.LTS", IndexVerification::Confirmed);
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
         push(
             &fs_with_skills(),
@@ -810,7 +810,7 @@ mod tests {
     async fn a_vendor_exact_pin_publishes_when_the_index_is_unavailable() {
         // The resolver itself emits vendor versions, so a re-push of its own output must not need the index back.
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
         push(
             &fs_with_skills(),
@@ -908,7 +908,7 @@ mod tests {
     #[test]
     fn a_dry_run_of_already_pinned_tools_promises_the_digest_it_previewed() {
         // push short-circuits exact pins without consulting the index, so the real push produces the same bytes — warning otherwise defeats the point of an offline preview.
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6","java@temurin-21.0.5+11.0.LTS"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6","java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
         push_dry_run(
             &fs_with_skills(),
@@ -921,7 +921,7 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("may differ"), "got: {text}");
 
-        let mixed = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","jq@latest"]}}"#;
+        let mixed = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","jq@latest"]}}"#;
         let mut mixed_out = Vec::new();
         push_dry_run(
             &fs_with_skills(),
@@ -940,7 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_declared_tools_leaves_an_empty_tool_list_untouched() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[]}}"#;
         let (pinned, reported) = pin_declared_tools(&unconsultable(), doc).await.unwrap();
         assert_eq!(pinned, doc.to_vec());
         assert!(reported.is_empty());
@@ -948,7 +948,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_declared_tools_refuses_a_non_string_entry() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[42]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1","tools":[42]}}"#;
         let err = pin_declared_tools(&unconsultable(), doc).await.unwrap_err();
         assert!(format!("{err:#}").contains("not a string"), "got: {err:#}");
     }

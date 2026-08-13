@@ -2119,7 +2119,7 @@ mod tests {
         let resp = as_json(
             handle_request(
                 &Request::ResolveDefinition {
-                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
                     project_dir: "/work".into(),
                     mixins: Vec::new(),
                 },
@@ -2147,7 +2147,7 @@ mod tests {
         let resp = as_json(
             handle_request(
                 &Request::ResolveDefinition {
-                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
                     project_dir: "work".into(),
                     mixins: Vec::new(),
                 },
@@ -2316,7 +2316,7 @@ mod tests {
     ) -> (String, String) {
         use sha2::Digest;
         let document = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
         );
         let manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
@@ -2394,7 +2394,7 @@ mod tests {
             )
             .unwrap();
         let definition = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"cached-lifecycle"}},"spec":{{"image":"{base_ref}"}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"cached-lifecycle"}},"spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
@@ -2564,7 +2564,7 @@ mod tests {
             .unwrap();
 
         let definition = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"{base_ref}"}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),

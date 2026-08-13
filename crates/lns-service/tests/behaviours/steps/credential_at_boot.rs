@@ -5,7 +5,7 @@ use crate::world::BehaviourWorld;
 
 fn definition_with_credential(env_var: &str, domain: &str) -> String {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env_var}","placeholder":"lns-placeholder-{env_var}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env_var}","placeholder":"lns-placeholder-{env_var}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
     )
 }
 

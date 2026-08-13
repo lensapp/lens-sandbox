@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::spec::{self, Metadata, Port, Resources};
 
 pub const API_VERSION: &str = "lns.run/v1";
-pub const KIND: &str = "Sandbox";
 pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
 pub const MAX_INLINE_TOTAL_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_FILES: usize = 256;
@@ -688,14 +687,14 @@ mod tests {
 
     fn def_json(spec: &str) -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
         )
         .into_bytes()
     }
 
     fn mixin_json(spec: &str) -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"postgres-tools"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"postgres-tools"}},"spec":{spec}}}"#
         )
         .into_bytes()
     }
@@ -768,12 +767,12 @@ mod tests {
     fn each_reader_answers_only_for_its_own_kind() {
         let sandbox_err = parse_mixin(&def_json(r#"{"image":"x:1"}"#)).unwrap_err();
         assert!(
-            format!("{sandbox_err:#}").contains("expected kind Mixin"),
+            format!("{sandbox_err:#}").contains("expected kind mixin"),
             "got: {sandbox_err:#}"
         );
         let mixin_err = parse(&mixin_json(r#"{"tools":["postgresql@17"]}"#)).unwrap_err();
         assert!(
-            format!("{mixin_err:#}").contains("expected kind Sandbox"),
+            format!("{mixin_err:#}").contains("expected kind sandbox"),
             "got: {mixin_err:#}"
         );
     }
@@ -989,7 +988,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_foreign_api_version() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#;
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
         assert!(
             format!("{err:#}").contains("unexpected apiVersion"),
@@ -1002,14 +1001,14 @@ mod tests {
         let json = br#"{"apiVersion":"lns.run/v1","kind":"Policy","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
         assert!(
-            format!("{err:#}").contains("expected kind Sandbox"),
+            format!("{err:#}").contains("expected kind sandbox"),
             "got: {err:#}"
         );
     }
 
     #[test]
     fn parse_rejects_an_invalid_name() {
-        let json = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"-bad"},"spec":{"image":"x:1"}}"#;
+        let json = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"-bad"},"spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
         assert!(format!("{err:#}").contains("metadata.name"), "got: {err:#}");
     }
@@ -1998,7 +1997,7 @@ mod tests {
 
     #[test]
     fn parse_surfaces_a_malformed_document_as_a_parse_error() {
-        let no_metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","spec":{"image":"x:1"}}"#;
+        let no_metadata = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","spec":{"image":"x:1"}}"#;
         let err = parse(no_metadata).unwrap_err();
         assert!(
             format!("{err:#}").contains("parsing sandbox definition"),
@@ -2024,11 +2023,11 @@ mod tests {
             assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
         }
 
-        let top_level = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"},"unexpected":true}"#;
+        let top_level = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"},"unexpected":true}"#;
         let err = parse(top_level).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
 
-        let metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes","unexpected":true},"spec":{"image":"x:1"}}"#;
+        let metadata = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes","unexpected":true},"spec":{"image":"x:1"}}"#;
         let err = parse(metadata).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
     }

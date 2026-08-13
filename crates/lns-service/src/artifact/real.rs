@@ -499,7 +499,7 @@ mod tests {
                     .clone()
                     .or_else(|| reference.digest().map(ToOwned::to_owned))
                     .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
-                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
+                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
             ))
         }
 

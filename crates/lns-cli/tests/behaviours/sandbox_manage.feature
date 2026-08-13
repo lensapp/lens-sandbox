@@ -26,7 +26,7 @@ Feature: managing cached sandboxes
     Given the reference "hermes:1.4.0" resolves to a cached sandbox
     When the user runs "lns inspect hermes:1.4.0"
     Then the exit code is 0
-    And the output contains "kind: Sandbox"
+    And the output contains "kind: sandbox"
     And the output contains "image"
 
   Scenario: rm refuses a running sandbox

@@ -139,7 +139,7 @@ mod tests {
     fn definition(mixins: &str) -> lns_artifact::sandbox::Definition {
         lns_artifact::sandbox::parse(
             format!(
-                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","mixins":{mixins}}}}}"#
+                r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"x:1","mixins":{mixins}}}}}"#
             )
             .as_bytes(),
         )
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn validate_names_a_mixin_directory_that_holds_no_document() {
-        let fs = MapFs::with(&[("/work/mixins/present/lns.yaml", "kind: Mixin")]);
+        let fs = MapFs::with(&[("/work/mixins/present/lns.yaml", "kind: mixin")]);
         let problems = directory_mixin_problems(
             &fs,
             Path::new("/work"),
@@ -252,7 +252,7 @@ mod tests {
     fn path_fileset_problems_reports_only_broken_path_entries() {
         let fs = MapFs::with(&[("/work/skills/prompts.md", "p")]);
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./missing","mountPath":"/b"},{"ref":"reg/skills@sha256:abc","mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./missing","mountPath":"/b"},{"ref":"reg/skills@sha256:abc","mountPath":"/c"}]}}"#,
         )
         .unwrap();
         let problems = path_fileset_problems(&fs, Path::new("/work"), &def);

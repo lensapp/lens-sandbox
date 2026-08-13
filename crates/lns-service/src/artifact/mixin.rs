@@ -330,7 +330,7 @@ fn refuse_what_no_sandbox_could_be(document: &[u8], sources: &[Source]) -> Resul
 fn document(def: &Definition, spec: &SandboxSpec) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "apiVersion": lns_artifact::sandbox::API_VERSION,
-        "kind": lns_artifact::sandbox::KIND,
+        "kind": lns_artifact::spec::Kind::Sandbox.as_str(),
         "metadata": &def.metadata,
         "spec": spec,
     }))
@@ -357,7 +357,7 @@ mod tests {
                         (
                             (*r).to_string(),
                             format!(
-                                r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"some-mixin"}},"spec":{spec}}}"#
+                                r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"some-mixin"}},"spec":{spec}}}"#
                             ),
                         )
                     })
@@ -410,7 +410,7 @@ mod tests {
 
     fn sandbox(spec: &str) -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
         )
         .into_bytes()
     }
