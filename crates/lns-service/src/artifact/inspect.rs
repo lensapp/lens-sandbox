@@ -123,6 +123,7 @@ pub(crate) fn project_inspection(
                 lns_ipc::SandboxView {
                     mixins: resolution.mixins.clone(),
                     pinned_mixins: resolution.pinned_extra.clone(),
+                    contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
                     reference: image_ref.to_string(),
                     digest,
                     cpus: declared_size.cpus,
@@ -168,6 +169,7 @@ mod tests {
             document: config.as_bytes().to_vec(),
             mixins: mixins.to_vec(),
             pinned_extra: Vec::new(),
+            contributions: Vec::new(),
         }
     }
 
@@ -265,6 +267,7 @@ mod tests {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -287,6 +290,7 @@ mod tests {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins,
             pinned_mixins: pinned,
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -309,6 +313,7 @@ mod tests {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: digest(),
             image: "registry.example.test/runtime:1".into(),
@@ -339,6 +344,7 @@ mod tests {
                 document: b"{}".to_vec(),
                 mixins: Vec::new(),
                 pinned_extra: Vec::new(),
+                contributions: Vec::new(),
             },
             None,
         )
@@ -364,6 +370,7 @@ mod tests {
                 document: document.into_bytes(),
                 mixins: Vec::new(),
                 pinned_extra: Vec::new(),
+                contributions: Vec::new(),
             },
             None,
         )
@@ -397,6 +404,7 @@ mod tests {
                 document: br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"obs"},"spec":{"image":"x:1"}}"#.to_vec(),
                 mixins: Vec::new(),
                 pinned_extra: Vec::new(),
+                contributions: Vec::new(),
             },
             None,
         )
@@ -421,6 +429,7 @@ mod tests {
                     document: br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#.to_vec(),
                     mixins: vec![declared.clone(), pinned.clone()],
                     pinned_extra: vec![pinned.clone()],
+                    contributions: Vec::new(),
                 },
                 None,
             )
@@ -573,6 +582,7 @@ mod tests {
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -653,6 +663,7 @@ mod tests {
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -691,6 +702,7 @@ mod tests {
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),
@@ -721,6 +733,7 @@ mod tests {
             ArtifactInspection::Sandbox(Box::new(SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:latest".into(),
                 digest: digest(),
                 image: "registry.example.test/runtime:1".into(),

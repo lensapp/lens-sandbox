@@ -195,6 +195,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             document: config_json.to_vec(),
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
+            contributions: Vec::new(),
         });
     }
     resolve(config_json, extra, home, source).await
@@ -207,6 +208,8 @@ pub struct Resolution {
     pub mixins: Vec<String>,
     /// What each reference the user named resolved to, in the order they named them, so the boot merges the bytes the preflight showed.
     pub pinned_extra: Vec<String>,
+    /// Which source decided each entry of the merged document, and what that decision replaced.
+    pub contributions: Vec<lns_artifact::merge::Contribution>,
 }
 
 /// Resolve a published definition and every mixin it layers on into the one document a run boots (`docs/sandbox-spec.md` §3.3), returned as a definition the rest of the plan path reads exactly as it reads an authored one.
@@ -222,6 +225,7 @@ pub async fn resolve<S: MixinSource>(
             document: config_json.to_vec(),
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
+            contributions: Vec::new(),
         });
     }
     let fetched = collect(&def.spec.mixins, extra, home, source).await?;
@@ -229,7 +233,7 @@ pub async fn resolve<S: MixinSource>(
     root.mixins = fetched.pinned_roots;
     let sources = flatten(&root, &fetched.pinned_extra, &fetched.graph)?;
     let merged = merge(&sources)?;
-    let document = document(&def, &merged)?;
+    let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
     Ok(Resolution {
         document,
@@ -239,7 +243,36 @@ pub async fn resolve<S: MixinSource>(
             .map(|source| source.label.to_string())
             .collect(),
         pinned_extra: fetched.pinned_extra,
+        contributions: merged.contributions,
     })
+}
+
+/// Restate a merge's attribution for the wire, since lns-ipc names the document format without depending on the crate that merges it.
+pub fn on_the_wire(
+    contributions: &[lns_artifact::merge::Contribution],
+) -> Vec<lns_ipc::SourceContribution> {
+    contributions
+        .iter()
+        .map(|c| lns_ipc::SourceContribution {
+            block: match c.block {
+                lns_artifact::merge::Block::Credential => lns_ipc::ContributionBlock::Credential,
+                lns_artifact::merge::Block::Tool => lns_ipc::ContributionBlock::Tool,
+                lns_artifact::merge::Block::Mount => lns_ipc::ContributionBlock::Mount,
+                lns_artifact::merge::Block::Port => lns_ipc::ContributionBlock::Port,
+                lns_artifact::merge::Block::Egress => lns_ipc::ContributionBlock::Egress,
+            },
+            key: c.key.clone(),
+            source: c.source.clone(),
+            displaced: c
+                .displaced
+                .iter()
+                .map(|d| lns_ipc::DisplacedEntry {
+                    source: d.source.clone(),
+                    summary: d.summary.clone(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Only a sandbox document has blocks to merge into, so a run of anything else has to refuse what it was given rather than boot without it.
@@ -405,6 +438,71 @@ mod tests {
             .collect();
         let out = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs)).await?;
         lns_artifact::sandbox::parse(&out.document)
+    }
+
+    #[tokio::test]
+    async fn a_resolution_carries_which_source_decided_each_entry() {
+        let (spec, documents) = resolve_named(
+            r#"{"image":"x:1","tools":["node@20"],"mixins":["obs"]}"#,
+            &[("obs", r#"{"tools":["node@22"]}"#)],
+        );
+        let refs: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+            .await
+            .expect("a declared mixin resolves");
+        let wire = on_the_wire(&resolution.contributions);
+        let tool = wire
+            .iter()
+            .find(|c| c.block == lns_ipc::ContributionBlock::Tool && c.key == "node")
+            .expect("the merged document's tool is attributed");
+        assert_eq!(tool.source, pinned("obs"));
+        assert_eq!(
+            tool.displaced,
+            [lns_ipc::DisplacedEntry {
+                source: lns_artifact::merge::ROOT_LABEL.to_string(),
+                summary: "node@20".to_string()
+            }],
+            "the disclosure the CLI prints is built from this, so what a mixin replaced has to survive the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_block_a_merge_attributes_survives_the_wire() {
+        let (spec, documents) = resolve_named(
+            r#"{"image":"x:1","mixins":["obs"]}"#,
+            &[(
+                "obs",
+                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"policy":{"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow"}]}}}"#,
+            )],
+        );
+        let refs: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+            .await
+            .expect("a mixin declaring every block resolves");
+        let wire = on_the_wire(&resolution.contributions);
+        let found: Vec<(lns_ipc::ContributionBlock, &str)> =
+            wire.iter().map(|c| (c.block, c.key.as_str())).collect();
+        for expected in [
+            (lns_ipc::ContributionBlock::Tool, "node"),
+            (lns_ipc::ContributionBlock::Mount, "/cache"),
+            (lns_ipc::ContributionBlock::Port, "8080"),
+            (lns_ipc::ContributionBlock::Credential, "SOME_TOKEN"),
+            (
+                lns_ipc::ContributionBlock::Egress,
+                "allow api.some-provider.example",
+            ),
+        ] {
+            assert!(
+                found.contains(&expected),
+                "§1.5 names every rule, mount, tool and credential, so a block that never reaches the wire is a line the disclosure cannot attribute; missing {expected:?} from {found:?}"
+            );
+        }
     }
 
     #[tokio::test]

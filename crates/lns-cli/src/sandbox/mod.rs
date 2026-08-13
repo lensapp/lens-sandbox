@@ -1332,6 +1332,7 @@ mod tests {
             inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2117,6 +2118,7 @@ mod tests {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                     mixins: Vec::new(),
                     pinned_mixins: Vec::new(),
+                    contributions: Vec::new(),
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),

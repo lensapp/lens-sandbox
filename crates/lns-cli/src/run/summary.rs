@@ -85,9 +85,21 @@ pub fn mixin_display(resolved: &[String], typed: &[String], pinned: &[String]) -
 }
 
 /// What the mixin flags become once the preflight has answered: the run carries the digests it pinned, and the summary shows each beside the reference the user typed. A typed reference goes no further than this, so the boot can only merge bytes the disclosure named.
-pub fn adopt_pinned_mixins(args: &mut RunArgs, resolved: &[String], pinned: &[String]) {
+pub fn adopt_pinned_mixins(
+    args: &mut RunArgs,
+    resolved: &[String],
+    pinned: &[String],
+    contributions: &[lns_ipc::SourceContribution],
+) {
     args.resolved_mixins = mixin_display(resolved, &args.mixins, pinned);
     args.mixins = pinned.to_vec();
+    args.contributions = contributions.to_vec();
+}
+
+/// A target the user claimed with `-v` has no author but them, so the declared mount it displaced must not be named as the author of the one that boots.
+pub fn drop_overridden_mounts(args: &mut RunArgs, overridden: &[String]) {
+    args.contributions
+        .retain(|c| c.block != lns_ipc::ContributionBlock::Mount || !overridden.contains(&c.key));
 }
 
 pub fn print_run_summary(
@@ -104,6 +116,89 @@ pub fn print_run_summary(
     Ok(path)
 }
 
+/// How an entry names the source that decided it, empty for a run that resolved no mixin; only for a block whose keys are unique, never for egress, where two sources may key alike.
+fn attribution(args: &RunArgs, block: lns_ipc::ContributionBlock, key: &str) -> String {
+    if args.resolved_mixins.is_empty() {
+        return String::new();
+    }
+    args.contributions
+        .iter()
+        .find(|c| c.block == block && c.key == key)
+        .map(attribution_of)
+        .unwrap_or_default()
+}
+
+/// The suffix one contribution renders as, taken from the entry rather than found again by key, since a key names one entry only outside egress.
+fn attribution_of(found: &lns_ipc::SourceContribution) -> String {
+    let replaced: Vec<String> = found
+        .displaced
+        .iter()
+        .map(|d| format!(", replaced {} from {}", d.summary, short_source(&d.source)))
+        .collect();
+    format!(
+        "  [from {}{}]",
+        short_source(&found.source),
+        replaced.join("")
+    )
+}
+
+/// A source as the disclosure names it, with a digest shortened the way every other reference in this summary is.
+fn short_source(source: &str) -> String {
+    match source.split_once("@sha256:") {
+        Some((repo, digest)) if digest.chars().count() > 12 => {
+            let short: String = digest.chars().take(12).collect();
+            format!("{repo}@sha256:{short}…")
+        }
+        _ => source.to_string(),
+    }
+}
+
+/// Where every value in this summary starts, so a label too long to fit still lines its entries up under one another.
+const COLUMN: usize = 13;
+
+/// The blocks §1.5 names that an uncomposed run has never printed, since only a composed run has a second author to attribute them to.
+fn write_composed_blocks(s: &mut String, args: &RunArgs) {
+    let listed = |block| -> Vec<&lns_ipc::SourceContribution> {
+        args.contributions
+            .iter()
+            .filter(|c| c.block == block)
+            .collect()
+    };
+    write_block(s, "Rules", &listed(lns_ipc::ContributionBlock::Egress));
+    write_block(
+        s,
+        "Credentials",
+        &listed(lns_ipc::ContributionBlock::Credential),
+    );
+}
+
+fn write_block(s: &mut String, label: &str, entries: &[&lns_ipc::SourceContribution]) {
+    let Some((first, rest)) = entries.split_first() else {
+        return;
+    };
+    let heading = format!("  {label}:");
+    let pad = COLUMN.saturating_sub(heading.len()).max(1);
+    let value_column = heading.len() + pad;
+    writeln!(
+        s,
+        "{heading}{:pad$}{}{}",
+        "",
+        first.key,
+        attribution_of(first)
+    )
+    .unwrap();
+    for entry in rest {
+        writeln!(
+            s,
+            "{:value_column$}{}{}",
+            "",
+            entry.key,
+            attribution_of(entry)
+        )
+        .unwrap();
+    }
+}
+
 pub fn format_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
@@ -115,25 +210,43 @@ pub fn format_summary(
     s.push_str("lns run\n");
     writeln!(s, "  Image:     {}", image_line(args)).unwrap();
     let (volumes, binds) = crate::cli::split_mounts(&args.mounts);
+    let mount = lns_ipc::ContributionBlock::Mount;
     for vol in &volumes {
-        writeln!(s, "  Volume:    {}", volume_line(vol)).unwrap();
+        let from = attribution(args, mount, &vol.target);
+        writeln!(s, "  Volume:    {}{from}", volume_line(vol)).unwrap();
     }
     for bind in &binds {
-        writeln!(s, "  Bind:      {}", bind_line(bind)).unwrap();
+        let from = attribution(args, mount, &bind.target);
+        writeln!(s, "  Bind:      {}{from}", bind_line(bind)).unwrap();
     }
     for fileset in &args.filesets {
         writeln!(
             s,
-            "  Fileset:   {} -> {} (owner: {})",
-            fileset.source, fileset.mount_path, fileset.owner
+            "  Fileset:   {} -> {} (owner: {}){}",
+            fileset.source,
+            fileset.mount_path,
+            fileset.owner,
+            attribution(args, mount, &fileset.mount_path)
         )
         .unwrap();
     }
     if !args.tools.is_empty() {
-        writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
+        let tools: Vec<String> = args
+            .tools
+            .iter()
+            .map(|tool| {
+                let key = tool.split_once('@').map_or(tool.as_str(), |(name, _)| name);
+                format!(
+                    "{tool}{}",
+                    attribution(args, lns_ipc::ContributionBlock::Tool, key)
+                )
+            })
+            .collect();
+        writeln!(s, "  Tools:     {}", tools.join(", ")).unwrap();
     }
     if !args.resolved_mixins.is_empty() {
         writeln!(s, "  Mixins:    {}", args.resolved_mixins.join(", ")).unwrap();
+        write_composed_blocks(&mut s, args);
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -317,10 +430,15 @@ fn ports_line(args: &RunArgs) -> String {
         .map(|p| {
             let bind = std::net::SocketAddr::new(p.host_ip, p.host_port);
             let mapping = format!("{bind} -> {}", p.container_port);
+            let from = attribution(
+                args,
+                lns_ipc::ContributionBlock::Port,
+                &p.container_port.to_string(),
+            );
             if p.host_ip.is_loopback() {
-                mapping
+                format!("{mapping}{from}")
             } else {
-                format!("{mapping} (exposed beyond this machine)")
+                format!("{mapping} (exposed beyond this machine){from}")
             }
         })
         .collect::<Vec<_>>()
@@ -394,6 +512,7 @@ mod tests {
         RunArgs {
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
+            contributions: Vec::new(),
             image: image.map(str::to_string),
             file: None,
             name: None,
@@ -524,6 +643,7 @@ mod tests {
         let view = lns_ipc::SandboxView {
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: "sha256:abc".into(),
             image: "registry.example.test/runtime:1".into(),
@@ -609,6 +729,7 @@ mod tests {
             &mut args,
             std::slice::from_ref(&pinned),
             std::slice::from_ref(&pinned),
+            &[],
         );
         assert_eq!(
             args.mixins,
@@ -625,7 +746,7 @@ mod tests {
     #[test]
     fn a_run_that_named_no_mixin_carries_none_after_the_preflight() {
         let mut args = run_args(Some("prism"));
-        adopt_pinned_mixins(&mut args, &[], &[]);
+        adopt_pinned_mixins(&mut args, &[], &[], &[]);
         assert!(args.mixins.is_empty());
         assert!(
             args.resolved_mixins.is_empty(),
@@ -637,7 +758,7 @@ mod tests {
     fn a_mixin_only_the_document_declared_is_disclosed_without_being_carried() {
         let declared = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
         let mut args = run_args(Some("prism"));
-        adopt_pinned_mixins(&mut args, std::slice::from_ref(&declared), &[]);
+        adopt_pinned_mixins(&mut args, std::slice::from_ref(&declared), &[], &[]);
         assert_eq!(
             args.resolved_mixins,
             [declared],
@@ -670,6 +791,334 @@ mod tests {
             &PolicySource::FoundInCwd,
         );
         assert!(!authored.contains("Mixins:"), "got: {authored}");
+    }
+
+    fn contributed(
+        block: lns_ipc::ContributionBlock,
+        key: &str,
+        source: &str,
+        displaced: &[(&str, &str)],
+    ) -> lns_ipc::SourceContribution {
+        lns_ipc::SourceContribution {
+            block,
+            key: key.to_string(),
+            source: source.to_string(),
+            displaced: displaced
+                .iter()
+                .map(|(source, summary)| lns_ipc::DisplacedEntry {
+                    source: (*source).to_string(),
+                    summary: (*summary).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn composed(args: &mut RunArgs, contributions: Vec<lns_ipc::SourceContribution>) {
+        args.resolved_mixins = vec![format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64))];
+        args.contributions = contributions;
+    }
+
+    #[test]
+    fn a_tool_a_mixin_replaced_names_the_mixin_and_the_version_it_replaced() {
+        let mut args = run_args(Some("prism"));
+        args.tools = vec!["node@22".into()];
+        composed(
+            &mut args,
+            vec![contributed(
+                lns_ipc::ContributionBlock::Tool,
+                "node",
+                &format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64)),
+                &[("the sandbox", "node@20")],
+            )],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("node@22  [from ghcr.io/acme/obs@sha256:cccccccccccc…, replaced node@20 from the sandbox]"),
+            "a developer reading `node@22` has to be able to see that a mixin put it there over the version their own document asked for; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_composed_run_lists_the_rules_and_credentials_the_merge_produced() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        composed(
+            &mut args,
+            vec![
+                contributed(
+                    lns_ipc::ContributionBlock::Egress,
+                    "api.vendor.example",
+                    &obs,
+                    &[],
+                ),
+                contributed(
+                    lns_ipc::ContributionBlock::Credential,
+                    "SOME_TOKEN",
+                    &obs,
+                    &[],
+                ),
+            ],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains(
+                "Rules:     api.vendor.example  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"
+            ),
+            "a destination a mixin opened is the whole reason the merged table is disclosed before boot; got: {s}"
+        );
+        assert!(
+            s.contains("Credentials: SOME_TOKEN  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
+            "a credential the sandbox never asked for has to be traceable to the source that asked; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_second_rule_lines_up_under_the_first_without_repeating_the_label() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        composed(
+            &mut args,
+            vec![
+                contributed(
+                    lns_ipc::ContributionBlock::Egress,
+                    "api.vendor.example",
+                    &obs,
+                    &[],
+                ),
+                contributed(
+                    lns_ipc::ContributionBlock::Egress,
+                    "proxy.vendor.example",
+                    "the sandbox",
+                    &[],
+                ),
+            ],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("\n             proxy.vendor.example  [from the sandbox]\n"),
+            "a merged table is read as a table, so the second entry has to sit under the first rather than restate the label; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_mount_the_user_added_on_the_command_line_is_attributed_to_nobody() {
+        let mut args = run_args(Some("prism"));
+        args.mounts = vec![lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+            name: "scratch".into(),
+            target: "/scratch".into(),
+            read_only: false,
+        })];
+        composed(&mut args, Vec::new());
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Volume:    scratch \u{2192} /scratch\n"),
+            "the user typed this one, so naming a source for it would invent an author; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_mount_the_user_overrode_loses_the_declared_sources_attribution() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        args.mounts = vec![lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
+            name: "mine".into(),
+            target: "/scratch".into(),
+            read_only: false,
+        })];
+        composed(
+            &mut args,
+            vec![contributed(
+                lns_ipc::ContributionBlock::Mount,
+                "/scratch",
+                &obs,
+                &[],
+            )],
+        );
+        drop_overridden_mounts(&mut args, &["/scratch".to_string()]);
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Volume:    mine \u{2192} /scratch\n"),
+            "the mixin's mount is not what boots, so naming it as the author of the user's own mount inverts who decided this; got: {s}"
+        );
+    }
+
+    #[test]
+    fn two_sources_declaring_one_rule_each_keep_their_own_source() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        composed(
+            &mut args,
+            vec![
+                contributed(
+                    lns_ipc::ContributionBlock::Egress,
+                    "allow api.vendor.example",
+                    &obs,
+                    &[],
+                ),
+                contributed(
+                    lns_ipc::ContributionBlock::Egress,
+                    "allow api.vendor.example",
+                    "the sandbox",
+                    &[],
+                ),
+            ],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains(
+                "Rules:     allow api.vendor.example  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"
+            ),
+            "got: {s}"
+        );
+        assert!(
+            s.contains("\n             allow api.vendor.example  [from the sandbox]\n"),
+            "egress is the one block two sources can key alike, so looking each line up by its key would name the first source twice and hide that the sandbox said this too; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_port_a_mixin_publishes_names_the_mixin() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        args.publish = vec![lns_ipc::PortPublish {
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port: 8080,
+            container_port: 8080,
+            protocol: lns_ipc::Protocol::Tcp,
+        }];
+        composed(
+            &mut args,
+            vec![contributed(
+                lns_ipc::ContributionBlock::Port,
+                "8080",
+                &obs,
+                &[],
+            )],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("[from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
+            "a mixin opening a host socket is a thing the developer is approving, so it has to name who asked; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_second_credential_lines_up_under_the_first() {
+        let mut args = run_args(Some("prism"));
+        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        composed(
+            &mut args,
+            vec![
+                contributed(
+                    lns_ipc::ContributionBlock::Credential,
+                    "SOME_TOKEN",
+                    &obs,
+                    &[],
+                ),
+                contributed(
+                    lns_ipc::ContributionBlock::Credential,
+                    "SOME_OTHER_TOKEN",
+                    &obs,
+                    &[],
+                ),
+            ],
+        );
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        let first = s
+            .lines()
+            .find(|l| l.contains("SOME_TOKEN"))
+            .expect("the first credential renders");
+        let second = s
+            .lines()
+            .find(|l| l.contains("SOME_OTHER_TOKEN"))
+            .expect("the second credential renders");
+        assert_eq!(
+            first.find("SOME_TOKEN"),
+            second.find("SOME_OTHER_TOKEN"),
+            "a label wider than the column still has to line its own entries up, or the block stops reading as one list"
+        );
+    }
+
+    #[test]
+    fn a_source_whose_digest_is_not_ascii_truncates_on_a_character() {
+        let mut args = run_args(Some("prism"));
+        composed(
+            &mut args,
+            vec![contributed(
+                lns_ipc::ContributionBlock::Tool,
+                "node",
+                "some/dir@sha256:a\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
+                &[],
+            )],
+        );
+        args.tools = vec!["node@22".into()];
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("some/dir@sha256:a\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{2026}"),
+            "a directory the user named is theirs to spell, so shortening it by bytes would panic on a run that is otherwise fine; got: {s}"
+        );
+    }
+
+    #[test]
+    fn an_uncomposed_run_prints_exactly_what_it_printed_before_attribution_existed() {
+        let mut args = run_args(Some("prism"));
+        args.tools = vec!["node@22".into()];
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(s.contains("Tools:     node@22\n"), "got: {s}");
+        assert!(
+            !s.contains("[from") && !s.contains("Rules:") && !s.contains("Credentials:"),
+            "a run that resolved no mixin has one author, so attributing every line to them is noise; got: {s}"
+        );
     }
 
     #[test]

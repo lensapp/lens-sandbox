@@ -601,8 +601,23 @@ A `--mixin` may be a tag, where a document's entry may not. The run pins it
 before it reports it, so the summary names the exact bytes you approved:
 
 ```
-  Mixins:    /work/mixins/debug-tools, observability:2 → ghcr.io/acme/observability@sha256:c41e8b7d…
+  Mixins:    /work/mixins/debug-tools, observability:2 → ghcr.io/acme/observability@sha256:c41e8b7d20a9…
 ```
+
+A composed run is a document you did not write in full, so the summary says
+where each line came from — and lists the rules and credentials the merge
+produced, which an uncomposed run has no second author to attribute:
+
+```
+  Volume:    cache → /home/agent/.cache  [from /work/mixins/debug-tools]
+  Tools:     node@22  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…, replaced node@20 from the sandbox]
+  Rules:     allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
+             deny proxy.vendor.example  [from the sandbox]
+  Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
+```
+
+A run that resolved no mixin prints what it always has: one author, nothing to
+attribute.
 
 `lns inspect <REF> --mixin <REF>` shows the same composition without starting a
 run.
