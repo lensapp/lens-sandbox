@@ -16,14 +16,6 @@ const ALL_KINDS: [Kind; 3] = [Kind::Sandbox, Kind::Mixin, Kind::FileSet];
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Kind::Sandbox => "Sandbox",
-            Kind::Mixin => "Mixin",
-            Kind::FileSet => "FileSet",
-        }
-    }
-
-    pub fn family(self) -> &'static str {
-        match self {
             Kind::Sandbox => "sandbox",
             Kind::Mixin => "mixin",
             Kind::FileSet => "fileset",
@@ -31,11 +23,11 @@ impl Kind {
     }
 
     pub fn artifact_type(self) -> String {
-        format!("application/vnd.lens.{}.v1+json", self.family())
+        format!("application/vnd.lens.{}.v1+json", self.as_str())
     }
 
     pub fn config_media_type(self) -> String {
-        format!("application/vnd.lens.{}.config.v1+json", self.family())
+        format!("application/vnd.lens.{}.config.v1+json", self.as_str())
     }
 
     pub fn from_artifact_type(media_type: &str) -> Option<Kind> {
@@ -214,23 +206,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_kind_is_spelled_the_way_the_specification_writes_it() {
+        for (kind, spelling) in [
+            (Kind::Sandbox, "sandbox"),
+            (Kind::Mixin, "mixin"),
+            (Kind::FileSet, "fileset"),
+        ] {
+            assert_eq!(
+                kind.as_str(),
+                spelling,
+                "docs/sandbox-spec.md writes every kind in lower case, and a document is refused when its kind does not match exactly"
+            );
+            assert_eq!(
+                Kind::from_kind_str(spelling),
+                Some(kind),
+                "a document spelled the way the specification writes it has to parse"
+            );
+        }
+    }
+
+    #[test]
     fn every_kind_carries_the_media_types_the_specification_names() {
         for (kind, name, artifact_type, config_media_type) in [
             (
                 Kind::Sandbox,
-                "Sandbox",
+                "sandbox",
                 "application/vnd.lens.sandbox.v1+json",
                 "application/vnd.lens.sandbox.config.v1+json",
             ),
             (
                 Kind::Mixin,
-                "Mixin",
+                "mixin",
                 "application/vnd.lens.mixin.v1+json",
                 "application/vnd.lens.mixin.config.v1+json",
             ),
             (
                 Kind::FileSet,
-                "FileSet",
+                "fileset",
                 "application/vnd.lens.fileset.v1+json",
                 "application/vnd.lens.fileset.config.v1+json",
             ),
@@ -284,11 +296,11 @@ mod tests {
 
     #[test]
     fn parse_doc_rejects_wrong_api_version_kind_and_name() {
-        let bad_api = br#"{"apiVersion":"v0","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
+        let bad_api = br#"{"apiVersion":"v0","kind":"fileset","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
         assert!(format!("{:#}", parse_fileset(bad_api).unwrap_err()).contains("apiVersion"));
-        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
+        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","metadata":{"name":"skills"},"mount":{"path":"/skills"},"spec":{}}"#;
         assert!(format!("{:#}", parse_fileset(bad_kind).unwrap_err()).contains("expected kind"));
-        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"-bad"},"mount":{"path":"/skills"},"spec":{}}"#;
+        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"-bad"},"mount":{"path":"/skills"},"spec":{}}"#;
         assert!(format!("{:#}", parse_fileset(bad_name).unwrap_err()).contains("metadata.name"));
     }
 
@@ -301,25 +313,25 @@ mod tests {
 
     #[test]
     fn parse_fileset_requires_a_mount() {
-        let with_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills","readOnly":true},"spec":{}}"#;
+        let with_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"skills"},"mount":{"path":"/root/.some-agent/skills","readOnly":true},"spec":{}}"#;
         let fileset = parse_fileset(with_mount).unwrap();
         assert_eq!(fileset.mount.path, "/root/.some-agent/skills");
         assert_eq!(fileset.mount.read_only, Some(true));
 
-        let no_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"spec":{}}"#;
+        let no_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"skills"},"spec":{}}"#;
         let err = parse_fileset(no_mount).unwrap_err();
         assert!(format!("{err:#}").contains("requires a mount"));
     }
 
     #[test]
     fn parse_fileset_rejects_a_traversing_or_relative_mount_path() {
-        let escaping = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"/root/../../etc"},"spec":{}}"#;
+        let escaping = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"skills"},"mount":{"path":"/root/../../etc"},"spec":{}}"#;
         let err = parse_fileset(escaping).unwrap_err();
         assert!(
             format!("{err:#}").contains("`..` segment"),
             "a fileset must not mount a traversing path: {err:#}"
         );
-        let relative = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"skills"},"mount":{"path":"root/skills"},"spec":{}}"#;
+        let relative = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"skills"},"mount":{"path":"root/skills"},"spec":{}}"#;
         let err = parse_fileset(relative).unwrap_err();
         assert!(
             format!("{err:#}").contains("must be absolute"),

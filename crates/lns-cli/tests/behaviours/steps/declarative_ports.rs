@@ -21,7 +21,7 @@ fn ports_yaml(ports: &str) -> String {
         })
         .collect();
     format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  ports:\n{entries}"
+        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  ports:\n{entries}"
     )
 }
 

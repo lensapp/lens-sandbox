@@ -5,7 +5,7 @@ use crate::world::BehaviourWorld;
 
 fn mixin_document(name: &str, spec: &str) -> String {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
     )
 }
 
@@ -47,7 +47,7 @@ fn local_definition(w: &mut BehaviourWorld, dir: &str, mixins: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.project_dir = Some(dir.to_string());
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":{mixins}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":{mixins}}}}}"#
     ));
 }
 
@@ -113,7 +113,7 @@ fn the_resolution_names_only_the_mixin(
 fn the_published_definition_declares_a_mixin(w: &mut BehaviourWorld, reference: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{reference}"]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{reference}"]}}}}"#
     ));
 }
 

@@ -26,7 +26,7 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
-    #[command(about = "Scaffold a default ./lns.yaml (kind: Sandbox) in this directory.")]
+    #[command(about = "Scaffold a default ./lns.yaml (kind: sandbox) in this directory.")]
     Init,
     #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
     Validate(SandboxValidateArgs),
@@ -948,7 +948,7 @@ fn render_cached_inspect<W: std::io::Write>(
 ) -> Result<()> {
     match inspection {
         lns_ipc::ArtifactInspection::Sandbox(view) => {
-            writeln!(out, "kind: Sandbox")?;
+            writeln!(out, "kind: sandbox")?;
             writeln!(out, "reference: {}", view.reference)?;
             if !view.digest.is_empty() {
                 writeln!(out, "digest: {}", view.digest)?;
@@ -983,7 +983,7 @@ fn render_cached_inspect<W: std::io::Write>(
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
-            writeln!(out, "kind: Mixin")?;
+            writeln!(out, "kind: mixin")?;
             writeln!(out, "reference: {}", view.reference)?;
             if !view.digest.is_empty() {
                 writeln!(out, "digest: {}", view.digest)?;
@@ -1008,7 +1008,7 @@ fn render_cached_inspect<W: std::io::Write>(
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Image(view) => {
-            writeln!(out, "kind: Image")?;
+            writeln!(out, "kind: image")?;
             writeln!(out, "reference: {}", view.reference)?;
             writeln!(out, "digest: {}", view.digest)?;
         }
@@ -2141,7 +2141,7 @@ mod tests {
         let code = inspect(&svc, "hermes:1.4.0", &[], &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("kind: Sandbox"), "got: {text}");
+        assert!(text.contains("kind: sandbox"), "got: {text}");
         assert!(
             text.contains("image: docker.io/library/alpine"),
             "got: {text}"
@@ -2166,7 +2166,7 @@ mod tests {
         let mut out = Vec::new();
         inspect(&image, "x", &[], &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("kind: Image"), "got: {text}");
+        assert!(text.contains("kind: image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
     }
 

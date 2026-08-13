@@ -16,7 +16,7 @@ use std::net::TcpStream;
 
 fn sandbox_manifest() -> Vec<u8> {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"reg/base@sha256:{}"}}}}"#,
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"reg/base@sha256:{}"}}}}"#,
         "a".repeat(64)
     )
     .into_bytes()

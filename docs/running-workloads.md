@@ -26,7 +26,7 @@ lns init
 
 ```yaml
 apiVersion: lns.run/v1
-kind: Sandbox
+kind: sandbox
 metadata:
   name: sandbox
 spec:
@@ -565,7 +565,7 @@ spec:
     - ghcr.io/acme/observability@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582
 ```
 
-A mixin is a document of `kind: Mixin`. It may carry anything a sandbox can
+A mixin is a document of `kind: mixin`. It may carry anything a sandbox can
 except the blocks that describe one launch — `image`, `command`, `workdir`,
 `user`, `resources` — and it may not name a connector.
 
@@ -1018,8 +1018,8 @@ primarily a live view of its output.
 **running** run it prints one JSON document with the run's status, image, command,
 and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
 the contents of its policy file when that file is readable on this machine. For a
-**cached** reference it prints the artifact's kind and definition — a plain `Image`,
-or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
+**cached** reference it prints the artifact's kind and definition — a plain `image`,
+or a `sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
 flagging a permissive default policy.
 
 ### Listing resource use

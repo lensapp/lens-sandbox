@@ -1115,7 +1115,7 @@ mod tests {
             }],
             auto_remove: true,
             verify_sandbox: false,
-            definition: Some(r#"{"kind":"Sandbox"}"#.into()),
+            definition: Some(r#"{"kind":"sandbox"}"#.into()),
             definition_dir: Some("/work/proj".into()),
         }
     }

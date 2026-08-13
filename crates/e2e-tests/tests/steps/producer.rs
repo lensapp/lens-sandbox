@@ -90,7 +90,7 @@ async fn push_sandbox_from_lns_yaml(world: &mut E2eWorld) {
     let reference = format!("{host}/e2e-cache-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n    - type: volume\n      source: e2e-cache\n      target: /home/sandbox/.cache\n      readOnly: true\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-cache-sandbox\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n    - type: volume\n      source: e2e-cache\n      target: /home/sandbox/.cache\n      readOnly: true\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();
@@ -117,7 +117,7 @@ async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
     let reference = format!("{host}/e2e-fileset-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-fileset-sandbox\nspec:\n  image: {base}\n  filesets:\n    - path: ./skills\n      mountPath: /opt/agent-skills\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-fileset-sandbox\nspec:\n  image: {base}\n  filesets:\n    - path: ./skills\n      mountPath: /opt/agent-skills\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();
@@ -148,7 +148,7 @@ async fn push_sandbox_with_inline_fileset(world: &mut E2eWorld, content: String)
     let reference = format!("{host}/e2e-inline-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-inline-sandbox\nspec:\n  image: {base}\n  filesets:\n    - inline:\n        mcp.json: {content}\n      mountPath: /etc/agent\n      owner: root\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-inline-sandbox\nspec:\n  image: {base}\n  filesets:\n    - inline:\n        mcp.json: {content}\n      mountPath: /etc/agent\n      owner: root\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();
@@ -197,7 +197,7 @@ async fn push_sandbox_with_tool(world: &mut E2eWorld, tool: String) {
     let reference = format!("{host}/e2e-tools-pin-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-pin\nspec:\n  image: {base}\n  tools:\n    - {tool}\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-tools-pin\nspec:\n  image: {base}\n  tools:\n    - {tool}\n"
     );
     let mut env = cache_env(world);
     env.push((

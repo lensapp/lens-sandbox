@@ -51,7 +51,7 @@ fn valid_lns_yaml_with_fileset(w: &mut BehaviourWorld, path: String, mount: Stri
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - path: {path}\n      mountPath: {mount}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - path: {path}\n      mountPath: {mount}\n"
         ),
     );
 }
@@ -63,7 +63,7 @@ fn valid_lns_yaml_with_inline_fileset(w: &mut BehaviourWorld, mount: String) {
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - inline:\n        settings.json: do-not-print\n      mountPath: {mount}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - inline:\n        settings.json: do-not-print\n      mountPath: {mount}\n"
         ),
     );
 }
@@ -184,7 +184,7 @@ fn valid_lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String,
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
         ),
     );
 }

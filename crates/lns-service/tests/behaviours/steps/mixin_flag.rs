@@ -17,7 +17,7 @@ fn a_mixin_published_under_a_tag(w: &mut BehaviourWorld, tool: String, tag: Stri
 fn the_definition_declares_a_tool(w: &mut BehaviourWorld, tool: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","tools":["{tool}"]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","tools":["{tool}"]}}}}"#
     ));
 }
 
@@ -35,7 +35,7 @@ async fn resolve_with(w: &mut BehaviourWorld, extra: &[String]) {
     let (definition, installed) = {
         let rig = w.declared.get_or_insert_with(Default::default);
         let definition = rig.definition.clone().unwrap_or_else(|| {
-            r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#
+            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#
                 .to_string()
         });
         (definition, Installed::from_rig(rig))
