@@ -417,11 +417,17 @@ pub fn resolve_default_registry(image: &str, default_registry: Option<&str>) -> 
     format!("{registry}/{image}")
 }
 
-fn image_has_registry(image: &str) -> bool {
+pub(crate) fn registry_of(image: &str) -> Option<&str> {
     match image.split_once('/') {
-        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
-        None => false,
+        Some((first, _)) if first.contains('.') || first.contains(':') || first == "localhost" => {
+            Some(first)
+        }
+        _ => None,
     }
+}
+
+fn image_has_registry(image: &str) -> bool {
+    registry_of(image).is_some()
 }
 
 #[cfg(test)]

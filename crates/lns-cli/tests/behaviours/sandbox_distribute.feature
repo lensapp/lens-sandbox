@@ -131,6 +131,12 @@ Feature: distributing a sandbox
     And the sandbox "hub.lns.run/hchen/claude:latest" resolves to the same cached artifact
     And the service received a request to tag from "hub.lns.run/hchen/claude:0.0.4"
 
+  Scenario: a bare tag target follows the source's registry
+    Given the sandbox "ghcr.io/team/hermes:1.4.0" is cached
+    When the user runs sandbox command "tag ghcr.io/team/hermes:1.4.0 team/hermes:latest"
+    Then the exit code is 0
+    And the sandbox "ghcr.io/team/hermes:latest" resolves to the same cached artifact
+
   Scenario: push carries a hostPath fileset verbatim and packs nothing for it
     Given a valid lns.yaml in the current directory declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig"
     And the registry accepts the push

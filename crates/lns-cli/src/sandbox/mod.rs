@@ -133,12 +133,15 @@ pub struct SandboxPullArgs {
 
 #[derive(clap::Args)]
 pub struct SandboxTagArgs {
-    #[arg(value_name = "SOURCE", help = "Cached sandbox to re-reference.")]
+    #[arg(
+        value_name = "SOURCE",
+        help = "Cached sandbox to re-reference; a bare reference resolves against the `run.registry` default, else hub.lns.run."
+    )]
     pub from: String,
 
     #[arg(
         value_name = "TARGET",
-        help = "New tag in the source sandbox's registry and repository."
+        help = "New tag in the source sandbox's registry and repository; a bare reference resolves against the source's registry."
     )]
     pub to: String,
 }
@@ -248,7 +251,11 @@ pub fn apply_registry_default(command: &mut SandboxCommand, registry: Option<&st
         SandboxCommand::Pull(args) => qualify(&mut args.reference),
         SandboxCommand::Tag(args) => {
             qualify(&mut args.from);
-            qualify(&mut args.to);
+            // A bare target follows the source's registry, so a same-repo retag never turns into a cross-registry pair.
+            args.to = crate::config::resolve_default_registry(
+                &args.to,
+                crate::config::registry_of(&args.from).or(registry),
+            );
         }
         // Inspect and rm take an id-or-ref, so the default can only be applied once the service has reported no such run — it rides along instead of rewriting the target.
         SandboxCommand::Inspect(args) => args.registry = registry.map(str::to_string),
@@ -1201,6 +1208,21 @@ mod tests {
     use super::*;
     use lns_ipc::encode_frame;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_docker_io_default_leaves_a_bare_tag_pair_to_the_parser() {
+        // Accepted interplay: docker.io is the reference parser's own default, so neither side gains a prefix and implicit `library/` namespacing survives.
+        let mut command = SandboxCommand::Tag(SandboxTagArgs {
+            from: "alpine:3".into(),
+            to: "alpine:mine".into(),
+        });
+        apply_registry_default(&mut command, Some("docker.io"));
+        let SandboxCommand::Tag(args) = command else {
+            unreachable!("the command was constructed as Tag")
+        };
+        assert_eq!(args.from, "alpine:3");
+        assert_eq!(args.to, "alpine:mine");
+    }
 
     struct CannedService {
         response: Response,
