@@ -1217,7 +1217,7 @@ decision is the same question again tomorrow — so the run writes it down, as a
 ```yaml
 apiVersion: lns.run/v1
 kind: mixin
-name: reviewer-local
+name: lns-local-mixin
 spec:
   egress:
     http:
@@ -1266,20 +1266,26 @@ parser, its own documentation, and its own answer to every question
 It also stops the file being egress-only. If a decision ever needs to record
 something other than a destination, the blocks are already defined.
 
-### 8.3 Open: the name
+### 8.3 The name
 
-`lns-policy.yaml` described a file that held policy. It holds decisions now, in
-mixin grammar, and may hold more than egress. The name has to change; what it
-changes to is not settled.
+The file is `lns-local-mixin.yaml`. The old name described a file that held
+policy; this one holds decisions, in mixin grammar, and may hold more than
+egress — so it says what the file **is** rather than what it once carried, and it
+sorts beside the `lns.yaml` it layers on.
 
-### 8.4 Open: where a connector grant goes
+Its `name` is the file's own stem, because nobody is present to choose one.
 
-The same file records which connectors are connected today, and that record has no
-home here. A connector is installed **per machine**
+### 8.4 Where a connector grant goes
+
+A connector grant does not live here. A connector is installed **per machine**
 ([§7.1](#71-connectors)), while consenting to use one is **per project** — and
 neither is something a mixin can say, because no kit names a connector
-([§1.4](#14-credentials-and-what-a-connector-adds)). So the grant needs a store of
-its own, per project and outside the kit grammar. Where that lives is not settled.
+([§1.4](#14-credentials-and-what-a-connector-adds)).
+
+So it lives in the per-workload grant store the machine already keeps, keyed by
+project alone: `lns connector connect` names a directory and no workload. Keeping it out of this file is what lets the file be committed — a
+clone asks for its own consent rather than inheriting one nobody in that clone
+gave.
 
 ---
 
@@ -1287,7 +1293,7 @@ its own, per project and outside the kit grammar. Where that lives is not settle
 
 - [Running workloads](running-workloads.md) — the authoring guide for this format.
 - [Policy and approvals](policy.md) — the `match` pattern grammar and the
-  per-directory `lns-policy.yaml`.
+  per-directory `lns-local-mixin.yaml`.
 - [Credentials](credentials.md) — placeholders, and the per-machine values a
   credential resolves against.
 - [Connectors](connectors.md) — connecting a workload to an external service.
