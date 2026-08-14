@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::relay::Relay;
 
-mod adapter;
+pub(crate) mod adapter;
 pub(crate) use adapter::revocations_before_gate;
 mod real;
 mod traits;

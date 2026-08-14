@@ -344,8 +344,8 @@ Manage the credential-connector catalog — the services whose credentials reach
 workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
 declared in a sandbox definition's `spec.connectors` seeds its placeholder env
 var but is only offered — the workload is prompted on first use, never armed
-automatically. Connecting one records it under `connectors:` in that
-directory's `lns-policy.yaml` and binds its value on your machine; the workload
+automatically. Connecting one records the connection for that project on this
+machine and binds its value; the workload
 still meets a first-use card, and answering it is what grants that workload the
 value.
 

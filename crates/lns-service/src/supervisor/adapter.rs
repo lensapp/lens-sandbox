@@ -604,6 +604,10 @@ async fn start_credential_subsystem(
 
     // Back-reference so the approval session's Policy emits carry the credential registry instead of `credentials: null`.
     session.set_credentials_provider(make_credentials_provider(&credential_session));
+    session.set_connection_recorder(make_connection_recorder(
+        consent.grant_store.clone(),
+        consent.project.to_string(),
+    ));
     // A policy reload re-gates the reconnected connectors through the grant snapshot, so a disconnected — or never-granted — connector's arming is revoked; granted declarations survive because they don't derive from the policy file.
     session.set_armed_reconciler(make_armed_reconciler(
         &credential_session,
@@ -623,14 +627,45 @@ async fn start_credential_subsystem(
 fn running_policies(
     policy_path: &Path,
     sandbox_policy: Option<&Policy>,
+    connected: Vec<String>,
 ) -> Result<(Policy, Policy)> {
-    let own = Policy::load_or_default(policy_path)
+    let mut own = Policy::load_or_default(policy_path)
         .with_context(|| format!("loading policy {}", policy_path.display()))?;
+    own.connectors = connected;
     let effective = match sandbox_policy {
         Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &own),
         None => own.clone(),
     };
     Ok((effective, own))
+}
+
+/// A live connect records the project's connection where the machine keeps them, so the next reload and the next run both see it.
+fn make_connection_recorder(
+    store: Arc<dyn GrantStore>,
+    project: String,
+) -> crate::approval_flow::session::ConnectionRecorder {
+    Box::new(move |id| {
+        store
+            .update(&mut |file| file.connect(&project, id))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// The decisions file as the run reads it: what the developer wrote, plus the connectors this project connected, which live per machine rather than in a file that travels.
+pub(crate) fn reload_with_connections(policy_path: &Path, grants_path: &Path) -> Result<Policy> {
+    let mut policy = Policy::load_or_default(policy_path)
+        .with_context(|| format!("reloading policy {}", policy_path.display()))?;
+    policy.connectors = connected_in(grants_path, &project_key(policy_path));
+    Ok(policy)
+}
+
+/// Every connector this project connected, read from the sidecar each time so a connect or disconnect made mid-run is seen by the next reload.
+fn connected_in(grants_path: &Path, project: &str) -> Vec<String> {
+    lns_policy::grants::JsonFileGrantStore::new(grants_path.to_path_buf())
+        .load()
+        .map(|file| file.connected_in(project))
+        .unwrap_or_default()
 }
 
 pub(super) async fn start(
@@ -644,7 +679,8 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let sandbox_credentials = consent.credentials;
     let workload = consent.workload;
-    let (mut policy, own_policy) = running_policies(policy_path, sandbox_policy)?;
+    let connected = connected_in(&default_workload_grants_path(), &project_key(policy_path));
+    let (mut policy, own_policy) = running_policies(policy_path, sandbox_policy, connected)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
     let user_catalog =
         load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
@@ -790,12 +826,13 @@ pub(super) async fn start(
     credential_session.set_ledger_recorder(recorder);
 
     // The watcher goes up only after the armed reconciler is registered, so no reload can fire without one; then one reconcile from disk catches any disconnect landed during subsystem init (the oauth-refresh await) before the relay emits its initial frame.
-    let watcher = PolicyWatcher::spawn(policy_path.to_path_buf(), session.clone())
-        .with_context(|| format!("watching policy {}", policy_path.display()))?;
-    session.apply_external_policy(
-        Policy::load_or_default(policy_path)
-            .with_context(|| format!("reloading policy {}", policy_path.display()))?,
-    );
+    let watcher = PolicyWatcher::spawn(
+        policy_path.to_path_buf(),
+        grants_path.clone(),
+        session.clone(),
+    )
+    .with_context(|| format!("watching policy {}", policy_path.display()))?;
+    session.apply_external_policy(reload_with_connections(policy_path, &grants_path)?);
 
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(
@@ -826,6 +863,39 @@ mod tests {
     use super::*;
     use lns_policy::grants::GrantRecord;
     use std::io;
+
+    #[test]
+    fn the_connection_recorder_writes_the_project_into_the_sidecar() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        let store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(path.clone()));
+
+        let record = make_connection_recorder(store.clone(), "/work".to_string());
+        assert_eq!(record("some-provider"), Ok(()));
+
+        assert_eq!(
+            store
+                .load()
+                .expect("the sidecar reads back")
+                .connected_in("/work"),
+            ["some-provider"],
+            "a connect the developer accepted mid-run is lost on the next reload unless it lands where the machine keeps its connections"
+        );
+    }
+
+    #[test]
+    fn the_connection_recorder_surfaces_a_sidecar_it_cannot_write() {
+        let unwritable = std::path::Path::new("/no/such/dir/grants.json");
+        let store: Arc<dyn GrantStore> =
+            Arc::new(JsonFileGrantStore::new(unwritable.to_path_buf()));
+
+        let record = make_connection_recorder(store, "/work".to_string());
+
+        assert!(
+            record("some-provider").is_err(),
+            "the session tells the developer when a connection it accepted did not land, so the re-offer next run is not a surprise"
+        );
+    }
 
     fn fixture_session() -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};

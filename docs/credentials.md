@@ -32,9 +32,9 @@ Declare your own for an internal API with `lns connector add`
 (see [Connectors](connectors.md)). A sandbox definition that lists a provider
 under `spec.connectors` seeds its placeholder env var but only *offers* it —
 the workload is prompted on first use, never armed automatically.
-`lns connector connect <id>` records the id under `connectors:` in that
-directory's `lns-policy.yaml` and binds the value on your machine, but that
-alone does not arm the credential for a workload — see
+`lns connector connect <id>` records the connection for that project on this
+machine and binds the value, but that alone does not arm the credential for a
+workload — see
 [Workload grants](#workload-grants) below.
 
 ## Value decisions

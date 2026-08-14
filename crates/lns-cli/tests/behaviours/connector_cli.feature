@@ -21,7 +21,7 @@ Feature: connecting connectors from the CLI
     And the background service is available to sign in
     When the developer runs "lns connector connect some-provider"
     Then the output describes binding a credential value
-    And "some-provider" is recorded under connectors in lns-policy.yaml
+    And "some-provider" is recorded as connected for this project
     And lns-policy.yaml carries no credential material
 
   Scenario: Connecting a credential connector fails clearly when the service is unavailable
@@ -29,20 +29,20 @@ Feature: connecting connectors from the CLI
     And the background service is not available
     When the developer runs "lns connector connect some-provider"
     Then the command fails noting the service is needed to bind
-    And "some-provider" is not recorded in lns-policy.yaml
+    And "some-provider" is not recorded as connected
 
   Scenario: Connecting an oauth connector signs in and then records it
     Given the background service is available to sign in
     When the developer runs "lns connector connect some-oauth"
     Then a verification URL and user code are shown
-    And "some-oauth" is recorded under connectors in lns-policy.yaml
+    And "some-oauth" is recorded as connected for this project
     And lns-policy.yaml carries no token material
 
   Scenario: Connecting an oauth connector fails clearly when the service is unavailable
     Given the background service is not available
     When the developer runs "lns connector connect some-oauth"
     Then the command fails noting the service is needed to sign in
-    And "some-oauth" is not recorded in lns-policy.yaml
+    And "some-oauth" is not recorded as connected
 
   Scenario: The catalog listing shows each connector's auth kind
     When the developer runs "lns connector list"
@@ -55,7 +55,7 @@ Feature: connecting connectors from the CLI
     When the developer runs "lns connector connect some-pkce"
     Then the browser is opened to the authorization page
     And no user code is shown
-    And "some-pkce" is recorded under connectors in lns-policy.yaml
+    And "some-pkce" is recorded as connected for this project
     And lns-policy.yaml carries no credential material
 
   Scenario: Connecting a pkce connector fails clearly when the service is unavailable
@@ -63,7 +63,7 @@ Feature: connecting connectors from the CLI
     And the background service is not available
     When the developer runs "lns connector connect some-pkce"
     Then the command fails noting the service is needed to sign in
-    And "some-pkce" is not recorded in lns-policy.yaml
+    And "some-pkce" is not recorded as connected
 
   Scenario: The catalog listing shows a pkce connector as authenticating by oauth
     Given a user catalog declares the "some-pkce" pkce connector

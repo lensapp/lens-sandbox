@@ -4,7 +4,6 @@ use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::ConnectorArgs;
 use lns_cli::connector::{self, BindOutcome, ConnectorSignIn, LocalBoxFuture, SignInOutcome};
-use lns_policy::Policy;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -316,14 +315,22 @@ fn shows_verification(world: &mut BehaviourWorld) {
     );
 }
 
-#[then(regex = r#"^"(\S+)" is recorded under connectors in lns-policy.yaml$"#)]
+#[then(regex = r#"^"(\S+)" is recorded as connected for this project$"#)]
 fn recorded(world: &mut BehaviourWorld, id: String) {
-    let policy = Policy::load_or_default(&policy_file(world)).unwrap();
+    let connected = connected_for(world);
     assert!(
-        policy.connectors.contains(&id),
-        "expected {id} recorded, got: {:?}",
-        policy.connectors
+        connected.contains(&id),
+        "connecting names a directory and no workload, so it records per project in the sidecar; got: {connected:?}"
     );
+}
+
+fn connected_for(world: &mut BehaviourWorld) -> Vec<String> {
+    use lns_policy::grants::GrantStore as _;
+    let policy = policy_file(world);
+    lns_policy::grants::JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
+        .load()
+        .expect("the sidecar reads back")
+        .connected_in(&lns_policy::grants::project_key(&policy))
 }
 
 #[then("lns-policy.yaml carries no token material")]
@@ -381,13 +388,12 @@ fn fails_needs_service(world: &mut BehaviourWorld) {
     );
 }
 
-#[then(regex = r#"^"(\S+)" is not recorded in lns-policy.yaml$"#)]
+#[then(regex = r#"^"(\S+)" is not recorded as connected$"#)]
 fn not_recorded(world: &mut BehaviourWorld, id: String) {
-    let policy = Policy::load_or_default(&policy_file(world)).unwrap();
+    let connected = connected_for(world);
     assert!(
-        !policy.connectors.contains(&id),
-        "expected {id} absent, got: {:?}",
-        policy.connectors
+        !connected.contains(&id),
+        "expected {id} absent, got: {connected:?}"
     );
 }
 
