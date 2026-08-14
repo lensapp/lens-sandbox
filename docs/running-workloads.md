@@ -37,9 +37,8 @@ spec:
   resources:
     cpu: 1
     memory: 512Mi
-  policy:
-    egress:
-      http: []
+  egress:
+    http: []
   connectors: []
   credentials: []
   volumes:
@@ -64,7 +63,7 @@ The `spec` fields:
 | `workdir`      | Absolute guest working directory. It is created when missing.                 |
 | `user`         | The run-as user the sandbox needs, `USER[:GROUP]` like `-u`, so a definition that needs root is runnable as published. A per-run `-u` still wins, and the image's own `USER` is the fallback when this is unset. |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
-| `policy`       | The network policy — the `egress.http` and `egress.tcp` rule tables (see [Policy](policy.md)). |
+| `egress`       | Where the workload may reach — the `http` and `tcp` rule tables (see [Policy](policy.md)). |
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
@@ -1057,7 +1056,7 @@ or `lns pull` simply fetches or rebuilds it again.
 
 [`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
-plus node declared under `spec.tools`, `spec.env`, a tight `policy` allowlist,
+plus node declared under `spec.tools`, `spec.env`, a tight `spec.egress` allowlist,
 the `claude-code-subscription` connector, a `.` bind at `/workspace`, and a
 self-contained inline fileset that seeds the agent's home. Copy its `lns.yaml`
 into your project and `lns run`.

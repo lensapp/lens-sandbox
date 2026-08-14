@@ -71,9 +71,7 @@ fn mixin_declaring_a_tool(w: &mut BehaviourWorld, tool: String) {
 fn mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
     install(
         w,
-        &format!(
-            r#"{{"policy":{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
-        ),
+        &format!(r#"{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}"#),
     );
 }
 

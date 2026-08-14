@@ -135,9 +135,8 @@ spec:
   resources:
     cpu: 1
     memory: 512Mi
-  policy:
-    egress:
-      http: []
+  egress:
+    http: []
   connectors: []
   credentials: []
   volumes:

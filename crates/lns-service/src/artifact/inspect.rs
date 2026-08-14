@@ -103,7 +103,9 @@ pub(crate) fn project_inspection(
                 credentials: mixin.spec.credentials.clone(),
                 tools: mixin.spec.tools.clone(),
                 policy_flags: declared_policy_flags(&lns_policy::Policy {
-                    network: mixin.spec.policy.clone(),
+                    network: lns_policy::NetworkPolicy {
+                        egress: mixin.spec.egress.clone(),
+                    },
                     ..Default::default()
                 }),
             })))
@@ -573,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"policy":{"egress":{"http":[{"match":"*","verdict":"allow"}]}}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 

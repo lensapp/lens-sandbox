@@ -21,17 +21,16 @@ spec:
   resources:
     cpu: 4
     memory: 6Gi
-  policy:
-    egress:
-      http:
-        - match: registry.npmjs.org
-          verdict: allow
-        - match: api.anthropic.com
-          verdict: allow
-        - match: platform.claude.com
-          verdict: allow
-        - match: downloads.claude.ai
-          verdict: allow
+  egress:
+    http:
+      - match: registry.npmjs.org
+        verdict: allow
+      - match: api.anthropic.com
+        verdict: allow
+      - match: platform.claude.com
+        verdict: allow
+      - match: downloads.claude.ai
+        verdict: allow
   connectors:
     - claude-code-subscription
   volumes:

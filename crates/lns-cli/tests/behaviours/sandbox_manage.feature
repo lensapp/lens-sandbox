@@ -69,5 +69,5 @@ Feature: managing cached sandboxes
     Given the sandbox "hermes:1.4.0" was pulled and then locally edited
     When the user runs sandbox command "diff hermes:1.4.0"
     Then the exit code is 0
-    And the output contains "policy"
+    And the output contains "egress"
     And the output shows the local changes since the pulled version
