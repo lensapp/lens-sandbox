@@ -25,8 +25,25 @@ spec:
 choose to edit the file directly.
 
 The file is a **mixin** — the same document format a
-[sandbox definition](running-workloads.md#defining-a-sandbox) layers on. Your
-decisions merge after every other source, so nothing you pulled overrules them.
+[sandbox definition](running-workloads.md#defining-a-sandbox) layers on. Every
+run in the directory resolves it without being named, after every other source,
+so nothing you pulled overrules what you decided.
+
+Being a mixin also means the file is not limited to `egress`. Any block a mixin
+can declare, this one can declare too — a tool, a mount, another mixin to layer
+on — and it reaches every run in this directory:
+
+```yaml
+apiVersion: lns.run/v1
+kind: mixin
+name: lns-local-mixin
+spec:
+  tools:
+    - ripgrep@14
+  egress:
+    http: []
+    tcp: []
+```
 
 One directory, one policy file — it sits next to the project it governs. Point a
 run at a different file with `--policy <path>`:

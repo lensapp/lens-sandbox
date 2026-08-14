@@ -22,6 +22,7 @@ pub(crate) async fn peek_and_plan(
     mixins: &[String],
     run_id: &str,
     microvm: &str,
+    decisions: Option<&std::path::Path>,
 ) -> Result<Option<SandboxPlan>> {
     let reference: Reference = image_ref
         .parse()
@@ -50,6 +51,7 @@ pub(crate) async fn peek_and_plan(
                 mixins,
                 &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
                 &RegistryMixins,
+                local_source(decisions)?,
             )
             .await
             .with_context(|| format!("resolving {image_ref}"))?
@@ -171,6 +173,20 @@ pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> 
         return Ok(());
     }
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
+}
+
+/// The directory's own decisions as a merge source, read off this machine; a run that named no decisions file resolves without one.
+fn local_source(
+    decisions: Option<&std::path::Path>,
+) -> Result<Option<crate::artifact::mixin::LocalSource>> {
+    let Some(path) = decisions else {
+        return Ok(None);
+    };
+    let decided_in = path.parent().unwrap_or(std::path::Path::new("."));
+    crate::artifact::mixin::LocalSource::read(
+        crate::artifact::mixin_dir::read_local_mixin(&RealMixinDir, path)?,
+        crate::artifact::mixin::Locator::Directory(lns_artifact::sandbox::fold_path(decided_in)),
+    )
 }
 
 /// Reads a directory mixin off this machine's filesystem.
@@ -356,14 +372,20 @@ pub(crate) async fn resolve_definition(
     definition: &str,
     project_dir: &str,
     mixins: &[String],
+    decisions: Option<&std::path::Path>,
 ) -> Result<lns_ipc::Response> {
     let project_dir = std::path::Path::new(project_dir);
     crate::artifact::mixin::require_a_rooted_project_dir(project_dir)?;
     let home = crate::artifact::mixin::Locator::Directory(project_dir.to_path_buf());
-    let resolution =
-        crate::artifact::mixin::resolve(definition.as_bytes(), mixins, &home, &RegistryMixins)
-            .await
-            .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
+    let resolution = crate::artifact::mixin::resolve(
+        definition.as_bytes(),
+        mixins,
+        &home,
+        &RegistryMixins,
+        local_source(decisions)?,
+    )
+    .await
+    .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
     Ok(lns_ipc::Response::DefinitionResolved {
         definition: String::from_utf8(resolution.document)
             .context("the resolved definition is not utf-8")?,
@@ -373,7 +395,11 @@ pub(crate) async fn resolve_definition(
     })
 }
 
-pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<ArtifactInspection> {
+pub(crate) async fn inspect(
+    image_ref: &str,
+    mixins: &[String],
+    decisions: Option<&std::path::Path>,
+) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -391,6 +417,7 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         mixins,
         &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
         &RegistryMixins,
+        local_source(decisions)?,
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;

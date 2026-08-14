@@ -45,6 +45,7 @@ async fn resolve_with(w: &mut BehaviourWorld, extra: &[String]) {
         extra,
         &published(),
         &installed,
+        None,
     )
     .await
     {

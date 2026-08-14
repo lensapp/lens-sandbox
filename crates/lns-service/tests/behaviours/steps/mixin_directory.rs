@@ -64,17 +64,22 @@ async fn the_local_sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
         )
     };
     let home = lns_service::artifact::mixin::Locator::Directory(std::path::PathBuf::from(home));
-    let planned =
-        match lns_service::artifact::mixin::resolve(definition.as_bytes(), &[], &home, &installed)
-            .await
-        {
-            Ok(resolution) => {
-                let rig = w.declared.get_or_insert_with(Default::default);
-                rig.resolved_mixins.clone_from(&resolution.mixins);
-                lns_service::artifact::plan_local_sandbox(&resolution.document)
-            }
-            Err(e) => Err(e),
-        };
+    let planned = match lns_service::artifact::mixin::resolve(
+        definition.as_bytes(),
+        &[],
+        &home,
+        &installed,
+        None,
+    )
+    .await
+    {
+        Ok(resolution) => {
+            let rig = w.declared.get_or_insert_with(Default::default);
+            rig.resolved_mixins.clone_from(&resolution.mixins);
+            lns_service::artifact::plan_local_sandbox(&resolution.document)
+        }
+        Err(e) => Err(e),
+    };
     crate::steps::declared_connectors::launch_resolved(w, planned);
 }
 

@@ -578,7 +578,12 @@ lns pull ghcr.io/acme/observability:2      # cache it and the mixins it names
 
 **The last source to say something about a thing wins.** Sources are ordered:
 the sandbox first, then each entry in `spec.mixins` in order with that mixin's
-own mixins expanded right after it, then each `--mixin` the user passed.
+own mixins expanded right after it, then each `--mixin` the user passed, and
+last the directory's own
+[`lns-local-mixin.yaml`](policy.md#the-policy-file) — so nothing you pulled
+overrules what you decided here. That file's egress is the exception: it reaches
+the running sandbox live rather than through the merge, so a rule you delete
+mid-run stops applying.
 
 A directory entry is read from this machine, relative to the document that names
 it. A published sandbox may not name one — a consumer has no copy of your

@@ -75,6 +75,7 @@ struct Fetched {
     graph: BTreeMap<String, SandboxSpec>,
     pinned_roots: Vec<String>,
     pinned_extra: Vec<String>,
+    pinned_local: Vec<String>,
 }
 
 /// What one walk of the graph carries: the sources fetched so far, what each reference resolved to under the document that named it, and the references still to visit.
@@ -89,6 +90,7 @@ struct Walk {
 async fn collect<S: MixinSource>(
     roots: &[String],
     extra: &[String],
+    local: Option<(&[String], &Locator)>,
     home: &Locator,
     source: &S,
 ) -> Result<Fetched> {
@@ -101,6 +103,12 @@ async fn collect<S: MixinSource>(
     let mut pinned_extra = Vec::new();
     for reference in extra {
         pinned_extra.push(visit(&mut walk, reference, home, true, source).await?);
+    }
+    let mut pinned_local = Vec::new();
+    if let Some((references, decided_in)) = local {
+        for reference in references {
+            pinned_local.push(visit(&mut walk, reference, decided_in, false, source).await?);
+        }
     }
     let mut pinned_roots = Vec::new();
     for reference in roots {
@@ -130,6 +138,7 @@ async fn collect<S: MixinSource>(
         graph,
         pinned_roots,
         pinned_extra,
+        pinned_local,
     })
 }
 
@@ -185,6 +194,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
     extra: &[String],
     home: &Locator,
     source: &S,
+    local: Option<LocalSource>,
 ) -> Result<Resolution> {
     if !matches!(
         crate::artifact::dispatch(artifact_type, config_media_type),
@@ -198,7 +208,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             contributions: Vec::new(),
         });
     }
-    resolve(config_json, extra, home, source).await
+    resolve(config_json, extra, home, source, local).await
 }
 
 /// What a run boots, and the mixins that produced it — the merged document declares none of its own, so the references travel beside it.
@@ -212,15 +222,49 @@ pub struct Resolution {
     pub contributions: Vec<lns_artifact::merge::Contribution>,
 }
 
+/// What the directory decided, as the merge reads it: the label a disclosure names it by, and everything but the egress it decided. Egress is left out because it reaches the guest live — an approval made mid-run applies and a rule deleted mid-run retracts, and a copy frozen into the booted document could do neither.
+#[derive(Debug)]
+pub struct LocalSource {
+    pub label: String,
+    /// The directory this file was read from, which is what any directory it names roots at (§3.3.1) — not the directory the run happens to be about.
+    home: Locator,
+    spec: SandboxSpec,
+}
+
+impl LocalSource {
+    /// Read the directory's decisions as one merge source; a file nobody has written has nothing to contribute.
+    pub fn read(fetched: Option<FetchedMixin>, home: Locator) -> Result<Option<Self>> {
+        let Some(fetched) = fetched else {
+            return Ok(None);
+        };
+        let document = lns_artifact::sandbox::parse_mixin(fetched.document.as_bytes())
+            .with_context(|| format!("reading {}", fetched.pinned))?;
+        Ok(Some(Self {
+            label: fetched.pinned,
+            home,
+            spec: SandboxSpec {
+                egress: Default::default(),
+                ..document.spec
+            },
+        }))
+    }
+
+    fn decides_nothing(&self) -> bool {
+        self.spec == SandboxSpec::default()
+    }
+}
+
 /// Resolve a published definition and every mixin it layers on into the one document a run boots (`docs/sandbox-spec.md` §3.3), returned as a definition the rest of the plan path reads exactly as it reads an authored one.
 pub async fn resolve<S: MixinSource>(
     config_json: &[u8],
     extra: &[String],
     home: &Locator,
     source: &S,
+    local: Option<LocalSource>,
 ) -> Result<Resolution> {
     let def = lns_artifact::sandbox::parse(config_json).context("reading the sandbox document")?;
-    if def.spec.mixins.is_empty() && extra.is_empty() {
+    let local = local.filter(|local| !local.decides_nothing());
+    if def.spec.mixins.is_empty() && extra.is_empty() && local.is_none() {
         return Ok(Resolution {
             document: config_json.to_vec(),
             mixins: Vec::new(),
@@ -228,10 +272,34 @@ pub async fn resolve<S: MixinSource>(
             contributions: lns_artifact::merge::own_egress(&def.spec),
         });
     }
-    let fetched = collect(&def.spec.mixins, extra, home, source).await?;
+    let decided = local
+        .as_ref()
+        .map(|local| (local.spec.mixins.clone(), local.home.clone()));
+    let fetched = collect(
+        &def.spec.mixins,
+        extra,
+        decided
+            .as_ref()
+            .map(|(references, decided_in)| (references.as_slice(), decided_in)),
+        home,
+        source,
+    )
+    .await?;
     let mut root = def.spec.clone();
     root.mixins = fetched.pinned_roots;
-    let sources = flatten(&root, &fetched.pinned_extra, None, &fetched.graph)?;
+    let local = local.map(|mut local| {
+        local.spec.mixins = fetched.pinned_local.clone();
+        local
+    });
+    let sources = flatten(
+        &root,
+        &fetched.pinned_extra,
+        local.as_ref().map(|local| Source {
+            label: &local.label,
+            spec: &local.spec,
+        }),
+        &fetched.graph,
+    )?;
     let merged = merge(&sources)?;
     let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
@@ -289,7 +357,7 @@ pub fn refuse_mixins_without_a_document(extra: &[String]) -> Result<()> {
 /// Cache every mixin a pulled one names, so a digest-pinned graph pulled once resolves offline afterwards; answers with how many documents it read.
 pub async fn warm<S: MixinSource>(roots: &[String], source: &S) -> Result<usize> {
     let home = Locator::Reference(String::new());
-    let fetched = collect(roots, &[], &home, source).await?;
+    let fetched = collect(roots, &[], None, &home, source).await?;
     Ok(fetched.graph.len())
 }
 
@@ -393,6 +461,10 @@ mod tests {
     }
 
     /// Every scenario here resolves a published document unless it says otherwise.
+    fn decided_in(dir: &str) -> Locator {
+        Locator::Directory(std::path::PathBuf::from(dir))
+    }
+
     fn published() -> Locator {
         Locator::Reference("registry.example.test/team/sandbox:1".to_string())
     }
@@ -434,7 +506,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let out = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs)).await?;
+        let out = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None).await?;
         lns_artifact::sandbox::parse(&out.document)
     }
 
@@ -448,7 +520,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None)
             .await
             .expect("a declared mixin resolves");
         let wire = on_the_wire(&resolution.contributions);
@@ -480,7 +552,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None)
             .await
             .expect("a mixin declaring every block resolves");
         let wire = on_the_wire(&resolution.contributions);
@@ -511,6 +583,7 @@ mod tests {
             &[],
             &published(),
             &source,
+            None,
         )
         .await
         .expect_err("a tag a published document declares resolves differently for each consumer");
@@ -538,7 +611,7 @@ mod tests {
             .iter()
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
-        let err = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs))
+        let err = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None)
             .await
             .expect_err("a pinned mixin naming a tag reopens exactly what pinning it closed");
         assert!(
@@ -551,7 +624,7 @@ mod tests {
     async fn a_document_with_no_mixins_is_returned_untouched() {
         let source = Fake::new(&[]);
         let original = sandbox(r#"{"image":"x:1"}"#);
-        let out = resolve(&original, &[], &published(), &source)
+        let out = resolve(&original, &[], &published(), &source, None)
             .await
             .unwrap();
         assert_eq!(
@@ -572,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_image_is_passed_through_without_a_fetch() {
         let source = Fake::new(&[]);
-        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &published(), &source)
+        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &published(), &source, None)
             .await
             .expect("an image has no document to merge");
         assert_eq!(out.document, b"{}");
@@ -595,6 +668,7 @@ mod tests {
             &[],
             &published(),
             &Fake::new(&[]),
+            None,
         )
         .await
         .expect("a sandbox resolves");
@@ -652,7 +726,7 @@ mod tests {
             .map(|(r, b)| (r.as_str(), b.as_str()))
             .collect();
         let source = Fake::new(&refs);
-        let resolution = resolve(&sandbox(&spec), &[], &published(), &source)
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &source, None)
             .await
             .expect("a diamond resolves");
         let shared = pinned("shared");
@@ -677,6 +751,7 @@ mod tests {
             &[],
             &published(),
             &Fake::new(&[]),
+            None,
         )
         .await
         .unwrap_err();
@@ -702,6 +777,7 @@ mod tests {
             &[],
             &published(),
             &source,
+            None,
         )
         .await
         .unwrap_err();
@@ -718,6 +794,7 @@ mod tests {
             &[],
             &published(),
             &Fake::new(&[]),
+            None,
         )
         .await
         .unwrap_err();
@@ -765,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_document_that_will_not_parse_is_blamed_on_itself_and_not_on_its_mixins() {
-        let err = resolve(b"{}", &[], &published(), &Fake::new(&[]))
+        let err = resolve(b"{}", &[], &published(), &Fake::new(&[]), None)
             .await
             .unwrap_err();
         assert!(
@@ -797,6 +874,7 @@ mod tests {
             &[pinned("m")],
             &published(),
             &Fake::new(&[]),
+            None,
         )
         .await
         .unwrap_err();
@@ -817,6 +895,7 @@ mod tests {
             &[],
             &published(),
             &source,
+            None,
         )
         .await
         .expect("a document may pin a mixin in any form the registry accepts");
@@ -837,6 +916,7 @@ mod tests {
             &[tagged.to_string()],
             &published(),
             &source,
+            None,
         )
         .await
         .expect("a tag resolves");
@@ -875,6 +955,7 @@ mod tests {
             &[],
             &Locator::Directory(std::path::PathBuf::from("/work")),
             &source,
+            None,
         )
         .await
         .expect("each mixin roots its own references");
@@ -893,6 +974,7 @@ mod tests {
             &["./mixins/pg".to_string()],
             &Locator::Directory(std::path::PathBuf::from("/work")),
             &Fake::new(&[]),
+            None,
         )
         .await
         .unwrap_err();
@@ -910,6 +992,7 @@ mod tests {
             &["/work/mixins/./pg".to_string()],
             &Locator::Directory(std::path::PathBuf::from("/work")),
             &source,
+            None,
         )
         .await
         .expect("a directory the user named beside their own definition is theirs to merge");
@@ -1016,6 +1099,7 @@ mod tests {
             &[],
             &published(),
             &Fake::new(&[]),
+            None,
         )
         .await
         .expect("a document with no mixins resolves to itself");
@@ -1029,6 +1113,97 @@ mod tests {
                 lns_artifact::merge::ROOT_LABEL
             )],
             "§1.5 has a run disclose every rule it will enforce, and a run that pulled no mixin enforces these"
+        );
+    }
+
+    #[test]
+    fn a_decisions_file_that_is_no_mixin_refuses_the_run_naming_the_file() {
+        let err = LocalSource::read(
+            Some(FetchedMixin {
+                pinned: "lns-local-mixin.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"x","spec":{"image":"x:1"}}"#.to_string(),
+            }),
+            decided_in("/work"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("lns-local-mixin.yaml"),
+            "a run that dropped a decisions file it could not read would boot without what the developer decided; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_decided_only_destinations_contributes_nothing_to_the_merge() {
+        let local = LocalSource::read(
+            Some(FetchedMixin {
+                pinned: "lns-local-mixin.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#.to_string(),
+            }),
+            decided_in("/work"),
+        )
+        .expect("a written file reads")
+        .expect("a written file contributes");
+        assert!(
+            local.decides_nothing(),
+            "egress reaches the guest live, so a file holding only egress leaves the merge with nothing to do"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_the_decisions_file_names_is_read_beside_that_file() {
+        let source = Fake::new(&[("/decisions/tools", r#"{"tools":["ripgrep@14"]}"#)]);
+        let local = LocalSource::read(
+            Some(FetchedMixin {
+                pinned: "lns-local-mixin.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"mixins":["./tools"]}}"#.to_string(),
+            }),
+            decided_in("/decisions"),
+        )
+        .expect("a written file reads")
+        .expect("a written file contributes");
+
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &[],
+            &published(),
+            &source,
+            Some(local),
+        )
+        .await
+        .expect("a directory beside the decisions file is one this machine read");
+        assert!(
+            String::from_utf8_lossy(&out.document).contains("ripgrep@14"),
+            "§3.3.1 roots a declared entry at the directory of the document that named it, and that document is the decisions file; got: {}",
+            String::from_utf8_lossy(&out.document)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decisions_file_kept_outside_the_project_still_roots_its_own_references() {
+        let source = Fake::new(&[("/decisions/tools", r#"{"tools":["ripgrep@14"]}"#)]);
+        let local = LocalSource::read(
+            Some(FetchedMixin {
+                pinned: "dev.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"dev","spec":{"mixins":["./tools"]}}"#.to_string(),
+            }),
+            decided_in("/decisions"),
+        )
+        .expect("a written file reads")
+        .expect("a written file contributes");
+
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &[],
+            &decided_in("/projdir"),
+            &source,
+            Some(local),
+        )
+        .await
+        .expect("a --policy file elsewhere still names directories beside itself");
+        assert!(
+            String::from_utf8_lossy(&out.document).contains("ripgrep@14"),
+            "rooting at the project instead would merge whatever /projdir/tools happens to hold; got: {}",
+            String::from_utf8_lossy(&out.document)
         );
     }
 }
