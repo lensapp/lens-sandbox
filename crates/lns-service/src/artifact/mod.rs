@@ -70,7 +70,7 @@ pub fn dispatch_run(
 /// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
     let ships_policy =
-        def.spec.policy != lns_policy::NetworkPolicy::default() || !def.spec.connectors.is_empty();
+        def.spec.egress != lns_policy::Egress::default() || !def.spec.connectors.is_empty();
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
@@ -137,7 +137,9 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
         policy: ships_policy.then(|| lns_policy::Policy {
-            network: def.spec.policy.clone(),
+            network: lns_policy::NetworkPolicy {
+                egress: def.spec.egress.clone(),
+            },
             connectors: def.spec.connectors.clone(),
         }),
         credentials: def.spec.credentials.clone(),
@@ -274,7 +276,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"egress":{"http":[{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"],"user":"root"}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"egress":{"http":[{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"user":"root"}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);

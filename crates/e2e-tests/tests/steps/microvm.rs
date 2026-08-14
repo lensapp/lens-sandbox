@@ -121,11 +121,9 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         }
     }
     if !world.project_egress.is_empty() {
-        spec_tail.push_str("\n  policy:\n    egress:\n      http:");
+        spec_tail.push_str("\n  egress:\n    http:");
         for host in &world.project_egress {
-            spec_tail.push_str(&format!(
-                "\n        - match: {host}\n          verdict: allow"
-            ));
+            spec_tail.push_str(&format!("\n      - match: {host}\n        verdict: allow"));
         }
     }
     if !world.project_tools.is_empty() {

@@ -87,7 +87,7 @@ Feature: authoring a sandbox
     When the user runs sandbox command "inspect"
     Then the exit code is 0
     And the output contains "image"
-    And the output contains "policy"
+    And the output contains "egress"
     And the service received no request
 
   Scenario: inspect discloses the run-as user a definition asks for

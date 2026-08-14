@@ -205,23 +205,21 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
 
     // A later source's entries are placed ahead of an earlier one's, so the latest entry matching a destination is the one that decides.
     for source in sources.iter().rev() {
-        spec.policy
-            .egress
+        spec.egress
             .http
-            .extend(source.spec.policy.egress.http.iter().cloned());
-        spec.policy
-            .egress
+            .extend(source.spec.egress.http.iter().cloned());
+        spec.egress
             .tcp
-            .extend(source.spec.policy.egress.tcp.iter().cloned());
+            .extend(source.spec.egress.tcp.iter().cloned());
         // Egress is a union rather than a keyed replacement, so every entry is attributed and none displaces another.
-        for rule in source.spec.policy.egress.http.iter() {
+        for rule in source.spec.egress.http.iter() {
             contributions.push(egress_contribution(
                 rule.verdict,
                 &rule.match_pattern,
                 source.label,
             ));
         }
-        for rule in source.spec.policy.egress.tcp.iter() {
+        for rule in source.spec.egress.tcp.iter() {
             contributions.push(egress_contribution(
                 rule.verdict,
                 &rule.match_pattern,
@@ -240,9 +238,8 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
 pub fn own_egress(spec: &SandboxSpec) -> Vec<Contribution> {
-    let http = spec.policy.egress.http.iter();
+    let http = spec.egress.http.iter();
     let tcp = spec
-        .policy
         .egress
         .tcp
         .iter()
@@ -731,11 +728,11 @@ mod tests {
         let found = contributions(&sources(&[
             (
                 ROOT_LABEL,
-                r#"{"policy":{"egress":{"http":[{"match":"api.base.example","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.base.example","verdict":"allow"}]}}"#,
             ),
             (
                 "obs",
-                r#"{"policy":{"egress":{"http":[{"match":"api.obs.example","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.obs.example","verdict":"allow"}]}}"#,
             ),
         ]));
         let rules: Vec<(&str, &str)> = found
@@ -959,14 +956,14 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}]}}"#,
             ),
             (
                 "later",
-                r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
             ),
         ]));
-        let table = &merged.policy.egress.http;
+        let table = &merged.egress.http;
         assert_eq!(table.len(), 2, "both entries survive the union");
         assert_eq!(
             table[0].verdict,
@@ -980,14 +977,14 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"deny"}]}}}"#,
+                r#"{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"deny"}]}}"#,
             ),
             (
                 "later",
-                r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}}"#,
             ),
         ]));
-        let table = &merged.policy.egress.tcp;
+        let table = &merged.egress.tcp;
         assert_eq!(table.len(), 2);
         assert_eq!(
             table[0].verdict,
@@ -1016,10 +1013,9 @@ mod tests {
     fn one_documents_own_order_survives_inside_its_own_entries() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}}"#,
+            r#"{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}"#,
         )]));
         let patterns: Vec<&str> = merged
-            .policy
             .egress
             .http
             .iter()
@@ -1061,7 +1057,7 @@ mod tests {
     fn a_merged_document_round_trips_through_its_own_serialization() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
+            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
         )]));
         let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(

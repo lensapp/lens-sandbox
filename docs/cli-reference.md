@@ -181,7 +181,7 @@ interchangeable everywhere a run is addressed.
 
 The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
-`workdir`, `volumes`, `env`, `policy`, and `connectors`. Declarative mounts
+`workdir`, `volumes`, `env`, `egress`, and `connectors`. Declarative mounts
 accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
 `readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).

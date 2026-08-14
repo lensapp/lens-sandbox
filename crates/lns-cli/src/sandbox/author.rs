@@ -19,10 +19,9 @@ spec:
   resources:
     cpu: 1
     memory: 512Mi
-  policy:
-    egress:
-      http: []
-      tcp: []
+  egress:
+    http: []
+    tcp: []
   connectors: []
   credentials: []
   volumes:
@@ -242,9 +241,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     }
     writeln!(
         out,
-        "  policy:       {} route(s){}",
-        def.spec.policy.egress.http.len(),
-        raw_rule_note(def.spec.policy.egress.tcp.len())
+        "  egress:       {} route(s){}",
+        def.spec.egress.http.len(),
+        raw_rule_note(def.spec.egress.tcp.len())
     )?;
     if !def.spec.connectors.is_empty() {
         writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;
@@ -460,7 +459,7 @@ mod tests {
             "got: {text}"
         );
         assert!(
-            text.contains("policy:") && text.contains("route(s)"),
+            text.contains("egress:") && text.contains("route(s)"),
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
@@ -481,7 +480,7 @@ mod tests {
 
     #[test]
     fn inspect_local_counts_raw_rules_apart_from_routes() {
-        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  policy:\n    egress:\n      http:\n        - match: api.example.test\n          verdict: allow\n      tcp:\n        - match: db.internal:5432\n          verdict: allow\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n    tcp:\n      - match: db.internal:5432\n        verdict: allow\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();

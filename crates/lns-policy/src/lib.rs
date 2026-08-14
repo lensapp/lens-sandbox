@@ -115,11 +115,10 @@ impl TryFrom<EgressRaw> for Egress {
     }
 }
 
-impl NetworkPolicy {
-    /// Whether the first catch-all `egress.http` rule the gate reaches is a deny, which decides everything the named rules leave rather than asking.
+impl Egress {
+    /// Whether the first catch-all `http` rule the gate reaches is a deny, which decides everything the named rules leave rather than asking.
     pub fn is_closed(&self) -> bool {
-        self.egress
-            .http
+        self.http
             .iter()
             .find(|rule| rule.is_catch_all())
             .is_some_and(|rule| rule.verdict == Verdict::Deny)
@@ -127,7 +126,6 @@ impl NetworkPolicy {
 
     pub fn validate_local_transport(&self) -> io::Result<()> {
         let uses_upstream = self
-            .egress
             .http
             .iter()
             .any(|route| route.transport == Transport::Upstream);
@@ -141,10 +139,21 @@ impl NetworkPolicy {
     }
 
     pub fn validate_binary_scopes(&self) -> io::Result<()> {
-        self.egress
-            .http
-            .iter()
-            .try_for_each(RouteRule::validate_binaries)
+        self.http.iter().try_for_each(RouteRule::validate_binaries)
+    }
+}
+
+impl NetworkPolicy {
+    pub fn is_closed(&self) -> bool {
+        self.egress.is_closed()
+    }
+
+    pub fn validate_local_transport(&self) -> io::Result<()> {
+        self.egress.validate_local_transport()
+    }
+
+    pub fn validate_binary_scopes(&self) -> io::Result<()> {
+        self.egress.validate_binary_scopes()
     }
 }
 

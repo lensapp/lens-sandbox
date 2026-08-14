@@ -475,7 +475,7 @@ mod tests {
             r#"{"image":"x:1","mixins":["obs"]}"#,
             &[(
                 "obs",
-                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"policy":{"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow"}]}}}"#,
+                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow"}]}}"#,
             )],
         );
         let refs: Vec<(&str, &str)> = documents
@@ -1013,7 +1013,7 @@ mod tests {
     async fn a_sandbox_that_layers_on_nothing_still_attributes_the_egress_it_ships() {
         let out = resolve(
             &sandbox(
-                r#"{"image":"x:1","policy":{"egress":{"tcp":[{"match":"db.vendor.example:5432","verdict":"allow"}]}}}"#,
+                r#"{"image":"x:1","egress":{"tcp":[{"match":"db.vendor.example:5432","verdict":"allow"}]}}"#,
             ),
             &[],
             &published(),
