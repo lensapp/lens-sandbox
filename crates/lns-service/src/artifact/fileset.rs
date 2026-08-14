@@ -1000,7 +1000,7 @@ mod tests {
         }
     }
 
-    const FILESET_CONFIG: &str = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#;
+    const FILESET_CONFIG: &str = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"files","mount":{"path":"/files"},"spec":{}}"#;
 
     #[test]
     fn declared_fileset_layers_are_rejected_before_their_aggregate_exceeds_the_limit() {
@@ -1088,7 +1088,8 @@ mod tests {
     #[test]
     fn a_fileset_config_of_the_wrong_kind_is_refused() {
         let manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar");
-        let config = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","metadata":{"name":"files"},"spec":{}}"#;
+        let config =
+            r#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"files","spec":{}}"#;
         let err = validate_fileset_artifact(&reference(), &manifest, config).unwrap_err();
         assert!(
             format!("{err:#}").contains("expected kind fileset"),

@@ -38,7 +38,7 @@ fn definition_declaring_tool(world: &mut E2eWorld, tool: String) {
     std::fs::write(
         project_dir(world).join("lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: tooled\nspec:\n  image: registry.example.test/runtime:1\n  tools:\n    - \"{tool}\"\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: tooled\nspec:\n  image: registry.example.test/runtime:1\n  tools:\n    - \"{tool}\"\n"
         ),
     )
     .expect("write tooled definition");
@@ -52,7 +52,7 @@ fn imageless_definition_at(world: &mut E2eWorld, rel: String) {
     }
     std::fs::write(
         path,
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: imageless\nspec: {}\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: imageless\nspec: {}\n",
     )
     .expect("write imageless definition");
 }

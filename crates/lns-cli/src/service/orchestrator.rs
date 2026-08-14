@@ -1242,7 +1242,7 @@ mod tests {
         let local = crate::run::target::RunTarget::Local {
             def: Box::new(
                 lns_artifact::sandbox::parse(
-                    br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#,
+                    br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"}}"#,
                 )
                 .expect("the fixture is a valid definition"),
             ),

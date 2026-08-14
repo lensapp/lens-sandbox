@@ -89,7 +89,7 @@ mod tests {
     fn a_directory_answers_with_its_own_document_under_its_own_path() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  tools:\n    - python@3.12\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  tools:\n    - python@3.12\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert_eq!(
@@ -107,7 +107,7 @@ mod tests {
     fn a_fileset_a_mixin_declares_is_rooted_where_that_mixin_lives() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -121,7 +121,7 @@ mod tests {
     fn a_fileset_that_names_no_path_is_left_alone() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  filesets:\n    - inline:\n        notes.md: hello\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - inline:\n        notes.md: hello\n      mountPath: /root/.agent/skills\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -135,7 +135,7 @@ mod tests {
     fn a_bind_a_mixin_declares_is_rooted_where_that_mixin_lives() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  volumes:\n    - type: bind\n      source: ./data\n      target: /data\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  volumes:\n    - type: bind\n      source: ./data\n      target: /data\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -149,7 +149,7 @@ mod tests {
     fn a_named_volume_keeps_the_name_it_was_given() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  volumes:\n    - type: volume\n      source: pg-data\n      target: /data\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  volumes:\n    - type: volume\n      source: pg-data\n      target: /data\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -163,7 +163,7 @@ mod tests {
     fn a_home_anchored_bind_stays_the_consumers_own_home() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  volumes:\n    - type: bind\n      source: ~/.config/pg\n      target: /config\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  volumes:\n    - type: bind\n      source: ~/.config/pg\n      target: /config\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -177,7 +177,7 @@ mod tests {
     fn an_absolute_fileset_path_is_left_as_the_author_wrote_it() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nmetadata:\n  name: pg\nspec:\n  filesets:\n    - path: /etc/agent/skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: /etc/agent/skills\n      mountPath: /root/.agent/skills\n",
         );
         let fetched = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(

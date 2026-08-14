@@ -361,7 +361,7 @@ mod tests {
     fn a_published_mixin_projects_as_the_document_its_author_wrote() {
         let pinned = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
         let document = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"obs-tools"}},"spec":{{"mixins":["{pinned}"],"tools":["node@22"],"env":{{"MODE":"research"}}}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs-tools","spec":{{"mixins":["{pinned}"],"tools":["node@22"],"env":{{"MODE":"research"}}}}}}"#
         );
         let projected = project_inspection(
             "ghcr.io/acme/obs-tools:2",
@@ -403,7 +403,7 @@ mod tests {
             Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
             &lns_artifact::spec::Kind::Mixin.config_media_type(),
             &crate::artifact::mixin::Resolution {
-                document: br#"{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{"name":"obs"},"spec":{"image":"x:1"}}"#.to_vec(),
+                document: br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs","spec":{"image":"x:1"}}"#.to_vec(),
                 mixins: Vec::new(),
                 pinned_extra: Vec::new(),
                 contributions: Vec::new(),
@@ -428,7 +428,7 @@ mod tests {
                 Some(&lns_artifact::spec::Kind::Sandbox.artifact_type()),
                 &lns_artifact::spec::Kind::Sandbox.config_media_type(),
                 &crate::artifact::mixin::Resolution {
-                    document: br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#.to_vec(),
+                    document: br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1"}}"#.to_vec(),
                     mixins: vec![declared.clone(), pinned.clone()],
                     pinned_extra: vec![pinned.clone()],
                     contributions: Vec::new(),
@@ -446,7 +446,7 @@ mod tests {
         let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
         assert_eq!(
             project_sandbox_resolved_from(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#,
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1"}}"#,
                 std::slice::from_ref(&pinned),
                 None,
             )
@@ -460,7 +460,7 @@ mod tests {
     fn a_sandbox_projects_the_run_as_user_it_declared_so_a_pull_can_disclose_it() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","user":"root"}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","user":"root"}}"#
             )
             .unwrap(),
             bare_sandbox_view(None, None, Some("root")),
@@ -472,7 +472,7 @@ mod tests {
     fn a_sandbox_declaring_a_share_projects_that_share_of_the_given_host() {
         assert_eq!(
             project_sandbox_on(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":"80%","memory":"80%"}}}"#,
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":"80%","memory":"80%"}}}"#,
                 Some(TEST_HOST)
             )
             .unwrap(),
@@ -485,7 +485,7 @@ mod tests {
     fn a_sandbox_projects_the_size_it_declared_so_a_pulled_run_can_report_it() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":3,"memory":"6Gi"}}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","resources":{"cpu":3,"memory":"6Gi"}}}"#
             )
             .unwrap(),
             bare_sandbox_view(Some(3), Some(6144), None),
@@ -497,7 +497,7 @@ mod tests {
     fn a_sandbox_that_declares_no_size_projects_none_not_the_default() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1"}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1"}}"#
             )
             .unwrap(),
             bare_sandbox_view(None, None, None),
@@ -509,7 +509,7 @@ mod tests {
     fn a_sandbox_projects_the_subpaths_its_bind_excluded() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":".","target":"/workspace","exclude":[".cargo","tmp/scratch"]}]}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":".","target":"/workspace","exclude":[".cargo","tmp/scratch"]}]}}"#
             )
             .unwrap(),
             sandbox_view_with(
@@ -533,7 +533,7 @@ mod tests {
     fn a_sandbox_discloses_a_host_file_source_and_whether_it_is_optional() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}}"#
             )
             .unwrap(),
             sandbox_view_with_filesets(vec![SandboxFileset {
@@ -553,7 +553,7 @@ mod tests {
     fn a_sandbox_projects_whether_its_bind_is_optional() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":"~/.claude","target":"/home/agent/.claude","optional":true}]}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","volumes":[{"type":"bind","source":"~/.claude","target":"/home/agent/.claude","optional":true}]}}"#
             )
             .unwrap(),
             sandbox_view_with(
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_declared_credentials_and_no_flags_without_a_policy() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_declared_tools() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","tools":["node@22.11.0","python@3.12.6"]}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","tools":["node@22.11.0","python@3.12.6"]}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_env_sorted_by_key() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","env":{"SHELL":"/bin/sh","FOO":"bar"}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","env":{"SHELL":"/bin/sh","FOO":"bar"}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 

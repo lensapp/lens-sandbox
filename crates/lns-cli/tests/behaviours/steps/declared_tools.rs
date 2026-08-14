@@ -22,7 +22,7 @@ fn lns_yaml_with_tools(w: &mut BehaviourWorld, list: String) {
     w.author_files.insert(
         PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools:\n{entries}"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools:\n{entries}"
         ),
     );
 }

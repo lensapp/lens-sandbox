@@ -1,7 +1,6 @@
 apiVersion: lns.run/v1
 kind: sandbox
-metadata:
-  name: claude-code
+name: claude-code
 spec:
   image: docker.io/library/debian:bookworm-slim
   tools:
