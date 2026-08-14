@@ -290,6 +290,7 @@ tool, mount target, or port repeats.
 | [`volumes`](#3110-volumes) | optional | Named volumes and host binds. |
 | [`filesets`](#3111-filesets) | optional | Files shipped inside the artifact. |
 | [`ports`](#3112-ports) | optional | Container ports the sandbox serves. |
+| [`sidecars`](#3113-sidecars) | optional | Auxiliary guests the workload reaches over a unix socket. |
 
 #### 3.1.1 `image`
 
@@ -645,6 +646,54 @@ Two properties bound what publishing can do:
   the developer reaches the service. Omit `host` to let the run report the port
   it chose.
 
+#### 3.1.13 `sidecars`
+
+```yaml
+sidecars:
+  - name: docker
+    image: docker.io/library/docker:27-dind
+    command: dockerd -H tcp://127.0.0.1:2375 --iptables=false --bridge=none
+    egress: proxy
+    volumes:
+      - name: docker-layers
+        target: /var/lib/docker
+    expose:
+      - guestPort: 2375
+        socket: /var/run/docker.sock
+```
+
+| Field | Type | Rules |
+|---|---|---|
+| `name` | string | REQUIRED. Names the sidecar in logs, `lns inspect`, and the audit chain. MUST be unique within the document. |
+| `image` | string | REQUIRED. The OCI image the sidecar runs. |
+| `command` | string | optional. Replaces the image's default command. |
+| `env` | map | optional. Non-secret environment variables for the sidecar's own processes. |
+| `egress` | string | optional. `none` (the default) or `proxy`. |
+| `resources` | map | optional. Same shapes as [`resources`](#315-resources); defaults to 2 vCPUs and 1 GiB. |
+| `volumes` | list | optional. Named volumes only — a host bind is REFUSED, because the sidecar runs as root. |
+| `expose` | list | optional. `guestPort` (1–65535) inside the sidecar, `socket` as an absolute unix socket path in the workload, and an octal `mode` string (default `"0666"`). Every `socket` MUST be unique across sidecars and MUST NOT collide with a mount target. |
+
+A sidecar is a service the workload needs but should not host: a docker daemon
+for an agent that builds images. It runs in **its own microVM**, as root there
+and nowhere else, and the workload reaches it at the `socket` path — never over a
+shared filesystem, because a named volume is a disk image with one writer.
+
+Three properties bound what a sidecar can do:
+
+- **No network device.** A sidecar guest has none, so `egress: none` is the
+  absence of any wire rather than a promise to behave.
+- **One policy governs the whole run.** `egress: proxy` bridges the sidecar into
+  the same supervisor proxy the workload uses, so its requests meet the same
+  [`egress`](#316-egress) table, the same approvals, and the same audit chain.
+- **Disclosed before boot.** Each sidecar's name, image, requested egress, and
+  published sockets appear in the resolved sandbox the developer approves
+  ([§1.5](#15-one-disclosure)), so a pulled artifact cannot bring a second guest
+  along quietly.
+
+A [`kind: mixin`](#33-kind-mixin) document MUST NOT declare `sidecars`
+([§3.3](#33-kind-mixin)): a sidecar names an image, a command, and resources,
+which are the blocks one launch owns.
+
 ---
 
 ### 3.2 `kind: connector`
@@ -790,7 +839,7 @@ spec:
 |---|---|
 | `env`, `egress`, `credentials`, `tools`, `volumes`, `filesets`, `ports` | Allowed, with the same rules as [§3.1](#31-kind-sandbox). |
 | `mixins` | Allowed. A mixin MAY build on other mixins, exactly as a sandbox does. |
-| `image`, `command`, `workdir`, `user`, `resources` | **FORBIDDEN.** These describe one launch, and the sandbox owns it. |
+| `image`, `command`, `workdir`, `user`, `resources`, `sidecars` | **FORBIDDEN.** These describe one launch, and the sandbox owns it. |
 
 A mixin ships agent-facing markdown as a `fileset`, so instructions land in the
 guest through the same mechanism as any other file and appear in the resolved
