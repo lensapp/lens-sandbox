@@ -128,6 +128,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
             },
         },
         connectors: overlay.connectors.clone(),
+        ..Policy::default()
     }
 }
 

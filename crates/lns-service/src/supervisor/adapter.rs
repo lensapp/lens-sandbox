@@ -1383,7 +1383,7 @@ mod tests {
     }
 
     fn seeded_sidecar(dir: &std::path::Path, policy_path: &Path) -> JsonFileGrantStore {
-        std::fs::write(policy_path, "network: {}\n").expect("policy");
+        Policy::default().save_atomic(policy_path).expect("policy");
         let store = JsonFileGrantStore::new(dir.join("grants.json"));
         store
             .update(&mut |file| {
@@ -1400,7 +1400,7 @@ mod tests {
     #[serial_test::serial(env)]
     fn revocations_before_gate_reads_only_this_projects_counts() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let policy_path = dir.path().join("lns-policy.yaml");
+        let policy_path = dir.path().join("lns-local-mixin.yaml");
         seeded_sidecar(dir.path(), &policy_path);
         let _g = crate::test_env::EnvVarGuard::set(
             "LNS_WORKLOAD_GRANTS_PATH",
@@ -1425,7 +1425,7 @@ mod tests {
         let _g = crate::test_env::EnvVarGuard::set("LNS_WORKLOAD_GRANTS_PATH", &sidecar);
 
         assert!(
-            revocations_before_gate(&dir.path().join("lns-policy.yaml")).is_empty(),
+            revocations_before_gate(&dir.path().join("lns-local-mixin.yaml")).is_empty(),
             "a corrupt sidecar must not stop a launch here; the write that follows surfaces the same corruption with something the developer can act on"
         );
     }

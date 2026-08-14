@@ -75,7 +75,7 @@ tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"
 
-# Approval-flow deps. serde_yaml: lns-policy.yaml load/save. notify:
+# Approval-flow deps. serde_yaml: lns-local-mixin.yaml load/save. notify:
 # filesystem watcher for hot-swap on manual policy edits. The
 # approval UI itself is rendered by the eframe/egui setup above —
 # no HTTP stack is involved.

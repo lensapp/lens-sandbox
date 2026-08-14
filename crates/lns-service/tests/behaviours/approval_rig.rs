@@ -77,7 +77,7 @@ pub struct ApprovalRig {
 impl ApprovalRig {
     pub fn new() -> Self {
         let dir = TempDir::new().expect("create tempdir");
-        let policy_path = dir.path().join("lns-policy.yaml");
+        let policy_path = dir.path().join("lns-local-mixin.yaml");
         let notifier = Arc::new(TestNotifier::default());
         let store = Arc::new(FlakyStore::new(policy_path.clone()));
         let (tx, rx) = mpsc::unbounded_channel();

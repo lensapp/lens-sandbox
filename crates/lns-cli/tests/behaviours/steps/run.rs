@@ -155,7 +155,7 @@ fn user_invokes_lns_run(world: &mut BehaviourWorld, image_and_flags: String) {
 #[given(regex = r"^the working directory is `[^`]+`$")]
 fn working_directory_is(_world: &mut BehaviourWorld) {}
 
-#[given(regex = r"^the working directory contains `\./lns-policy\.yaml`$")]
+#[given(regex = r"^the working directory contains `\./lns-local-mixin\.yaml`$")]
 fn cwd_contains_policy_file(world: &mut BehaviourWorld) {
     let _ = require_cwd(world);
 }
@@ -171,11 +171,11 @@ fn that_policy_has(world: &mut BehaviourWorld, allows: usize, denies: usize) {
         policy.add_rule(RouteRule::deny_host(format!("deny-{i}.example")));
     }
     policy
-        .save_atomic(&cwd.join("lns-policy.yaml"))
+        .save_atomic(&cwd.join("lns-local-mixin.yaml"))
         .expect("save_atomic");
 }
 
-#[given(regex = r"^no `lns-policy\.yaml` exists in the working directory$")]
+#[given(regex = r"^no `lns-local-mixin\.yaml` exists in the working directory$")]
 fn no_policy_in_cwd(_world: &mut BehaviourWorld) {}
 
 #[given(regex = r"^the command is `lns run ([^`]+)`$")]
@@ -284,7 +284,7 @@ fn resolving_placeholder_present(world: &mut BehaviourWorld) -> Result<(), Strin
 #[then(regex = r"^the Policy block shows the file path$")]
 fn policy_block_shows_file_path(world: &mut BehaviourWorld) -> Result<(), String> {
     let cwd = require_cwd(world);
-    let expected = cwd.join("lns-policy.yaml");
+    let expected = cwd.join("lns-local-mixin.yaml");
     let needle = format!("file: {}", expected.display());
     if world.summary_output.contains(&needle) {
         Ok(())

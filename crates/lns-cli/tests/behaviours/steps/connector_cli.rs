@@ -15,7 +15,7 @@ fn cwd(world: &mut BehaviourWorld) -> PathBuf {
 }
 
 fn policy_file(world: &mut BehaviourWorld) -> PathBuf {
-    cwd(world).join("lns-policy.yaml")
+    cwd(world).join("lns-local-mixin.yaml")
 }
 
 /// Stands in for the running service: renders the sign-in prompt the CLI would show and returns the scripted outcome.
@@ -333,7 +333,7 @@ fn connected_for(world: &mut BehaviourWorld) -> Vec<String> {
         .connected_in(&lns_policy::grants::project_key(&policy))
 }
 
-#[then("lns-policy.yaml carries no token material")]
+#[then("lns-local-mixin.yaml carries no token material")]
 fn no_token_material(world: &mut BehaviourWorld) {
     let text = std::fs::read_to_string(policy_file(world)).unwrap_or_default();
     assert!(
@@ -368,7 +368,7 @@ fn shows_no_user_code(world: &mut BehaviourWorld) {
     );
 }
 
-#[then("lns-policy.yaml carries no credential material")]
+#[then("lns-local-mixin.yaml carries no credential material")]
 fn no_credential_material(world: &mut BehaviourWorld) {
     let text = std::fs::read_to_string(policy_file(world)).unwrap_or_default();
     assert!(

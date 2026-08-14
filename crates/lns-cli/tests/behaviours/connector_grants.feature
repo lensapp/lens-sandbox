@@ -7,7 +7,7 @@ Feature: inspecting and forgetting per-workload connector grants
   connector's next use asks again. `lns connector disconnect` forgets the
   connector's grants here as part of dropping it from the policy.
 
-  Grants are per-machine, so no grant data reaches `lns-policy.yaml`; these
+  Grants are per-machine, so no grant data reaches `lns-local-mixin.yaml`; these
   scenarios use an arbitrary user-declared connector, so nothing here pins
   a shipped service.
 

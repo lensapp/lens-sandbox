@@ -141,6 +141,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                 egress: def.spec.egress.clone(),
             },
             connectors: def.spec.connectors.clone(),
+            ..lns_policy::Policy::default()
         }),
         credentials: def.spec.credentials.clone(),
         tools: def.spec.tools.clone(),

@@ -82,7 +82,7 @@ pub struct ConnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -93,7 +93,7 @@ pub struct DisconnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -108,7 +108,7 @@ pub struct ConnectorListArgs {
 pub struct GrantsArgs {
     #[arg(
         long,
-        help = "Policy file path whose project the grants are listed for; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path whose project the grants are listed for; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
     #[arg(
@@ -126,7 +126,7 @@ pub struct RevokeArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path whose project the grant is revoked from; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path whose project the grant is revoked from; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -600,7 +600,7 @@ mod tests {
         JsonFileGrantStore::new(dir.join("grants.json"))
             .load()
             .expect("the sidecar reads back")
-            .connected_in(&project_key(&dir.join("lns-policy.yaml")))
+            .connected_in(&project_key(&dir.join("lns-local-mixin.yaml")))
     }
 
     #[test]

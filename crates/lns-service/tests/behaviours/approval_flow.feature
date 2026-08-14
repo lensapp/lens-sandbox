@@ -28,11 +28,11 @@ Feature: lns-service approval flow
     And a future request to "api.linear.app" prompts again
 
   Scenario: Always allow writes a rule to the policy file and hot-swaps the running policy
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And the policy has no rule for "api.linear.app"
     And an approval entry is visible for a request to "api.linear.app"
     When the developer picks "always allow"
-    Then "lns-policy.yaml" contains a new allow rule for "api.linear.app"
+    Then "lns-local-mixin.yaml" contains a new allow rule for "api.linear.app"
     And the running policy contains the same rule
     And the workload's request proceeds
     And a future request to "api.linear.app" is allowed without prompting
@@ -55,11 +55,11 @@ Feature: lns-service approval flow
     And a future request to "api.linear.app" prompts again
 
   Scenario: Always deny writes a deny rule to the policy file and hot-swaps the running policy
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And the policy has no rule for "api.linear.app"
     And an approval entry is visible for a request to "api.linear.app"
     When the developer picks "always deny"
-    Then "lns-policy.yaml" contains a new deny rule for "api.linear.app"
+    Then "lns-local-mixin.yaml" contains a new deny rule for "api.linear.app"
     And the running policy contains the same rule
     And the workload's request is denied always
     And a future request to "api.linear.app" is denied without prompting
@@ -93,8 +93,8 @@ Feature: lns-service approval flow
     And no restart of the workload is required
 
   Scenario: A manual edit to the policy file hot-swaps the running policy
-    Given a workload is running with "lns-policy.yaml" loaded
-    When the developer edits "lns-policy.yaml" to add an allow rule for "api.linear.app"
+    Given a workload is running with "lns-local-mixin.yaml" loaded
+    When the developer edits "lns-local-mixin.yaml" to add an allow rule for "api.linear.app"
     Then a subsequent request from the workload to "api.linear.app" is allowed without prompting
     And no restart of the workload is required
 
@@ -103,29 +103,29 @@ Feature: lns-service approval flow
   # match, so writing the second answer behind it would be a line that never fires —
   # and silence would leave the developer believing their deny stuck.
   Scenario: A second, contradicting always-decision is not written behind the rule the first one wrote
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And an approval entry is visible for a request to "api.example.test"
     When the developer picks "always allow"
     And the workload makes a request to "api.example.test"
     And the developer picks "always deny"
-    Then "lns-policy.yaml" contains a new allow rule for "api.example.test"
-    And "lns-policy.yaml" holds no deny rule for "api.example.test"
+    Then "lns-local-mixin.yaml" contains a new allow rule for "api.example.test"
+    And "lns-local-mixin.yaml" holds no deny rule for "api.example.test"
     And the approval window informs the developer that a rule already decides the destination
 
   # A raw splice is passed through untouched, so the rule has to name the port the
   # developer was shown; the bare host would grant every other port on that host too.
   Scenario: Always allow on a raw splice writes the port-scoped destination to the raw table
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And an approval entry is visible for a raw splice to "db.internal:5432"
     When the developer picks "always allow"
-    Then "lns-policy.yaml" contains a new raw allow rule for "db.internal:5432"
+    Then "lns-local-mixin.yaml" contains a new raw allow rule for "db.internal:5432"
     And the workload's request proceeds
 
   Scenario: Always deny on a raw splice writes a raw deny rule
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And an approval entry is visible for a raw splice to "db.internal:5432"
     When the developer picks "always deny"
-    Then "lns-policy.yaml" contains a new raw deny rule for "db.internal:5432"
+    Then "lns-local-mixin.yaml" contains a new raw deny rule for "db.internal:5432"
     And the workload's request is denied always
 
   # The developer's own file can already hold the answer they just gave, stranded behind
@@ -133,7 +133,7 @@ Feature: lns-service approval flow
   # bigger surprise, so the card keeps coming back — but they have to be told why, or
   # "always allow" reads as remembered while nothing changed.
   Scenario: An always-decision the file already holds behind another rule is reported, not silently dropped
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And the policy denies "*.example.test" and holds an allow rule for "api.example.test" behind that
     And an approval entry is visible for a request to "api.example.test"
     When the developer picks "always allow"
@@ -143,21 +143,21 @@ Feature: lns-service approval flow
   # The raw table is the pre-filter, so an approved splice takes the destination over
   # from the HTTP rules naming that host — silently, unless the card says so.
   Scenario: Approving a raw splice says which HTTP rule stops applying to it
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And the policy allows "db.internal"
     And an approval entry is visible for a raw splice to "db.internal:5432"
     When the developer picks "always allow"
-    Then "lns-policy.yaml" contains a new raw allow rule for "db.internal:5432"
+    Then "lns-local-mixin.yaml" contains a new raw allow rule for "db.internal:5432"
     And the approval window informs the developer that the HTTP rule for "db.internal" no longer applies
 
   # One unparseable rule force-denies the whole policy inside the guest, so a
   # destination we cannot express has to leave the file alone and say so.
   Scenario: A raw destination that cannot be expressed as a rule is not written to the policy file
-    Given the sandbox was launched with --policy "lns-policy.yaml"
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
     And an approval entry is visible for a raw splice to "db.internal"
     When the developer picks "always allow"
     Then the workload's request proceeds
-    And the raw table in "lns-policy.yaml" stays empty
+    And the raw table in "lns-local-mixin.yaml" stays empty
     And the approval window informs the developer that the destination could not be turned into a rule
 
   Scenario: A failed policy-file write keeps the rule in memory and notifies the developer

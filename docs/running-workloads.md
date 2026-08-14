@@ -115,7 +115,7 @@ lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
-`lns-policy.yaml` that governs the run. To expose your actual host files to the
+`lns-local-mixin.yaml` that governs the run. To expose your actual host files to the
 workload, bind-mount a directory with `-v /host/path:/guest/path` (see
 [Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
 attach a named volume instead.

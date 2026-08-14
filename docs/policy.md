@@ -7,12 +7,15 @@ three things: **allow** it, **deny** it at the boundary, or — when no rule mat
 
 ## The policy file
 
-Policy lives in a human-readable YAML file. By default that's `lns-policy.yaml` in
+Policy lives in a human-readable YAML file. By default that's `lns-local-mixin.yaml` in
 the directory you run from; the first `lns run` in a directory without one creates
 it:
 
 ```yaml
-network:
+apiVersion: lns.run/v1
+kind: mixin
+name: lns-local-mixin
+spec:
   egress:
     http: []
     tcp: []
@@ -20,6 +23,10 @@ network:
 
 `lns run` writes this starter file for you, so you only deal with it by hand if you
 choose to edit the file directly.
+
+The file is a **mixin** — the same document format a
+[sandbox definition](running-workloads.md#defining-a-sandbox) layers on. Your
+decisions merge after every other source, so nothing you pulled overrules them.
 
 One directory, one policy file — it sits next to the project it governs. Point a
 run at a different file with `--policy <path>`:
@@ -51,7 +58,7 @@ That rule governs raw destinations too, so `egress.tcp` needs no counterpart. Se
 Each entry in `egress.http` is a rule:
 
 ```yaml
-network:
+spec:
   egress:
     http:
       - match: api.github.com
@@ -78,10 +85,6 @@ A `match` pattern can be:
 - a CIDR block — `10.0.0.0/8`
 - a host with a port — `registry.internal:5000`
 
-`egress.http` used to be a top-level `allowedRoutes:` list. That key is gone: a
-policy file still naming it is refused with an error rather than loaded as a
-policy with no rules. Move the list under `egress: http:`.
-
 ### Raw TCP destinations
 
 Not everything a workload connects to speaks HTTP. A Postgres client, a Redis
@@ -90,7 +93,7 @@ client, an SSH session — Lens Sandbox cannot read those, so it cannot apply
 allow anyway:
 
 ```yaml
-network:
+spec:
   egress:
     http:
       - match: api.github.com
@@ -144,7 +147,7 @@ a rule that grants uninspected traffic is the right way round.
 denied that host:
 
 ```yaml
-network:
+spec:
   egress:
     http:
       - match: git.example.test
@@ -190,7 +193,7 @@ section before using it.
 ## Editing rules from the CLI
 
 You can hand-edit the YAML, but `lns policy` edits it for you and keeps it
-well-formed. All subcommands default to `lns-policy.yaml` in the current directory;
+well-formed. All subcommands default to `lns-local-mixin.yaml` in the current directory;
 pass `--policy <path>` to target another file.
 
 ### Add an allow or deny rule
@@ -218,7 +221,7 @@ effect ahead of the broader rule it narrows. `lns policy allow` places it there 
 says so:
 
 ```
-Added allow rule for "api.example.test" to lns-policy.yaml
+Added allow rule for "api.example.test" to lns-local-mixin.yaml
 Placed it before the existing rule for "*.example.test", which covers the same
 destination and would otherwise pre-empt it. Every other caller is now denied
 "api.example.test" without being asked, and that rule no longer serves them.
@@ -230,7 +233,7 @@ destination. A scoped rule for a destination no other rule covers has nothing to
 in front of, so it is appended — and still reports what it now denies:
 
 ```
-Added allow rule for "git.example.test" to lns-policy.yaml
+Added allow rule for "git.example.test" to lns-local-mixin.yaml
 Every other caller is now denied "git.example.test" without being asked.
 ```
 
@@ -394,7 +397,7 @@ If no one responds, the request times out and is treated as a denial.
 
 ## Sharing policy
 
-Because policy is a plain file, it travels. Commit `lns-policy.yaml` to the repo so
+Because policy is a plain file, it travels. Commit `lns-local-mixin.yaml` to the repo so
 everyone running the project shares the same rules, hand it to a teammate, or keep
 a curated file somewhere central and point runs at it with `--policy`. A run loads
 the file at startup, so shared approvals are already in place — no one has to

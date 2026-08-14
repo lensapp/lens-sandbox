@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn is_policy_change_accepts_modify_on_target_path() {
-        let target = Path::new("/tmp/lns-policy.yaml");
+        let target = Path::new("/tmp/lns-local-mixin.yaml");
         assert!(is_policy_change(
             &evt(EventKind::Modify(ModifyKind::Any), target),
             target
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn is_policy_change_accepts_create_on_target_path() {
-        let target = Path::new("/tmp/lns-policy.yaml");
+        let target = Path::new("/tmp/lns-local-mixin.yaml");
         assert!(is_policy_change(
             &evt(EventKind::Create(CreateKind::Any), target),
             target
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn is_policy_change_accepts_remove_on_target_path() {
-        let target = Path::new("/tmp/lns-policy.yaml");
+        let target = Path::new("/tmp/lns-local-mixin.yaml");
         assert!(is_policy_change(
             &evt(EventKind::Remove(RemoveKind::Any), target),
             target
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn is_policy_change_rejects_event_on_sibling_path() {
-        let target = Path::new("/tmp/lns-policy.yaml");
+        let target = Path::new("/tmp/lns-local-mixin.yaml");
         let sibling = Path::new("/tmp/something-else.yaml");
         assert!(!is_policy_change(
             &evt(EventKind::Modify(ModifyKind::Any), sibling),
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn is_policy_change_rejects_uninteresting_event_kinds() {
-        let target = Path::new("/tmp/lns-policy.yaml");
+        let target = Path::new("/tmp/lns-local-mixin.yaml");
         assert!(!is_policy_change(
             &evt(EventKind::Access(notify::event::AccessKind::Any), target),
             target
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn spawn_returns_ok_for_existing_parent_dir() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         Policy::default().save_atomic(&path).unwrap();
 
         let notifier = Arc::new(crate::approval_flow::session::tests::RecordingNotifier::default());
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn spawn_with_path_that_has_no_parent_uses_cwd() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         Policy::default().save_atomic(&path).unwrap();
 
         let notifier = Arc::new(crate::approval_flow::session::tests::RecordingNotifier::default());
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn event_handler_closure_reloads_policy_on_matching_event() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let mut updated = Policy::default();
         updated.add_rule(RouteRule::allow_host("api.linear.app"));
         updated.save_atomic(&path).unwrap();
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn handle_event_for_matching_modify_reloads_and_applies_policy() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let mut updated = Policy::default();
         updated.add_rule(RouteRule::allow_host("api.linear.app"));
         updated.save_atomic(&path).unwrap();
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn a_change_to_the_sidecar_reaches_the_run() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         Policy::default().save_atomic(&path).unwrap();
         let grants = dir.path().join("grants.json");
         let store = lns_policy::grants::JsonFileGrantStore::new(grants.clone());
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn handle_event_for_unrelated_path_is_a_noop() {
         let dir = tempfile::TempDir::new().unwrap();
-        let target = dir.path().join("lns-policy.yaml");
+        let target = dir.path().join("lns-local-mixin.yaml");
         let sibling = dir.path().join("other.yaml");
         Policy::default().save_atomic(&target).unwrap();
 
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn handle_event_with_notify_error_is_a_noop() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let (session, mut rx) = make_session();
 
         handle_event(
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn handle_event_with_malformed_policy_file_is_a_noop() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         std::fs::write(&path, "this is: not\n  - a: valid\npolicy: [").unwrap();
         let (session, mut rx) = make_session();
 

@@ -163,5 +163,5 @@ place of `credential:`) whose `flow` selects one of two shapes:
 
 - [Credentials](credentials.md) — how placeholders keep real secrets out of the
   workload, and the per-machine value decisions connectors reuse.
-- [Policy and approvals](policy.md) — the `lns-policy.yaml` file that records the
+- [Policy and approvals](policy.md) — the `lns-local-mixin.yaml` file that records the
   destinations a project decided.

@@ -18,7 +18,7 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     And fields not yet known to the CLI are shown as "(resolving…)"
 
   Scenario: Policy block answers what and why
-    Given the working directory contains `./lns-policy.yaml`
+    Given the working directory contains `./lns-local-mixin.yaml`
     And that policy has 3 allow rules, and 1 deny rule
     When the summary is printed
     Then the Policy block shows the file path
@@ -27,7 +27,7 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     And the provenance line: "source: found in this directory"
 
   Scenario: Auto-created policy is called out in the source line
-    Given no `lns-policy.yaml` exists in the working directory
+    Given no `lns-local-mixin.yaml` exists in the working directory
     When the run starts
     Then the Policy block source line reads "auto-created (no policy in this directory)"
     And a destination no rule names is "ask"ed

@@ -18,7 +18,7 @@ fn store(world: &mut BehaviourWorld) -> JsonFileGrantStore {
 
 /// Derived the same way the commands derive it, so a seeded grant keys identically to one a real run would have left.
 fn this_project(world: &mut BehaviourWorld) -> String {
-    project_key(&cwd(world).join("lns-policy.yaml"))
+    project_key(&cwd(world).join("lns-local-mixin.yaml"))
 }
 
 fn workload_of(key: &str) -> WorkloadIdentity {
@@ -97,7 +97,7 @@ fn project_still_connects(world: &mut BehaviourWorld, id: String) {
     let connected = JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
         .load()
         .expect("the sidecar reads back")
-        .connected_in(&project_key(&cwd(world).join("lns-policy.yaml")));
+        .connected_in(&project_key(&cwd(world).join("lns-local-mixin.yaml")));
     assert!(
         connected.contains(&id),
         "the connection and the grants under it are one write now, so a disconnect that could not land leaves {id} connected for a retry, got: {connected:?}"
