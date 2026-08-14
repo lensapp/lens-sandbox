@@ -484,6 +484,7 @@ where
         .one_shot(Request::InspectImage {
             image: args.reference.clone(),
             mixins: Vec::new(),
+            decisions: None,
         })
         .await?;
     // A mixin pull installs nothing: it caches documents, so there is no effect to consent to and its tools are disclosed where they are installed.
@@ -929,6 +930,7 @@ async fn inspect_cached<W: std::io::Write>(
         .one_shot(Request::InspectImage {
             image: reference.to_string(),
             mixins: mixins.to_vec(),
+            decisions: None,
         })
         .await?
     {

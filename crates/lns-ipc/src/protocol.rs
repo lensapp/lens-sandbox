@@ -94,12 +94,18 @@ pub enum Request {
         project_dir: String,
         #[serde(default)]
         mixins: Vec<String>,
+        /// The decisions file this run reads, so what the preflight resolves is what the boot resolves.
+        #[serde(default)]
+        decisions: Option<String>,
     },
     InspectImage {
         image: String,
         /// The mixin references the user named on the command line, in flag order, so the preflight describes the document that will boot.
         #[serde(default)]
         mixins: Vec<String>,
+        /// The decisions file this run reads, absent when the question is about the artifact rather than about a run in some directory.
+        #[serde(default)]
+        decisions: Option<String>,
     },
     TagImage {
         from: String,
@@ -1439,6 +1445,7 @@ mod tests {
         let req = Request::InspectImage {
             image: "registry.example.test/team/sandbox:1".into(),
             mixins: vec!["ghcr.io/acme/obs-tools:2".into()],
+            decisions: Some("/work/lns-local-mixin.yaml".into()),
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

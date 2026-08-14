@@ -24,6 +24,34 @@ Feature: a run resolves the mixins its document declares
     When the published sandbox is resolved and launched
     Then the run installs "node@22"
 
+  Scenario: what the directory decided reaches the run, after everything it pulled
+    Given a mixin declaring the tool "python@3.11"
+    And the sandbox definition declares that mixin
+    And the directory's own decisions declare the tool "python@3.12"
+    When the published sandbox is resolved and launched
+    Then the run installs "python@3.12"
+
+  Scenario: the directory's egress stays live rather than being frozen into the document
+    Given the sandbox definition declares nothing but its image
+    And the directory's own decisions allow "api.some-provider.example"
+    When the published sandbox is resolved and launched
+    Then the run installs "curl@8"
+    And the resolved document decides nothing about "api.some-provider.example"
+
+  Scenario: a directory that decided only destinations leaves the document alone
+    Given the sandbox definition declares nothing but its image
+    And the directory's own decisions allow "api.some-provider.example" and nothing else
+    When the published sandbox is resolved and launched
+    Then the run resolved no source but the sandbox itself
+
+  Scenario: a mixin the directory's decisions name merges before them
+    Given a mixin declaring the tools "node@22" and "python@3.11"
+    And the sandbox definition declares nothing but its image
+    And the directory's own decisions declare the tool "python@3.12" and that mixin
+    When the published sandbox is resolved and launched
+    Then the run installs "node@22"
+    And the run installs "python@3.12"
+
   Scenario: a mixin's egress is enforced like the sandbox's own
     Given a mixin allowing "api.some-provider.example"
     And the sandbox definition declares that mixin

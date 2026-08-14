@@ -90,6 +90,7 @@ async fn orchestrate(
                 &args.mixins,
                 &run_id,
                 &microvm,
+                policy.as_deref(),
             )
             .await?
         }

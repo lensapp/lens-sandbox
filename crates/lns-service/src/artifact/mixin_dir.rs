@@ -18,11 +18,38 @@ pub fn read_directory_mixin<D: MixinDir>(dir: &D, path: &Path) -> Result<Fetched
     let yaml = dir
         .read(&document)
         .with_context(|| format!("reading {}", document.display()))?;
+    parse_document(&yaml, &document, path, path.display().to_string())
+}
+
+/// Read the directory's own decisions, which every run there resolves without being named (`docs/sandbox-spec.md` §8.1); a directory nobody has decided anything in has none to read.
+pub fn read_local_mixin<D: MixinDir>(dir: &D, file: &Path) -> Result<Option<FetchedMixin>> {
+    let yaml = match dir.read(file) {
+        Ok(yaml) => yaml,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", file.display()))),
+    };
+    if yaml.trim().is_empty() {
+        return Ok(None);
+    }
+    let label = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.display().to_string());
+    parse_document(&yaml, file, file.parent().unwrap_or(Path::new(".")), label).map(Some)
+}
+
+/// Parse one document off this machine, rooting the paths it writes against the directory it was written in.
+fn parse_document(
+    yaml: &str,
+    document: &Path,
+    root: &Path,
+    pinned: String,
+) -> Result<FetchedMixin> {
     let mut parsed: serde_json::Value =
-        serde_yaml::from_str(&yaml).with_context(|| format!("parsing {}", document.display()))?;
-    root_relative_paths(&mut parsed, path);
+        serde_yaml::from_str(yaml).with_context(|| format!("parsing {}", document.display()))?;
+    root_relative_paths(&mut parsed, root);
     Ok(FetchedMixin {
-        pinned: path.display().to_string(),
+        pinned,
         document: serde_json::to_string(&parsed).context("serializing the mixin")?,
     })
 }
@@ -203,6 +230,94 @@ mod tests {
         let err = read_directory_mixin(&dir, Path::new("/work/mixins/pg")).unwrap_err();
         assert!(
             format!("{err:#}").contains("parsing /work/mixins/pg/lns.yaml"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_directory_nobody_has_decided_anything_in_contributes_nothing() {
+        assert!(
+            read_local_mixin(
+                &Fake(BTreeMap::new()),
+                Path::new("/work/lns-local-mixin.yaml")
+            )
+            .unwrap()
+            .is_none(),
+            "§8.1 has the mixin exist whether or not anyone created it, so an absent file is not an error"
+        );
+    }
+
+    #[test]
+    fn a_decisions_file_an_editor_has_truncated_contributes_nothing() {
+        let dir = holding("/work/lns-local-mixin.yaml", "  \n");
+        assert!(
+            read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+                .unwrap()
+                .is_none(),
+            "an editor truncates a file before it writes one, and a run that caught it mid-write must not refuse"
+        );
+    }
+
+    #[test]
+    fn the_decisions_file_is_named_by_the_file_it_is() {
+        let dir = holding(
+            "/work/lns-local-mixin.yaml",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  tools:\n    - ripgrep@14\n",
+        );
+        let fetched = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+            .unwrap()
+            .expect("a written file contributes");
+        assert_eq!(
+            fetched.pinned, "lns-local-mixin.yaml",
+            "nothing names this source, so a disclosure attributes it by the file it is"
+        );
+        assert!(
+            fetched.document.contains(r#""ripgrep@14""#),
+            "got: {}",
+            fetched.document
+        );
+    }
+
+    #[test]
+    fn a_path_the_decisions_file_writes_is_rooted_in_its_own_directory() {
+        let dir = holding(
+            "/work/lns-local-mixin.yaml",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  filesets:\n    - path: ./notes\n      mountPath: /home/agent/notes\n",
+        );
+        let fetched = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+            .unwrap()
+            .expect("a written file contributes");
+        assert!(
+            fetched.document.contains(r#""/work/notes""#),
+            "a relative path is written against the directory the file sits in; got: {}",
+            fetched.document
+        );
+    }
+
+    #[test]
+    fn a_decisions_file_that_cannot_be_read_says_so_rather_than_deciding_nothing() {
+        struct Denied;
+        impl MixinDir for Denied {
+            fn read(&self, _: &Path) -> std::io::Result<String> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))
+            }
+        }
+        let err = read_local_mixin(&Denied, Path::new("/work/lns-local-mixin.yaml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/work/lns-local-mixin.yaml"),
+            "a file that exists and cannot be read is not a directory that decided nothing; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_decisions_file_that_is_not_yaml_names_the_file_it_could_not_parse() {
+        let dir = holding("/work/lns-local-mixin.yaml", "\tnot: [valid");
+        let err = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parsing /work/lns-local-mixin.yaml"),
             "got: {err:#}"
         );
     }

@@ -198,11 +198,13 @@ async fn preflight_local(
     definition: &str,
     project_dir: &Path,
     mixins: &[String],
+    decisions: &Path,
 ) -> Result<ResolvedDefinition> {
     let request = Request::ResolveDefinition {
         definition: definition.to_string(),
         project_dir: project_dir.display().to_string(),
         mixins: mixins.to_vec(),
+        decisions: Some(decisions.display().to_string()),
     };
     match timeout(
         PUBLISHED_PREFLIGHT_TIMEOUT,
@@ -238,10 +240,12 @@ async fn preflight_published(
     socket: &Path,
     reference: &str,
     mixins: &[String],
+    decisions: &Path,
 ) -> Result<PublishedTarget> {
     let request = Request::InspectImage {
         image: reference.to_string(),
         mixins: mixins.to_vec(),
+        decisions: Some(decisions.display().to_string()),
     };
     await_published_preflight(reference, real::send_request(socket, &request)).await
 }
@@ -274,14 +278,17 @@ pub async fn run_image(
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
+    // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
+    let decisions = crate::run::summary::policy_path(args.policy.as_deref(), &cwd);
     if let crate::run::target::RunTarget::Local {
         def,
         json,
         project_dir,
     } = &mut target
-        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty())
+        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty() || decisions.is_file())
     {
-        let resolved = preflight_local(client.socket(), json, project_dir, &args.mixins).await?;
+        let resolved =
+            preflight_local(client.socket(), json, project_dir, &args.mixins, &decisions).await?;
         **def = lns_artifact::sandbox::parse(resolved.definition.as_bytes())
             .context("reading the resolved definition")?;
         *json = resolved.definition;
@@ -294,7 +301,7 @@ pub async fn run_image(
     }
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
-            Some(preflight_published(client.socket(), reference, &args.mixins).await?)
+            Some(preflight_published(client.socket(), reference, &args.mixins, &decisions).await?)
         }
         crate::run::target::RunTarget::Local { .. } => {
             // A path-shaped REF resolved to a definition; the summary names its image, not the path.
