@@ -192,7 +192,7 @@ pub fn resolve_applied_with_credentials(
     let mut out = resolve_applied_connectors(&base, catalog);
     // `base` drops the supplier so its own env var cannot double-seed beside the declaration's, but the reach a connect earned is not the declaration's to withdraw.
     out.routes = applied_connector_routes(&policy.connectors, catalog);
-    let ceiling_denies = crate::artifact::policy::is_closed(policy);
+    let denies_by_default = crate::artifact::policy::is_closed(policy);
     for (credential, supplier) in supplied {
         out.providers.push(DefProvider::new(declared_provider_def(
             credential, supplier,
@@ -202,7 +202,7 @@ pub fn resolve_applied_with_credentials(
         };
         // A declaration is artifact-authored, so its supplier's route must not widen the user's lockdown — a connector connected here already carries its own.
         let connected_here = policy.connectors.contains(&integ.id);
-        if !ceiling_denies && !connected_here {
+        if !denies_by_default && !connected_here {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));
         }
@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
     }
 
-    /// A deny-by-default directory: `is_closed` reads the http table, so the catch-all deny is what makes this policy a ceiling.
+    /// A deny-by-default directory: `is_closed` reads the http table, so the catch-all deny is what closes it.
     fn closed_policy_applying(ids: &[&str]) -> Policy {
         let mut policy = policy_applying(ids);
         policy.add_rule(lns_policy::RouteRule::deny_host("*"));

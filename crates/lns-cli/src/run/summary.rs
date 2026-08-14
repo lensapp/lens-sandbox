@@ -156,23 +156,35 @@ fn short_source(source: &str) -> String {
 /// Where every value in this summary starts, so a label too long to fit still lines its entries up under one another.
 const COLUMN: usize = 13;
 
-/// The blocks §1.5 names that an uncomposed run has never printed, since only a composed run has a second author to attribute them to.
-fn write_composed_blocks(s: &mut String, args: &RunArgs) {
+/// The blocks §1.5 names. A run that resolved no mixin still lists its rules — §4.2 lets a pulled entry outrank this directory only because the merged table is disclosed first — but names no source for them, since one author is not an attribution question.
+fn write_disclosed_blocks(s: &mut String, args: &RunArgs) {
     let listed = |block| -> Vec<&lns_ipc::SourceContribution> {
         args.contributions
             .iter()
             .filter(|c| c.block == block)
             .collect()
     };
-    write_block(s, "Rules", &listed(lns_ipc::ContributionBlock::Egress));
+    let composed = !args.resolved_mixins.is_empty();
+    write_block(
+        s,
+        "Rules",
+        &listed(lns_ipc::ContributionBlock::Egress),
+        composed,
+    );
     write_block(
         s,
         "Credentials",
         &listed(lns_ipc::ContributionBlock::Credential),
+        composed,
     );
 }
 
-fn write_block(s: &mut String, label: &str, entries: &[&lns_ipc::SourceContribution]) {
+fn write_block(
+    s: &mut String,
+    label: &str,
+    entries: &[&lns_ipc::SourceContribution],
+    attributed: bool,
+) {
     let Some((first, rest)) = entries.split_first() else {
         return;
     };
@@ -184,7 +196,11 @@ fn write_block(s: &mut String, label: &str, entries: &[&lns_ipc::SourceContribut
         "{heading}{:pad$}{}{}",
         "",
         first.key,
-        attribution_of(first)
+        if attributed {
+            attribution_of(first)
+        } else {
+            String::new()
+        }
     )
     .unwrap();
     for entry in rest {
@@ -193,7 +209,11 @@ fn write_block(s: &mut String, label: &str, entries: &[&lns_ipc::SourceContribut
             "{:value_column$}{}{}",
             "",
             entry.key,
-            attribution_of(entry)
+            if attributed {
+                attribution_of(entry)
+            } else {
+                String::new()
+            }
         )
         .unwrap();
     }
@@ -246,8 +266,8 @@ pub fn format_summary(
     }
     if !args.resolved_mixins.is_empty() {
         writeln!(s, "  Mixins:    {}", args.resolved_mixins.join(", ")).unwrap();
-        write_composed_blocks(&mut s, args);
     }
+    write_disclosed_blocks(&mut s, args);
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
@@ -1118,6 +1138,40 @@ mod tests {
         assert!(
             !s.contains("[from") && !s.contains("Rules:") && !s.contains("Credentials:"),
             "a run that resolved no mixin has one author, so attributing every line to them is noise; got: {s}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_resolved_no_mixin_still_names_the_rules_the_sandbox_ships() {
+        let mut args = run_args(Some("prism"));
+        args.contributions = ["allow db.vendor.example:5432", "allow api.vendor.example"]
+            .into_iter()
+            .map(|key| lns_ipc::SourceContribution {
+                block: lns_ipc::ContributionBlock::Egress,
+                key: key.into(),
+                source: "the sandbox".into(),
+                displaced: Vec::new(),
+            })
+            .collect();
+        let mut closed = Policy::default();
+        closed.add_rule(RouteRule::deny_host("*"));
+
+        let s = summary_of(
+            &args,
+            &closed,
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+
+        assert!(
+            s.contains("Rules:")
+                && s.contains("allow db.vendor.example:5432")
+                && s.contains("allow api.vendor.example"),
+            "§4.2 lets a pulled rule outrank this directory only because the merged table is disclosed first, and a raw allow this file cannot deny is exactly the entry that has to be named; got: {s}"
+        );
+        assert!(
+            !s.contains("[from"),
+            "one author is not an attribution question, so naming them on every line is noise; got: {s}"
         );
     }
 

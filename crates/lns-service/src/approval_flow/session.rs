@@ -147,7 +147,7 @@ pub struct ApprovalSession {
     connector: OnceLock<Arc<dyn ConnectPort>>,
     connecting: Mutex<HashSet<String>>,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
-    policy_floor: OnceLock<Policy>,
+    shipped: OnceLock<Policy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +180,7 @@ impl ApprovalSession {
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
             ledger: OnceLock::new(),
-            policy_floor: OnceLock::new(),
+            shipped: OnceLock::new(),
         }
     }
 
@@ -205,9 +205,9 @@ impl ApprovalSession {
         let _ = self.connector_routes.set(deriver);
     }
 
-    /// Installs a sandbox's shipped policy as an always-merged floor, so a watcher reload of the local overlay can never drop the sandbox's rules; idempotent, the first wins.
-    pub fn set_policy_floor(&self, floor: Policy) {
-        let _ = self.policy_floor.set(floor);
+    /// Installs a sandbox's shipped policy as the earlier source every reload re-merges under, so a watcher reload of the local decisions carries the sandbox's rules along rather than replacing them; idempotent, the first wins.
+    pub fn set_shipped_policy(&self, shipped: Policy) {
+        let _ = self.shipped.set(shipped);
     }
 
     /// Installs the connect port once the credential subsystem exists; idempotent, the first wins.
@@ -536,8 +536,8 @@ impl ApprovalSession {
 
     pub fn apply_external_policy(&self, mut new_policy: Policy) {
         *self.persisted.lock().expect("persisted mutex poisoned") = new_policy.clone();
-        if let Some(floor) = self.policy_floor.get() {
-            new_policy = crate::artifact::policy::merge_effective(Some(floor), &new_policy);
+        if let Some(shipped) = self.shipped.get() {
+            new_policy = crate::artifact::policy::merge_effective(Some(shipped), &new_policy);
         }
         if let Some(derive) = self.connector_routes.get() {
             let routes = derive(&new_policy.connectors);
@@ -1743,7 +1743,7 @@ pub(crate) mod tests {
         let (s, _n, _store, mut rx) = fixture();
         let mut document = Policy::default();
         document.add_rule(RouteRule::deny_host("api.example.test"));
-        s.set_policy_floor(document);
+        s.set_shipped_policy(document);
 
         let mut reloaded = Policy::default();
         reloaded.add_rule(RouteRule::allow_host("api.example.test"));

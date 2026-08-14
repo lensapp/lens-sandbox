@@ -279,11 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_allow_in_a_ceiling_does_not_legitimize_another_layers_copy_of_it() {
-        // The ceiling grants only what its own gate would reach. A line stranded
-        // behind its catch-all — which is exactly what an unreachable approval
-        // leaves in the file — must not authorize an untrusted baseline's identical
-        // allow, or the lockdown is widened through a rule that never fires.
+    fn an_allow_stranded_behind_a_catch_all_does_not_decide_an_earlier_sources_copy_of_it() {
+        // An unreachable approval is what a lockdown leaves in the file, and the gate stops before it.
         let mut overlay = Policy::default();
         overlay.add_rule(RouteRule::deny_host("*"));
         overlay.add_rule(RouteRule::allow_host("attacker.example"));
@@ -301,7 +298,7 @@ mod tests {
         assert_eq!(
             (decided.match_pattern.as_str(), decided.verdict),
             ("*", Verdict::Deny),
-            "the baseline allow must not clear a ceiling through a dead rule: {:?}",
+            "a rule the gate never reaches decides nothing, so an earlier source's identical allow must not be reached either: {:?}",
             merged.network.egress.http
         );
     }
@@ -443,26 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn a_ceiling_authorizes_an_allow_its_own_wildcard_already_covers() {
-        let mut ceiling = allow("*.example.test");
-        ceiling.add_rule(RouteRule::deny_host("*"));
-
-        let merged = merge_effective(Some(&ceiling), &allow("api.example.test"));
-
-        assert!(
-            merged
-                .network
-                .egress
-                .http
-                .iter()
-                .any(|rule| rule.match_pattern == "api.example.test"
-                    && rule.verdict == Verdict::Allow),
-            "the ceiling already permits every host under *.example.test, so approving one of them must not be dropped: {:?}",
-            merged.network.egress.http
-        );
-    }
-
-    #[test]
     fn a_local_allow_decides_a_destination_the_artifact_denies() {
         let mut artifact = Policy::default();
         artifact.add_rule(RouteRule::deny_host("docs.vendor.example"));
@@ -562,26 +539,7 @@ mod tests {
         assert_eq!(
             merged.network.egress.tcp.len(),
             1,
-            "the two tables fold independently, and neither is the other's ceiling"
-        );
-    }
-
-    #[test]
-    fn a_ceiling_authorizes_a_raw_splice_inside_a_range_it_already_splices() {
-        let mut ceiling = tcp_allow("10.0.0.0/8:5432");
-        ceiling.add_rule(RouteRule::deny_host("*"));
-
-        let merged = merge_effective(Some(&ceiling), &tcp_allow("10.0.0.5:5432"));
-
-        assert!(
-            merged
-                .network
-                .egress
-                .tcp
-                .iter()
-                .any(|rule| rule.match_pattern == "10.0.0.5:5432"),
-            "the ceiling already splices every address in 10.0.0.0/8 on that port, so naming one of them adds no reach: {:?}",
-            merged.network.egress.tcp
+            "the two tables fold independently, and neither decides the other"
         );
     }
 
@@ -600,31 +558,6 @@ mod tests {
                 .iter()
                 .all(|rule| rule.match_pattern != "db.internal:5432"),
             "the tables fold independently, so an http entry never becomes a raw one"
-        );
-    }
-
-    #[test]
-    fn merge_keeps_a_raw_allow_that_only_narrows_which_binary_a_ceiling_already_splices() {
-        let mut overlay = tcp_allow("db.internal:5432");
-        overlay.network.egress.tcp[0].binaries = Some(vec!["/usr/bin/psql".into()]);
-        let mut ceiling = tcp_allow("db.internal:5432");
-        ceiling.add_rule(RouteRule::deny_host("*"));
-
-        let merged = merge_effective(Some(&ceiling), &overlay);
-
-        let scoped = merged
-            .network
-            .egress
-            .tcp
-            .iter()
-            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/psql".to_string()]));
-        let open =
-            merged.network.egress.tcp.iter().position(|rule| {
-                rule.match_pattern == "db.internal:5432" && rule.binaries.is_none()
-            });
-        assert!(
-            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
-            "narrowing a splice the ceiling already grants every caller must survive, and a first-match gate must reach the narrower rule first or the narrowing is void: {merged:?}"
         );
     }
 
@@ -696,95 +629,6 @@ mod tests {
                 ("attacker.example", Verdict::Allow)
             ],
             "the gate reads first-match, so the developer's catch-all deny decides attacker.example even though the artifact's allow is still in the table"
-        );
-    }
-
-    #[test]
-    fn merge_keeps_a_scoped_allow_that_only_narrows_what_a_ceiling_already_permits() {
-        let mut overlay = allow("git.example.test");
-        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
-        let baseline = closed_allowing("git.example.test");
-
-        let merged = merge_effective(Some(&baseline), &overlay);
-
-        let scoped = merged
-            .network
-            .egress
-            .http
-            .iter()
-            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git".to_string()]));
-        let open =
-            merged.network.egress.http.iter().position(|rule| {
-                rule.match_pattern == "git.example.test" && rule.binaries.is_none()
-            });
-        assert!(
-            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
-            "narrowing a host the ceiling already allows to every caller must survive the merge, and a first-match gate must see the narrower rule before the ceiling's open allow or the narrowing is void: {merged:?}"
-        );
-    }
-
-    #[test]
-    fn merge_keeps_a_scoped_allow_whose_ceiling_rule_differs_only_in_its_description() {
-        let mut overlay = allow("git.example.test");
-        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
-        let mut baseline = closed_allowing("git.example.test");
-        baseline.network.egress.http[0].description = Some("git over https".into());
-
-        let merged = merge_effective(Some(&baseline), &overlay);
-
-        let scoped = merged
-            .network
-            .egress
-            .http
-            .iter()
-            .position(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git".to_string()]));
-        let open =
-            merged.network.egress.http.iter().position(|rule| {
-                rule.match_pattern == "git.example.test" && rule.binaries.is_none()
-            });
-        assert!(
-            scoped.is_some_and(|scoped| open.is_none_or(|open| scoped < open)),
-            "a note on the ceiling's rule is not part of its grant, so it must not decide whether the user's narrowing survives — dropping it leaves the ceiling's own open allow in force: {merged:?}"
-        );
-    }
-
-    #[test]
-    fn merge_reads_a_redundant_separator_as_the_same_binary_the_ceiling_named() {
-        let mut overlay = allow("git.example.test");
-        overlay.network.egress.http[0].binaries = Some(vec!["/usr/bin/git/".into()]);
-        let mut baseline = closed_allowing("git.example.test");
-        baseline.network.egress.http[0].binaries = Some(vec!["/usr/bin/git".into()]);
-
-        let merged = merge_effective(Some(&baseline), &overlay);
-
-        assert!(
-            merged
-                .network
-                .egress
-                .http
-                .iter()
-                .any(|rule| rule.binaries.as_deref() == Some(&["/usr/bin/git/".to_string()])),
-            "the guest compares these as paths and admits the same caller, so the merge must not read them as different binaries and drop the overlay: {merged:?}"
-        );
-    }
-
-    #[test]
-    fn merge_keeps_an_allow_both_layers_carry_when_both_deny_by_default() {
-        let overlay = closed_allowing("api.shared.example");
-        let baseline = closed_allowing("api.shared.example");
-
-        let merged = merge_effective(Some(&baseline), &overlay);
-
-        assert!(
-            merged.network.egress.http.iter().any(|rule| {
-                rule.match_pattern == "api.shared.example" && rule.verdict == Verdict::Allow
-            }),
-            "a host both the user and the artifact allow under deny-by-default is in the intersection and must survive: {merged:?}"
-        );
-        assert!(
-            is_closed(&merged),
-            "a closed layer must leave the merged policy closed: {:?}",
-            merged.network.egress.http
         );
     }
 

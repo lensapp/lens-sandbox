@@ -238,6 +238,21 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
     })
 }
 
+/// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
+pub fn own_egress(spec: &SandboxSpec) -> Vec<Contribution> {
+    let http = spec.policy.egress.http.iter();
+    let tcp = spec
+        .policy
+        .egress
+        .tcp
+        .iter()
+        .map(|rule| (rule.verdict, &rule.match_pattern));
+    http.map(|rule| (rule.verdict, &rule.match_pattern))
+        .chain(tcp)
+        .map(|(verdict, pattern)| egress_contribution(verdict, pattern, ROOT_LABEL))
+        .collect()
+}
+
 /// A rule is its verdict and its pattern together, because the verdict is the half that decides and two sources may disagree about one destination.
 fn egress_contribution(
     verdict: lns_policy::Verdict,

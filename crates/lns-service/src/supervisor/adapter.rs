@@ -722,7 +722,7 @@ pub(super) async fn start(
 
     session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
     if let Some(baseline) = sandbox_policy {
-        session.set_policy_floor(baseline.clone());
+        session.set_shipped_policy(baseline.clone());
     }
 
     tokio::spawn(decision_delivery_loop(

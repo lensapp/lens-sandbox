@@ -723,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn start_merges_a_sandbox_policy_floor_under_the_local_overlay() {
+    async fn start_merges_a_sandbox_shipped_policy_under_the_local_decisions() {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
