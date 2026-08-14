@@ -125,8 +125,7 @@ That writes a starter `./lns.yaml`:
 ```yaml
 apiVersion: lns.run/v1
 kind: sandbox
-metadata:
-  name: sandbox
+name: sandbox
 spec:
   image: docker.io/library/alpine:3.20
   command: sh

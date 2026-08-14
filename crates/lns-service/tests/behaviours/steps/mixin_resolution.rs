@@ -45,9 +45,7 @@ pub(crate) fn install_at(w: &mut BehaviourWorld, reference: &str, name: &str, sp
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.mixins.insert(
         reference.to_string(),
-        format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
-        ),
+        format!(r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"{name}","spec":{spec}}}"#),
     );
 }
 
@@ -58,7 +56,7 @@ fn install(w: &mut BehaviourWorld, spec: &str) {
 fn definition(w: &mut BehaviourWorld, spec: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{spec}}}"#
     ));
 }
 

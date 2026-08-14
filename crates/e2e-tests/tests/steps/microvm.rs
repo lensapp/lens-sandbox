@@ -178,7 +178,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         }
     }
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         world
             .project_image
             .clone()
@@ -342,7 +342,7 @@ fn base_image_without_a_trust_store(world: &mut E2eWorld) {
 fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
     let project = microvm_project(world);
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
         pinned_microvm_image()
     );
     std::fs::write(project.join("lns.yaml"), definition)
@@ -723,7 +723,7 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     let volume = format!("e2e-declarative-published-{seq}");
     let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
     );
     std::fs::write(publisher.path().join("lns.yaml"), definition)
         .expect("write published declarative lns.yaml");
@@ -1040,7 +1040,7 @@ async fn publish_tools_sandbox(world: &mut E2eWorld, entry: &str) {
     let reference = format!("{host}/e2e-tools-sandbox:{seq}");
     let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - {entry}\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - {entry}\n"
     );
     std::fs::write(publisher.path().join("lns.yaml"), definition)
         .expect("write published tools lns.yaml");
@@ -1193,7 +1193,7 @@ async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String
         .parse()
         .expect("run-sandbox ref parses");
     let doc = format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"e2e-run-sandbox"}},"spec":{{"image":"{image}"}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"e2e-run-sandbox","spec":{{"image":"{image}"}}}}"#
     );
     let built = lns_artifact::build::build_artifact(doc.as_bytes()).expect("build run sandbox");
     let client = oci_client::Client::new(oci_client::client::ClientConfig {

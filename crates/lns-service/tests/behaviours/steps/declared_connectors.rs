@@ -58,7 +58,7 @@ fn definition_declaring(ids: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":[{list}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","connectors":[{list}]}}}}"#
     )
 }
 
@@ -201,7 +201,7 @@ fn published_declares_one(w: &mut BehaviourWorld, id: String) {
 fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, host: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
     ));
 }
 
@@ -680,7 +680,7 @@ fn connector_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String
 
 fn definition_with_credential_on(env: &str, domain: &str) -> String {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env}","placeholder":"lns-placeholder-{env}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env}","placeholder":"lns-placeholder-{env}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
     )
 }
 

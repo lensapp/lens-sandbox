@@ -21,7 +21,7 @@ fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
 
 fn declarative_yaml(bind_source: &str) -> String {
     format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: {bind_source}\n      target: /workspace\n    - type: volume\n      source: some-cache\n      target: /home/node/.cache\n      readOnly: true\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: {bind_source}\n      target: /workspace\n    - type: volume\n      source: some-cache\n      target: /home/node/.cache\n      readOnly: true\n"
     )
 }
 
@@ -37,7 +37,7 @@ fn definition_with_bind_exclude(world: &mut BehaviourWorld, exclude: String) {
     world.author_files.insert(
         "/work/lns.yaml".into(),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      exclude:\n        - '{exclude}'\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      exclude:\n        - '{exclude}'\n"
         ),
     );
 }
@@ -47,7 +47,7 @@ fn definition_with_bind_source(world: &mut BehaviourWorld, source: String) {
     world.author_files.insert(
         "/work/lns.yaml".into(),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: '{source}'\n      target: /workspace\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: '{source}'\n      target: /workspace\n"
         ),
     );
 }
@@ -113,7 +113,7 @@ fn install_definition(world: &mut BehaviourWorld, extra_spec: &str) {
     world.author_files.insert(
         Path::new("/work/lns.yaml").to_path_buf(),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n{extra_spec}"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n{extra_spec}"
         ),
     );
 }

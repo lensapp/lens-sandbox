@@ -331,7 +331,7 @@ fn document(def: &Definition, spec: &SandboxSpec) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "apiVersion": lns_artifact::sandbox::API_VERSION,
         "kind": lns_artifact::spec::Kind::Sandbox.as_str(),
-        "metadata": &def.metadata,
+        "name": &def.name,
         "spec": spec,
     }))
     .context("serializing the resolved sandbox")
@@ -357,7 +357,7 @@ mod tests {
                         (
                             (*r).to_string(),
                             format!(
-                                r#"{{"apiVersion":"lns.run/v1","kind":"mixin","metadata":{{"name":"some-mixin"}},"spec":{spec}}}"#
+                                r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"some-mixin","spec":{spec}}}"#
                             ),
                         )
                     })
@@ -409,10 +409,8 @@ mod tests {
     }
 
     fn sandbox(spec: &str) -> Vec<u8> {
-        format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
-        )
-        .into_bytes()
+        format!(r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{spec}}}"#)
+            .into_bytes()
     }
 
     /// Names in a fixture stand for digest-pinned references, so a scenario reads as a graph rather than as sixty-four hex characters.

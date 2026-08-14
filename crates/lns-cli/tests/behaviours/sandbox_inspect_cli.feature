@@ -10,7 +10,7 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "Usage: lns inspect"
 
-  Scenario: inspecting a published mixin labels it Mixin and shows every block it carries
+  Scenario: inspecting a published mixin labels it mixin and shows every block it carries
     Given the service inspects "ghcr.io/acme/obs-tools:2" as a mixin declaring the tool "node@22.11.0"
     When the user runs "lns inspect ghcr.io/acme/obs-tools:2"
     Then the exit code is 0

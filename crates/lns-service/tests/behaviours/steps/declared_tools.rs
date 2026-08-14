@@ -9,7 +9,7 @@ fn definition_with_tools(entries: &str) -> String {
         .map(|entry| format!("{:?}", entry.trim().trim_matches('"')))
         .collect();
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","tools":[{}]}}}}"#,
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"registry.example.test/runtime:1","tools":[{}]}}}}"#,
         tools.join(",")
     )
 }
@@ -85,7 +85,7 @@ fn lns_yaml_with_tools_and_policy(w: &mut BehaviourWorld, entries: String) {
         .collect();
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"registry.example.test/runtime:1","egress":{{"http":[{{"match":"*","verdict":"deny"}}]}},"tools":[{}]}}}}"#,
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"registry.example.test/runtime:1","egress":{{"http":[{{"match":"*","verdict":"deny"}}]}},"tools":[{}]}}}}"#,
         tools.join(",")
     ));
 }
