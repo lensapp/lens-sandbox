@@ -16,6 +16,9 @@ use super::{
     vm_ended_before_connector, workload_identity,
 };
 
+/// Long enough for every sidecar to flush and unmount; past it the guest is abandoned rather than holding the run open.
+const SIDECAR_STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn handle(
     run_id: String,
     microvm: String,
@@ -120,6 +123,13 @@ async fn orchestrate(
             requests
         }
         _ => Vec::new(),
+    };
+    let sidecars = match &sandbox_plan {
+        Some(plan) => crate::sidecar::plan(
+            &plan.workload.sidecars,
+            lns_artifact::resources::host::probe(),
+        )?,
+        None => Vec::new(),
     };
     let launch = sandbox_plan
         .as_ref()
@@ -362,13 +372,16 @@ async fn orchestrate(
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
     );
-    let exec = vm::ExecSpec::for_run(
+    let mut exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
         &cmd,
         image.config.as_ref(),
         Some(&session),
     );
+    exec.kernel_env
+        .extend(crate::sidecar::workload_revforward_cmdline(&sidecars));
+    let (sidecar_channels, sidecar_service_rx) = crate::sidecar::service_channels(&sidecars);
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -394,6 +407,17 @@ async fn orchestrate(
     );
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 
+    let sidecar_host = crate::sidecar::launch::Host {
+        run_id: run_id.clone(),
+        cache_dir,
+        layer_cache: layer_cache.clone(),
+        content_store: content_store.clone(),
+        guest_tools: guest_tools.clone(),
+        kernel: kernel_path.clone(),
+        initrd: initrd.clone(),
+        debug: args.debug,
+    };
+
     let spec = vm::VmSpec {
         run_id: run_id.clone(),
         cpus,
@@ -409,10 +433,13 @@ async fn orchestrate(
         binds: bind_attachments,
         workload_uid: run_as.uid,
         workload_gid: vm::host_known_workload_gid(&run_as),
-        vsock: Some(vm::VsockChannel {
+        vsock: std::iter::once(vm::VsockChannel {
             port: crate::relay::VSOCK_PORT,
             fd_tx: session.relay.fd_tx.clone(),
-        }),
+        })
+        .chain(sidecar_channels)
+        .collect(),
+        no_nic: false,
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
@@ -521,6 +548,22 @@ async fn orchestrate(
     );
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
 
+    // Concurrent with the workload, not before it: the CA a proxied sidecar must trust only exists once the supervisor is up, and the supervisor comes up with the workload's own session.
+    let sidecar_run = (!sidecars.is_empty()).then(|| {
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::sidecar::supervise::supervise(
+            crate::sidecar::launch::VmGuests {
+                host: sidecar_host,
+                main_guest: connector.clone(),
+            },
+            sidecars,
+            sidecar_service_rx,
+            Some(session.relay.proxy_ca_ask()),
+            stop_rx,
+        ));
+        (stop_tx, task)
+    });
+
     log::progress("Connecting", "session", 0, 0);
     let connect_started = std::time::Instant::now();
     let fd = connector
@@ -534,6 +577,18 @@ async fn orchestrate(
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
     crate::run_registry::set_exit_code(&run_id, session_code);
+
+    // Sidecars go down before the main guest: their egress is bridged into it.
+    if let Some((stop_tx, task)) = sidecar_run {
+        let _ = stop_tx.send(());
+        let stopped = tokio::time::timeout(SIDECAR_STOP_BUDGET, task).await;
+        // A panic reads as Ok(Err(JoinError)) and leaves the same guests behind as a timeout does.
+        if !matches!(stopped, Ok(Ok(()))) {
+            log::warn!(
+                "the run's sidecars did not power off cleanly within {SIDECAR_STOP_BUDGET:?}; a volume one wrote may need a repair on the next run"
+            );
+        }
+    }
 
     super::shutdown::shutdown_after_session(forwards, std::time::Duration::from_secs(2), vm_task)
         .await?;

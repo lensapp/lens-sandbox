@@ -167,6 +167,12 @@ pub fn handle_session(
     };
     let confinement = confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID"));
     let inherited: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    let mut env = env;
+    if let Some(Err(e)) = crate::trust::install_from_env(&mut env, &crate::trust::RealTrustStore) {
+        let _ = writeln_stderr(&format!(
+            "lns-session-broker: proxy CA not installed, egress stays untrusted by this workload: {e}"
+        ));
+    }
     let spec = WorkloadSpec {
         argv,
         env,

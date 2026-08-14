@@ -90,6 +90,26 @@ fn lns_yaml_from_the_retired_group(w: &mut BehaviourWorld) {
     );
 }
 
+#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" sidecar with proxied egress$"#)]
+fn lns_yaml_with_proxied_sidecar(w: &mut BehaviourWorld, name: String) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  sidecars:\n    - name: {name}\n      image: ghcr.io/team/{name}:1\n      egress: proxy\n      expose:\n        - guestPort: 2375\n          socket: /var/run/some.sock\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^an lns\.yaml declaring the "([^"]+)" sidecar with no egress$"#)]
+fn lns_yaml_with_isolated_sidecar(w: &mut BehaviourWorld, name: String) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  sidecars:\n    - name: {name}\n      image: ghcr.io/team/{name}:1\n"
+        ),
+    );
+}
+
 #[given("an lns.yaml with a misspelled volume readOnly field")]
 fn lns_yaml_with_unknown_nested_field(w: &mut BehaviourWorld) {
     seed(

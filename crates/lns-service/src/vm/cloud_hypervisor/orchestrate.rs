@@ -11,7 +11,6 @@ use super::launch::{BindIdMap, ShareAccess, SocketLayout, cloud_hypervisor_args,
 use super::process::{Child, Spawner};
 use super::vmm_bin::VmmBinaries;
 use super::vsock;
-use crate::relay::VSOCK_PORT;
 use crate::vm::{BindAttachment, VmSpec};
 
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -41,7 +40,7 @@ pub(crate) async fn launch<S: Spawner>(
     spec: &VmSpec,
     bins: &VmmBinaries,
     layout: &SocketLayout,
-    relay_fd_tx: Option<UnboundedSender<RawFd>>,
+    guest_listeners: Vec<(u32, UnboundedSender<RawFd>)>,
     timeouts: &LaunchTimeouts,
 ) -> Result<RunningVm<S::Child>> {
     let content = spawn_virtiofsd(
@@ -78,8 +77,8 @@ pub(crate) async fn launch<S: Spawner>(
         }
     }
 
-    if let Some(tx) = relay_fd_tx {
-        let listener = vsock::bind_guest_listener(&layout.vsock, VSOCK_PORT)?;
+    for (port, tx) in guest_listeners {
+        let listener = vsock::bind_guest_listener(&layout.vsock, port)?;
         super::real::spawn_accept_loop(listener, tx);
     }
 
@@ -204,6 +203,7 @@ async fn wait_for_socket(path: &Path, timeout: Duration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relay::VSOCK_PORT;
     use crate::vm::ExecSpec;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
@@ -345,7 +345,8 @@ mod tests {
             workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
-            vsock: None,
+            vsock: Vec::new(),
+            no_nic: false,
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
@@ -404,9 +405,16 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let spawner = FakeSpawner::ready();
-        let mut running = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
-            .await
-            .expect("launch should succeed once both sockets appear");
+        let mut running = launch(
+            &spawner,
+            &spec(d.path()),
+            &bins(),
+            &layout,
+            Vec::new(),
+            &fast(),
+        )
+        .await
+        .expect("launch should succeed once both sockets appear");
 
         assert_eq!(
             spawner.programs(),
@@ -434,10 +442,17 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let spawner = FakeSpawner::suppressing(layout.virtiofsd.clone());
-        let err = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
-            .await
-            .map(|_| ())
-            .expect_err("a missing virtiofsd socket must abort the launch");
+        let err = launch(
+            &spawner,
+            &spec(d.path()),
+            &bins(),
+            &layout,
+            Vec::new(),
+            &fast(),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("a missing virtiofsd socket must abort the launch");
 
         assert!(
             format!("{err:#}").contains("virtiofsd did not expose its socket"),
@@ -464,10 +479,17 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let spawner = FakeSpawner::suppressing(layout.vsock.clone());
-        let err = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
-            .await
-            .map(|_| ())
-            .expect_err("a missing vsock socket must abort the launch");
+        let err = launch(
+            &spawner,
+            &spec(d.path()),
+            &bins(),
+            &layout,
+            Vec::new(),
+            &fast(),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("a missing vsock socket must abort the launch");
 
         assert!(
             format!("{err:#}").contains("cloud-hypervisor did not expose its vsock socket"),
@@ -498,10 +520,17 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = SocketLayout::for_run_dir(d.path());
         let spawner = FakeSpawner::failing_to_spawn("cloud-hypervisor");
-        let err = launch(&spawner, &spec(d.path()), &bins(), &layout, None, &fast())
-            .await
-            .map(|_| ())
-            .expect_err("a cloud-hypervisor spawn failure must abort the launch");
+        let err = launch(
+            &spawner,
+            &spec(d.path()),
+            &bins(),
+            &layout,
+            Vec::new(),
+            &fast(),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("a cloud-hypervisor spawn failure must abort the launch");
 
         assert!(
             format!("{err:#}").contains("spawning cloud-hypervisor"),
@@ -537,7 +566,7 @@ mod tests {
             &spec(d.path()),
             &bins(),
             &layout,
-            Some(fd_tx),
+            vec![(VSOCK_PORT, fd_tx)],
             &fast(),
         )
         .await
@@ -548,6 +577,38 @@ mod tests {
             relay_path.exists(),
             "the guest→host relay listener socket must be bound before the guest boots"
         );
+    }
+
+    #[tokio::test]
+    async fn launch_binds_one_guest_listener_per_channel() {
+        // A run with a sidecar needs two: the relay and the sidecar's docker-API
+        // channel. Binding only the first would leave the second guest dialling a
+        // host port nothing is listening on.
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = SocketLayout::for_run_dir(d.path());
+        let spawner = FakeSpawner::ready();
+        let (relay_tx, _relay_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sidecar_tx, _sidecar_rx) = tokio::sync::mpsc::unbounded_channel();
+        launch(
+            &spawner,
+            &spec(d.path()),
+            &bins(),
+            &layout,
+            vec![
+                (VSOCK_PORT, relay_tx),
+                (lns_session::SIDECAR_EGRESS_PORT, sidecar_tx),
+            ],
+            &fast(),
+        )
+        .await
+        .expect("launch should succeed");
+
+        for port in [VSOCK_PORT, lns_session::SIDECAR_EGRESS_PORT] {
+            assert!(
+                vsock::guest_listener_path(&layout.vsock, port).exists(),
+                "no listener bound for port {port}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -562,7 +623,7 @@ mod tests {
             bind(data.path(), "/data", true),
         ];
         let spawner = FakeSpawner::ready();
-        let running = launch(&spawner, &s, &bins(), &layout, None, &fast())
+        let running = launch(&spawner, &s, &bins(), &layout, Vec::new(), &fast())
             .await
             .expect("launch with host binds should succeed");
 
@@ -635,7 +696,7 @@ mod tests {
         s.workload_gid = None;
         s.binds = vec![bind(proj.path(), "/work", false)];
         let spawner = FakeSpawner::ready();
-        let running = launch(&spawner, &s, &bins(), &layout, None, &fast())
+        let running = launch(&spawner, &s, &bins(), &layout, Vec::new(), &fast())
             .await
             .expect("a bind boots without a known gid");
 
@@ -657,7 +718,7 @@ mod tests {
         let mut s = spec(d.path());
         s.binds = vec![bind(proj.path(), "/work", false)];
         let spawner = FakeSpawner::suppressing(layout.bind_virtiofsd(0));
-        let err = launch(&spawner, &s, &bins(), &layout, None, &fast())
+        let err = launch(&spawner, &s, &bins(), &layout, Vec::new(), &fast())
             .await
             .map(|_| ())
             .expect_err("a hung bind virtiofsd must abort the launch");
@@ -689,7 +750,7 @@ mod tests {
         let mut s = spec(d.path());
         s.binds = vec![bind(Path::new("/no/such/host/path"), "/work", false)];
         let spawner = FakeSpawner::ready();
-        let err = launch(&spawner, &s, &bins(), &layout, None, &fast())
+        let err = launch(&spawner, &s, &bins(), &layout, Vec::new(), &fast())
             .await
             .map(|_| ())
             .expect_err("a missing bind source must abort the launch");

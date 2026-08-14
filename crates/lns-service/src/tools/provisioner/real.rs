@@ -202,7 +202,8 @@ async fn run_provisioner(
         }],
         workload_uid: run_as.uid,
         workload_gid: vm::host_known_workload_gid(&run_as),
-        vsock: None,
+        vsock: Vec::new(),
+        no_nic: false,
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,

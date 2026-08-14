@@ -11,7 +11,7 @@ mod transport;
 #[cfg(target_os = "macos")]
 mod vz;
 
-pub use transport::{GuestTransport, VmStopGuard};
+pub use transport::{GuestDialer, GuestTransport, VmStopGuard, stop_when_reachable};
 #[cfg(target_os = "macos")]
 pub use vz::VsockConnector;
 
@@ -31,7 +31,9 @@ pub struct VmSpec {
     pub binds: Vec<BindAttachment>,
     pub workload_uid: Option<u32>,
     pub workload_gid: Option<u32>,
-    pub vsock: Option<VsockChannel>,
+    pub vsock: Vec<VsockChannel>,
+    /// A sidecar guest gets no network device, so egress it does not route to the run's proxy reaches nothing.
+    pub no_nic: bool,
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
@@ -767,6 +769,10 @@ mod tests {
                 token: token.to_string(),
                 audit_path: std::path::PathBuf::from("/tmp/fake-audit.jsonl"),
                 fd_tx,
+                proxy_ca: crate::relay::test_proxy_ca_ask(
+                    tokio::sync::mpsc::unbounded_channel().0,
+                    crate::relay::ProxyCaState::Pending,
+                ),
             },
             watcher: None,
             credential_watcher: None,
@@ -981,7 +987,8 @@ mod tests {
             binds: vec![],
             workload_uid: None,
             workload_gid: None,
-            vsock: None,
+            vsock: Vec::new(),
+            no_nic: false,
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,

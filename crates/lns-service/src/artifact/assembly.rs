@@ -31,6 +31,7 @@ pub struct ResolvedSandbox {
     pub host_filesets: Vec<HostFileset>,
     pub inline_filesets: Vec<InlineFileset>,
     pub filesets: Vec<ResolvedFileset>,
+    pub sidecars: Vec<lns_artifact::sandbox::Sidecar>,
     pub command: Option<String>,
     pub user: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -52,6 +53,7 @@ pub struct ResolvedFileset {
 #[derive(Debug, Clone)]
 pub struct AssembledWorkload {
     pub base_image: String,
+    pub sidecars: Vec<lns_artifact::sandbox::Sidecar>,
     pub command: Option<String>,
     pub user: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -64,6 +66,7 @@ pub struct AssembledWorkload {
 pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
     AssembledWorkload {
         base_image: sandbox.base_image.clone(),
+        sidecars: sandbox.sidecars.clone(),
         command: sandbox.command.clone(),
         user: sandbox.user.clone(),
         env: sandbox.env.clone(),

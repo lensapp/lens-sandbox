@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::Instrument;
@@ -70,6 +70,79 @@ pub struct Relay {
     pub audit_path: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fd_tx: mpsc::UnboundedSender<RawFd>,
+    pub(crate) proxy_ca: ProxyCaAsk,
+}
+
+/// The MITM CA as the host knows it; `Pending` until the supervisor answers, so a caller can tell "not yet" from "there is none".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyCaState {
+    Pending,
+    Available(String),
+    Unavailable,
+}
+
+/// Why an ask for the CA came back empty; the two cases need different operator action, so they must not share a message.
+enum NoProxyCa {
+    SupervisorHasNone,
+    RelayClosed,
+}
+
+impl Relay {
+    /// A handle for asking the supervisor for the run's MITM CA, which a sidecar must trust before its first request or its egress can only be tunnelled, never inspected. Detached from the relay, so a bring-up that outlives this borrow can still ask.
+    pub fn proxy_ca_ask(&self) -> ProxyCaAsk {
+        self.proxy_ca.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct ProxyCaAsk {
+    frame_tx: mpsc::UnboundedSender<HostFrame>,
+    state: watch::Receiver<ProxyCaState>,
+}
+
+impl ProxyCaAsk {
+    /// Ask, then wait for the answer or the timeout. An answer that already landed is returned as-is, so a second ask can read the first one's answer; a run asks once.
+    pub async fn get(&self, timeout: Duration) -> Result<String> {
+        let mut rx = self.state.clone();
+        self.frame_tx
+            .send(HostFrame::ProxyCaRequest)
+            .context("relay is gone, cannot ask for the proxy CA")?;
+        let settled = tokio::time::timeout(timeout, async {
+            loop {
+                match &*rx.borrow_and_update() {
+                    ProxyCaState::Pending => {}
+                    ProxyCaState::Available(pem) => return Ok(pem.clone()),
+                    ProxyCaState::Unavailable => return Err(NoProxyCa::SupervisorHasNone),
+                }
+                if rx.changed().await.is_err() {
+                    return Err(NoProxyCa::RelayClosed);
+                }
+            }
+        })
+        .await
+        .context("supervisor did not answer the proxy CA request")?;
+        settled.map_err(|why| match why {
+            NoProxyCa::SupervisorHasNone => anyhow::anyhow!(
+                "the supervisor has no proxy CA; the run has no proxy to inspect egress with"
+            ),
+            NoProxyCa::RelayClosed => {
+                anyhow::anyhow!("the relay closed before the supervisor answered with a proxy CA")
+            }
+        })
+    }
+}
+
+/// A handle answering as the supervisor already has, for tests that need a `ProxyCaAsk` without a relay behind it.
+#[cfg(test)]
+pub(crate) fn test_proxy_ca_ask(
+    frame_tx: mpsc::UnboundedSender<HostFrame>,
+    answered: ProxyCaState,
+) -> ProxyCaAsk {
+    let (_ca_tx, ca_rx) = watch::channel(answered);
+    ProxyCaAsk {
+        frame_tx,
+        state: ca_rx,
+    }
 }
 
 #[derive(Clone)]
@@ -83,6 +156,7 @@ pub fn spawn(
     microvm: &str,
     session: Arc<ApprovalSession>,
     credential_session: Arc<CredentialSession>,
+    frame_tx: mpsc::UnboundedSender<HostFrame>,
     frame_rx: mpsc::UnboundedReceiver<HostFrame>,
     user_env: Vec<String>,
 ) -> Result<Relay> {
@@ -90,6 +164,12 @@ pub fn spawn(
     let url = format!("vsock://host:{VSOCK_PORT}/v1/sandbox");
     let audit = audit_path(run_id).context("resolving audit log path")?;
     let (fd_tx, fd_rx) = mpsc::unbounded_channel::<RawFd>();
+    let (proxy_ca_tx, proxy_ca_rx) = watch::channel(ProxyCaState::Pending);
+    let proxy_ca_tx = Arc::new(proxy_ca_tx);
+    let proxy_ca = ProxyCaAsk {
+        frame_tx: frame_tx.clone(),
+        state: proxy_ca_rx,
+    };
 
     let token_clone = token.clone();
     let audit_clone = audit.clone();
@@ -110,6 +190,7 @@ pub fn spawn(
                 audit_clone,
                 user_env,
                 identity,
+                proxy_ca_tx,
             )
             .await;
         }
@@ -121,6 +202,7 @@ pub fn spawn(
         token,
         audit_path: audit,
         fd_tx,
+        proxy_ca,
     })
 }
 
@@ -226,6 +308,7 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
     writer: &mut AuditWriter<'_, L, S>,
     budget: &AuditBudget,
     clock: &dyn crate::oauth::Clock,
+    proxy_ca: &watch::Sender<ProxyCaState>,
 ) -> Result<bool> {
     let text = match msg {
         Message::Text(text) => text,
@@ -266,6 +349,16 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 serde_json::from_value::<GuestFrame>(Value::Object(obj))
             {
                 credential_session.submit_pending(req, Instant::now());
+            }
+        }
+        Some("proxy_ca") => {
+            if let Ok(GuestFrame::ProxyCa(ca)) =
+                serde_json::from_value::<GuestFrame>(Value::Object(obj))
+            {
+                proxy_ca.send_replace(match ca.pem {
+                    Some(pem) => ProxyCaState::Available(pem),
+                    None => ProxyCaState::Unavailable,
+                });
             }
         }
         _ => {}
@@ -698,6 +791,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -743,6 +837,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -793,6 +888,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -867,6 +963,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -906,6 +1003,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -939,6 +1037,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -1034,6 +1133,7 @@ mod tests {
             },
             &exhausted_budget,
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .unwrap();
@@ -1056,6 +1156,181 @@ mod tests {
         notifier.dismiss("unused");
         notifier.inform("unused");
         notifier.clear_informs();
+    }
+
+    async fn route_proxy_ca(raw: &str) -> ProxyCaState {
+        let (ca_tx, ca_rx) = watch::channel(ProxyCaState::Pending);
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut log = MemLog::default();
+        let mut anchor = MemAnchor::default();
+        handle_inbound(
+            Message::Text(raw.into()),
+            &session_with_dummy_sink(),
+            &credential_session_with_dummy_sink(),
+            &mut AuditWriter {
+                chain: &mut chain,
+                log: &mut log,
+                anchor: &mut anchor,
+                run: "test-run",
+                microvm: "calm-finch",
+            },
+            &AuditBudget::with_defaults(),
+            &CLOCK,
+            &ca_tx,
+        )
+        .await
+        .expect("handle_inbound");
+        assert!(
+            log.bytes.is_empty(),
+            "a proxy_ca frame is not an audit record"
+        );
+        ca_rx.borrow().clone()
+    }
+
+    #[tokio::test]
+    async fn a_proxy_ca_frame_publishes_the_pem_to_whoever_waits_for_it() {
+        assert_eq!(
+            route_proxy_ca(r#"{"type":"proxy_ca","pem":"PEM-BODY"}"#).await,
+            ProxyCaState::Available("PEM-BODY".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_null_pem_settles_as_unavailable_rather_than_leaving_a_caller_pending() {
+        // A run with no proxy must fail the waiter, not hang it.
+        assert_eq!(
+            route_proxy_ca(r#"{"type":"proxy_ca","pem":null}"#).await,
+            ProxyCaState::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_proxy_ca_frame_leaves_the_state_pending() {
+        // Publishing garbage as a CA would have the sidecar trust nothing and
+        // fail every request; staying pending lets the timeout say so instead.
+        assert_eq!(
+            route_proxy_ca(r#"{"type":"proxy_ca","pem":{"not":"a string"}}"#).await,
+            ProxyCaState::Pending
+        );
+    }
+
+    fn relay_awaiting_ca() -> (
+        Relay,
+        mpsc::UnboundedReceiver<HostFrame>,
+        watch::Sender<ProxyCaState>,
+    ) {
+        let (fd_tx, _fd_rx) = mpsc::unbounded_channel();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let (ca_tx, ca_rx) = watch::channel(ProxyCaState::Pending);
+        let relay = Relay {
+            url: "vsock://host:1024/v1/sandbox".to_string(),
+            token: "t".to_string(),
+            audit_path: PathBuf::from("/tmp/unused.jsonl"),
+            fd_tx,
+            proxy_ca: ProxyCaAsk {
+                frame_tx,
+                state: ca_rx,
+            },
+        };
+        (relay, frame_rx, ca_tx)
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_proxy_ca_sends_a_request_and_returns_the_answer() {
+        let (relay, mut frame_rx, ca_tx) = relay_awaiting_ca();
+        let asked =
+            tokio::spawn(async move { relay.proxy_ca_ask().get(Duration::from_secs(5)).await });
+
+        assert_eq!(
+            frame_rx.recv().await.expect("a request frame"),
+            HostFrame::ProxyCaRequest,
+            "the guest only answers when asked"
+        );
+        ca_tx.send_replace(ProxyCaState::Available("PEM-BODY".to_string()));
+
+        assert_eq!(asked.await.expect("join").expect("a pem"), "PEM-BODY");
+    }
+
+    #[tokio::test]
+    async fn a_ca_that_arrived_before_the_ask_is_still_returned() {
+        // The answer can land while the caller is still being scheduled; a
+        // waiter that only watches for *changes* would miss it and time out.
+        let (relay, _frame_rx, ca_tx) = relay_awaiting_ca();
+        ca_tx.send_replace(ProxyCaState::Available("PEM-BODY".to_string()));
+
+        assert_eq!(
+            relay
+                .proxy_ca_ask()
+                .get(Duration::from_secs(5))
+                .await
+                .expect("a pem"),
+            "PEM-BODY"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_proxy_fails_the_ask_with_a_reason() {
+        let (relay, _frame_rx, ca_tx) = relay_awaiting_ca();
+        ca_tx.send_replace(ProxyCaState::Unavailable);
+
+        let err = relay
+            .proxy_ca_ask()
+            .get(Duration::from_secs(5))
+            .await
+            .expect_err("no CA to hand out");
+        assert!(
+            format!("{err:#}").contains("no proxy CA"),
+            "the error must name the cause: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_supervisor_times_out_instead_of_hanging_the_run() {
+        let (relay, _frame_rx, _ca_tx) = relay_awaiting_ca();
+
+        let err = relay
+            .proxy_ca_ask()
+            .get(Duration::from_millis(20))
+            .await
+            .expect_err("no answer");
+        assert!(
+            format!("{err:#}").contains("did not answer"),
+            "the error must name the timeout: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_relay_fails_the_ask_rather_than_waiting_out_the_timeout() {
+        let (relay, frame_rx, ca_tx) = relay_awaiting_ca();
+        drop(frame_rx);
+        drop(ca_tx);
+
+        let err = relay
+            .proxy_ca_ask()
+            .get(Duration::from_secs(30))
+            .await
+            .expect_err("nothing to ask");
+        assert!(
+            format!("{err:#}").contains("relay is gone"),
+            "the error must name the dead channel: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_drops_the_connection_says_so_rather_than_blaming_the_supervisor() {
+        // A dead relay and a supervisor without a proxy need different fixes.
+        let (relay, _frame_rx, ca_tx) = relay_awaiting_ca();
+        drop(ca_tx);
+
+        let err = relay
+            .proxy_ca_ask()
+            .get(Duration::from_secs(30))
+            .await
+            .expect_err("no answer is coming");
+        assert!(
+            format!("{err:#}").contains("relay closed"),
+            "the error must name the dead relay: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -1089,6 +1364,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .unwrap();
@@ -1119,6 +1395,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -1149,6 +1426,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");
@@ -1181,6 +1459,7 @@ mod tests {
                 },
                 &AuditBudget::with_defaults(),
                 &CLOCK,
+                &watch::channel(ProxyCaState::Pending).0,
             )
             .await
             .expect("handle_inbound");
@@ -1209,6 +1488,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("malformed audit_event must NOT propagate as an error");
@@ -1252,6 +1532,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .unwrap();
@@ -1288,6 +1569,7 @@ mod tests {
             },
             &AuditBudget::with_defaults(),
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("unknown type must not error");
@@ -1305,12 +1587,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let _home = home_for(&temp);
         let session = session_with_dummy_sink();
-        let (_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let relay = spawn(
             "aa1234",
             "calm-finch",
             session,
             credential_session_with_dummy_sink(),
+            frame_tx,
             frame_rx,
             vec![],
         )
@@ -1424,6 +1707,7 @@ mod tests {
             },
             &budget,
             &CLOCK,
+            &watch::channel(ProxyCaState::Pending).0,
         )
         .await
         .expect("handle_inbound");

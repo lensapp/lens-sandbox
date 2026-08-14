@@ -91,6 +91,64 @@ impl Volume {
     }
 }
 
+/// Whether a sidecar can reach the network at all; without `Proxy` it has no route off its guest, since it has no network device and no bridge to the run's proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidecarEgress {
+    #[default]
+    None,
+    Proxy,
+}
+
+/// What an exposed socket is created with when the declaration does not say: a run's guest holds one workload, so letting it reach the socket is the useful default.
+pub const DEFAULT_SOCKET_MODE: u32 = 0o666;
+
+/// One service a sidecar publishes, surfaced in the workload as a unix socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidecarExpose {
+    pub guest_port: i64,
+    pub socket: String,
+    /// Octal, as a string: YAML would read a bare `0666` as decimal on the 1.2 core schema and silently widen the mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl SidecarExpose {
+    pub fn mode_bits(&self) -> Result<u32> {
+        let Some(mode) = &self.mode else {
+            return Ok(DEFAULT_SOCKET_MODE);
+        };
+        let bits = u32::from_str_radix(mode, 8)
+            .with_context(|| format!("socket mode {mode:?} must be octal, like \"0660\""))?;
+        // setuid/setgid/sticky mean nothing on a socket, so a mode that sets them is a mistake worth naming rather than a grant to pass through.
+        if bits > 0o777 {
+            bail!("socket mode {mode:?} must not set bits above 0777");
+        }
+        Ok(bits)
+    }
+}
+
+/// An auxiliary guest attached to the run: rootful and unsupervised, with no network device, so egress it does not route to the run's proxy reaches nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Sidecar {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub egress: SidecarEgress,
+    #[serde(default)]
+    pub resources: Option<Resources>,
+    #[serde(default)]
+    pub volumes: Vec<Volume>,
+    #[serde(default)]
+    pub expose: Vec<SidecarExpose>,
+}
+
 /// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the connector ids it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -124,6 +182,8 @@ pub struct SandboxSpec {
     pub filesets: Vec<FilesetEntry>,
     #[serde(default)]
     pub ports: Vec<Port>,
+    #[serde(default)]
+    pub sidecars: Vec<Sidecar>,
 }
 
 /// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
@@ -227,6 +287,7 @@ fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
         (spec.workdir.is_some(), "workdir"),
         (spec.user.is_some(), "user"),
         (spec.resources.is_some(), "resources"),
+        (!spec.sidecars.is_empty(), "sidecars"),
     ];
     if let Some((_, block)) = launch_blocks.iter().find(|(declared, _)| *declared) {
         bail!("a mixin must not declare {block}: it describes one launch, and the sandbox owns it");
@@ -289,20 +350,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
         spec::validate_mount_path(workdir).context("workdir")?;
     }
     let mut targets = BTreeSet::new();
-    for volume in &doc.spec.volumes {
-        spec::validate_mount_path(&volume.target)
-            .with_context(|| format!("volume targeting {}", volume.target))?;
-        if overlaps_runtime_namespace(&volume.target) {
-            bail!(
-                "volume target {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
-                volume.target
-            );
-        }
-        validate_volume(volume)?;
-        if !targets.insert(&volume.target) {
-            bail!("duplicate volume target {}", volume.target);
-        }
-    }
+    validate_volumes(&doc.spec.volumes, &mut targets)?;
     for connector in &doc.spec.connectors {
         if !spec::is_valid_name(connector) {
             bail!("invalid connector id {connector:?}");
@@ -316,7 +364,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
-        if !targets.insert(&fileset.mount_path) {
+        if !targets.insert(fileset.mount_path.as_str()) {
             bail!("duplicate mount target {}", fileset.mount_path);
         }
     }
@@ -341,7 +389,115 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             }
         }
     }
+    validate_sidecars(&doc.spec.sidecars, &targets)?;
     Ok(doc)
+}
+
+fn validate_volumes<'a>(volumes: &'a [Volume], targets: &mut BTreeSet<&'a str>) -> Result<()> {
+    for volume in volumes {
+        spec::validate_mount_path(&volume.target)
+            .with_context(|| format!("volume targeting {}", volume.target))?;
+        if overlaps_runtime_namespace(&volume.target) {
+            bail!(
+                "volume target {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
+                volume.target
+            );
+        }
+        validate_volume(volume)?;
+        if !targets.insert(volume.target.as_str()) {
+            bail!("duplicate volume target {}", volume.target);
+        }
+    }
+    Ok(())
+}
+
+/// Socket paths are checked across every sidecar because two sidecars publishing one path would silently shadow each other, while ports and volume targets only have to be unique within their own guest.
+fn validate_sidecars(sidecars: &[Sidecar], workload_targets: &BTreeSet<&str>) -> Result<()> {
+    let mut names = BTreeSet::new();
+    let mut sockets = BTreeSet::new();
+    for sidecar in sidecars {
+        if !spec::is_valid_name(&sidecar.name) {
+            bail!("invalid sidecar name {:?}", sidecar.name);
+        }
+        if !names.insert(&sidecar.name) {
+            bail!("duplicate sidecar {:?}", sidecar.name);
+        }
+        validate_sidecar(sidecar, &mut sockets, workload_targets)
+            .with_context(|| format!("sidecar {:?}", sidecar.name))?;
+    }
+    Ok(())
+}
+
+fn validate_sidecar<'a>(
+    sidecar: &'a Sidecar,
+    sockets: &mut BTreeSet<&'a str>,
+    workload_targets: &BTreeSet<&str>,
+) -> Result<()> {
+    if sidecar.image.trim().is_empty() {
+        bail!("must carry an image; it is the OCI image the sidecar runs");
+    }
+    for key in sidecar.env.keys() {
+        if !lns_spec::is_legal_env_var_name(key) {
+            bail!(
+                "invalid env key {key:?}: env keys must be non-empty and free of '=', whitespace, and control characters"
+            );
+        }
+    }
+    if let Some(resources) = &sidecar.resources {
+        validate_resources(resources)?;
+    }
+    validate_sidecar_volumes(&sidecar.volumes)?;
+    validate_sidecar_expose(&sidecar.expose, sockets, workload_targets)
+}
+
+fn validate_sidecar_volumes(volumes: &[Volume]) -> Result<()> {
+    for volume in volumes {
+        if volume.is_bind() {
+            bail!(
+                "volume targeting {} must be a named volume; a host path bound into a rootful sidecar is not supported",
+                volume.target
+            );
+        }
+    }
+    validate_volumes(volumes, &mut BTreeSet::new())
+}
+
+fn validate_sidecar_expose<'a>(
+    expose: &'a [SidecarExpose],
+    sockets: &mut BTreeSet<&'a str>,
+    workload_targets: &BTreeSet<&str>,
+) -> Result<()> {
+    let mut ports = BTreeSet::new();
+    for service in expose {
+        if !(1..=65535).contains(&service.guest_port) {
+            bail!("guestPort {} is out of range (1-65535)", service.guest_port);
+        }
+        if !ports.insert(service.guest_port) {
+            bail!("duplicate guestPort {}", service.guest_port);
+        }
+        spec::validate_mount_path(&service.socket)
+            .with_context(|| format!("socket at {}", service.socket))?;
+        if overlaps_runtime_namespace(&service.socket) {
+            bail!(
+                "socket {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
+                service.socket
+            );
+        }
+        if workload_targets.contains(service.socket.as_str()) {
+            bail!(
+                "socket {} is already a workload volume or fileset mount target",
+                service.socket
+            );
+        }
+        if !sockets.insert(service.socket.as_str()) {
+            bail!(
+                "socket {} is already published into the workload by another sidecar",
+                service.socket
+            );
+        }
+        service.mode_bits()?;
+    }
+    Ok(())
 }
 
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
@@ -726,6 +882,10 @@ mod tests {
             (r#"{"workdir":"/workspace"}"#, "workdir"),
             (r#"{"user":"node"}"#, "user"),
             (r#"{"resources":{"cpu":2}}"#, "resources"),
+            (
+                r#"{"sidecars":[{"name":"some-sidecar","image":"ghcr.io/team/aux:1"}]}"#,
+                "sidecars",
+            ),
         ] {
             let err = parse_mixin(&mixin_json(spec)).unwrap_err();
             assert!(
@@ -2047,5 +2207,237 @@ mod tests {
         let top_level = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"},"unexpected":true}"#;
         let err = parse(top_level).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
+    }
+    fn sidecar_json(sidecars: &str) -> Vec<u8> {
+        def_json(&format!(
+            r#"{{"image":"ghcr.io/team/base:1","sidecars":{sidecars}}}"#
+        ))
+    }
+
+    fn sidecar_error(sidecars: &str) -> String {
+        format!("{:#}", parse(&sidecar_json(sidecars)).unwrap_err())
+    }
+
+    #[test]
+    fn parse_reads_a_sidecar_declared_inline() {
+        let def = parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","command":"/usr/bin/aux --serve","env":{"AUX_ROOT":"/data"},"egress":"proxy","resources":{"cpu":2,"memory":"2Gi"},"volumes":[{"name":"aux-state","target":"/data"}],"expose":[{"guestPort":2375,"socket":"/run/aux.sock","mode":"0660"}]}]"#,
+        ))
+        .expect("a full sidecar declaration");
+        let sidecar = &def.spec.sidecars[0];
+        assert_eq!(sidecar.name, "some-sidecar");
+        assert_eq!(sidecar.image, "ghcr.io/team/aux:1");
+        assert_eq!(sidecar.command.as_deref(), Some("/usr/bin/aux --serve"));
+        assert_eq!(sidecar.env["AUX_ROOT"], "/data");
+        assert_eq!(sidecar.egress, SidecarEgress::Proxy);
+        assert_eq!(sidecar.volumes[0].source(), "aux-state");
+        assert_eq!(sidecar.expose[0].guest_port, 2375);
+        assert_eq!(sidecar.expose[0].socket, "/run/aux.sock");
+        assert_eq!(sidecar.expose[0].mode.as_deref(), Some("0660"));
+    }
+
+    #[test]
+    fn a_sidecar_that_does_not_ask_for_egress_gets_none() {
+        // Egress is the grant, so a declaration that forgets to ask must not receive one.
+        let def = parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1"}]"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.sidecars[0].egress, SidecarEgress::None);
+    }
+
+    #[test]
+    fn a_sandbox_without_sidecars_declares_none() {
+        let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
+        assert!(def.spec.sidecars.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_an_invalid_sidecar_name() {
+        let err = sidecar_error(r#"[{"name":"Some Sidecar","image":"ghcr.io/team/aux:1"}]"#);
+        assert!(err.contains("invalid sidecar name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_two_sidecars_sharing_a_name() {
+        // The name is how a rule, an audit line, and a socket refer to one guest, so it has to mean one guest.
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1"},{"name":"some-sidecar","image":"ghcr.io/team/other:1"}]"#,
+        );
+        assert!(err.contains("duplicate sidecar"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_sidecar_without_an_image() {
+        let err = sidecar_error(r#"[{"name":"some-sidecar","image":"  "}]"#);
+        assert!(err.contains("must carry an image"), "got: {err}");
+        assert!(
+            err.contains("some-sidecar"),
+            "the error names the sidecar: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_invalid_sidecar_env_key() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","env":{"BAD KEY":"1"}}]"#,
+        );
+        assert!(err.contains("invalid env key"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_sidecar_asking_for_no_cpu() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","resources":{"cpu":0}}]"#,
+        );
+        assert!(
+            err.contains("must be a positive count or size"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_sidecar_volume_target() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","volumes":[{"name":"aux-state","target":"data"}]}]"#,
+        );
+        assert!(err.contains("must be absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_sidecar_volume_inside_the_runtime_namespace() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","volumes":[{"name":"aux-state","target":"/.lens/state"}]}]"#,
+        );
+        assert!(
+            err.contains("overlaps the /.lens runtime namespace"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_host_path_bound_into_a_sidecar() {
+        // A sidecar runs as root, so a bind would hand it the host directory outright; a named volume keeps it inside the run.
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","volumes":[{"type":"bind","source":".","target":"/data"}]}]"#,
+        );
+        assert!(err.contains("must be a named volume"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_socket_published_into_the_runtime_namespace() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/.lens/aux.sock"}]}]"#,
+        );
+        assert!(
+            err.contains("overlaps the /.lens runtime namespace"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_duplicate_sidecar_volume_target() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","volumes":[{"name":"a","target":"/data"},{"name":"b","target":"/data"}]}]"#,
+        );
+        assert!(err.contains("duplicate volume target /data"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_an_out_of_range_guest_port() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":0,"socket":"/run/aux.sock"}]}]"#,
+        );
+        assert!(err.contains("guestPort 0 is out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_sidecar_exposing_one_port_twice() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/a.sock"},{"guestPort":2375,"socket":"/run/b.sock"}]}]"#,
+        );
+        assert!(err.contains("duplicate guestPort 2375"), "got: {err}");
+    }
+
+    #[test]
+    fn two_sidecars_may_expose_the_same_port_because_each_has_its_own_guest() {
+        parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/a.sock"}]},{"name":"other-sidecar","image":"ghcr.io/team/other:1","expose":[{"guestPort":2375,"socket":"/run/b.sock"}]}]"#,
+        ))
+        .expect("a guest port is scoped to its own guest");
+    }
+
+    #[test]
+    fn parse_rejects_a_relative_socket_path() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"aux.sock"}]}]"#,
+        );
+        assert!(err.contains("must be absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_socket_published_over_a_workload_mount() {
+        // The socket would shadow the workload's own mount just as one sidecar's socket shadows another's.
+        let err = format!(
+            "{:#}",
+            parse(&def_json(
+                r#"{"image":"ghcr.io/team/base:1","volumes":[{"name":"state","target":"/run/aux.sock"}],"sidecars":[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]}]}"#
+            ))
+            .unwrap_err()
+        );
+        assert!(
+            err.contains("already a workload volume or fileset mount target"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_two_sidecars_publishing_one_socket() {
+        // Both sockets land in the same workload filesystem, so the second would silently shadow the first.
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]},{"name":"other-sidecar","image":"ghcr.io/team/other:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]}]"#,
+        );
+        assert!(
+            err.contains("already published into the workload by another sidecar"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_socket_mode_that_is_not_octal() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock","mode":"0999"}]}]"#,
+        );
+        assert!(err.contains("must be octal"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_socket_mode_setting_setuid() {
+        let err = sidecar_error(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock","mode":"4666"}]}]"#,
+        );
+        assert!(err.contains("must not set bits above 0777"), "got: {err}");
+    }
+
+    #[test]
+    fn an_undeclared_socket_mode_still_lets_the_workload_reach_the_socket() {
+        // The broker creates the socket as root; a default the workload cannot open would make expose useless.
+        let def = parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock"}]}]"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            def.spec.sidecars[0].expose[0].mode_bits().unwrap(),
+            DEFAULT_SOCKET_MODE
+        );
+    }
+
+    #[test]
+    fn a_socket_mode_is_read_as_octal_not_decimal() {
+        let def = parse(&sidecar_json(
+            r#"[{"name":"some-sidecar","image":"ghcr.io/team/aux:1","expose":[{"guestPort":2375,"socket":"/run/aux.sock","mode":"0600"}]}]"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.sidecars[0].expose[0].mode_bits().unwrap(), 0o600);
     }
 }

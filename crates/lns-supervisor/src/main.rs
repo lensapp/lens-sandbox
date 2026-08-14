@@ -37,6 +37,21 @@ fn env_u32(key: &str) -> Option<u32> {
     std::env::var(key).ok().and_then(|s| s.parse().ok())
 }
 
+struct StateProxyCa(Option<Arc<lens_sandbox_core::proxy::ProxyState>>);
+
+impl dispatcher::ProxyCa for StateProxyCa {
+    fn pem(&self) -> Option<String> {
+        Some(
+            self.0
+                .as_ref()?
+                .ephemeral_ca
+                .get()?
+                .ca_cert_pem()
+                .to_string(),
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Install the ring crypto provider for rustls (needed for MITM TLS).
@@ -124,8 +139,12 @@ async fn main() {
 
     let has_proxy = proxy_state.is_some();
 
-    let dispatcher =
-        dispatcher::AgentDispatcher::new(config.clone(), sandbox_creds, reaper.clone());
+    let dispatcher = dispatcher::AgentDispatcher::new(
+        config.clone(),
+        sandbox_creds,
+        reaper.clone(),
+        Arc::new(StateProxyCa(proxy_state.clone())),
+    );
     lens_sandbox_core::client::run(&config.core, &proxy_state, &dispatcher).await;
 
     if has_proxy {

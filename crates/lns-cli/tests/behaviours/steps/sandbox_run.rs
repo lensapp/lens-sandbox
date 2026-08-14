@@ -81,6 +81,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            sidecars: Vec::new(),
         })),
     });
 }

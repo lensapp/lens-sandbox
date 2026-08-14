@@ -114,6 +114,7 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     });
 }
 
@@ -148,6 +149,7 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     });
 }
 
@@ -312,6 +314,7 @@ fn pulled_view_with_host_path_fileset(world: &mut BehaviourWorld, source: String
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        sidecars: Vec::new(),
     });
 }
 

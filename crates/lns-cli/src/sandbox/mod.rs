@@ -982,6 +982,7 @@ fn render_cached_inspect<W: std::io::Write>(
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
+            render_sidecars(out, &view.sidecars)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
@@ -1078,6 +1079,33 @@ pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String
 fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
     for id in connectors {
         writeln!(out, "connector: {id}")?;
+    }
+    Ok(())
+}
+
+/// One wording for both inspect paths, so a sandbox on disk and the same sandbox pushed disclose their sidecars identically.
+pub(crate) fn sidecar_line(name: &str, image: &str, egress: &str, sockets: &[String]) -> String {
+    let sockets = match sockets.is_empty() {
+        true => String::new(),
+        false => format!(", sockets: {}", sockets.join(" ")),
+    };
+    format!("sidecar: {name} {image} (egress: {egress}{sockets})")
+}
+
+fn render_sidecars<W: std::io::Write>(
+    out: &mut W,
+    sidecars: &[lns_ipc::SandboxSidecar],
+) -> Result<()> {
+    for sidecar in sidecars {
+        let egress = match sidecar.egress {
+            lns_ipc::SandboxSidecarEgress::None => "none",
+            lns_ipc::SandboxSidecarEgress::Proxy => "proxy",
+        };
+        writeln!(
+            out,
+            "{}",
+            sidecar_line(&sidecar.name, &sidecar.image, egress, &sidecar.sockets)
+        )?;
     }
     Ok(())
 }
@@ -1350,6 +1378,7 @@ mod tests {
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
+                sidecars: Vec::new(),
             })),
         }
     }
@@ -2136,6 +2165,7 @@ mod tests {
                     policy_flags: Vec::new(),
                     cpus: None,
                     mem_mib: None,
+                    sidecars: Vec::new(),
                 })),
             },
         );

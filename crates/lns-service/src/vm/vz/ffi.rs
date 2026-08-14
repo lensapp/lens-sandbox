@@ -157,7 +157,7 @@ impl super::ConnectOnce for VsockConnector {
     }
 }
 
-impl crate::vm::GuestTransport for VsockConnector {
+impl crate::vm::GuestDialer for VsockConnector {
     fn connect(
         &self,
         port: u32,
@@ -165,7 +165,9 @@ impl crate::vm::GuestTransport for VsockConnector {
     ) -> futures_util::future::BoxFuture<'_, Result<std::os::fd::RawFd>> {
         Box::pin(self.connect(port, timeout))
     }
+}
 
+impl crate::vm::GuestTransport for VsockConnector {
     fn request_stop(&self) {
         self.request_stop();
     }
@@ -209,6 +211,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
     let volumes = spec.volumes.clone();
     let binds = spec.binds.clone();
     let vsock = spec.vsock;
+    let no_nic = spec.no_nic;
     let connector_tx = spec.connector_tx;
     let console_fd = spec.console_fd;
     let cpus = spec.cpus;
@@ -226,7 +229,8 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             upper_disk: &upper_disk,
             volumes: &volumes,
             binds: &binds,
-            vsock: vsock.as_ref(),
+            vsock: &vsock,
+            no_nic,
             console_fd,
             cmdline: &cmdline,
             cpus,
@@ -265,7 +269,8 @@ struct BuildInputs<'a> {
     upper_disk: &'a Path,
     volumes: &'a [crate::vm::VolumeAttachment],
     binds: &'a [crate::vm::BindAttachment],
-    vsock: Option<&'a crate::vm::VsockChannel>,
+    vsock: &'a [crate::vm::VsockChannel],
+    no_nic: bool,
     console_fd: std::os::fd::RawFd,
     cmdline: &'a str,
     cpus: u8,
@@ -311,7 +316,7 @@ fn build_and_start(
         let mut listeners_for_leak: Vec<Retained<VZVirtioSocketListener>> = Vec::new();
         let mut delegates_for_leak: Vec<Retained<LnsVsockListenerDelegate>> = Vec::new();
 
-        if let Some(channel) = inputs.vsock {
+        for channel in inputs.vsock {
             install_vsock_listener(
                 &virtio_dev,
                 channel,
@@ -394,12 +399,15 @@ unsafe fn build_config(
         let entropy_devices: Retained<NSArray<VZEntropyDeviceConfiguration>> =
             NSArray::from_retained_slice(&[Retained::cast_unchecked(entropy)]);
 
-        let nat = VZNATNetworkDeviceAttachment::new();
-        let net = VZVirtioNetworkDeviceConfiguration::new();
-        net.setAttachment(Some(&nat));
-        net.setMACAddress(&VZMACAddress::randomLocallyAdministeredAddress());
-        let networks: Retained<NSArray<VZNetworkDeviceConfiguration>> =
-            NSArray::from_retained_slice(&[Retained::cast_unchecked(net)]);
+        let networks: Retained<NSArray<VZNetworkDeviceConfiguration>> = if inputs.no_nic {
+            NSArray::from_retained_slice(&[])
+        } else {
+            let nat = VZNATNetworkDeviceAttachment::new();
+            let net = VZVirtioNetworkDeviceConfiguration::new();
+            net.setAttachment(Some(&nat));
+            net.setMACAddress(&VZMACAddress::randomLocallyAdministeredAddress());
+            NSArray::from_retained_slice(&[Retained::cast_unchecked(net)])
+        };
 
         let platform = VZGenericPlatformConfiguration::new();
 

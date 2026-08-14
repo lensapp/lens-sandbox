@@ -111,6 +111,20 @@ Feature: authoring a sandbox
     And the output contains "credential: SOME_TOKEN (travels nowhere)"
     And the service received no request
 
+  Scenario: inspect discloses a declared sidecar, its egress, and the socket it publishes
+    Given an lns.yaml declaring the "some-sidecar" sidecar with proxied egress
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
+    And the output contains "sidecar: some-sidecar ghcr.io/team/some-sidecar:1 (egress: proxy, sockets: /var/run/some.sock)"
+    And the service received no request
+
+  Scenario: inspect names a sidecar with no egress and no socket
+    Given an lns.yaml declaring the "some-sidecar" sidecar with no egress
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
+    And the output contains "sidecar: some-sidecar ghcr.io/team/some-sidecar:1 (egress: none)"
+    And the service received no request
+
   Scenario: inspect of a path-shaped target renders the definition offline
     Given a valid lns.yaml in the current directory
     When the user runs sandbox command "inspect ."

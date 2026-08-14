@@ -8,6 +8,8 @@ pub enum HostFrame {
     Policy(PolicyMessage),
     RequestDecision(RequestDecision),
     CredentialDecision(CredentialDecision),
+    /// Ask the supervisor for the MITM CA it generated; only valid after a `Policy` frame, which is what makes the CA exist.
+    ProxyCaRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +17,7 @@ pub enum HostFrame {
 pub enum GuestFrame {
     RequestPending(RequestPending),
     CredentialPending(CredentialPending),
+    ProxyCa(ProxyCa),
     #[serde(other)]
     Other,
 }
@@ -50,6 +53,13 @@ pub enum WireDefaultVerdict {
     #[default]
     Ask,
     Deny,
+}
+
+/// The supervisor's answer to `ProxyCaRequest`; `pem` is absent when the run has no proxy to generate one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyCa {
+    #[serde(default)]
+    pub pem: Option<String>,
 }
 
 /// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network` and (when armed) `credentials`.

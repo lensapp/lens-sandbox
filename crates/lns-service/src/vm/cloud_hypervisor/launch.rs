@@ -158,7 +158,8 @@ mod tests {
             workload_gid: Some(65534),
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
-            vsock: None,
+            vsock: Vec::new(),
+            no_nic: false,
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
@@ -176,6 +177,19 @@ mod tests {
             .unwrap_or_else(|| panic!("flag {flag} not present in {args:?}"));
         args.get(pos + 1)
             .unwrap_or_else(|| panic!("flag {flag} has no value in {args:?}"))
+    }
+
+    #[test]
+    fn a_guest_that_asks_for_no_network_device_is_given_no_network_argument() {
+        let mut spec = spec();
+        spec.no_nic = true;
+
+        let args = cloud_hypervisor_args(&spec, &layout());
+
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--net")),
+            "a sidecar's isolation is the absence of the device, not a rule on it: {args:?}"
+        );
     }
 
     #[test]

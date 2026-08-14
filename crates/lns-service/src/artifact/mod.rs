@@ -145,6 +145,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         }),
         credentials: def.spec.credentials.clone(),
         tools: def.spec.tools.clone(),
+        sidecars: def.spec.sidecars.clone(),
     }
 }
 
@@ -393,6 +394,20 @@ mod tests {
         assert!(
             format!("{err:#}").contains("unsupported artifact type"),
             "a real artifactType we don't know must not be overridden by the config blob: {err:#}"
+        );
+    }
+    #[test]
+    fn resolved_from_sandbox_carries_the_sidecars_the_definition_declares() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"x:1","sidecars":[{"name":"some-sidecar","image":"registry.example.test/aux:1","egress":"proxy"}]}}"#,
+        )
+        .unwrap();
+        let resolved = resolved_from_sandbox(&def);
+        assert_eq!(resolved.sidecars.len(), 1);
+        assert_eq!(resolved.sidecars[0].name, "some-sidecar");
+        assert_eq!(
+            resolved.sidecars[0].egress,
+            lns_artifact::sandbox::SidecarEgress::Proxy
         );
     }
 }

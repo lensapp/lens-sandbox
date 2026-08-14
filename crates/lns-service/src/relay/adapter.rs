@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
@@ -34,6 +34,7 @@ pub(super) async fn accept_loop(
     audit: PathBuf,
     user_env: Vec<String>,
     identity: super::RunIdentity,
+    proxy_ca: std::sync::Arc<watch::Sender<super::ProxyCaState>>,
 ) {
     let mut conn_tx: Option<mpsc::UnboundedSender<HostFrame>> = None;
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -64,6 +65,7 @@ pub(super) async fn accept_loop(
                 let user_env_c = user_env.clone();
                 let identity_c = identity.clone();
                 let budget_c = budget.clone();
+                let proxy_ca_c = proxy_ca.clone();
                 let span = tracing::Span::current();
                 let handle = tokio::spawn(
                     async move {
@@ -78,6 +80,7 @@ pub(super) async fn accept_loop(
                             identity_c,
                             shutdown_rx,
                             budget_c,
+                            proxy_ca_c,
                         )
                         .await
                         {
@@ -122,6 +125,7 @@ async fn handle_connection(
     identity: super::RunIdentity,
     shutdown: oneshot::Receiver<()>,
     budget: AuditBudget,
+    proxy_ca: std::sync::Arc<watch::Sender<super::ProxyCaState>>,
 ) -> Result<()> {
     // SAFETY: `VZVirtioSocketConnection.fileDescriptor` hands us a kernel fd that supports stream read/write.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -205,6 +209,7 @@ async fn handle_connection(
         &mut writer,
         shutdown,
         &budget,
+        &proxy_ca,
     )
     .await;
     let _ = audit_file.flush().await;
@@ -229,6 +234,7 @@ async fn serve(
     writer: &mut super::AuditWriter<'_, crate::audit::LazyAuditLog, crate::audit::FileAnchorSink>,
     mut shutdown: oneshot::Receiver<()>,
     budget: &AuditBudget,
+    proxy_ca: &watch::Sender<super::ProxyCaState>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -257,6 +263,7 @@ async fn serve(
                     writer,
                     budget,
                     &crate::oauth::RealClock,
+                    proxy_ca,
                 )
                 .await?
                 {

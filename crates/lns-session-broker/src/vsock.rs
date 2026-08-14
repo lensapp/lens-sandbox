@@ -7,10 +7,12 @@ use std::os::fd::RawFd;
 mod real;
 pub use real::read_exact;
 #[cfg(target_os = "linux")]
-pub use real::{accept, listen, write_all};
+pub use real::{accept, connect_host, listen, write_all};
 
 const AF_VSOCK: c_int = 40;
 const VMADDR_CID_ANY: u32 = u32::MAX;
+/// The well-known CID of the hypervisor host, as seen from inside a guest.
+const VMADDR_CID_HOST: u32 = 2;
 
 #[repr(C)]
 pub(crate) struct SockaddrVm {
@@ -46,6 +48,7 @@ pub enum ReadOutcome {
 pub(crate) trait VsockSyscalls {
     fn socket(&self) -> io::Result<RawFd>;
     fn bind(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()>;
+    fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()>;
     fn listen(&self, fd: RawFd, backlog: c_int) -> io::Result<()>;
     fn accept_once(&self, listen_fd: RawFd) -> io::Result<RawFd>;
     fn close(&self, fd: RawFd);
@@ -61,6 +64,33 @@ fn vsock_listen_addr(port: u32) -> SockaddrVm {
         svm_cid: VMADDR_CID_ANY,
         svm_zero: [0; 4],
     }
+}
+
+fn vsock_host_addr(port: u32) -> SockaddrVm {
+    SockaddrVm {
+        svm_family: AF_VSOCK as libc::sa_family_t,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: VMADDR_CID_HOST,
+        svm_zero: [0; 4],
+    }
+}
+
+/// Dial a port the host is listening on. The mirror of `listen_with`: the guest is the client here, which is how a sidecar reaches the run's proxy and how a workload reaches a sidecar.
+pub(crate) fn connect_host_with(sys: &dyn VsockSyscalls, port: u32) -> Result<RawFd, VsockError> {
+    let fd = sys.socket().map_err(|err| VsockError::Syscall {
+        op: format!("socket(AF_VSOCK) host-port={port}"),
+        err,
+    })?;
+    let addr = vsock_host_addr(port);
+    if let Err(err) = sys.connect(fd, &addr) {
+        sys.close(fd);
+        return Err(VsockError::Syscall {
+            op: format!("connect(vsock host:{port})"),
+            err,
+        });
+    }
+    Ok(fd)
 }
 
 pub(crate) fn listen_with(sys: &dyn VsockSyscalls, port: u32) -> Result<RawFd, VsockError> {
@@ -138,6 +168,7 @@ mod tests {
     enum Call {
         Socket,
         Bind { fd: RawFd, port: u32, cid: u32 },
+        Connect { fd: RawFd, port: u32, cid: u32 },
         Listen { fd: RawFd, backlog: c_int },
         AcceptOnce(RawFd),
         Close(RawFd),
@@ -161,6 +192,7 @@ mod tests {
         calls: RefCell<Vec<Call>>,
         socket_ret: Option<io::Result<RawFd>>,
         bind_fail: Option<ErrorKind>,
+        connect_fail: Option<ErrorKind>,
         listen_fail: Option<ErrorKind>,
         accept_script: RefCell<VecDeque<io::Result<RawFd>>>,
         reads: RefCell<VecDeque<ReadStep>>,
@@ -189,6 +221,17 @@ mod tests {
                 cid: addr.svm_cid,
             });
             match self.bind_fail {
+                Some(k) => Err(io::Error::new(k, "scripted")),
+                None => Ok(()),
+            }
+        }
+        fn connect(&self, fd: RawFd, addr: &SockaddrVm) -> io::Result<()> {
+            self.calls.borrow_mut().push(Call::Connect {
+                fd,
+                port: addr.svm_port,
+                cid: addr.svm_cid,
+            });
+            match self.connect_fail {
                 Some(k) => Err(io::Error::new(k, "scripted")),
                 None => Ok(()),
             }
@@ -239,6 +282,59 @@ mod tests {
                 WriteStep::Fail(k) => Err(io::Error::from(k)),
             }
         }
+    }
+
+    #[test]
+    fn connect_host_dials_the_host_cid_not_the_wildcard() {
+        // A guest reaching out must address CID 2; VMADDR_CID_ANY is a listen-side
+        // wildcard and connecting to it would never find the host.
+        let fake = FakeVsock::default();
+        let fd = connect_host_with(&fake, 1032).expect("connect");
+        assert_eq!(fd, 7);
+        assert_eq!(
+            fake.calls(),
+            vec![
+                Call::Socket,
+                Call::Connect {
+                    fd: 7,
+                    port: 1032,
+                    cid: VMADDR_CID_HOST
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_host_closes_the_socket_when_the_dial_fails() {
+        // Otherwise every refused bridge attempt leaks an fd until the guest hits EMFILE.
+        let fake = FakeVsock {
+            connect_fail: Some(ErrorKind::ConnectionRefused),
+            ..FakeVsock::default()
+        };
+        let err = connect_host_with(&fake, 1032).expect_err("refused");
+        assert!(
+            err.to_string().contains("connect(vsock host:1032)"),
+            "got: {err}"
+        );
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&Call::Close(7)),
+            "the socket must be closed on failure: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn connect_host_surfaces_a_socket_failure_without_dialling() {
+        let fake = FakeVsock {
+            socket_ret: Some(Err(io::Error::from(ErrorKind::PermissionDenied))),
+            ..FakeVsock::default()
+        };
+        let err = connect_host_with(&fake, 1032).expect_err("no socket");
+        assert!(
+            err.to_string().contains("socket(AF_VSOCK) host-port=1032"),
+            "got: {err}"
+        );
+        assert_eq!(fake.calls(), vec![Call::Socket]);
     }
 
     #[test]

@@ -1,8 +1,10 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+//! The guest's trust store: seeded from the staged bundle when the rootfs ships none, then extended with the run's MITM CA so a sidecar's clients trust the proxy without the image cooperating.
+
 mod real;
 #[cfg(target_os = "linux")]
-pub use real::seed_trust_store;
+pub use real::{RealTrustStore, seed_trust_store};
 
 use lns_session::{STAGED_CA_BUNDLE_PATH as STAGED_PEM, SYSTEM_CA_BUNDLE_PATH as SYSTEM_BUNDLE};
 
@@ -48,6 +50,49 @@ pub fn seed_trust_store_with(fs: &dyn TrustFs) -> Result<Seeding, String> {
     fs.write(SYSTEM_BUNDLE, &pem, 0o644)
         .map_err(|e| format!("writing {SYSTEM_BUNDLE}: {e}"))?;
     Ok(Seeding::StagedStoreCopied)
+}
+
+pub trait TrustStore {
+    fn read(&self, path: &str) -> std::io::Result<String>;
+    fn append(&self, path: &str, pem: &str) -> std::io::Result<()>;
+}
+
+/// Take the CA out of `env`, dropped whether or not the install succeeds so no child can re-export it.
+pub fn take_proxy_ca(env: &mut Vec<String>) -> Option<String> {
+    let prefix = format!("{}=", lns_session::PROXY_CA_ENV);
+    let mut pem = None;
+    env.retain(|entry| match entry.strip_prefix(&prefix) {
+        Some(value) => {
+            if pem.is_none() && !value.is_empty() {
+                pem = Some(value.to_string());
+            }
+            false
+        }
+        None => true,
+    });
+    pem
+}
+
+/// Append `pem` to the bundle unless it is already there, so a reconnect does not grow the file.
+pub fn install(store: &dyn TrustStore, path: &str, pem: &str) -> Result<(), String> {
+    let existing = store
+        .read(path)
+        .map_err(|e| format!("reading trust store {path}: {e}"))?;
+    if existing.contains(pem.trim()) {
+        return Ok(());
+    }
+    store
+        .append(path, pem)
+        .map_err(|e| format!("appending the proxy CA to {path}: {e}"))
+}
+
+/// Install the CA named in `env` if there is one; `None` is the ordinary case for a workload whose supervisor owns its own.
+pub fn install_from_env(
+    env: &mut Vec<String>,
+    store: &dyn TrustStore,
+) -> Option<Result<(), String>> {
+    let pem = take_proxy_ca(env)?;
+    Some(install(store, SYSTEM_BUNDLE, &pem))
 }
 
 #[cfg(test)]
@@ -189,5 +234,141 @@ mod tests {
         };
         let err = seed_trust_store_with(&fs).expect_err("reported");
         assert!(err.contains(SYSTEM_BUNDLE), "got: {err}");
+    }
+
+    #[derive(Default)]
+    struct FakeStore {
+        contents: RefCell<String>,
+        read_fails: bool,
+        append_fails: bool,
+    }
+
+    impl TrustStore for FakeStore {
+        fn read(&self, _path: &str) -> std::io::Result<String> {
+            if self.read_fails {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
+            Ok(self.contents.borrow().clone())
+        }
+
+        fn append(&self, _path: &str, pem: &str) -> std::io::Result<()> {
+            if self.append_fails {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            self.contents.borrow_mut().push_str(pem);
+            Ok(())
+        }
+    }
+
+    fn env_with_ca(pem: &str) -> Vec<String> {
+        vec![
+            "PATH=/usr/bin".to_string(),
+            format!("{}={pem}", lns_session::PROXY_CA_ENV),
+            "HOME=/root".to_string(),
+        ]
+    }
+
+    #[test]
+    fn the_ca_is_taken_out_of_the_env_the_workload_will_inherit() {
+        // The workload has no use for it and a child re-exporting it is pure leak.
+        let mut env = env_with_ca("PEM-BODY");
+        assert_eq!(take_proxy_ca(&mut env).as_deref(), Some("PEM-BODY"));
+        assert_eq!(
+            env,
+            vec!["PATH=/usr/bin".to_string(), "HOME=/root".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_pem_carrying_base64_padding_survives_intact() {
+        // PEM bodies end in '=' padding, so splitting on every '=' would truncate the cert.
+        let pem = "-----BEGIN CERTIFICATE-----\nAAAB==\n-----END CERTIFICATE-----";
+        let mut env = env_with_ca(pem);
+        assert_eq!(take_proxy_ca(&mut env).as_deref(), Some(pem));
+    }
+
+    #[test]
+    fn no_ca_in_the_env_leaves_it_untouched() {
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+        assert!(take_proxy_ca(&mut env).is_none());
+        assert_eq!(env, vec!["PATH=/usr/bin".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_value_is_no_ca_but_is_still_dropped_from_the_env() {
+        let mut env = env_with_ca("");
+        assert!(take_proxy_ca(&mut env).is_none());
+        assert_eq!(
+            env,
+            vec!["PATH=/usr/bin".to_string(), "HOME=/root".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_first_of_several_values_wins_and_every_copy_is_dropped() {
+        let mut env = vec![
+            format!("{}=first", lns_session::PROXY_CA_ENV),
+            format!("{}=second", lns_session::PROXY_CA_ENV),
+        ];
+        assert_eq!(take_proxy_ca(&mut env).as_deref(), Some("first"));
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn installing_appends_the_ca_to_the_bundle() {
+        let store = FakeStore {
+            contents: RefCell::new("EXISTING-ROOT".into()),
+            ..FakeStore::default()
+        };
+        install(&store, SYSTEM_BUNDLE, "PEM-BODY").expect("install");
+        assert_eq!(*store.contents.borrow(), "EXISTING-ROOTPEM-BODY");
+    }
+
+    #[test]
+    fn installing_the_same_ca_twice_does_not_grow_the_bundle() {
+        let store = FakeStore::default();
+        install(&store, SYSTEM_BUNDLE, "PEM-BODY").expect("first install");
+        install(&store, SYSTEM_BUNDLE, "PEM-BODY").expect("second install");
+        assert_eq!(*store.contents.borrow(), "PEM-BODY");
+    }
+
+    #[test]
+    fn an_image_without_a_trust_store_reports_the_path_it_looked_for() {
+        // A scratch image has nothing to append to, so the caller logs and carries on.
+        let store = FakeStore {
+            read_fails: true,
+            ..FakeStore::default()
+        };
+        let err = install(&store, SYSTEM_BUNDLE, "PEM-BODY").expect_err("no bundle");
+        assert!(err.contains(SYSTEM_BUNDLE), "got: {err}");
+    }
+
+    #[test]
+    fn an_unwritable_trust_store_reports_the_path_it_failed_on() {
+        let store = FakeStore {
+            append_fails: true,
+            ..FakeStore::default()
+        };
+        let err = install(&store, SYSTEM_BUNDLE, "PEM-BODY").expect_err("read-only bundle");
+        assert!(err.contains(SYSTEM_BUNDLE), "got: {err}");
+    }
+
+    #[test]
+    fn install_from_env_installs_and_strips_in_one_step() {
+        let store = FakeStore::default();
+        let mut env = env_with_ca("PEM-BODY");
+        install_from_env(&mut env, &store)
+            .expect("a CA was present")
+            .expect("install");
+        assert_eq!(*store.contents.borrow(), "PEM-BODY");
+        assert!(!env.iter().any(|e| e.contains(lns_session::PROXY_CA_ENV)));
+    }
+
+    #[test]
+    fn install_from_env_does_nothing_when_the_run_sent_no_ca() {
+        let store = FakeStore::default();
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+        assert!(install_from_env(&mut env, &store).is_none());
+        assert!(store.contents.borrow().is_empty());
     }
 }
