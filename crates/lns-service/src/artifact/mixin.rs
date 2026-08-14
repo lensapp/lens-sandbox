@@ -225,7 +225,7 @@ pub async fn resolve<S: MixinSource>(
             document: config_json.to_vec(),
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
-            contributions: Vec::new(),
+            contributions: lns_artifact::merge::own_egress(&def.spec),
         });
     }
     let fetched = collect(&def.spec.mixins, extra, home, source).await?;
@@ -1007,5 +1007,30 @@ mod tests {
         );
         assert!(!is_a_mixin_artifact(None, None));
         assert!(!is_a_mixin_artifact(Some(""), None));
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_that_layers_on_nothing_still_attributes_the_egress_it_ships() {
+        let out = resolve(
+            &sandbox(
+                r#"{"image":"x:1","policy":{"egress":{"tcp":[{"match":"db.vendor.example:5432","verdict":"allow"}]}}}"#,
+            ),
+            &[],
+            &published(),
+            &Fake::new(&[]),
+        )
+        .await
+        .expect("a document with no mixins resolves to itself");
+        assert_eq!(
+            out.contributions
+                .iter()
+                .map(|c| (c.key.as_str(), c.source.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                "allow db.vendor.example:5432",
+                lns_artifact::merge::ROOT_LABEL
+            )],
+            "§1.5 has a run disclose every rule it will enforce, and a run that pulled no mixin enforces these"
+        );
     }
 }
