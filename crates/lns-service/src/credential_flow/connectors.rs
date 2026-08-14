@@ -75,7 +75,7 @@ pub fn applied_connector_routes(ids: &[String], catalog: &[Connector]) -> Vec<Ro
         .collect()
 }
 
-/// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-policy.yaml` id which stays a tolerant skip.
+/// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-local-mixin.yaml` id which stays a tolerant skip.
 pub fn unknown_connector_ids(declared: &[String], catalog: &[Connector]) -> Vec<String> {
     let known: HashSet<&str> = catalog.iter().map(|i| i.id.as_str()).collect();
     declared

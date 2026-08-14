@@ -569,8 +569,8 @@ mod tests {
             EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH"),
             EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
         ];
-        let policy_path = dir.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = dir.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
         lns_policy::connectors::Catalog {
             connectors: vec![lns_policy::connectors::Connector {
                 id: "some-oauth".into(),
@@ -701,8 +701,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
 
         let result = SupervisorSession::start(
             "deadbeef00000000000000000000aa99".to_string(),
@@ -732,8 +732,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
         let mut sandbox_policy = lns_policy::Policy::default();
         sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 

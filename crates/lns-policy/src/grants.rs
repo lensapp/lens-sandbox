@@ -956,8 +956,8 @@ mod tests {
     #[test]
     fn project_key_canonicalizes_an_existing_policy_path() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        fs::write(&path, "network: {}\n").unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(&path, "").unwrap();
         assert_eq!(
             project_key(&path),
             fs::canonicalize(&path).unwrap().to_string_lossy()
@@ -966,8 +966,8 @@ mod tests {
 
     #[test]
     fn project_key_falls_back_to_the_raw_path_when_it_cannot_be_canonicalized() {
-        let path = Path::new("/no/such/dir/lns-policy.yaml");
-        assert_eq!(project_key(path), "/no/such/dir/lns-policy.yaml");
+        let path = Path::new("/no/such/dir/lns-local-mixin.yaml");
+        assert_eq!(project_key(path), "/no/such/dir/lns-local-mixin.yaml");
     }
 
     #[test]

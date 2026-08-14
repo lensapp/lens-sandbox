@@ -33,7 +33,7 @@ Feature: a run resolves the mixins its document declares
   Scenario: a mixin cannot open a directory that denies by default
     Given a mixin allowing "api.some-provider.example"
     And the sandbox definition declares that mixin
-    And the directory's lns-policy.yaml denies all by default
+    And the directory's lns-local-mixin.yaml denies all by default
     When the published sandbox is resolved and launched
     Then a workload request to "api.some-provider.example" is denied by policy
 

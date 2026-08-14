@@ -37,7 +37,7 @@ Two environment variables override the defaults (mostly useful for development):
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
 - `LNS_HEADLESS=1` — run without the tray or approval window even when a
   display is present. Interactive prompts can't be shown headless: approvals
-  need pre-authorized rules in `lns-policy.yaml`, and `lns connector
+  need pre-authorized rules in `lns-local-mixin.yaml`, and `lns connector
   connect` for a credential connector fails immediately instead of waiting
   on a card that can never appear.
 

@@ -205,13 +205,13 @@ fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, ho
     ));
 }
 
-#[given("the directory's lns-policy.yaml connects no connectors")]
+#[given("the directory's lns-local-mixin.yaml connects no connectors")]
 fn overlay_connects_nothing(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay = Policy::default();
 }
 
-#[given(regex = r#"^the directory's lns-policy.yaml connects "([^"]+)"$"#)]
+#[given(regex = r#"^the directory's lns-local-mixin.yaml connects "([^"]+)"$"#)]
 fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.connectors.push(id);
@@ -465,7 +465,7 @@ fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
     w.approval();
 }
 
-#[given("the directory's lns-policy.yaml denies all by default")]
+#[given("the directory's lns-local-mixin.yaml denies all by default")]
 fn overlay_denies_by_default(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.add_rule(lns_policy::RouteRule::deny_host("*"));
@@ -513,7 +513,7 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
     }
 }
 
-#[then("the allow rule is written to the directory's lns-policy.yaml")]
+#[then("the allow rule is written to the directory's lns-local-mixin.yaml")]
 fn allow_rule_written_to_policy_file(w: &mut BehaviourWorld) -> Result<(), String> {
     let rig = w.approval();
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;

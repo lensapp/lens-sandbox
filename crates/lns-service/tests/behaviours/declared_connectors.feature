@@ -8,7 +8,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   stays reactive and per-directory: the first time the workload reaches
   the connector's domain it is offered a live connect, and accepting it
   arms the connector and records the id in this directory's
-  `lns-policy.yaml`. Only a connector the user has connected in this
+  `lns-local-mixin.yaml`. Only a connector the user has connected in this
   directory (the overlay) arms at launch. A sandbox that must have a
   credential declares a `spec.credentials` slot instead (see
   credential_at_boot.feature). Real secrets never enter the artifact or the
@@ -17,7 +17,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A declared connector seeds its placeholder but is not armed, only offered
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     When the sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And the running policy does not allow the "api.some-provider.example" route
@@ -26,7 +26,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A published sandbox's declared connectors seed their placeholder, offered not armed
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN"
     And a published sandbox artifact declares connector "some-provider"
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     When the published sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And "some-provider" is offered for a reactive connect
@@ -35,7 +35,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the machine catalog has a credential connector "other-provider" managing "OTHER_TOKEN" with a route to "api.other.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     When the sandbox is launched
     Then the workload's environment does not seed the "OTHER_TOKEN" placeholder
     And "other-provider" is offered for a reactive connect
@@ -43,7 +43,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A connector connected in this directory still arms at launch
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects "some-provider"
+    And the directory's lns-local-mixin.yaml connects "some-provider"
     When the sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
     And the running policy allows the "api.some-provider.example" route
@@ -51,7 +51,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A connected connector's machine-stored value arms at the boundary at launch
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects "some-provider"
+    And the directory's lns-local-mixin.yaml connects "some-provider"
     And the per-machine credential store has a stored value for "some-provider"
     When the sandbox is launched
     Then the boundary injection for "some-provider" is armed with the stored value
@@ -59,7 +59,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A committed overlay this workload never granted does not arm the machine-stored value
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects "some-provider"
+    And the directory's lns-local-mixin.yaml connects "some-provider"
     And the per-machine credential store has a stored value for "some-provider"
     And this workload has no grant for "some-provider"
     When the sandbox is launched
@@ -69,7 +69,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A grant the bare run earned does not arm a run that layers a mixin onto it
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects "some-provider"
+    And the directory's lns-local-mixin.yaml connects "some-provider"
     And the per-machine credential store has a stored value for "some-provider"
     And the run composes the mixin "ghcr.io/acme/obs-tools"
     When the sandbox is launched
@@ -79,7 +79,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A declared connector's machine-stored value stays unarmed until connected
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider" and allows the "api.some-provider.example" route
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     And the per-machine credential store has a stored value for "some-provider"
     When the sandbox is launched
     Then the workload's environment contains the "SOME_TOKEN" placeholder
@@ -91,7 +91,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the machine catalog has a credential connector "other-provider" managing "OTHER_TOKEN" with a route to "api.other.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     And the per-machine credential store has a stored value for "other-provider"
     When the sandbox is launched
     Then the boundary injection for "other-provider" stays unarmed
@@ -99,7 +99,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: A declared connector does not open a route past a local deny-by-default
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares connector "some-provider"
-    And the directory's lns-policy.yaml denies all by default
+    And the directory's lns-local-mixin.yaml denies all by default
     When the sandbox is launched
     Then a workload request to "api.some-provider.example" is denied by policy
 
@@ -114,13 +114,13 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
   Scenario: Accepting a reactive connect persists to the directory policy, never the definition
     Given a launched sandbox whose definition declares connector "some-provider"
     When the developer approves a new destination "api.example.test" with "always allow"
-    Then the allow rule is written to the directory's lns-policy.yaml
+    Then the allow rule is written to the directory's lns-local-mixin.yaml
     And the sandbox definition is not modified
 
   Scenario: A declared credential does not open a route past a local deny-by-default
     Given the machine catalog has a credential connector "some-provider" managing "SOME_TOKEN" with a route to "api.some-provider.example"
     And the sandbox definition declares a credential "SOME_TOKEN" for "api.some-provider.example"
-    And the directory's lns-policy.yaml denies all by default
+    And the directory's lns-local-mixin.yaml denies all by default
     When the sandbox is launched
     Then a workload request to "api.some-provider.example" is denied by policy
 
@@ -128,7 +128,7 @@ Feature: a sandbox definition's declared connectors seed their placeholder but s
     Given the machine catalog has a credential connector "some-primary" managing "PRIMARY_TOKEN" with a route to "api.shared.example"
     And the machine catalog has a credential connector "some-secondary" managing "SECONDARY_TOKEN" with a route to "api.shared.example"
     And the sandbox definition declares connector "some-primary"
-    And the directory's lns-policy.yaml connects no connectors
+    And the directory's lns-local-mixin.yaml connects no connectors
     When the sandbox is launched
     Then "some-secondary" is not offered for a reactive connect
 

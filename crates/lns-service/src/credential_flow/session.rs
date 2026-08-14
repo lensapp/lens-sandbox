@@ -1,4 +1,4 @@
-//! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
+//! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-local-mixin.yaml`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -340,7 +340,7 @@ impl CredentialSession {
         self
     }
 
-    /// The value keys of the run's artifact-declared credentials, which `lns-policy.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the credential was granted at boot or consented at first use.
+    /// The value keys of the run's artifact-declared credentials, which `lns-local-mixin.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the credential was granted at boot or consented at first use.
     pub fn with_declared_ids(mut self, declared: HashSet<String>) -> Self {
         self.declared_ids = declared;
         self
@@ -4252,7 +4252,7 @@ mod tests {
                 )),
             "while connected, the stored value arms"
         );
-        // `lns connector disconnect` drops the id from lns-policy.yaml; the reload reconciles with the remaining connectors.
+        // `lns connector disconnect` drops the connection from the sidecar; the reload reconciles with the remaining connectors.
         session.reconcile_armed(&[], &[]);
         assert!(
             wire_injections(&session, "some-provider")

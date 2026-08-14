@@ -1,4 +1,4 @@
-//! Credential rules live in `~/.lns-credentials.json`, not `lns-policy.yaml`, to keep the shareable policy file free of per-machine state.
+//! Credential rules live in `~/.lns-credentials.json`, not `lns-local-mixin.yaml`, to keep the shareable policy file free of per-machine state.
 
 use std::collections::HashMap;
 use std::fs;

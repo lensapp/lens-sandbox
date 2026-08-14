@@ -186,8 +186,8 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
-        root.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http: []\n",
+        root.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n",
     )
     .expect("write the project policy");
     root
@@ -254,7 +254,7 @@ fn last_run(world: &E2eWorld) -> Result<String, String> {
 
 fn write_policy(world: &mut E2eWorld, yaml: &str) {
     let dir = tempfile::TempDir::new().expect("tempdir for policy");
-    let path = dir.path().join("lns-policy.yaml");
+    let path = dir.path().join("lns-local-mixin.yaml");
     std::fs::write(&path, yaml).expect("write policy file");
     world.policy_dir = Some(dir);
     world.policy_path = Some(path);
@@ -753,8 +753,8 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     std::fs::write(consumer.join("consumer-marker"), "consumer project\n")
         .expect("write consumer marker");
     std::fs::write(
-        consumer.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     track_volume(world, &volume);
@@ -1136,8 +1136,8 @@ fn run_pulled_sandbox_offline(world: &mut E2eWorld, cmd_line: &str) {
         .path()
         .to_path_buf();
     std::fs::write(
-        consumer.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     let mut args = vec![
@@ -1541,7 +1541,7 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 
@@ -1549,7 +1549,7 @@ fn policy_ask_with_direct_route(world: &mut E2eWorld) {
 fn policy_deny_all(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     );
 }
 

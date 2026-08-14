@@ -1082,7 +1082,7 @@ mod tests {
             mem: 1024,
             cpus_explicit: true,
             mem_explicit: true,
-            policy_path: Some("/work/lns-policy.yaml".into()),
+            policy_path: Some("/work/lns-local-mixin.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
             entrypoint: Some("/bin/sh".into()),
@@ -1126,7 +1126,10 @@ mod tests {
         let config = RunConfig::from_run_args(&args);
         assert_eq!(config.cpus, 2);
         assert_eq!(config.mem_mib, 1024);
-        assert_eq!(config.policy_path.as_deref(), Some("/work/lns-policy.yaml"));
+        assert_eq!(
+            config.policy_path.as_deref(),
+            Some("/work/lns-local-mixin.yaml")
+        );
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
         assert_eq!(config.entrypoint.as_deref(), Some("/bin/sh"));
         assert_eq!(config.hostname.as_deref(), Some("demo"));

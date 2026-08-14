@@ -96,14 +96,14 @@ lns run
   Flags:     -i -t
   Ports:     (none)
   Policy:
-    file: /Users/you/dev/my-app/lns-policy.yaml
+    file: /Users/you/dev/my-app/lns-local-mixin.yaml
     unmatched destinations: ask
     rules: none defined; anything else asks
     source: auto-created (no policy in this directory)
 ```
 
 You run Lens Sandbox from a project directory — that's where it looks for
-`lns-policy.yaml`, creating an empty one the first time. To
+`lns-local-mixin.yaml`, creating an empty one the first time. To
 give the workload your actual project files, bind-mount the directory with
 `-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
 portable definition use a declarative bind with `source: .`; for scratch
@@ -183,7 +183,7 @@ action (for example `CONNECT api.github.com:443`). You choose:
 
 - **Allow once** / **Deny once** — applies to this request only.
 - **Allow always** / **Deny always** — also writes a matching rule to
-  `lns-policy.yaml`, so the same question isn't asked again.
+  `lns-local-mixin.yaml`, so the same question isn't asked again.
 
 A denied request fails at the boundary the way a real network failure would — a
 refused connection or a failed DNS lookup — never a silent success.
@@ -211,7 +211,7 @@ lns uninstall --purge
 ```
 
 `--purge` keeps only files you authored yourself, such as your
-`~/.lns-connectors.yaml` catalog and each project's `lns-policy.yaml`, and prints
+`~/.lns-connectors.yaml` catalog and each project's `lns-local-mixin.yaml`, and prints
 what it left behind.
 
 ## Where to go next

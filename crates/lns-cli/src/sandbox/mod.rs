@@ -2075,7 +2075,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {
-                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    policy_path: Some("/work/lns-local-mixin.yaml".into()),
                     ..Default::default()
                 },
             }),
@@ -2607,7 +2607,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {
-                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    policy_path: Some("/work/lns-local-mixin.yaml".into()),
                     ..Default::default()
                 },
             }),
@@ -2624,15 +2624,15 @@ mod tests {
 
     #[test]
     fn policy_doc_marks_an_unreadable_file() {
-        let doc = policy_doc("/work/lns-policy.yaml", None);
-        assert_eq!(doc["path"], "/work/lns-policy.yaml");
+        let doc = policy_doc("/work/lns-local-mixin.yaml", None);
+        assert_eq!(doc["path"], "/work/lns-local-mixin.yaml");
         assert!(doc["error"].as_str().unwrap().contains("could not be read"));
     }
 
     #[test]
     fn policy_doc_embeds_a_parsed_policy() {
         let doc = policy_doc(
-            "/work/lns-policy.yaml",
+            "/work/lns-local-mixin.yaml",
             Some(serde_json::json!({"network": {"egress": {"http": []}}})),
         );
         assert_eq!(

@@ -11,9 +11,9 @@ bin/
 # Auto-created when running `lns`; a runtime artifact, not source. The e2e
 # harness boots real runs with the crate dir as cwd (make e2e-microvm), and
 # example recipes boot with their own dir as cwd (docs/examples/*).
-/lns-policy.yaml
-/crates/e2e-tests/lns-policy.yaml
-/docs/examples/**/lns-policy.yaml
+/lns-local-mixin.yaml
+/crates/e2e-tests/lns-local-mixin.yaml
+/docs/examples/**/lns-local-mixin.yaml
 
 # Claude Code local settings
 .claude/settings.local.json

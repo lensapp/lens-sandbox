@@ -18,7 +18,7 @@ mod secure_file;
 #[cfg(test)]
 mod test_env;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
     #[serde(default)]
@@ -26,60 +26,74 @@ pub struct Policy {
     /// The run's connected set, filled from the per-machine sidecar rather than this file: connecting is a per-machine risk acceptance, and a file that travels must not carry one.
     #[serde(skip)]
     pub connectors: Vec<String>,
+    /// What the document on disk called itself, kept so writing a decision back does not rename the developer's own file.
+    #[serde(skip)]
+    pub name: Option<String>,
+    /// Every block of that document the run does not write, kept verbatim so an approval cannot delete what somebody wrote by hand.
+    #[serde(skip)]
+    pub rest: serde_yaml::Mapping,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    rename_all = "camelCase",
-    deny_unknown_fields,
-    try_from = "NetworkPolicyRaw"
-)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub egress: Egress,
 }
 
-/// Deserialization shim for the two fields that left the file: one restating the new behavior is dropped, one that decided something is refused.
-#[derive(Deserialize)]
+/// The document format every kit is written in (`docs/sandbox-spec.md` §2), which the directory's own decisions are written in too.
+pub const API_VERSION: &str = "lns.run/v1";
+
+/// The kind §8.1 records a decision as, so it merges under the same rules as anything the developer pulled.
+pub const KIND: &str = "mixin";
+
+/// The decisions file on disk. Its envelope is restated here rather than read through the crate that parses a kit, which depends on this one; only the block a run writes back is modelled, and every other one travels in [`LocalMixinSpec::rest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NetworkPolicyRaw {
+struct LocalMixinDocument {
+    api_version: String,
+    kind: String,
+    name: String,
     #[serde(default)]
-    egress: Egress,
-    #[serde(default)]
-    default_verdict: Option<String>,
-    #[serde(default)]
-    default_transport: Option<String>,
+    spec: LocalMixinSpec,
 }
 
-impl TryFrom<NetworkPolicyRaw> for NetworkPolicy {
-    type Error = String;
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LocalMixinSpec {
+    #[serde(default)]
+    egress: Egress,
+    #[serde(flatten)]
+    rest: serde_yaml::Mapping,
+}
 
-    fn try_from(raw: NetworkPolicyRaw) -> Result<Self, Self::Error> {
-        match raw.default_verdict.as_deref() {
-            None | Some("ask") => {}
-            Some(verdict @ ("allow" | "deny")) => {
-                return Err(format!(
-                    "defaultVerdict is no longer part of a policy file, and `{verdict}` decided what a rule now has to say: delete the line, then end `egress.http` with a catch-all instead — `lns policy {verdict} '*'`. {raw}",
-                    raw = match verdict {
-                        "deny" =>
-                            "That rule governs raw destinations too, so `egress.tcp` needs no counterpart",
-                        // A catch-all allow leaves a connection nothing can read still asking, since a default was never consent to splice one.
-                        _ => "A raw destination nothing can inspect will still ask on first use",
-                    }
-                ));
-            }
-            Some(other) => {
-                return Err(format!(
-                    "defaultVerdict is no longer part of a policy file, and `{other}` was never one of its values: delete the line"
-                ));
-            }
-        }
-        if let Some(transport) = raw.default_transport.as_deref().filter(|t| *t != "direct") {
-            return Err(format!(
-                "defaultTransport is no longer part of a policy file, and `{transport}` isn't supported in the local sandbox: delete the line"
-            ));
-        }
-        Ok(Self { egress: raw.egress })
+/// The shape §2 requires of a document's name, restated here for the same reason the envelope is: a document this crate accepts has to be one the resolver accepts.
+fn is_dns_label(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && alnum(bytes[0])
+        && alnum(bytes[bytes.len() - 1])
+        && bytes.iter().all(|&b| alnum(b) || b == b'-')
+}
+
+/// Name a written document after the file it lands in, since nobody is present to choose one.
+fn dns_label_for(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let spelled: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let label: String = spelled.trim_matches('-').chars().take(63).collect();
+    let label = label.trim_end_matches('-');
+    if is_dns_label(label) {
+        label.to_string()
+    } else {
+        "local".to_string()
     }
 }
 
@@ -376,20 +390,60 @@ pub enum Scheme {
 impl Policy {
     pub fn load_or_default(path: &Path) -> io::Result<Self> {
         match fs::read_to_string(path) {
-            Ok(text) => {
-                let policy: Self = serde_yaml::from_str(&text)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                policy.network.validate_local_transport()?;
-                policy.network.validate_binary_scopes()?;
-                Ok(policy)
-            }
+            // §8.1 has the mixin exist whether or not anyone wrote it, and an editor truncates a file before it writes one.
+            Ok(text) if text.trim().is_empty() => Ok(Self::default()),
+            Ok(text) => Self::from_document(&text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
         }
     }
 
+    fn from_document(text: &str) -> io::Result<Self> {
+        let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+        let doc: LocalMixinDocument =
+            serde_yaml::from_str(text).map_err(|e| invalid(e.to_string()))?;
+        if doc.api_version != API_VERSION {
+            return Err(invalid(format!(
+                "this document says apiVersion {}, and a directory's decisions are written in {API_VERSION}",
+                doc.api_version
+            )));
+        }
+        if doc.kind != KIND {
+            return Err(invalid(format!(
+                "this document says kind {}, and a directory's decisions are a {KIND}",
+                doc.kind
+            )));
+        }
+        if !is_dns_label(&doc.name) {
+            return Err(invalid(format!(
+                "this document is named {}, and a document is named with lowercase letters, digits and dashes, starting and ending with a letter or a digit",
+                doc.name
+            )));
+        }
+        let policy = Self {
+            network: NetworkPolicy {
+                egress: doc.spec.egress,
+            },
+            connectors: Vec::new(),
+            name: Some(doc.name),
+            rest: doc.spec.rest,
+        };
+        policy.network.validate_local_transport()?;
+        policy.network.validate_binary_scopes()?;
+        Ok(policy)
+    }
+
     pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
-        let yaml = serde_yaml::to_string(self)
+        let document = LocalMixinDocument {
+            api_version: API_VERSION.to_string(),
+            kind: KIND.to_string(),
+            name: self.name.clone().unwrap_or_else(|| dns_label_for(path)),
+            spec: LocalMixinSpec {
+                egress: self.network.egress.clone(),
+                rest: self.rest.clone(),
+            },
+        };
+        let yaml = serde_yaml::to_string(&document)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -588,6 +642,20 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Write a decisions file whose spec holds the given blocks, so a fixture states the one thing it is about.
+    fn decisions_file(dir: &TempDir, spec: &str) -> PathBuf {
+        let path = dir.path().join("lns-local-mixin.yaml");
+        let body: String = spec.lines().map(|line| format!("  {line}\n")).collect();
+        fs::write(
+            &path,
+            format!(
+                "apiVersion: {API_VERSION}\nkind: {KIND}\nname: lns-local-mixin\nspec:\n{body}"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
     #[test]
     fn a_default_policy_decides_nothing_and_so_holds_no_rules() {
         // The file is the decisions the developer has made. A fresh one has made
@@ -595,92 +663,6 @@ mod tests {
         let p = Policy::default();
         assert!(p.network.egress.http.is_empty());
         assert!(p.network.egress.tcp.is_empty());
-    }
-
-    #[test]
-    fn the_removed_defaults_are_dropped_where_they_only_restated_the_new_behavior() {
-        // Every file created before this change carries both, and both spell what
-        // the runtime now does unconditionally — refusing them would brick every
-        // existing project to tell it nothing.
-        let net: NetworkPolicy = serde_yaml::from_str(
-            "egress:\n  http: []\ndefaultVerdict: ask\ndefaultTransport: direct\n",
-        )
-        .expect("the values that restate the new behavior must load");
-        assert!(net.egress.http.is_empty());
-        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
-        assert!(
-            !yaml.contains("defaultVerdict") && !yaml.contains("defaultTransport"),
-            "a rewritten file must not put the keys back:\n{yaml}"
-        );
-    }
-
-    #[test]
-    fn a_default_verdict_that_decided_something_is_refused_with_the_rule_to_write_instead() {
-        // These two changed a file's meaning, and no rule the loader could invent
-        // would preserve it — so it says what to write rather than guessing.
-        for (value, tail, absent) in [
-            (
-                "deny",
-                "`egress.tcp` needs no counterpart",
-                "still ask on first use",
-            ),
-            ("allow", "still ask on first use", "needs no counterpart"),
-        ] {
-            let err = serde_yaml::from_str::<NetworkPolicy>(&format!(
-                "egress:\n  http: []\ndefaultVerdict: {value}\n"
-            ))
-            .expect_err("a default that decided something must be refused");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("defaultVerdict") && msg.contains(value),
-                "the error must name the key and the verdict; got {msg}"
-            );
-            // Only a catch-all deny reaches raw destinations, so only that branch may
-            // promise it; an allow leaves an unreadable connection still asking.
-            assert!(msg.contains(tail), "expected {tail:?} in {msg}");
-            assert!(!msg.contains(absent), "unexpected {absent:?} in {msg}");
-        }
-    }
-
-    #[test]
-    fn the_refusal_says_delete_the_line_before_the_command_that_needs_it_gone() {
-        // `lns policy deny '*'` loads the file first, so it stops on this same error.
-        // Prescribed in the other order the fix is a loop the reader cannot leave.
-        let err =
-            serde_yaml::from_str::<NetworkPolicy>("egress:\n  http: []\ndefaultVerdict: deny\n")
-                .expect_err("a default that decided something must be refused");
-        let msg = err.to_string();
-        let (delete, command) = (
-            msg.find("delete the line")
-                .expect("the message must say to delete it"),
-            msg.find("lns policy deny")
-                .expect("the message must name the command"),
-        );
-        assert!(
-            delete < command,
-            "the command cannot run until the line is gone: {msg}"
-        );
-    }
-
-    #[test]
-    fn a_default_verdict_that_was_never_a_value_is_refused_without_inventing_a_command() {
-        let err =
-            serde_yaml::from_str::<NetworkPolicy>("egress:\n  http: []\ndefaultVerdict: bananas\n")
-                .expect_err("an unknown value must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("never one of its values") && !msg.contains("lns policy bananas"),
-            "the fix-it must not echo a value back as a verb: {msg}"
-        );
-    }
-
-    #[test]
-    fn an_upstream_default_transport_keeps_the_error_it_always_had() {
-        let err = serde_yaml::from_str::<NetworkPolicy>(
-            "egress:\n  http: []\ndefaultTransport: upstream\n",
-        )
-        .expect_err("upstream must stay refused");
-        assert!(err.to_string().contains("upstream"), "got {err}");
     }
 
     #[test]
@@ -830,18 +812,17 @@ mod tests {
     #[test]
     fn load_or_default_accepts_a_rule_scoped_to_an_absolute_binary() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  egress:
-    http:
-      - match: git.example.test
-        verdict: allow
-        binaries:
-          - /usr/bin/git
-  defaultVerdict: ask
-";
-        fs::write(&path, yaml).unwrap();
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
+  http:
+    - match: git.example.test
+      verdict: allow
+      binaries:
+        - /usr/bin/git
+",
+        );
         let p = Policy::load_or_default(&path).unwrap();
         assert_eq!(
             p.network.egress.http[0].binaries,
@@ -852,17 +833,16 @@ network:
     #[test]
     fn load_or_default_rejects_an_empty_binaries_filter() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  egress:
-    http:
-      - match: git.example.test
-        verdict: allow
-        binaries: []
-  defaultVerdict: ask
-";
-        fs::write(&path, yaml).unwrap();
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
+  http:
+    - match: git.example.test
+      verdict: allow
+      binaries: []
+",
+        );
         let err = Policy::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -875,19 +855,18 @@ network:
     #[test]
     fn load_or_default_rejects_a_relative_binary_path() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  egress:
-    http:
-      - match: git.example.test
-        verdict: allow
-        binaries:
-          - /usr/bin/git
-          - git
-  defaultVerdict: ask
-";
-        fs::write(&path, yaml).unwrap();
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
+  http:
+    - match: git.example.test
+      verdict: allow
+      binaries:
+        - /usr/bin/git
+        - git
+",
+        );
         let err = Policy::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -987,16 +966,15 @@ network:
     #[test]
     fn load_or_default_reads_existing_yaml() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  egress:
-    http:
-      - match: api.linear.app
-        verdict: allow
-  defaultVerdict: ask
-";
-        fs::write(&path, yaml).unwrap();
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
+  http:
+    - match: api.linear.app
+      verdict: allow
+",
+        );
         let p = Policy::load_or_default(&path).unwrap();
         assert_eq!(p.network.egress.http.len(), 1);
         assert_eq!(p.network.egress.http[0].match_pattern, "api.linear.app");
@@ -1004,22 +982,22 @@ network:
     }
 
     #[test]
-    fn load_or_default_rejects_a_file_still_naming_the_removed_allowed_routes_key() {
+    fn load_or_default_rejects_a_stale_key_inside_egress_rather_than_reading_zero_rules() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
   allowedRoutes:
     - match: api.linear.app
       verdict: allow
-  defaultVerdict: ask
-";
-        fs::write(&path, yaml).unwrap();
+",
+        );
         let err = Policy::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
             err.to_string().contains("allowedRoutes"),
-            "a stale key must name itself in the error, not load as a policy with zero rules: {err}"
+            "a key nothing reads must name itself in the error, not load as a decision that decides nothing: {err}"
         );
     }
 
@@ -1090,12 +1068,10 @@ network:
     #[test]
     fn load_or_default_reads_a_tcp_rule() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        fs::write(
-            &path,
-            "network:\n  egress:\n    tcp:\n      - match: db.internal:5432\n        verdict: allow\n  defaultVerdict: ask\n",
-        )
-        .unwrap();
+        let path = decisions_file(
+            &dir,
+            "egress:\n  tcp:\n    - match: db.internal:5432\n      verdict: allow\n",
+        );
         let p = Policy::load_or_default(&path).unwrap();
         assert_eq!(p.network.egress.tcp, vec![tcp_allow("db.internal:5432")]);
     }
@@ -1513,38 +1489,18 @@ network:
     }
 
     #[test]
-    fn load_or_default_rejects_an_upstream_default_transport() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  defaultVerdict: ask
-  defaultTransport: upstream
-";
-        fs::write(&path, yaml).unwrap();
-        let err = Policy::load_or_default(&path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("defaultTransport is no longer part of a policy file")
-                && err.to_string().contains("upstream"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
     fn load_or_default_rejects_an_upstream_route_transport() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        let yaml = "\
-network:
-  egress:
-    http:
-      - match: api.example.test
-        verdict: allow
-        transport: upstream
-";
-        fs::write(&path, yaml).unwrap();
+        let path = decisions_file(
+            &dir,
+            "\
+egress:
+  http:
+    - match: api.example.test
+      verdict: allow
+      transport: upstream
+",
+        );
         let err = Policy::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -1567,7 +1523,7 @@ network:
     fn load_or_default_surfaces_invalid_yaml_as_io_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("broken.yaml");
-        fs::write(&path, "network: not-a-map\n").unwrap();
+        fs::write(&path, "apiVersion: [\n").unwrap();
         let err = Policy::load_or_default(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
@@ -1575,19 +1531,19 @@ network:
     #[test]
     fn save_atomic_writes_file_readable_by_load_or_default() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("api.linear.app"));
 
         p.save_atomic(&path).unwrap();
         let reloaded = Policy::load_or_default(&path).unwrap();
-        assert_eq!(p, reloaded);
+        assert_eq!(p.network, reloaded.network);
     }
 
     #[test]
     fn save_atomic_creates_parent_directory() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("nested/dir/lns-policy.yaml");
+        let path = dir.path().join("nested/dir/lns-local-mixin.yaml");
         Policy::default().save_atomic(&path).unwrap();
         assert!(path.exists());
     }
@@ -1595,7 +1551,7 @@ network:
     #[test]
     fn save_atomic_leaves_no_tmp_file_on_success() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         Policy::default().save_atomic(&path).unwrap();
         let tmp = path.with_extension("yaml.tmp");
         assert!(!tmp.exists(), "tmp file should be renamed away");
@@ -1604,7 +1560,7 @@ network:
     #[test]
     fn file_policy_store_save_writes_yaml_readable_by_load_or_default() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let store = FilePolicyStore::new(path.clone());
 
         let mut p = Policy::default();
@@ -1612,7 +1568,7 @@ network:
         store.save(&p).unwrap();
 
         let reloaded = Policy::load_or_default(&path).unwrap();
-        assert_eq!(reloaded, p);
+        assert_eq!(reloaded.network, p.network);
     }
 
     #[test]
@@ -1620,7 +1576,7 @@ network:
         let dir = TempDir::new().unwrap();
         let unwritable = dir.path().join("file-not-a-dir");
         fs::write(&unwritable, b"").unwrap();
-        let path = unwritable.join("nested/lns-policy.yaml");
+        let path = unwritable.join("nested/lns-local-mixin.yaml");
         let store = FilePolicyStore::new(path);
 
         let err = store.save(&Policy::default()).unwrap_err();
@@ -1671,80 +1627,26 @@ network:
     }
 
     #[test]
-    fn legacy_network_only_yaml_parses_with_empty_connectors() {
-        let yaml = "\
-network:
-  egress:
-    http: []
-  defaultVerdict: ask
-  defaultTransport: direct
-";
-        let p: Policy = serde_yaml::from_str(yaml).unwrap();
-        assert!(p.connectors.is_empty());
-    }
-
-    #[test]
-    fn default_policy_omits_the_connectors_key() {
-        let yaml = serde_yaml::to_string(&Policy::default()).unwrap();
-        assert!(
-            !yaml.contains("connectors"),
-            "an empty connectors list must not clutter the shareable file:\n{yaml}"
-        );
-    }
-
-    #[test]
-    fn a_file_still_carrying_the_old_connectors_key_loads_and_decides_nothing() {
-        let p: Policy = serde_yaml::from_str(
-            "network:\n  egress:\n    http: []\nconnectors:\n  - some-provider\n",
-        )
-        .expect("a directory written before connections moved still opens");
-        assert!(
-            p.connectors.is_empty(),
-            "the key is ignored rather than read, so the connector is offered again on first use"
-        );
-    }
-
-    #[test]
     fn the_decisions_file_never_carries_which_connectors_are_connected() {
-        let p = Policy {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        Policy {
             connectors: vec!["some-provider".into()],
             ..Policy::default()
-        };
-        let yaml = serde_yaml::to_string(&p).unwrap();
+        }
+        .save_atomic(&path)
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
         assert!(
-            !yaml.contains("connectors"),
-            "connecting is a per-machine risk acceptance, and this file is meant to be committed; got:\n{yaml}"
+            !text.contains("connectors"),
+            "connecting is a per-machine risk acceptance, and this file is meant to be committed; got:\n{text}"
         );
         assert!(
-            serde_yaml::from_str::<Policy>(&yaml)
+            Policy::load_or_default(&path)
                 .unwrap()
                 .connectors
                 .is_empty(),
             "what a run may spend is read from the sidecar, never from a file that travels"
-        );
-    }
-
-    #[test]
-    fn a_legacy_policy_carrying_the_removed_credentials_section_still_loads() {
-        let yaml = "\
-network:
-  egress:
-    http: []
-  defaultVerdict: ask
-  defaultTransport: direct
-credentials:
-  customProviders:
-    - id: acme
-      envVar: ACME_API_KEY
-      placeholder: acme_LNSPLACEHOLDER0000000000000000000000
-      injections:
-        - kind: bearer_header
-          domain: api.acme.corp
-";
-        let p: Policy = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            p.connectors.is_empty(),
-            "the now-unknown credentials section is ignored, not an error"
         );
     }
 
@@ -1761,5 +1663,175 @@ credentials:
         p.connect("some-provider");
         p.connect("some-provider");
         assert_eq!(p.connectors, ["some-provider"]);
+    }
+
+    #[test]
+    fn the_decisions_file_is_the_mixin_the_specification_says_it_is() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("docs.some-vendor.example"));
+        p.save_atomic(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("apiVersion: lns.run/v1") && text.contains("kind: mixin"),
+            "§8.1 records a decision in the grammar the rest of the document already defines; got:\n{text}"
+        );
+        assert!(
+            text.contains("egress:") && !text.contains("network:"),
+            "§3.1.6 names the block `egress`, directly under `spec`; got:\n{text}"
+        );
+        assert_eq!(
+            Policy::load_or_default(&path).unwrap().network.egress.http,
+            p.network.egress.http,
+            "what the run wrote back is what the next run reads"
+        );
+    }
+
+    #[test]
+    fn the_document_is_named_for_the_file_it_is_written_to() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        Policy::default().save_atomic(&path).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("name: lns-local-mixin"),
+            "§2 requires a name on every document, and nobody is here to choose one"
+        );
+    }
+
+    #[test]
+    fn a_name_no_dns_label_could_be_is_written_as_one() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("My_Decisions.yaml");
+        Policy::default().save_atomic(&path).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("name: my-decisions"),
+            "a `--policy` path the developer chose still has to produce a document §2 accepts"
+        );
+    }
+
+    #[test]
+    fn a_file_stem_holding_no_label_character_still_produces_a_name() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("__.yaml");
+        Policy::default().save_atomic(&path).unwrap();
+        assert!(
+            fs::read_to_string(&path).unwrap().contains("name: local"),
+            "§2 requires a name, so a file whose stem spells none has to fall back to one"
+        );
+    }
+
+    #[test]
+    fn a_file_stem_longer_than_a_label_is_cut_to_one() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(format!("{}-tail.yaml", "a".repeat(70)));
+        Policy::default().save_atomic(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let name = text
+            .lines()
+            .find_map(|line| line.strip_prefix("name: "))
+            .expect("the document names itself");
+        assert_eq!(
+            name,
+            "a".repeat(63),
+            "§2 caps a label at 63 characters, and a path the developer chose can be longer"
+        );
+    }
+
+    #[test]
+    fn a_block_the_run_never_writes_survives_the_run_writing_one_it_does() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(
+            &path,
+            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  mixins:\n    - ghcr.io/team/base@sha256:abc\n  egress:\n    http: []\n",
+        )
+        .unwrap();
+
+        let mut p = Policy::load_or_default(&path).unwrap();
+        p.add_rule(RouteRule::allow_host("api.example.test"));
+        p.save_atomic(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("ghcr.io/team/base@sha256:abc"),
+            "an approval appends an egress entry; it must not delete what the developer wrote by hand:\n{text}"
+        );
+        assert!(text.contains("api.example.test"), "got:\n{text}");
+    }
+
+    #[test]
+    fn a_document_of_another_kind_is_refused_rather_than_read_as_decisions() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(
+            &path,
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: something-else\nspec:\n  egress:\n    http: []\n",
+        )
+        .unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("mixin"),
+            "the file is the developer's own, so a wrong kind is loud rather than silently empty: {err}"
+        );
+    }
+
+    #[test]
+    fn a_document_named_what_no_document_may_be_named_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(
+            &path,
+            "apiVersion: lns.run/v1\nkind: mixin\nname: Not_A_Label!\nspec:\n  egress:\n    http: []\n",
+        )
+        .unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("Not_A_Label!"),
+            "the resolver refuses this document too, so the two readers of one grammar have to agree: {err}"
+        );
+    }
+
+    #[test]
+    fn a_name_is_a_label_or_it_is_not_a_name() {
+        for valid in ["a", "9", "lns-local-mixin", &"a".repeat(63)] {
+            assert!(is_dns_label(valid), "{valid} is a label");
+        }
+        for invalid in ["", "-a", "a-", "aBc", "a_b", "a.b", &"a".repeat(64)] {
+            assert!(!is_dns_label(invalid), "{invalid} is not a label");
+        }
+    }
+
+    #[test]
+    fn a_document_of_another_api_version_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(
+            &path,
+            "apiVersion: lns.run/v2\nkind: mixin\nname: local\nspec:\n  egress:\n    http: []\n",
+        )
+        .unwrap();
+        let err = Policy::load_or_default(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("lns.run/v1"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_file_is_the_mixin_nobody_wrote() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        fs::write(&path, "  \n").unwrap();
+        assert_eq!(
+            Policy::load_or_default(&path).unwrap().network,
+            NetworkPolicy::default(),
+            "§8.1 has the mixin exist whether or not anyone wrote it, and an editor truncates before it writes"
+        );
     }
 }

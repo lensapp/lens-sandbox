@@ -739,7 +739,7 @@ fn then_future_request_failed(world: &mut BehaviourWorld) -> Result<(), String> 
     Ok(())
 }
 
-#[then(r#""lns-policy.yaml" is unchanged"#)]
+#[then(r#""lns-local-mixin.yaml" is unchanged"#)]
 fn then_lns_policy_yaml_unchanged(_w: &mut BehaviourWorld) -> Result<(), String> {
     // no-op: no code path runs from CredentialSession to the policy file, so this holds by construction.
     Ok(())

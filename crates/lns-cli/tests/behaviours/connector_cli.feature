@@ -5,8 +5,8 @@ Feature: connecting connectors from the CLI
   connector by an interactive sign-in the background service drives, so
   connecting one shows the verification URL and code. Either way the
   decision lands in the per-machine credential store, never in
-  `lns-policy.yaml`; the id is recorded under `connectors:` in that
-  directory's policy only once the bind or sign-in completes.
+  `lns-local-mixin.yaml`; the connection is recorded for the directory in
+  the per-machine sidecar only once the bind or sign-in completes.
   `lns connector list` shows, per connector, whether it authenticates
   by sign-in or a value.
 
@@ -22,7 +22,7 @@ Feature: connecting connectors from the CLI
     When the developer runs "lns connector connect some-provider"
     Then the output describes binding a credential value
     And "some-provider" is recorded as connected for this project
-    And lns-policy.yaml carries no credential material
+    And lns-local-mixin.yaml carries no credential material
 
   Scenario: Connecting a credential connector fails clearly when the service is unavailable
     Given a user catalog declares the "some-provider" credential connector
@@ -36,7 +36,7 @@ Feature: connecting connectors from the CLI
     When the developer runs "lns connector connect some-oauth"
     Then a verification URL and user code are shown
     And "some-oauth" is recorded as connected for this project
-    And lns-policy.yaml carries no token material
+    And lns-local-mixin.yaml carries no token material
 
   Scenario: Connecting an oauth connector fails clearly when the service is unavailable
     Given the background service is not available
@@ -56,7 +56,7 @@ Feature: connecting connectors from the CLI
     Then the browser is opened to the authorization page
     And no user code is shown
     And "some-pkce" is recorded as connected for this project
-    And lns-policy.yaml carries no credential material
+    And lns-local-mixin.yaml carries no credential material
 
   Scenario: Connecting a pkce connector fails clearly when the service is unavailable
     Given a user catalog declares the "some-pkce" pkce connector

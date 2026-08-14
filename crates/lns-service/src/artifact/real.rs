@@ -334,7 +334,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     if policy.network != lns_policy::NetworkPolicy::default() {
         crate::log::info!(
             "policy",
-            "this sandbox ships a network policy; it governs the run except where your own lns-policy.yaml decides otherwise"
+            "this sandbox ships a network policy; it governs the run except where your own lns-local-mixin.yaml decides otherwise"
         );
         let summary =
             crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));

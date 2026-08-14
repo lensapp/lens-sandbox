@@ -14,13 +14,7 @@ pub enum PolicySource {
     AutoCreated,
 }
 
-const DEFAULT_POLICY_FILENAME: &str = "lns-policy.yaml";
-const DEFAULT_POLICY_YAML: &str = "\
-network:
-  egress:
-    http: []
-    tcp: []
-";
+const DEFAULT_POLICY_FILENAME: &str = "lns-local-mixin.yaml";
 
 pub fn policy_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
     match explicit {
@@ -45,7 +39,8 @@ pub fn resolve_policy(explicit: Option<&Path>, cwd: &Path) -> Result<(PathBuf, P
             path.display()
         ),
         Err(_) => {
-            std::fs::write(&path, DEFAULT_POLICY_YAML)
+            lns_policy::Policy::default()
+                .save_atomic(&path)
                 .with_context(|| format!("creating default policy at {}", path.display()))?;
             Ok((path, PolicySource::AutoCreated))
         }
@@ -580,7 +575,7 @@ mod tests {
         summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         )
     }
@@ -797,7 +792,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -807,7 +802,7 @@ mod tests {
         let authored = summary_of(
             &run_args(Some("prism")),
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(!authored.contains("Mixins:"), "got: {authored}");
@@ -854,7 +849,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -887,7 +882,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -926,7 +921,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -947,7 +942,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -978,7 +973,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1011,7 +1006,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1048,7 +1043,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1081,7 +1076,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         let first = s
@@ -1115,7 +1110,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1131,7 +1126,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Tools:     node@22\n"), "got: {s}");
@@ -1182,7 +1177,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1238,7 +1233,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/home/dev/my-app/lns-policy.yaml"),
+            Path::new("/home/dev/my-app/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Image:"), "missing Image line: {s}");
@@ -1265,7 +1260,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1291,7 +1286,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1313,7 +1308,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1355,7 +1350,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Workdir:   /app"), "missing workdir line: {s}");
@@ -1366,7 +1361,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(!s.contains("Workdir:"), "no workdir line expected: {s}");
@@ -1377,7 +1372,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(!s.contains("Volume:"), "no volume line expected: {s}");
@@ -1389,7 +1384,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("ubuntu (resolving…)"), "no placeholder: {s}");
@@ -1401,7 +1396,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("./lns.yaml (resolving…)"), "got: {s}");
@@ -1418,7 +1413,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("lns.dev.yaml (resolving…)"), "got: {s}");
@@ -1430,7 +1425,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("1 vCPU · 512 MiB"), "resources line wrong: {s}");
@@ -1450,7 +1445,7 @@ mod tests {
                 mem_mib: 6144,
             },
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
@@ -1465,7 +1460,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     -i -t"), "flags line wrong: {s}");
@@ -1480,7 +1475,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     -d"), "flags line wrong: {s}");
@@ -1493,7 +1488,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     -i -t --rm"), "flags line wrong: {s}");
@@ -1508,7 +1503,7 @@ mod tests {
         let s = summary_of(
             &args,
             &Policy::default(),
-            Path::new("/x/lns-policy.yaml"),
+            Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("Flags:     (none)"), "flags line wrong: {s}");
@@ -1524,7 +1519,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1544,10 +1539,10 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
-        assert!(s.contains("file: ./lns-policy.yaml"));
+        assert!(s.contains("file: ./lns-local-mixin.yaml"));
         assert!(
             s.contains("unmatched destinations: ask"),
             "the default is no longer a field the file varies, so the summary states the rule: {s}"
@@ -1570,7 +1565,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1590,7 +1585,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1604,7 +1599,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(
@@ -1621,7 +1616,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &policy,
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("1 allow, 1 deny, anything else asks"));
@@ -1632,7 +1627,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         );
         assert!(s.contains("source: found in this directory"));
@@ -1643,7 +1638,7 @@ mod tests {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::AutoCreated,
         );
         assert!(s.contains("source: auto-created (no policy in this directory)"));
@@ -1691,7 +1686,7 @@ mod tests {
     fn resolve_policy_finds_existing_default_file_in_cwd() {
         let dir = tempfile::TempDir::new().unwrap();
         let preexisting = dir.path().join(DEFAULT_POLICY_FILENAME);
-        std::fs::write(&preexisting, "network:\n  egress:\n    http: []\n").unwrap();
+        Policy::default().save_atomic(&preexisting).unwrap();
         let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
         assert_eq!(resolved, preexisting);
         assert_eq!(source, PolicySource::FoundInCwd);
