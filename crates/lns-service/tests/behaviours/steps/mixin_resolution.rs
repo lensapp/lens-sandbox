@@ -155,6 +155,17 @@ fn run_installs(w: &mut BehaviourWorld, tool: String) -> Result<(), String> {
     }
 }
 
+/// What the guest's gate decides for a host: the first entry that matches it, since a merged table only means anything read in order. `None` is the destination nothing decided, which is asked about rather than refused.
+pub fn gate_verdict(policy: &lns_policy::Policy, host: &str) -> Option<lns_policy::Verdict> {
+    policy
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|rule| lns_policy::matching::domain_matches(&rule.match_pattern, host))
+        .map(|rule| rule.verdict)
+}
+
 #[then(regex = r#"^a workload request to "([^"]+)" is allowed by policy$"#)]
 fn request_allowed_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
     let policy = w
@@ -162,19 +173,12 @@ fn request_allowed_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(),
         .as_ref()
         .and_then(|r| r.running_policy.as_ref())
         .ok_or("no running policy was produced")?;
-    let verdict = policy
-        .network
-        .egress
-        .http
-        .iter()
-        .find(|r| r.match_pattern == host)
-        .map(|r| r.verdict);
-    if verdict == Some(lns_policy::Verdict::Allow) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected {host} to be allowed by what the mixin contributed, got {verdict:?}"
-        ))
+    match gate_verdict(policy, &host) {
+        Some(lns_policy::Verdict::Allow) => Ok(()),
+        other => Err(format!(
+            "expected {host} to be allowed by what the mixin contributed, the gate's first match gave {other:?}; routes: {:?}",
+            policy.network.egress.http
+        )),
     }
 }
 
