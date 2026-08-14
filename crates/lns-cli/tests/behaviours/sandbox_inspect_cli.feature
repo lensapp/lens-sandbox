@@ -10,6 +10,17 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "Usage: lns inspect"
 
+  Scenario: inspecting a published mixin labels it Mixin and shows every block it carries
+    Given the service inspects "ghcr.io/acme/obs-tools:2" as a mixin declaring the tool "node@22.11.0"
+    When the user runs "lns inspect ghcr.io/acme/obs-tools:2"
+    Then the exit code is 0
+    And the output contains "kind: Mixin"
+    And the output contains "tool: node@22.11.0"
+    And the output contains "mixin: ghcr.io/acme/base@sha256:"
+    And the output contains "env: MODE=research"
+    And the output contains "ports: 9090"
+    And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
+
   Scenario: inspecting a plain image labels it Image
     Given the service inspects "registry.example.test/some-image:1.0" as a plain image
     When the user runs "lns inspect registry.example.test/some-image:1.0"
@@ -55,11 +66,17 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
-  Scenario: inspecting a sandbox lists the mixins it layers on
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox declaring the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
+  Scenario: a mixin the user names reads as the tag and the digest it pinned to
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox the user's mixin "obs-tools:2" resolved into "ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin obs-tools:2"
+    Then the exit code is 0
+    And the output contains "mixin: obs-tools:2 → ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
+
+  Scenario: inspecting a published sandbox names the mixins it resolved into
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox resolved from the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0"
     Then the exit code is 0
-    And the output contains "mixin: ghcr.io/acme/postgres-tools@sha256:"
+    And the output contains "mixin: ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"
 
   Scenario: inspecting a sandbox flags a permissive shipped policy
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox whose policy allows every destination

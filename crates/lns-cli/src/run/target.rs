@@ -28,7 +28,7 @@ pub fn resolve<F: Fs>(
             return Ok(RunTarget::Reference(reference.to_string()));
         }
         (Some(reference), None) => definition_file(reference, cwd),
-        (None, Some(file)) => normalize(&cwd.join(file)),
+        (None, Some(file)) => lns_artifact::sandbox::fold_path(&cwd.join(file)),
         (None, None) => cwd.join(LNS_YAML),
     };
     let project_dir = file
@@ -71,7 +71,7 @@ pub(crate) fn is_definition_path(reference: &str) -> bool {
 }
 
 pub(crate) fn definition_file(reference: &str, cwd: &Path) -> PathBuf {
-    let path = normalize(&cwd.join(reference));
+    let path = lns_artifact::sandbox::fold_path(&cwd.join(reference));
     if is_yaml_file_name(&path) {
         path
     } else {
@@ -84,20 +84,6 @@ fn is_yaml_file_name(path: &Path) -> bool {
         path.extension().and_then(std::ffi::OsStr::to_str),
         Some("yaml" | "yml")
     )
-}
-
-// components() already normalizes interior `.` away, so only ParentDir needs lexical handling.
-pub(crate) fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// The wire definition roots each path fileset in the consumer's project, the same way bind sources resolve, so the service snapshots exactly the directories this machine declared.
@@ -155,9 +141,40 @@ impl RunTarget {
     }
 }
 
+/// A directory the user types is theirs, so it roots where they typed it; the service reads an absolute path or nothing.
+pub fn root_named_directories(mixins: &[String], cwd: &Path) -> Result<Vec<String>> {
+    mixins
+        .iter()
+        .map(|reference| {
+            if !lns_artifact::sandbox::names_a_local_directory(reference) {
+                return Ok(reference.clone());
+            }
+            let rooted = lns_artifact::sandbox::fold_path(&cwd.join(reference));
+            rooted
+                .to_str()
+                .map(str::to_string)
+                .with_context(|| format!("mixin directory {} is not utf-8", rooted.display()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_the_user_names_roots_where_they_typed_it() {
+        let rooted = root_named_directories(
+            &["./mixins/pg".to_string(), "ghcr.io/acme/obs:2".to_string()],
+            Path::new("/work"),
+        )
+        .unwrap();
+        assert_eq!(
+            rooted,
+            ["/work/mixins/pg", "ghcr.io/acme/obs:2"],
+            "only the caller knows where the user typed a relative directory, and a reference is not a path to root"
+        );
+    }
 
     use crate::sandbox::test_support::MapFs;
 

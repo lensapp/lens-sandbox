@@ -7,11 +7,11 @@ use anyhow::{Result, bail};
 use crate::sandbox::{FilesetEntry, SandboxSpec, Volume};
 use crate::spec::Port;
 
-/// One layer of a resolved sandbox, labelled with where it came from so a disclosure can attribute every entry it shows.
+/// One layer of a resolved sandbox, labelled with where it came from so a disclosure can attribute every entry it shows. It borrows the document the walk already holds, because a source list names an order rather than owning a copy of every spec in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Source {
-    pub label: String,
-    pub spec: SandboxSpec,
+pub struct Source<'a> {
+    pub label: &'a str,
+    pub spec: &'a SandboxSpec,
 }
 
 /// The label the sandbox's own spec resolves under; every other source is labelled by the reference that named it.
@@ -20,90 +20,113 @@ pub const ROOT_LABEL: &str = "the sandbox";
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
 pub const MAX_DEPTH: usize = 5;
 
-/// What one source contributed to the merged document, and what it displaced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Contribution {
-    pub source: String,
-    pub block: &'static str,
-    pub key: String,
-    pub replaced: Option<String>,
-}
-
-/// A resolved sandbox and the record of who contributed each part of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Merged {
-    pub spec: SandboxSpec,
-    pub contributions: Vec<Contribution>,
-}
-
 /// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it.
 ///
 /// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting.
-pub fn flatten(
-    root: &SandboxSpec,
-    extra: &[String],
-    graph: &BTreeMap<String, SandboxSpec>,
-) -> Result<Vec<Source>> {
-    let mut sources = vec![Source {
-        label: ROOT_LABEL.to_string(),
-        spec: root.clone(),
-    }];
-    let mut trail = Vec::new();
-    expand(&root.mixins, graph, 1, &mut trail, &mut sources)?;
-    expand(extra, graph, 1, &mut trail, &mut sources)?;
+/// A source many documents name appears once, at the last place it was named: an earlier appearance can decide nothing a later one does not, since either a source after it sets a key or the source itself sets it again.
+pub fn flatten<'a>(
+    root: &'a SandboxSpec,
+    extra: &'a [String],
+    graph: &'a BTreeMap<String, SandboxSpec>,
+) -> Result<Vec<Source<'a>>> {
+    refuse_what_sits_out_of_reach(&root.mixins, extra, graph)?;
+    let mut sources = Vec::with_capacity(1 + graph.len());
+    let mut seen = std::collections::BTreeSet::new();
+    expand(extra, graph, &mut seen, &mut sources)?;
+    expand(&root.mixins, graph, &mut seen, &mut sources)?;
+    sources.push(Source {
+        label: ROOT_LABEL,
+        spec: root,
+    });
+    sources.reverse();
     Ok(sources)
 }
 
-fn expand(
-    references: &[String],
-    graph: &BTreeMap<String, SandboxSpec>,
-    depth: usize,
-    trail: &mut Vec<String>,
-    sources: &mut Vec<Source>,
+/// One reference to reach, and the source to emit once everything it names has been.
+enum Step<'a> {
+    Reach(&'a str),
+    Emit(&'a str, &'a SandboxSpec),
+}
+
+/// Walk the references in reverse, each one's own mixins before it, and keep the first arrival — which is the last place the forward order names it. The walk carries its own stack, because the graph's longest chain is bounded by how many documents were fetched and not by [`MAX_DEPTH`].
+fn expand<'a>(
+    references: &'a [String],
+    graph: &'a BTreeMap<String, SandboxSpec>,
+    seen: &mut std::collections::BTreeSet<&'a str>,
+    sources: &mut Vec<Source<'a>>,
 ) -> Result<()> {
-    for reference in references {
-        if trail.contains(reference) {
-            bail!(
-                "mixin {reference} is reachable from itself ({} → {reference}); a cycle cannot resolve",
-                trail.join(" → ")
-            );
-        }
-        if depth > MAX_DEPTH {
-            bail!(
-                "mixin {reference} sits deeper than {MAX_DEPTH} mixins from the sandbox ({}); refusing to resolve further",
-                trail.join(" → ")
-            );
-        }
-        let Some(spec) = graph.get(reference) else {
-            bail!("mixin {reference} is not resolved; it has to be pulled before the merge");
+    let mut trail: Vec<&'a str> = Vec::new();
+    let mut ancestors: std::collections::BTreeSet<&'a str> = std::collections::BTreeSet::new();
+    let mut stack: Vec<Step<'a>> = references.iter().map(|r| Step::Reach(r)).collect();
+    while let Some(step) = stack.pop() {
+        let key = match step {
+            Step::Emit(key, spec) => {
+                trail.pop();
+                ancestors.remove(key);
+                sources.push(Source { label: key, spec });
+                continue;
+            }
+            Step::Reach(key) => key,
         };
-        sources.push(Source {
-            label: reference.clone(),
-            spec: spec.clone(),
-        });
-        trail.push(reference.clone());
-        expand(&spec.mixins, graph, depth + 1, trail, sources)?;
-        trail.pop();
+        if ancestors.contains(key) {
+            bail!(
+                "mixin {key} is reachable from itself ({} → {key}); a cycle cannot resolve",
+                trail.join(" → ")
+            );
+        }
+        let Some(spec) = graph.get(key) else {
+            bail!("mixin {key} is not resolved; it has to be pulled before the merge");
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        trail.push(key);
+        ancestors.insert(key);
+        stack.push(Step::Emit(key, spec));
+        stack.extend(spec.mixins.iter().map(|child| Step::Reach(child)));
     }
     Ok(())
 }
 
+/// Refuse a source no walk of depth [`MAX_DEPTH`] reaches, measured by shortest path so a mixin one document names deep does not refuse a graph another names shallow. It is the same frontier the fetch walks, so what a fetch pulled is what resolves.
+fn refuse_what_sits_out_of_reach(
+    declared: &[String],
+    extra: &[String],
+    graph: &BTreeMap<String, SandboxSpec>,
+) -> Result<()> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut frontier: Vec<&str> = declared.iter().chain(extra).map(String::as_str).collect();
+    let mut depth = 1;
+    loop {
+        frontier.retain(|reference| !seen.contains(reference));
+        let Some(first) = frontier.first() else {
+            return Ok(());
+        };
+        if depth > MAX_DEPTH {
+            bail!(
+                "mixin {first} sits deeper than {MAX_DEPTH} mixins from the sandbox; refusing to resolve further"
+            );
+        }
+        let mut next = Vec::new();
+        for reference in std::mem::take(&mut frontier) {
+            if seen.insert(reference)
+                && let Some(spec) = graph.get(reference)
+            {
+                next.extend(spec.mixins.iter().map(String::as_str));
+            }
+        }
+        frontier = next;
+        depth += 1;
+    }
+}
+
 /// Merge an ordered source list per §3.3.2: the last source to say something about a thing wins, and every keyed block unions by its key.
-pub fn merge(sources: &[Source]) -> Result<Merged> {
-    let mut contributions = Vec::new();
+pub fn merge(sources: &[Source]) -> Result<SandboxSpec> {
     let mut spec = SandboxSpec::default();
 
     for source in sources {
-        for (key, value) in &source.spec.env {
-            let replaced = spec.env.insert(key.clone(), value.clone());
-            record(
-                &mut contributions,
-                source,
-                "env",
-                key.clone(),
-                replaced.map(|_| ()),
-            );
-        }
+        spec.env
+            .extend(source.spec.env.iter().map(|(k, v)| (k.clone(), v.clone())));
         // Only a sandbox can carry the blocks that describe one launch; a mixin declaring one is refused at parse.
         if !source.spec.image.is_empty() {
             spec.image = source.spec.image.clone();
@@ -117,28 +140,10 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         }
     }
 
-    spec.credentials = fold(
-        sources,
-        "credentials",
-        |s| &s.credentials,
-        |c| c.env_var.clone(),
-        &mut contributions,
-    );
-    spec.tools = fold(
-        sources,
-        "tools",
-        |s| &s.tools,
-        |t| tool_name(t).to_string(),
-        &mut contributions,
-    );
-    (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions);
-    let ports = fold_labelled(
-        sources,
-        "ports",
-        |s| &s.ports,
-        |p| p.container.to_string(),
-        &mut contributions,
-    );
+    spec.credentials = fold(sources, |s| &s.credentials, |c| c.env_var.clone());
+    spec.tools = fold(sources, |s| &s.tools, |t| tool_name(t).to_string());
+    (spec.volumes, spec.filesets) = fold_mounts(sources);
+    let ports = fold_labelled(sources, |s| &s.ports, |p| p.container.to_string());
     refuse_a_host_port_two_sources_publish(&ports)?;
     spec.ports = ports.into_iter().map(|(port, _)| port).collect();
 
@@ -152,32 +157,11 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
             .egress
             .tcp
             .extend(source.spec.policy.egress.tcp.iter().cloned());
-        for rule in &source.spec.policy.egress.http {
-            record(
-                &mut contributions,
-                source,
-                "egress.http",
-                rule.match_pattern.clone(),
-                None,
-            );
-        }
-        for rule in &source.spec.policy.egress.tcp {
-            record(
-                &mut contributions,
-                source,
-                "egress.tcp",
-                rule.match_pattern.clone(),
-                None,
-            );
-        }
     }
 
     // The mixins are what produced this document, so the resolved one declares none of its own.
     spec.mixins = Vec::new();
-    Ok(Merged {
-        spec,
-        contributions,
-    })
+    Ok(spec)
 }
 
 /// A mount, whichever block claimed it: one target is one keyspace across `volumes` and `filesets`, so a later source's claim of either kind displaces an earlier source's claim of either kind.
@@ -186,45 +170,25 @@ enum Mount {
     Fileset(FilesetEntry),
 }
 
-fn fold_mounts(
-    sources: &[Source],
-    contributions: &mut Vec<Contribution>,
-) -> (Vec<Volume>, Vec<FilesetEntry>) {
+fn fold_mounts(sources: &[Source]) -> (Vec<Volume>, Vec<FilesetEntry>) {
     let mut order: Vec<String> = Vec::new();
-    let mut winners: BTreeMap<String, (Mount, String)> = BTreeMap::new();
-    let mut claim = |target: String, mount: Mount, block: &'static str, label: &str| {
-        let replaced = winners.insert(target.clone(), (mount, label.to_string()));
-        if replaced.is_none() {
-            order.push(target.clone());
+    let mut winners: BTreeMap<String, Mount> = BTreeMap::new();
+    let mut claim = |target: String, mount: Mount| {
+        if winners.insert(target.clone(), mount).is_none() {
+            order.push(target);
         }
-        contributions.push(Contribution {
-            source: label.to_string(),
-            block,
-            key: target,
-            replaced: replaced.map(|(_, held)| held),
-        });
     };
     for source in sources {
         for volume in &source.spec.volumes {
-            claim(
-                volume.target.clone(),
-                Mount::Volume(volume.clone()),
-                "volumes",
-                &source.label,
-            );
+            claim(volume.target.clone(), Mount::Volume(volume.clone()));
         }
         for fileset in &source.spec.filesets {
-            claim(
-                fileset.mount_path.clone(),
-                Mount::Fileset(fileset.clone()),
-                "filesets",
-                &source.label,
-            );
+            claim(fileset.mount_path.clone(), Mount::Fileset(fileset.clone()));
         }
     }
     let mut volumes = Vec::new();
     let mut filesets = Vec::new();
-    for (mount, _) in order
+    for mount in order
         .into_iter()
         .filter_map(|target| winners.remove(&target))
     {
@@ -250,12 +214,10 @@ fn tool_name(entry: &str) -> &str {
 /// Union one keyed block across every source, last-wins, in first-appearance order of the key so a reader sees the document's own entries before what a mixin added.
 fn fold<T: Clone>(
     sources: &[Source],
-    block: &'static str,
     items: fn(&SandboxSpec) -> &Vec<T>,
     key: fn(&T) -> String,
-    contributions: &mut Vec<Contribution>,
 ) -> Vec<T> {
-    fold_labelled(sources, block, items, key, contributions)
+    fold_labelled(sources, items, key)
         .into_iter()
         .map(|(item, _)| item)
         .collect()
@@ -264,26 +226,20 @@ fn fold<T: Clone>(
 /// [`fold`], keeping the source each winner came from, for a block whose winners still have to answer for one another.
 fn fold_labelled<T: Clone>(
     sources: &[Source],
-    block: &'static str,
     items: fn(&SandboxSpec) -> &Vec<T>,
     key: fn(&T) -> String,
-    contributions: &mut Vec<Contribution>,
 ) -> Vec<(T, String)> {
     let mut order: Vec<String> = Vec::new();
     let mut winners: BTreeMap<String, (T, String)> = BTreeMap::new();
     for source in sources {
-        for item in items(&source.spec) {
+        for item in items(source.spec) {
             let key = key(item);
-            let replaced = winners.insert(key.clone(), (item.clone(), source.label.clone()));
-            if replaced.is_none() {
-                order.push(key.clone());
+            if winners
+                .insert(key.clone(), (item.clone(), source.label.to_string()))
+                .is_none()
+            {
+                order.push(key);
             }
-            contributions.push(Contribution {
-                source: source.label.clone(),
-                block,
-                key,
-                replaced: replaced.map(|(_, label)| label),
-            });
         }
     }
     order
@@ -304,28 +260,6 @@ fn refuse_a_host_port_two_sources_publish(ports: &[(Port, String)]) -> Result<()
     Ok(())
 }
 
-fn record(
-    contributions: &mut Vec<Contribution>,
-    source: &Source,
-    block: &'static str,
-    key: String,
-    replaced: Option<()>,
-) {
-    let replaced = replaced.and_then(|()| {
-        contributions
-            .iter()
-            .rev()
-            .find(|c| c.block == block && c.key == key)
-            .map(|c| c.source.clone())
-    });
-    contributions.push(Contribution {
-        source: source.label.clone(),
-        block,
-        key,
-        replaced,
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,24 +275,96 @@ mod tests {
             .collect()
     }
 
-    fn labels(sources: &[Source]) -> Vec<&str> {
-        sources.iter().map(|s| s.label.as_str()).collect()
+    fn labels<'a>(sources: &[Source<'a>]) -> Vec<&'a str> {
+        sources.iter().map(|s| s.label).collect()
+    }
+
+    /// Four levels, five mixins each, every one naming all of the next level — the shape a stranger's artifact can hand the service.
+    fn wide_dag() -> (SandboxSpec, BTreeMap<String, SandboxSpec>) {
+        let level = |n: usize| -> Vec<String> { (0..5).map(|i| format!("l{n}-{i}")).collect() };
+        let names = |n: usize| -> String {
+            serde_json::to_string(&level(n)).expect("a reference list serializes")
+        };
+        let mut graph = BTreeMap::new();
+        for depth in 1..=4 {
+            let body = if depth == 4 {
+                r#"{"tools":["node@22"]}"#.to_string()
+            } else {
+                format!(r#"{{"mixins":{}}}"#, names(depth + 1))
+            };
+            for key in level(depth) {
+                graph.insert(key, spec(&body));
+            }
+        }
+        (
+            spec(&format!(r#"{{"image":"x:1","mixins":{}}}"#, names(1))),
+            graph,
+        )
+    }
+
+    /// Every source is named by the sandbox itself, so each sits one step away and no depth rule refuses the graph — and each also names the one before it, so the walk has a chain as long as the list to get down.
+    fn a_chain_the_sandbox_names_flat(
+        length: usize,
+    ) -> (SandboxSpec, BTreeMap<String, SandboxSpec>) {
+        let names: Vec<String> = (0..length).map(|i| format!("m{i}")).collect();
+        let graph = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let body = match i {
+                    0 => "{}".to_string(),
+                    _ => format!(r#"{{"mixins":["m{}"]}}"#, i - 1),
+                };
+                (name.clone(), spec(&body))
+            })
+            .collect();
+        let listed = serde_json::to_string(&names).expect("a reference list serializes");
+        (
+            spec(&format!(r#"{{"image":"x:1","mixins":{listed}}}"#)),
+            graph,
+        )
+    }
+
+    #[test]
+    fn a_long_chain_of_sources_costs_no_stack() {
+        let (root, graph) = a_chain_the_sandbox_names_flat(5_000);
+        let walked = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || flatten(&root, &[], &graph).map(|sources| sources.len()))
+            .expect("the walk gets its own thread")
+            .join()
+            .expect(
+                "a walk that takes a frame per source overflows the stack, and that aborts the service rather than refusing one run",
+            );
+        assert_eq!(
+            walked.expect("every reference resolves"),
+            5_001,
+            "the depth rule measures the shortest path, so a chain the sandbox names flat is legal however long it is"
+        );
+    }
+
+    #[test]
+    fn a_mixin_many_documents_reach_is_one_source_and_not_one_per_path() {
+        let (root, graph) = wide_dag();
+        let sources = flatten(&root, &[], &graph).expect("every reference resolves");
+        assert_eq!(
+            labels(&sources).len(),
+            1 + graph.len(),
+            "a source list built per path grows as a power of the fan-out, so this twenty-document graph would cost the service hundreds of spec copies to merge one document"
+        );
     }
 
     #[test]
     fn the_source_list_walks_the_document_then_its_mixins_then_the_flags() {
         let root = spec(r#"{"image":"x:1","mixins":["own"]}"#);
-        let sources = flatten(
-            &root,
-            &["first".into(), "second".into()],
-            &graph(&[
-                ("own", r#"{}"#),
-                ("first", r#"{"mixins":["firsts-own"]}"#),
-                ("firsts-own", r#"{}"#),
-                ("second", r#"{}"#),
-            ]),
-        )
-        .expect("every reference resolves");
+        let extra = ["first".to_string(), "second".to_string()];
+        let graph = graph(&[
+            ("own", r#"{}"#),
+            ("first", r#"{"mixins":["firsts-own"]}"#),
+            ("firsts-own", r#"{}"#),
+            ("second", r#"{}"#),
+        ]);
+        let sources = flatten(&root, &extra, &graph).expect("every reference resolves");
         assert_eq!(
             labels(&sources),
             [ROOT_LABEL, "own", "first", "firsts-own", "second"],
@@ -413,18 +419,22 @@ mod tests {
         );
     }
 
-    fn sources(entries: &[(&str, &str)]) -> Vec<Source> {
+    fn sources(entries: &[(&str, &str)]) -> Vec<(String, SandboxSpec)> {
         entries
             .iter()
-            .map(|(label, json)| Source {
-                label: (*label).to_string(),
-                spec: spec(json),
-            })
+            .map(|(label, json)| ((*label).to_string(), spec(json)))
             .collect()
     }
 
-    fn merged(sources: &[Source]) -> Merged {
-        merge(sources).expect("these sources resolve")
+    fn as_sources(owned: &[(String, SandboxSpec)]) -> Vec<Source<'_>> {
+        owned
+            .iter()
+            .map(|(label, spec)| Source { label, spec })
+            .collect()
+    }
+
+    fn merged(owned: &[(String, SandboxSpec)]) -> SandboxSpec {
+        merge(&as_sources(owned)).expect("these sources resolve")
     }
 
     #[test]
@@ -433,11 +443,8 @@ mod tests {
             ("base", r#"{"env":{"MODE":"research","KEEP":"1"}}"#),
             ("later", r#"{"env":{"MODE":"strict"}}"#),
         ]));
-        assert_eq!(
-            merged.spec.env.get("MODE").map(String::as_str),
-            Some("strict")
-        );
-        assert_eq!(merged.spec.env.get("KEEP").map(String::as_str), Some("1"));
+        assert_eq!(merged.env.get("MODE").map(String::as_str), Some("strict"));
+        assert_eq!(merged.env.get("KEEP").map(String::as_str), Some("1"));
     }
 
     #[test]
@@ -452,13 +459,10 @@ mod tests {
                 r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-later"}]}"#,
             ),
         ]));
-        assert_eq!(merged.spec.credentials.len(), 1);
-        assert_eq!(
-            merged.spec.credentials[0].placeholder,
-            "lns-placeholder-later"
-        );
+        assert_eq!(merged.credentials.len(), 1);
+        assert_eq!(merged.credentials[0].placeholder, "lns-placeholder-later");
         assert!(
-            merged.spec.credentials[0].injections.is_empty(),
+            merged.credentials[0].injections.is_empty(),
             "half of one entry and half of another would inject a placeholder the workload never holds"
         );
     }
@@ -469,7 +473,7 @@ mod tests {
             ("base", r#"{"tools":["node@20","python@3.12"]}"#),
             ("later", r#"{"tools":["node@22"]}"#),
         ]));
-        assert_eq!(merged.spec.tools, ["node@22", "python@3.12"]);
+        assert_eq!(merged.tools, ["node@22", "python@3.12"]);
     }
 
     #[test]
@@ -484,13 +488,10 @@ mod tests {
                 r#"{"volumes":[{"type":"volume","name":"later","target":"/cache"}],"filesets":[{"inline":{"a.md":"later"},"mountPath":"/notes"}]}"#,
             ),
         ]));
-        assert_eq!(merged.spec.volumes.len(), 1);
-        assert_eq!(merged.spec.volumes[0].source(), "later");
-        assert_eq!(merged.spec.filesets.len(), 1);
-        assert_eq!(
-            merged.spec.filesets[0].inline.as_ref().unwrap()["a.md"],
-            "later"
-        );
+        assert_eq!(merged.volumes.len(), 1);
+        assert_eq!(merged.volumes[0].source(), "later");
+        assert_eq!(merged.filesets.len(), 1);
+        assert_eq!(merged.filesets[0].inline.as_ref().unwrap()["a.md"], "later");
     }
 
     #[test]
@@ -506,19 +507,13 @@ mod tests {
             ),
         ]));
         assert!(
-            merged.spec.volumes.is_empty(),
+            merged.volumes.is_empty(),
             "one target is one keyspace across both blocks, and a document claiming it twice is one the parser itself refuses"
         );
-        assert_eq!(merged.spec.filesets.len(), 1);
-        let claim = merged
-            .contributions
-            .iter()
-            .find(|c| c.key == "/notes" && c.source == "later")
-            .expect("the winning claim is recorded");
         assert_eq!(
-            claim.replaced.as_deref(),
-            Some("base"),
-            "the disclosure has to name the volume the fileset displaced"
+            merged.filesets.len(),
+            1,
+            "the later source's fileset displaced the volume that held the target"
         );
     }
 
@@ -534,9 +529,9 @@ mod tests {
                 r#"{"volumes":[{"type":"volume","name":"later","target":"/notes"}]}"#,
             ),
         ]));
-        assert!(merged.spec.filesets.is_empty());
-        assert_eq!(merged.spec.volumes.len(), 1);
-        assert_eq!(merged.spec.volumes[0].source(), "later");
+        assert!(merged.filesets.is_empty());
+        assert_eq!(merged.volumes.len(), 1);
+        assert_eq!(merged.volumes[0].source(), "later");
     }
 
     #[test]
@@ -546,16 +541,10 @@ mod tests {
             ("second", r#"{"env":{"MODE":"b"}}"#),
             ("third", r#"{"env":{"MODE":"c"}}"#),
         ]));
-        assert_eq!(merged.spec.env.get("MODE").map(String::as_str), Some("c"));
-        let third = merged
-            .contributions
-            .iter()
-            .find(|c| c.source == "third")
-            .expect("the last writer is recorded");
         assert_eq!(
-            third.replaced.as_deref(),
-            Some("second"),
-            "a displacement names whoever held the key, not whoever set it first"
+            merged.env.get("MODE").map(String::as_str),
+            Some("c"),
+            "the last source to set a key wins, however many held it before"
         );
     }
 
@@ -565,19 +554,19 @@ mod tests {
             ("base", r#"{"ports":[{"container":8080,"host":18080}]}"#),
             ("later", r#"{"ports":[{"container":8080,"host":28080}]}"#),
         ]));
-        assert_eq!(merged.spec.ports.len(), 1);
-        assert_eq!(merged.spec.ports[0].host, Some(28080));
+        assert_eq!(merged.ports.len(), 1);
+        assert_eq!(merged.ports[0].host, Some(28080));
     }
 
     #[test]
     fn two_sources_publishing_one_host_port_refuse_the_resolution() {
-        let err = merge(&sources(&[
+        let err = merge(&as_sources(&sources(&[
             (
                 ROOT_LABEL,
                 r#"{"image":"x:1","ports":[{"container":8080,"host":18080}]}"#,
             ),
             ("later", r#"{"ports":[{"container":9090,"host":18080}]}"#),
-        ]))
+        ])))
         .unwrap_err();
         let message = format!("{err:#}");
         assert!(
@@ -595,7 +584,7 @@ mod tests {
             ("later", r#"{"ports":[{"container":8080,"host":18080}]}"#),
         ]));
         assert_eq!(
-            merged.spec.ports.len(),
+            merged.ports.len(),
             1,
             "the later entry replaced the earlier one by container, so one mapping holds the host port and nothing collides"
         );
@@ -609,7 +598,7 @@ mod tests {
             ("last", r#"{"ports":[{"container":9090,"host":18080}]}"#),
         ]));
         assert_eq!(
-            merged.spec.ports.len(),
+            merged.ports.len(),
             2,
             "the source that held 18080 was overridden off it, so the claim it no longer makes must not refuse a later one"
         );
@@ -627,7 +616,7 @@ mod tests {
                 r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
             ),
         ]));
-        let table = &merged.spec.policy.egress.http;
+        let table = &merged.policy.egress.http;
         assert_eq!(table.len(), 2, "both entries survive the union");
         assert_eq!(
             table[0].verdict,
@@ -648,15 +637,12 @@ mod tests {
                 r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}}}"#,
             ),
         ]));
-        let table = &merged.spec.policy.egress.tcp;
+        let table = &merged.policy.egress.tcp;
         assert_eq!(table.len(), 2);
-        assert_eq!(table[0].verdict, lns_policy::Verdict::Allow);
-        assert!(
-            merged
-                .contributions
-                .iter()
-                .any(|c| c.block == "egress.tcp" && c.source == "later"),
-            "a raw destination is disclosed like any other, so the merge has to record who asked for it"
+        assert_eq!(
+            table[0].verdict,
+            lns_policy::Verdict::Allow,
+            "a raw destination merges by the same rule, so the later source's entry decides"
         );
     }
 
@@ -670,7 +656,7 @@ mod tests {
             ("later", r#"{"tools":["node@22"]}"#),
         ]));
         assert_eq!(
-            merged.spec.connectors,
+            merged.connectors,
             ["some-provider"],
             "no mixin can name a connector, so resolution must not lose the list the sandbox itself carries"
         );
@@ -683,7 +669,6 @@ mod tests {
             r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}}"#,
         )]));
         let patterns: Vec<&str> = merged
-            .spec
             .policy
             .egress
             .http
@@ -701,7 +686,7 @@ mod tests {
     fn the_resolved_document_declares_no_mixins_of_its_own() {
         let merged = merged(&sources(&[("base", r#"{"image":"x:1","mixins":["own"]}"#)]));
         assert!(
-            merged.spec.mixins.is_empty(),
+            merged.mixins.is_empty(),
             "the mixins are what produced this document, so carrying them would ask a run to resolve them twice"
         );
     }
@@ -715,43 +700,11 @@ mod tests {
             ),
             ("later", r#"{"tools":["node@22"]}"#),
         ]));
-        assert_eq!(merged.spec.image, "x:1");
-        assert_eq!(merged.spec.command.as_deref(), Some("agent"));
-        assert_eq!(merged.spec.workdir.as_deref(), Some("/w"));
-        assert_eq!(merged.spec.user.as_deref(), Some("node"));
-        assert!(merged.spec.resources.is_some());
-    }
-
-    #[test]
-    fn a_contribution_names_its_source_and_what_it_displaced() {
-        let merged = merged(&sources(&[
-            ("base", r#"{"tools":["node@20"],"env":{"MODE":"research"}}"#),
-            ("later", r#"{"tools":["node@22"],"env":{"MODE":"strict"}}"#),
-        ]));
-        let tool = merged
-            .contributions
-            .iter()
-            .find(|c| c.block == "tools" && c.source == "later")
-            .expect("the winning tool is recorded");
-        assert_eq!(tool.key, "node");
-        assert_eq!(
-            tool.replaced.as_deref(),
-            Some("base"),
-            "the disclosure has to show what a source replaced, so an override nobody intended is visible while it can still be refused"
-        );
-        let env = merged
-            .contributions
-            .iter()
-            .find(|c| c.block == "env" && c.source == "later")
-            .expect("the winning env key is recorded");
-        assert_eq!(env.replaced.as_deref(), Some("base"));
-    }
-
-    #[test]
-    fn a_first_contribution_displaces_nothing() {
-        let merged = merged(&sources(&[("base", r#"{"tools":["node@20"]}"#)]));
-        assert_eq!(merged.contributions.len(), 1);
-        assert_eq!(merged.contributions[0].replaced, None);
+        assert_eq!(merged.image, "x:1");
+        assert_eq!(merged.command.as_deref(), Some("agent"));
+        assert_eq!(merged.workdir.as_deref(), Some("/w"));
+        assert_eq!(merged.user.as_deref(), Some("node"));
+        assert!(merged.resources.is_some());
     }
 
     #[test]
@@ -760,10 +713,10 @@ mod tests {
             "base",
             r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
         )]));
-        let json = serde_json::to_string(&merged.spec).expect("a merged spec serializes");
+        let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(
             serde_json::from_str::<SandboxSpec>(&json).expect("and decodes again"),
-            merged.spec,
+            merged,
             "the resolved document has to survive the trip to a disclosure and to the service, or the merge silently drops what it re-encoded badly"
         );
     }

@@ -62,6 +62,14 @@ fn definition_declaring(ids: &[&str]) -> String {
     )
 }
 
+/// The same launch path a scenario drives directly, exposed so a sibling step module can hand it an already-resolved plan.
+pub(crate) fn launch_resolved(
+    w: &mut BehaviourWorld,
+    resolved: anyhow::Result<lns_service::artifact::assembly::ResolvedSandbox>,
+) {
+    launch(w, resolved);
+}
+
 fn launch(
     w: &mut BehaviourWorld,
     resolved: anyhow::Result<lns_service::artifact::assembly::ResolvedSandbox>,
@@ -74,6 +82,7 @@ fn launch(
             return;
         }
     };
+    rig.tools = resolved.tools.clone();
     let declared = resolved
         .policy
         .as_ref()

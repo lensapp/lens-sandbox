@@ -144,3 +144,18 @@ Feature: distributing a sandbox
     Then the exit code is 0
     And only the sandbox artifact is pushed
     And the published sandbox config carries the hostPath unchanged
+
+  Scenario: pulling a published mixin caches the graph it layers on and asks nothing
+    Given the registry serves the mixin "ghcr.io/acme/obs-tools:2"
+    And sandbox input is non-interactive
+    When the user runs sandbox command "pull ghcr.io/acme/obs-tools:2"
+    Then the exit code is 0
+    And the output contains "pulled ghcr.io/acme/obs-tools:2"
+    And the output contains "cached 2 mixin(s) it layers on"
+    And the output does not contain "installer runs as root"
+
+  Scenario: a mixin the registry gives no digest for refuses the pull
+    Given the registry serves a mixin with no digest at "ghcr.io/acme/obs-tools:2"
+    When the user runs sandbox command "pull ghcr.io/acme/obs-tools:2"
+    Then the exit code is 1
+    And the output contains "did not provide a digest"

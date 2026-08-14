@@ -551,6 +551,62 @@ The trust model is pinning plus disclosure: a published sandbox whose fileset
 ref is not digest-pinned is refused, and what a sandbox ships is always
 visible in `lns inspect` before anything runs.
 
+### Mixins — what a sandbox layers on
+
+`spec.mixins` names documents this sandbox builds on. Each one is merged before
+the run plans anything, and what it contributes is enforced exactly like
+something the sandbox wrote itself:
+
+```yaml
+spec:
+  image: docker.io/library/debian:bookworm-slim
+  mixins:
+    - ./mixins/postgres-tools
+    - ghcr.io/acme/observability@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582
+```
+
+A mixin is a document of `kind: Mixin`. It may carry anything a sandbox can
+except the blocks that describe one launch — `image`, `command`, `workdir`,
+`user`, `resources` — and it may not name a connector.
+
+You publish one the same way you publish a sandbox, because it is the same kind
+of thing:
+
+```bash
+lns push ghcr.io/acme/observability:2 -f observability.yaml
+lns inspect ghcr.io/acme/observability:2   # what it carries, as written
+lns pull ghcr.io/acme/observability:2      # cache it and the mixins it names
+```
+
+**The last source to say something about a thing wins.** Sources are ordered:
+the sandbox first, then each entry in `spec.mixins` in order with that mixin's
+own mixins expanded right after it, then each `--mixin` the user passed.
+
+A directory entry is read from this machine, relative to the document that names
+it. A published sandbox may not name one — a consumer has no copy of your
+working directory — so `spec.mixins` in a document you `lns push` must be
+digest-pinned. `lns validate` reports a directory that holds no `lns.yaml`.
+
+You can add your own for a single run:
+
+```bash
+lns run . --mixin ./mixins/debug-tools
+lns run ghcr.io/acme/agent:1 --mixin ghcr.io/acme/observability:2
+```
+
+A directory merges only into a document this machine read, whoever names it — so
+`--mixin ./dir` works on a local run and is refused for a published sandbox.
+
+A `--mixin` may be a tag, where a document's entry may not. The run pins it
+before it reports it, so the summary names the exact bytes you approved:
+
+```
+  Mixins:    /work/mixins/debug-tools, observability:2 → ghcr.io/acme/observability@sha256:c41e8b7d…
+```
+
+`lns inspect <REF> --mixin <REF>` shows the same composition without starting a
+run.
+
 ### Tools — declared toolchains
 
 `spec.tools` names the developer tools the workload needs, without baking them

@@ -67,6 +67,29 @@ pub fn resolved_size(
     )
 }
 
+/// How the disclosure names each source: a reference the user typed as a tag reads as `typed -> pinned`, so what they approve names bytes without losing what they asked for.
+pub fn mixin_display(resolved: &[String], typed: &[String], pinned: &[String]) -> Vec<String> {
+    resolved
+        .iter()
+        .map(|entry| {
+            match typed
+                .iter()
+                .zip(pinned)
+                .find(|(typed, pin)| *pin == entry && *typed != entry)
+            {
+                Some((typed, _)) => format!("{typed} \u{2192} {entry}"),
+                None => entry.clone(),
+            }
+        })
+        .collect()
+}
+
+/// What the mixin flags become once the preflight has answered: the run carries the digests it pinned, and the summary shows each beside the reference the user typed. A typed reference goes no further than this, so the boot can only merge bytes the disclosure named.
+pub fn adopt_pinned_mixins(args: &mut RunArgs, resolved: &[String], pinned: &[String]) {
+    args.resolved_mixins = mixin_display(resolved, &args.mixins, pinned);
+    args.mixins = pinned.to_vec();
+}
+
 pub fn print_run_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
@@ -108,6 +131,9 @@ pub fn format_summary(
     }
     if !args.tools.is_empty() {
         writeln!(s, "  Tools:     {}", args.tools.join(", ")).unwrap();
+    }
+    if !args.resolved_mixins.is_empty() {
+        writeln!(s, "  Mixins:    {}", args.resolved_mixins.join(", ")).unwrap();
     }
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
@@ -366,6 +392,8 @@ mod tests {
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
+            mixins: Vec::new(),
+            resolved_mixins: Vec::new(),
             image: image.map(str::to_string),
             file: None,
             name: None,
@@ -495,6 +523,7 @@ mod tests {
     fn pulled_fileset_summaries_disclose_inline_source_and_root_owner() {
         let view = lns_ipc::SandboxView {
             mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:latest".into(),
             digest: "sha256:abc".into(),
             image: "registry.example.test/runtime:1".into(),
@@ -539,6 +568,108 @@ mod tests {
             format!("reg/skills@sha256:{}é…", "a".repeat(11)),
             "a crafted pulled fileset digest must truncate by chars, never panic on a byte boundary"
         );
+    }
+
+    #[test]
+    fn a_digest_the_user_typed_reads_once_rather_than_pointing_at_itself() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        assert_eq!(
+            mixin_display(
+                std::slice::from_ref(&pinned),
+                std::slice::from_ref(&pinned),
+                std::slice::from_ref(&pinned),
+            ),
+            [pinned],
+            "a user who typed the digest already sees the bytes, so repeating it either side of an arrow says nothing"
+        );
+    }
+
+    #[test]
+    fn a_tag_the_user_named_reads_as_the_tag_and_the_digest_it_pinned_to() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        let declared = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
+        let shown = mixin_display(
+            &[declared.clone(), pinned.clone()],
+            &["obs-tools:2".to_string()],
+            std::slice::from_ref(&pinned),
+        );
+        assert_eq!(
+            shown,
+            [declared, format!("obs-tools:2 \u{2192} {pinned}")],
+            "the user approves bytes, but a line that dropped the tag they typed would not tell them which flag produced it"
+        );
+    }
+
+    #[test]
+    fn a_tag_the_user_typed_never_travels_further_than_the_preflight() {
+        let pinned = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
+        let mut args = run_args(Some("prism"));
+        args.mixins = vec!["obs-tools:2".to_string()];
+        adopt_pinned_mixins(
+            &mut args,
+            std::slice::from_ref(&pinned),
+            std::slice::from_ref(&pinned),
+        );
+        assert_eq!(
+            args.mixins,
+            std::slice::from_ref(&pinned),
+            "the run merges the digest the preflight showed; a tag reaching the service could move between the disclosure and the merge, and the service refuses one outright"
+        );
+        assert_eq!(
+            args.resolved_mixins,
+            [format!("obs-tools:2 \u{2192} {pinned}")],
+            "the tag survives in the disclosure alone, so the user still sees which flag produced this digest"
+        );
+    }
+
+    #[test]
+    fn a_run_that_named_no_mixin_carries_none_after_the_preflight() {
+        let mut args = run_args(Some("prism"));
+        adopt_pinned_mixins(&mut args, &[], &[]);
+        assert!(args.mixins.is_empty());
+        assert!(
+            args.resolved_mixins.is_empty(),
+            "a sandbox that resolved nothing must not read as a composed one"
+        );
+    }
+
+    #[test]
+    fn a_mixin_only_the_document_declared_is_disclosed_without_being_carried() {
+        let declared = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
+        let mut args = run_args(Some("prism"));
+        adopt_pinned_mixins(&mut args, std::slice::from_ref(&declared), &[]);
+        assert_eq!(
+            args.resolved_mixins,
+            [declared],
+            "the document's own mixins are what the summary names"
+        );
+        assert!(
+            args.mixins.is_empty(),
+            "the service resolves a document's own mixins from the document, so sending them back would merge each source twice"
+        );
+    }
+
+    #[test]
+    fn the_mixins_line_names_what_a_composed_sandbox_resolved_into() {
+        let mut args = run_args(Some("prism"));
+        args.resolved_mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()];
+        let s = summary_of(
+            &args,
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(
+            s.contains("Mixins:    ghcr.io/acme/postgres-tools@sha256:c41e8b7d"),
+            "the resolved document declares no mixins of its own, so without this line a composed sandbox reads as an authored one and a tool the user did not expect has nowhere to be traced to; got: {s}"
+        );
+        let authored = summary_of(
+            &run_args(Some("prism")),
+            &Policy::default(),
+            Path::new("./lns-policy.yaml"),
+            &PolicySource::FoundInCwd,
+        );
+        assert!(!authored.contains("Mixins:"), "got: {authored}");
     }
 
     #[test]

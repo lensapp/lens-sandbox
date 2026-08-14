@@ -5,6 +5,8 @@ pub mod audit;
 pub mod credential_boot;
 pub mod fileset;
 pub mod inspect;
+pub mod mixin;
+pub mod mixin_dir;
 pub mod policy;
 pub mod real;
 pub mod resources;
@@ -20,7 +22,10 @@ pub enum RunPath {
     Sandbox,
 }
 
-pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) -> Result<RunPath> {
+pub fn dispatch(
+    artifact_type: Option<&str>,
+    config_media_type: Option<&str>,
+) -> Result<Option<Kind>> {
     let artifact_type = artifact_type.filter(|t| !t.is_empty());
     let config_media_type = config_media_type.filter(|t| !t.is_empty());
     // Fall back to the config-blob media type only when artifactType is absent (the oras case), never to second-guess a present-but-unrecognized one.
@@ -28,19 +33,13 @@ pub fn dispatch(artifact_type: Option<&str>, config_media_type: Option<&str>) ->
         Some(t) => Kind::from_artifact_type(t),
         None => config_media_type.and_then(Kind::from_config_media_type),
     };
-    match kind {
-        Some(Kind::Sandbox) => Ok(RunPath::Sandbox),
-        Some(other) => bail!(
-            "a {} artifact is not directly runnable; lns run takes a published sandbox",
-            other.as_str()
+    match (kind, artifact_type) {
+        (Some(kind), _) => Ok(Some(kind)),
+        (None, Some(unknown)) => bail!(
+            "unsupported artifact type {unknown}; \
+             lns run launches a sandbox"
         ),
-        None => match artifact_type {
-            Some(unknown) => bail!(
-                "unsupported artifact type {unknown}; \
-                 lns run launches a sandbox"
-            ),
-            None => Ok(RunPath::SingleImage),
-        },
+        (None, None) => Ok(None),
     }
 }
 
@@ -51,7 +50,14 @@ pub fn dispatch_run(
     reference: &str,
     verify: bool,
 ) -> Result<RunPath> {
-    let path = dispatch(artifact_type, config_media_type)?;
+    let path = match dispatch(artifact_type, config_media_type)? {
+        Some(Kind::Sandbox) => RunPath::Sandbox,
+        Some(other) => bail!(
+            "a {} artifact is not directly runnable; lns run takes a published sandbox",
+            other.as_str()
+        ),
+        None => RunPath::SingleImage,
+    };
     if verify && path == RunPath::SingleImage {
         bail!(
             "{reference} is not a sandbox; run `lns init` to author an lns.yaml, \
@@ -166,31 +172,35 @@ pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
     problems
 }
 
-/// A document may declare the mixins it layers on, but nothing resolves them yet — so a run refuses rather than booting a sandbox without the capabilities its own document names.
-pub fn refuse_unresolved_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
-    if def.spec.mixins.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "this sandbox declares mixins ({}) and startup resolution is not implemented yet; \
-         remove them, or inline what they contribute, to run it today",
-        def.spec.mixins.join(", ")
-    )
-}
-
 /// Plan a published sandbox's config blob: the one place the pulled path turns a document into a run, so every guard between the two applies to a stranger's artifact as much as to a local file.
 pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .with_context(|| format!("parsing published sandbox {image_ref}"))?;
-    refuse_unresolved_mixins(&def)?;
+    if !def.spec.mixins.is_empty() {
+        anyhow::bail!(
+            "published sandbox {image_ref} reached the plan without being resolved; it still declares mixins ({}), and running it now would drop what they contribute",
+            def.spec.mixins.join(", ")
+        );
+    }
     Ok(resolved_from_sandbox(&def))
+}
+
+/// Resolution is what empties this list, so a definition still carrying one never went through it and would boot without what its mixins contribute.
+pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
+    if def.spec.mixins.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this definition reached the plan without being resolved; it still declares mixins ({})",
+        def.spec.mixins.join(", ")
+    )
 }
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
 pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
-    refuse_unresolved_mixins(&def)?;
+    refuse_unresolved_local_mixins(&def)?;
     Ok(resolved_from_sandbox(&def))
 }
 
@@ -250,7 +260,7 @@ mod tests {
 
     #[test]
     fn an_empty_artifact_type_and_config_type_is_treated_as_a_plain_image() {
-        assert_eq!(dispatch(Some(""), Some("")).unwrap(), RunPath::SingleImage);
+        assert_eq!(dispatch(Some(""), Some("")).unwrap(), None);
     }
 
     #[test]
@@ -329,11 +339,28 @@ mod tests {
     }
 
     #[test]
+    fn a_published_document_reaching_the_plan_unresolved_refuses_rather_than_dropping_its_mixins() {
+        let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
+        let err = plan_published_sandbox(
+            format!(
+                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{pinned}"]}}}}"#
+            )
+            .as_bytes(),
+            "registry.example.test/team/sandbox:1",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reached the plan without being resolved"),
+            "resolution is what empties this list, so a document that still carries one never went through it and would boot without what its mixins contribute; got: {err:#}"
+        );
+    }
+
+    #[test]
     fn dispatch_runs_a_published_sandbox_artifact_directly() {
         let sandbox_type = Kind::Sandbox.artifact_type();
         assert_eq!(
             dispatch(Some(&sandbox_type), None).unwrap(),
-            RunPath::Sandbox
+            Some(Kind::Sandbox)
         );
         assert_eq!(
             dispatch_run(Some(&sandbox_type), None, "ghcr.io/team/hermes:1", true).unwrap(),

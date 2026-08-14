@@ -514,9 +514,16 @@ fn warn_if_tools_unprovisioned(
     vec![warning]
 }
 
-pub struct PullOutcome {
-    pub image: lns_ipc::ImageInfo,
-    pub warnings: Vec<String>,
+pub enum PullOutcome {
+    Sandbox {
+        image: lns_ipc::ImageInfo,
+        warnings: Vec<String>,
+    },
+    Mixin {
+        reference: String,
+        digest: String,
+        cached_mixins: usize,
+    },
 }
 
 fn verify_consented_digest(image: &str, expected: &str, actual: &str) -> Result<()> {
@@ -536,26 +543,29 @@ async fn finish_pull_with<F: Fs>(
     image: &str,
     shared: tokio::sync::RwLockReadGuard<'_, ()>,
     pre_provision: impl std::future::Future<Output = Result<(), crate::tools::ProvisionError>>,
-) -> Result<PullOutcome> {
+) -> Result<(lns_ipc::ImageInfo, Vec<String>)> {
     let image_info = pull_with(fs, images_root, record, active).await?;
     drop(shared);
     let warnings = warn_if_tools_unprovisioned(image, pre_provision.await);
-    Ok(PullOutcome {
-        image: image_info,
-        warnings,
-    })
+    Ok((image_info, warnings))
 }
 
 pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let artifact = crate::image::pull_sandbox(image).await?;
+    let artifact = match crate::image::pull_kit(image).await? {
+        crate::image::PulledKit::Sandbox(artifact) => artifact,
+        crate::image::PulledKit::Mixin(mixin) => {
+            verify_consented_digest(image, expected_digest, &mixin.digest)?;
+            return pull_mixin_graph(image, mixin).await;
+        }
+    };
     verify_consented_digest(image, expected_digest, &artifact.digest)?;
     let shared = lock_shared().await;
     let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
     let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
-    finish_pull_with(
+    let (image_info, warnings) = finish_pull_with(
         &real::RealFs,
         &images_root()?,
         &record,
@@ -564,7 +574,24 @@ pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
         shared,
         crate::tools::real::pre_provision_for_pull(&artifact, &base_image),
     )
-    .await
+    .await?;
+    Ok(PullOutcome::Sandbox {
+        image: image_info,
+        warnings,
+    })
+}
+
+/// A mixin is config-only, so pulling one warms the manifest cache for it and every mixin it names — that is what lets a digest-pinned graph resolve offline afterwards. It records no index entry: nothing runs it, and nothing has to reclaim it.
+async fn pull_mixin_graph(image: &str, mixin: crate::image::PulledMixin) -> Result<PullOutcome> {
+    let cached =
+        crate::artifact::mixin::warm(&mixin.mixins, &crate::artifact::real::RegistryMixins)
+            .await
+            .with_context(|| format!("caching the mixins {image} layers on"))?;
+    Ok(PullOutcome::Mixin {
+        reference: image.to_string(),
+        digest: mixin.digest,
+        cached_mixins: cached,
+    })
 }
 
 #[cfg(test)]
@@ -861,14 +888,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(outcome.image.reference, record.reference);
+        let (image, warnings) = outcome;
+        assert_eq!(image.reference, record.reference);
         assert!(
-            outcome.warnings.iter().any(|warning| warning
-                .contains("the version index is unreachable")
-                && warning.contains("the first run will retry tool provisioning")
-                && !warning.contains("needs the network")),
-            "the successful pull must carry its offline-readiness warning: {:?}",
-            outcome.warnings
+            warnings.iter().any(
+                |warning| warning.contains("the version index is unreachable")
+                    && warning.contains("the first run will retry tool provisioning")
+                    && !warning.contains("needs the network")
+            ),
+            "the successful pull must carry its offline-readiness warning: {warnings:?}",
         );
         assert!(
             fs.has(&record_path(Path::new(ROOT), &record.reference)),

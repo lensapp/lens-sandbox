@@ -810,13 +810,21 @@ lns run claude --mixin xyz --mixin zyx    # the user adds two more, in flag orde
 
 | Source | Written by | Reference form |
 |---|---|---|
-| [`spec.mixins`](#319-mixins) | The sandbox's author | MUST be digest-pinned. A published sandbox has to resolve to the same thing for everyone. |
-| `--mixin <ref>` | The user, per run | Resolves like a sandbox reference — a tag is fine, and preflight pins and shows the digest before boot. |
+| [`spec.mixins`](#319-mixins) | The sandbox's author | A local directory, or an OCI reference that MUST be digest-pinned. A published sandbox has to resolve to the same thing for everyone. |
+| `--mixin <ref>` | The user, per run | A local directory, or a reference that resolves like a sandbox reference — a tag is fine, and preflight pins and shows the digest before boot. |
 
 The asymmetry is the same one that governs a sandbox reference itself. A digest
 inside a published document is what makes it reproducible for a stranger; a
 reference the user types is their own live choice, and they see what it resolved
 to.
+
+A directory names a file on one machine, so it merges only into a document that
+machine read. A published sandbox MUST NOT name one — a consumer has no copy of
+the author's working directory — and neither may a `--mixin` on a published run.
+A declared entry roots at the directory of the document that named it; a
+`--mixin` roots where the user typed it, since no document names one. Either
+way its folded absolute path is its identity: what the graph keys on, and what
+the disclosure shows.
 
 Either way the mixin is pulled, merged, and shown in the resolved sandbox the run
 presents for approval ([§1.5](#15-one-disclosure)). A `--mixin` is not a way to
@@ -882,8 +890,15 @@ contributed and what it replaced, so an override nobody intended is visible whil
 it can still be refused ([§1.5](#15-one-disclosure)).
 
 - **A mixin MAY declare mixins.** Resolution walks the graph to a depth of **5**
-  and refuses beyond it. A cycle — a mixin reachable from itself — refuses the run;
-  digest-pinned references make one detectable by identity.
+  and refuses beyond it, measured by the shortest path that reaches a source —
+  so a mixin one document names deep does not refuse a graph another names
+  shallow. A cycle — a mixin reachable from itself — refuses the run; a
+  digest-pinned reference and a directory's folded absolute path both make one
+  detectable by identity.
+- **A source many documents name is one source.** It merges at the last place
+  the order names it, and the disclosure names it once. An earlier appearance
+  can decide nothing the last one does not: either a source after it sets a key,
+  or the source itself sets it again.
 - **Winning a merge is not a way past the developer.** A mixin's entries are
   enforced like any other, so what stops a mixin from quietly widening a run is
   disclosure: the resolved sandbox it produced is what the developer approves
@@ -1083,8 +1098,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
   placeholder self-identifies as fake and is at least 16 characters.
 - **Mixin**: no `image`, `command`, `workdir`, `user`, or `resources`; every
-  reference in
-  a document's `mixins` is digest-pinned.
+  entry in a document's `mixins` is a local directory or a digest-pinned OCI
+  reference, and a document that publishes carries no directory.
 
 Offline validation checks one document in isolation. Four checks cannot run
 there, because they depend on state no document carries — they run at launch:
@@ -1116,8 +1131,12 @@ another on the consumer's: a directory that exists only beside the author's file
 and a version that moves next week. Two surfaces stay unresolved, on purpose:
 
 - **`mixins[]` publishes as written.** Resolution is a startup concern
-  ([§1.5](#15-one-disclosure)). The reference is already digest-pinned, so there
-  is nothing for publish to pin.
+  ([§1.5](#15-one-disclosure)), and the reference is already digest-pinned, so
+  there is nothing for publish to pin. A directory entry is the one thing publish
+  refuses outright ([§3.3.1](#331-how-a-mixin-enters-a-run)): unlike a fileset
+  `path`, there is nothing to pack — it names a document the consumer resolves
+  for themselves, and no transform can make that mean the same thing on their
+  machine.
 - **A `%` share stays a share.** It resolves against the consumer's host, which
   is the entire point of writing one ([§3.1.5](#315-resources)).
 

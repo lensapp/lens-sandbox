@@ -213,6 +213,13 @@ pub struct SandboxInspectArgs {
         help = "Definition file to render instead of ./lns.yaml, offline. Cannot be combined with TARGET."
     )]
     pub file: Option<PathBuf>,
+
+    #[arg(
+        long = "mixin",
+        value_name = "REF",
+        help = "Resolve this mixin into the sandbox before rendering it, as `lns run --mixin` would. Repeatable."
+    )]
+    pub mixins: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -472,7 +479,7 @@ where
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
             };
-            inspect(svc, target, registry, out).await
+            inspect(svc, target, registry, &args.mixins, out).await
         }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -501,14 +508,20 @@ where
     let inspection = svc
         .one_shot(Request::InspectImage {
             image: args.reference.clone(),
+            mixins: Vec::new(),
         })
         .await?;
+    // A mixin pull installs nothing: it caches documents, so there is no effect to consent to and its tools are disclosed where they are installed.
     let (digest, tools) = match inspection {
         Response::ImageInspected {
             inspection: lns_ipc::ArtifactInspection::Sandbox(view),
         } if !view.digest.is_empty() => (view.digest, view.tools),
         Response::ImageInspected {
-            inspection: lns_ipc::ArtifactInspection::Sandbox(_),
+            inspection: lns_ipc::ArtifactInspection::Mixin(view),
+        } if !view.digest.is_empty() => (view.digest, Vec::new()),
+        Response::ImageInspected {
+            inspection:
+                lns_ipc::ArtifactInspection::Mixin(_) | lns_ipc::ArtifactInspection::Sandbox(_),
         } => bail!(
             "the registry did not provide a digest for {}",
             args.reference
@@ -542,6 +555,18 @@ where
         })
         .await?;
     match response {
+        Response::MixinPulled {
+            reference,
+            digest,
+            cached_mixins,
+        } => {
+            writeln!(out, "pulled {reference}")?;
+            writeln!(out, "digest: {digest}")?;
+            if cached_mixins > 0 {
+                writeln!(out, "cached {cached_mixins} mixin(s) it layers on")?;
+            }
+            Ok(0)
+        }
         Response::ImagePulled { image, warnings } => {
             writeln!(out, "pulled {}", image.reference)?;
             writeln!(out, "digest: {}", image.digest)?;
@@ -880,10 +905,21 @@ async fn prune<W: std::io::Write>(
     }
 }
 
+/// `--mixin` composes a document before it boots, and neither a run that has already booted nor a file rendered offline can honour it.
+pub fn refuse_mixins_unless_published(mixins: &[String]) -> Result<()> {
+    if mixins.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "--mixin applies to a sandbox reference: a live run has already booted with what it merged, and a local definition renders offline, without resolving anything"
+    )
+}
+
 async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
     target: &str,
     registry: Option<&str>,
+    mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
     match svc
@@ -893,6 +929,7 @@ async fn inspect<W: std::io::Write>(
         .await?
     {
         Response::RunInspect { details } => {
+            refuse_mixins_unless_published(mixins)?;
             let policy = details
                 .config
                 .policy_path
@@ -904,7 +941,7 @@ async fn inspect<W: std::io::Write>(
         // A reference the service knows no run for is a cached artifact; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
             let reference = crate::config::resolve_default_registry(target, registry);
-            inspect_cached(svc, &reference, out).await
+            inspect_cached(svc, &reference, mixins, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -914,16 +951,18 @@ async fn inspect<W: std::io::Write>(
 async fn inspect_cached<W: std::io::Write>(
     svc: &impl SandboxService,
     reference: &str,
+    mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
     match svc
         .one_shot(Request::InspectImage {
             image: reference.to_string(),
+            mixins: mixins.to_vec(),
         })
         .await?
     {
         Response::ImageInspected { inspection } => {
-            render_cached_inspect(&inspection, out)?;
+            render_cached_inspect(&inspection, mixins, out)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -933,6 +972,7 @@ async fn inspect_cached<W: std::io::Write>(
 
 fn render_cached_inspect<W: std::io::Write>(
     inspection: &lns_ipc::ArtifactInspection,
+    typed: &[String],
     out: &mut W,
 ) -> Result<()> {
     match inspection {
@@ -943,7 +983,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
-            for mixin in &view.mixins {
+            for mixin in
+                crate::run::summary::mixin_display(&view.mixins, typed, &view.pinned_mixins)
+            {
                 writeln!(out, "mixin: {mixin}")?;
             }
             if let Some(user) = &view.user {
@@ -955,31 +997,37 @@ fn render_cached_inspect<W: std::io::Write>(
             for entry in &view.env {
                 writeln!(out, "env: {entry}")?;
             }
-            for mount in &view.mounts {
-                let kind = match mount.kind {
-                    lns_ipc::SandboxMountKind::Bind => "bind",
-                    lns_ipc::SandboxMountKind::Volume => "volume",
-                };
-                let mode = if mount.read_only { " (read-only)" } else { "" };
-                writeln!(
-                    out,
-                    "mount: {kind} {} -> {}{mode}",
-                    mount.source, mount.target
-                )?;
-            }
+            render_mounts(out, &view.mounts)?;
             if !view.ports.is_empty() {
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
-            for fileset in &view.filesets {
-                let source = crate::run::summary::fileset_view_source_display(fileset);
-                let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
-                writeln!(
-                    out,
-                    "fileset: {source} -> {} (owner: {owner})",
-                    fileset.mount_path
-                )?;
-            }
+            render_filesets(out, &view.filesets)?;
             render_connectors(out, &view.connectors)?;
+            for credential in &view.credentials {
+                writeln!(out, "credential: {}", credential_disclosure(credential))?;
+            }
+            for tool in &view.tools {
+                writeln!(out, "tool: {tool}")?;
+            }
+            render_policy_flags(out, &view.policy_flags)?;
+        }
+        lns_ipc::ArtifactInspection::Mixin(view) => {
+            writeln!(out, "kind: Mixin")?;
+            writeln!(out, "reference: {}", view.reference)?;
+            if !view.digest.is_empty() {
+                writeln!(out, "digest: {}", view.digest)?;
+            }
+            for mixin in &view.mixins {
+                writeln!(out, "mixin: {mixin}")?;
+            }
+            for entry in &view.env {
+                writeln!(out, "env: {entry}")?;
+            }
+            render_mounts(out, &view.mounts)?;
+            if !view.ports.is_empty() {
+                writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
+            }
+            render_filesets(out, &view.filesets)?;
             for credential in &view.credentials {
                 writeln!(out, "credential: {}", credential_disclosure(credential))?;
             }
@@ -993,6 +1041,39 @@ fn render_cached_inspect<W: std::io::Write>(
             writeln!(out, "reference: {}", view.reference)?;
             writeln!(out, "digest: {}", view.digest)?;
         }
+    }
+    Ok(())
+}
+
+/// One renderer for both kinds, since a mixin's mounts read exactly as a sandbox's do.
+fn render_mounts<W: std::io::Write>(out: &mut W, mounts: &[lns_ipc::SandboxMount]) -> Result<()> {
+    for mount in mounts {
+        let kind = match mount.kind {
+            lns_ipc::SandboxMountKind::Bind => "bind",
+            lns_ipc::SandboxMountKind::Volume => "volume",
+        };
+        let mode = if mount.read_only { " (read-only)" } else { "" };
+        writeln!(
+            out,
+            "mount: {kind} {} -> {}{mode}",
+            mount.source, mount.target
+        )?;
+    }
+    Ok(())
+}
+
+fn render_filesets<W: std::io::Write>(
+    out: &mut W,
+    filesets: &[lns_ipc::SandboxFileset],
+) -> Result<()> {
+    for fileset in filesets {
+        let source = crate::run::summary::fileset_view_source_display(fileset);
+        let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
+        writeln!(
+            out,
+            "fileset: {source} -> {} (owner: {owner})",
+            fileset.mount_path
+        )?;
     }
     Ok(())
 }
@@ -1294,6 +1375,7 @@ mod tests {
         Response::ImageInspected {
             inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
+                pinned_mixins: Vec::new(),
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
@@ -1440,6 +1522,7 @@ mod tests {
             SandboxCommand::Validate(SandboxValidateArgs { file: None }),
             SandboxCommand::Inspect(SandboxInspectArgs {
                 run: None,
+                mixins: Vec::new(),
                 file: None,
             }),
         ] {
@@ -1539,7 +1622,7 @@ mod tests {
         assert!(matches!(
             svc.requests.lock().unwrap().as_slice(),
             [
-                Request::InspectImage { image },
+                Request::InspectImage { image, .. },
                 Request::PullImage {
                     image: pulled,
                     expected_digest
@@ -2038,10 +2121,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_of_a_live_run_refuses_a_mixin_rather_than_ignoring_it() {
+        let svc = CannedService::new(Response::RunInspect {
+            details: Box::new(RunDetails {
+                summary: lns_ipc::RunSummary {
+                    id: "1a2b3c4d0000000000000000000000aa".into(),
+                    name: "reviewer".into(),
+                    image: "some-image".into(),
+                    command: String::new(),
+                    status: lns_ipc::RunStatus::Running,
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                config: lns_ipc::RunConfig {
+                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    ..Default::default()
+                },
+            }),
+        });
+        let mut out = Vec::new();
+        let err = inspect(&svc, "1", None, &["ghcr.io/acme/obs:2".to_string()], &mut out)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--mixin applies to a sandbox reference"),
+            "a live run has already booted, so rendering it as though the flag applied would describe a composition that never ran; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", None, &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", None, &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2051,7 +2162,7 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", None, &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", None, &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
@@ -2064,6 +2175,7 @@ mod tests {
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                     mixins: Vec::new(),
+                    pinned_mixins: Vec::new(),
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2083,7 +2195,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(&svc, "hermes:1.4.0", None, &mut out).await.unwrap();
+        let code = inspect(&svc, "hermes:1.4.0", None, &[], &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Sandbox"), "got: {text}");
@@ -2109,7 +2221,7 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        inspect(&image, "x", None, &mut out).await.unwrap();
+        inspect(&image, "x", None, &[], &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
@@ -2124,7 +2236,7 @@ mod tests {
             Response::Pong,
         );
         let mut out = Vec::new();
-        let err = inspect(&svc, "x", None, &mut out).await.unwrap_err();
+        let err = inspect(&svc, "x", None, &[], &mut out).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2134,7 +2246,7 @@ mod tests {
             message: "daemon busy".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "reviewer", None, &mut out).await.unwrap_err();
+        let err = inspect(&svc, "reviewer", None, &[], &mut out).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("daemon busy"),
             "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
@@ -2566,7 +2678,7 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, "1", None, &mut out).await.unwrap();
+        let code = inspect(&svc, "1", None, &[], &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

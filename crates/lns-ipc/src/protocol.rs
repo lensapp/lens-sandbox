@@ -88,8 +88,18 @@ pub enum Request {
         image: String,
     },
     PruneImages,
+    /// Resolve a local definition's mixins, since only the service can pull a reference and read a directory the same way a run will.
+    ResolveDefinition {
+        definition: String,
+        project_dir: String,
+        #[serde(default)]
+        mixins: Vec<String>,
+    },
     InspectImage {
         image: String,
+        /// The mixin references the user named on the command line, in flag order, so the preflight describes the document that will boot.
+        #[serde(default)]
+        mixins: Vec<String>,
     },
     TagImage {
         from: String,
@@ -200,6 +210,12 @@ pub enum Response {
         image: ImageInfo,
         warnings: Vec<String>,
     },
+    /// A pulled mixin has no index entry: nothing runs it and nothing has to reclaim it, so the answer is what was cached rather than a row.
+    MixinPulled {
+        reference: String,
+        digest: String,
+        cached_mixins: usize,
+    },
     ImageList {
         images: Vec<ImageInfo>,
     },
@@ -213,6 +229,14 @@ pub enum Response {
     },
     ImageInspected {
         inspection: ArtifactInspection,
+    },
+    DefinitionResolved {
+        /// The merged document, which declares no mixins of its own.
+        definition: String,
+        /// Every source the merge reached, as the disclosure names them.
+        mixins: Vec<String>,
+        /// What each mixin the user named resolved to, in the order they named them.
+        pinned_mixins: Vec<String>,
     },
     ImageTagged {
         from: String,
@@ -257,6 +281,7 @@ pub struct ImageInfo {
 pub enum ArtifactInspection {
     Image(ImageView),
     Sandbox(Box<SandboxView>),
+    Mixin(Box<MixinView>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,15 +290,43 @@ pub struct ImageView {
     pub digest: String,
 }
 
+/// A published mixin as its author wrote it: everything a sandbox may carry except the blocks that describe one launch, which a mixin may not declare.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixinView {
+    pub reference: String,
+    #[serde(default)]
+    pub digest: String,
+    /// The mixins this one declares, as written — a published mixin is shown unresolved, since what its graph merges to is a launch-time answer.
+    #[serde(default)]
+    pub mixins: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<SandboxMount>,
+    #[serde(default)]
+    pub ports: Vec<SandboxPort>,
+    #[serde(default)]
+    pub filesets: Vec<SandboxFileset>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub credentials: Vec<lns_spec::Credential>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub policy_flags: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxView {
     pub reference: String,
     #[serde(default)]
     pub digest: String,
     pub image: String,
-    /// The mixins the document declares, so a reader sees the capabilities it layers on before trusting it.
+    /// The mixins this sandbox resolved into, since the merged document declares none of its own.
     #[serde(default)]
     pub mixins: Vec<String>,
+    /// What each mixin the user named resolved to, in the order they named them, so the run boots the bytes its preflight pinned.
+    #[serde(default)]
+    pub pinned_mixins: Vec<String>,
     #[serde(default)]
     pub workdir: Option<String>,
     /// The run-as user the sandbox declared, so a pulled artifact asking for root is visible before it boots.
@@ -457,6 +510,9 @@ pub struct RunImageArgs {
     pub image: Option<String>,
     #[serde(default)]
     pub resolved_image: Option<String>,
+    /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
+    #[serde(default)]
+    pub mixins: Vec<String>,
     #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
@@ -515,12 +571,18 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
+/// Splits a `:ro`/`:rw` suffix off a mount spec, so the two parsers cannot drift on which suffixes mean read-only.
+fn split_read_only(spec: &str) -> (&str, bool) {
+    let body = spec
+        .strip_suffix(":ro")
+        .or_else(|| spec.strip_suffix(":rw"))
+        .unwrap_or(spec);
+    (body, spec.ends_with(":ro"))
+}
+
 impl VolumeMount {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let body = spec
-            .strip_suffix(":ro")
-            .or_else(|| spec.strip_suffix(":rw"))
-            .unwrap_or(spec);
+        let (body, read_only) = split_read_only(spec);
         let (name, target) = body
             .split_once(':')
             .ok_or_else(|| format!("invalid volume {spec:?}: expected name:/path[:ro]"))?;
@@ -529,7 +591,7 @@ impl VolumeMount {
         Ok(Self {
             name: name.to_string(),
             target: target.to_string(),
-            read_only: spec.ends_with(":ro"),
+            read_only,
         })
     }
 }
@@ -640,21 +702,17 @@ pub struct BindSpec {
 
 impl BindSpec {
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let read_only = spec.ends_with(":ro");
-        let body = spec
-            .strip_suffix(":ro")
-            .or_else(|| spec.strip_suffix(":rw"))
-            .unwrap_or(spec);
+        let (body, read_only) = split_read_only(spec);
         let (source, target) = body
             .split_once(':')
             .ok_or_else(|| format!("invalid host bind {spec:?}: expected /host-path:/path[:ro]"))?;
         validate_volume_target(target)?;
         validate_bind_source(source)?;
+        // A `-v` carries neither exclude nor optional; the definition is the author surface for both.
         Ok(Self {
             host_source: source.to_string(),
             target: target.to_string(),
             read_only,
-            // A `-v` carries neither exclude nor optional; the definition is the author surface for both.
             exclude: Vec::new(),
             optional: false,
         })
@@ -812,6 +870,7 @@ mod tests {
         let req = Request::RunImage(Box::new(RunImageArgs {
             image: Some("prism".into()),
             resolved_image: None,
+            mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -848,6 +907,7 @@ mod tests {
         let args = RunImageArgs {
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
+            mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -977,6 +1037,7 @@ mod tests {
         RunImageArgs {
             image: Some("some-image:1".into()),
             resolved_image: None,
+            mixins: Vec::new(),
             name: None,
             cpus: 2,
             mem: 1024,
@@ -1332,6 +1393,24 @@ mod tests {
     }
 
     #[test]
+    fn an_inspect_request_carries_the_mixins_the_user_named_and_defaults_to_none() {
+        let req = Request::InspectImage {
+            image: "registry.example.test/team/sandbox:1".into(),
+            mixins: vec!["ghcr.io/acme/obs-tools:2".into()],
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+        let bare: Request =
+            serde_json::from_str(r#"{"type":"InspectImage","image":"registry.example.test/x:1"}"#)
+                .expect("an inspect naming no mixin decodes");
+        assert!(
+            matches!(bare, Request::InspectImage { ref mixins, .. } if mixins.is_empty()),
+            "an inspect with no flag asks about the artifact alone, so it must not invent a source the user never named"
+        );
+    }
+
+    #[test]
     fn registry_login_request_survives_a_round_trip() {
         let req = Request::RegistryLogin {
             registry: "ghcr.io".into(),
@@ -1371,7 +1450,8 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
-            mixins: Vec::new(),
+            mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
+            pinned_mixins: Vec::new(),
             reference: "registry.example.test/team/sandbox:1".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),
