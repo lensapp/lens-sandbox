@@ -1301,11 +1301,13 @@ mod tests {
             to: "alpine:mine".into(),
         });
         apply_registry_default(&mut command, Some("docker.io"));
-        let SandboxCommand::Tag(args) = command else {
-            unreachable!("the command was constructed as Tag")
-        };
-        assert_eq!(args.from, "alpine:3");
-        assert_eq!(args.to, "alpine:mine");
+        assert!(
+            matches!(
+                &command,
+                SandboxCommand::Tag(args) if args.from == "alpine:3" && args.to == "alpine:mine"
+            ),
+            "a docker.io default must leave both sides bare so implicit `library/` namespacing survives"
+        );
     }
 
     struct CannedService {
@@ -2139,9 +2141,15 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", None, &["ghcr.io/acme/obs:2".to_string()], &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(
+            &svc,
+            "1",
+            None,
+            &["ghcr.io/acme/obs:2".to_string()],
+            &mut out,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("--mixin applies to a sandbox reference"),
             "a live run has already booted, so rendering it as though the flag applied would describe a composition that never ran; got: {err:#}"
@@ -2195,7 +2203,9 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(&svc, "hermes:1.4.0", None, &[], &mut out).await.unwrap();
+        let code = inspect(&svc, "hermes:1.4.0", None, &[], &mut out)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: Sandbox"), "got: {text}");
@@ -2246,7 +2256,9 @@ mod tests {
             message: "daemon busy".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "reviewer", None, &[], &mut out).await.unwrap_err();
+        let err = inspect(&svc, "reviewer", None, &[], &mut out)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("daemon busy"),
             "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
