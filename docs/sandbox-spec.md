@@ -1244,7 +1244,9 @@ spec:
   by digest, and this one is a working file on disk.
 - **Last in the merge.** It is the developer's own, so it sits after every other
   source in [§3.3.2](#332-merge-rules) — including a `--mixin`. Nothing they pulled
-  can overrule what they decided.
+  can overrule what they decided, and that includes what this file itself pulls: a
+  mixin it names merges **before** it, not after, so the general rule that a mixin's
+  own mixins beat it stops at this one.
 
 The developer does not approve this file. [§1.5](#15-one-disclosure) has a run
 disclose what it resolved before booting, which protects them from documents they
