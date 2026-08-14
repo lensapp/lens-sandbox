@@ -63,7 +63,10 @@ async fn the_local_sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             Installed::from_rig(rig),
         )
     };
-    let home = lns_service::artifact::mixin::Locator::Directory(std::path::PathBuf::from(home));
+    // A local source is named by the document it was read from, so the project's own `lns.yaml` is what its references join onto.
+    let home = lns_service::artifact::mixin::Locator::Local(
+        std::path::PathBuf::from(home).join("lns.yaml"),
+    );
     let planned = match lns_service::artifact::mixin::resolve(
         definition.as_bytes(),
         &[],
@@ -126,7 +129,7 @@ fn the_error_says_a_published_document_cannot_read_a_directory(
 ) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let error = rig.error.as_deref().ok_or("no launch error was recorded")?;
-    if error.contains("a directory merges only into a document this machine read") {
+    if error.contains("a consumer has no copy of the machine that wrote it") {
         Ok(())
     } else {
         Err(format!(

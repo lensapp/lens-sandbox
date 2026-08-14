@@ -312,6 +312,10 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
 pub(crate) struct RealFs;
 
 impl super::author::Fs for RealFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
     }

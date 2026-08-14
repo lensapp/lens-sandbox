@@ -490,7 +490,7 @@ mixins:
 
 | Field | Type | Rules |
 |---|---|---|
-| `mixins` | list<string> | optional. A local directory or an OCI reference. A remote reference MUST be digest-pinned. |
+| `mixins` | list<string> | optional. A local path or an OCI reference. A remote reference MUST be digest-pinned. |
 
 The list **publishes as written** — `lns push` does not merge it. Each mixin is
 pulled and merged at startup, and the run presents the resolved sandbox for
@@ -810,20 +810,30 @@ lns run claude --mixin xyz --mixin zyx    # the user adds two more, in flag orde
 
 | Source | Written by | Reference form |
 |---|---|---|
-| [`spec.mixins`](#319-mixins) | The sandbox's author | A local directory, or an OCI reference that MUST be digest-pinned. A published sandbox has to resolve to the same thing for everyone. |
-| `--mixin <ref>` | The user, per run | A local directory, or a reference that resolves like a sandbox reference — a tag is fine, and preflight pins and shows the digest before boot. |
+| [`spec.mixins`](#319-mixins) | The sandbox's author | A local path, or an OCI reference that MUST be digest-pinned. A published sandbox has to resolve to the same thing for everyone. |
+| `--mixin <ref>` | The user, per run | A local path, or a reference that resolves like a sandbox reference — a tag is fine, and preflight pins and shows the digest before boot. |
 
 The asymmetry is the same one that governs a sandbox reference itself. A digest
 inside a published document is what makes it reproducible for a stranger; a
 reference the user types is their own live choice, and they see what it resolved
 to.
 
-A directory names a file on one machine, so it merges only into a document that
-machine read. A published sandbox MUST NOT name one — a consumer has no copy of
-the author's working directory — and neither may a `--mixin` on a published run.
+**A local path is a directory or the document itself.** A directory is read as
+the `lns.yaml` inside it; a path naming the document is that document. These are
+the two spellings `lns run` already takes for a local sandbox, and one reference
+grammar means one rule — nothing about the merge distinguishes them, since a
+path a document writes roots at the directory the document sits in either way.
+
+A published sandbox MUST NOT name a local path — a consumer has no copy of the
+author's working directory, so the reference resolves to nothing, or worse to
+something else. A `--mixin` may name one on any run, published or not: the user
+typed it on the machine the run happens on, and the preflight shows them what it
+resolved to.
 A declared entry roots at the directory of the document that named it; a
 `--mixin` roots where the user typed it, since no document names one. Either
-way its folded absolute path is its identity: what the graph keys on, and what
+way the folded absolute path of the **document** it resolved to is its identity —
+so a directory and the `lns.yaml` inside it are one source, not two — and that
+identity is what the graph keys on, and what
 the disclosure shows.
 
 Either way the mixin is pulled, merged, and shown in the resolved sandbox the run
@@ -1098,8 +1108,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
   placeholder self-identifies as fake and is at least 16 characters.
 - **Mixin**: no `image`, `command`, `workdir`, `user`, or `resources`; every
-  entry in a document's `mixins` is a local directory or a digest-pinned OCI
-  reference, and a document that publishes carries no directory.
+  entry in a document's `mixins` is a local path or a digest-pinned OCI
+  reference, and a document that publishes carries no local path.
 
 Offline validation checks one document in isolation. Four checks cannot run
 there, because they depend on state no document carries — they run at launch:

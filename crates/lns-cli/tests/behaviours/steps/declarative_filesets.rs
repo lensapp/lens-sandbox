@@ -17,6 +17,13 @@ struct StepFs {
 }
 
 impl Fs for StepFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        self.files
+            .borrow()
+            .keys()
+            .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
+    }
+
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         self.files
             .borrow()

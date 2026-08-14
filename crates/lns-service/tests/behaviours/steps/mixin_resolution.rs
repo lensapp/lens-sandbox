@@ -24,15 +24,24 @@ impl Installed {
 impl MixinSource for Installed {
     async fn fetch(&self, locator: &Locator) -> anyhow::Result<FetchedMixin> {
         let reference = locator.key();
+        // A local path answers under the document it names, as the reader this stands in for does; a directory holds `lns.yaml`.
+        let pinned = match locator {
+            Locator::Local(path) if path.extension().is_none() => {
+                path.join("lns.yaml").display().to_string()
+            }
+            _ => self
+                .pins
+                .get(&reference)
+                .cloned()
+                .unwrap_or(reference.clone()),
+        };
         let document = self
             .documents
-            .get(&reference)
+            .get(&pinned)
+            .or_else(|| self.documents.get(&reference))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("nothing here answers for {reference}"))?;
-        Ok(FetchedMixin {
-            pinned: self.pins.get(&reference).cloned().unwrap_or(reference),
-            document,
-        })
+        Ok(FetchedMixin { pinned, document })
     }
 }
 
@@ -166,7 +175,7 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             pinned: "lns-local-mixin.yaml".to_string(),
             document,
         }),
-        Locator::Directory(std::path::PathBuf::from("/work")),
+        Locator::Local(std::path::PathBuf::from("/work")),
     )
     .expect("the directory's decisions read");
     let planned = match lns_service::artifact::mixin::resolve(

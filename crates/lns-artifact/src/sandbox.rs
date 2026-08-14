@@ -184,7 +184,7 @@ pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
 }
 
 /// Whether a mixin entry names a directory rather than a registry coordinate — the one predicate validation, rooting and resolution all read, so they cannot disagree about which entries are local.
-pub fn names_a_local_directory(reference: &str) -> bool {
+pub fn names_a_local_path(reference: &str) -> bool {
     reference == "."
         || reference == ".."
         || reference.starts_with("./")
@@ -211,9 +211,9 @@ fn validate_mixin_reference(reference: &str) -> Result<()> {
     if reference.trim().is_empty() {
         bail!("a mixin entry must name a directory or an OCI reference");
     }
-    if !names_a_local_directory(reference) && !spec::is_digest_pinned_image(reference) {
+    if !names_a_local_path(reference) && !spec::is_digest_pinned_image(reference) {
         bail!(
-            "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local directory starts with `./`, `../` or `/`"
+            "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local path starts with `./`, `../` or `/`"
         );
     }
     Ok(())

@@ -92,13 +92,11 @@ fn resolution_answers_for_the_tag(w: &mut BehaviourWorld, tag: String) -> Result
     }
 }
 
-#[then("the error says a directory merges only into a document this machine read")]
-fn error_says_a_directory_needs_a_document_this_machine_read(
-    w: &mut BehaviourWorld,
-) -> Result<(), String> {
+#[then("the error says the run merges the absolute path its preflight showed")]
+fn error_says_the_run_merges_the_absolute_path(w: &mut BehaviourWorld) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let error = rig.error.as_deref().ok_or("no launch error was recorded")?;
-    if error.contains("a directory merges only into a document this machine read") {
+    if error.contains("merges the absolute path its preflight showed") {
         Ok(())
     } else {
         Err(format!(

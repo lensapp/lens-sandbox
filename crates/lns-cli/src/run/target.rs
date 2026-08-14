@@ -146,7 +146,7 @@ pub fn root_named_directories(mixins: &[String], cwd: &Path) -> Result<Vec<Strin
     mixins
         .iter()
         .map(|reference| {
-            if !lns_artifact::sandbox::names_a_local_directory(reference) {
+            if !lns_artifact::sandbox::names_a_local_path(reference) {
                 return Ok(reference.clone());
             }
             let rooted = lns_artifact::sandbox::fold_path(&cwd.join(reference));

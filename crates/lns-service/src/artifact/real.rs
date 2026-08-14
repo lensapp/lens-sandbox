@@ -182,10 +182,9 @@ fn local_source(
     let Some(path) = decisions else {
         return Ok(None);
     };
-    let decided_in = path.parent().unwrap_or(std::path::Path::new("."));
     crate::artifact::mixin::LocalSource::read(
         crate::artifact::mixin_dir::read_local_mixin(&RealMixinDir, path)?,
-        crate::artifact::mixin::Locator::Directory(lns_artifact::sandbox::fold_path(decided_in)),
+        crate::artifact::mixin::Locator::Local(lns_artifact::sandbox::fold_path(path)),
     )
 }
 
@@ -193,6 +192,10 @@ fn local_source(
 pub(crate) struct RealMixinDir;
 
 impl crate::artifact::mixin_dir::MixinDir for RealMixinDir {
+    fn is_dir(&self, path: &std::path::Path) -> bool {
+        path.is_dir()
+    }
+
     fn read(&self, path: &std::path::Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
     }
@@ -211,8 +214,8 @@ impl crate::artifact::mixin::MixinSource for RegistryMixins {
                 let registry = crate::image::caching_registry_for(reference)?;
                 crate::image::pull_mixin_with(&registry, reference).await
             }
-            crate::artifact::mixin::Locator::Directory(dir) => {
-                crate::artifact::mixin_dir::read_directory_mixin(&RealMixinDir, dir)
+            crate::artifact::mixin::Locator::Local(dir) => {
+                crate::artifact::mixin_dir::read_path_mixin(&RealMixinDir, dir)
             }
         }
     }
@@ -376,7 +379,7 @@ pub(crate) async fn resolve_definition(
 ) -> Result<lns_ipc::Response> {
     let project_dir = std::path::Path::new(project_dir);
     crate::artifact::mixin::require_a_rooted_project_dir(project_dir)?;
-    let home = crate::artifact::mixin::Locator::Directory(project_dir.to_path_buf());
+    let home = crate::artifact::mixin::Locator::Local(project_dir.join("lns.yaml"));
     let resolution = crate::artifact::mixin::resolve(
         definition.as_bytes(),
         mixins,
