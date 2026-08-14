@@ -158,9 +158,52 @@ pub struct WorkloadGrantFile {
     pub grants: Vec<GrantRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revocations: Vec<Revocation>,
+    /// Connectors a project connected. `lns connector connect` names a directory and no workload, so this answers for every workload run there; spending one is still the per-workload decision `grants` records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected: Vec<Connection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connection {
+    pub project: String,
+    pub connector: String,
 }
 
 impl WorkloadGrantFile {
+    pub fn is_connected(&self, project: &str, connector: &str) -> bool {
+        self.connected
+            .iter()
+            .any(|c| c.project == project && c.connector == connector)
+    }
+
+    /// Answers whether this changed anything, so a caller writes the file only when it did.
+    pub fn connect(&mut self, project: &str, connector: &str) -> bool {
+        if self.is_connected(project, connector) {
+            return false;
+        }
+        self.connected.push(Connection {
+            project: project.to_string(),
+            connector: connector.to_string(),
+        });
+        true
+    }
+
+    pub fn disconnect(&mut self, project: &str, connector: &str) -> bool {
+        let before = self.connected.len();
+        self.connected
+            .retain(|c| !(c.project == project && c.connector == connector));
+        before != self.connected.len()
+    }
+
+    /// Every connector this project connected, in the order it connected them.
+    pub fn connected_in(&self, project: &str) -> Vec<String> {
+        self.connected
+            .iter()
+            .filter(|c| c.project == project)
+            .map(|c| c.connector.clone())
+            .collect()
+    }
+
     fn triple_matches(g: &GrantRecord, project: &str, workload_key: &str, connector: &str) -> bool {
         g.project == project && g.workload == workload_key && g.connector == connector
     }
@@ -363,6 +406,30 @@ mod tests {
 
     fn mixin(name: &str) -> String {
         format!("ghcr.io/acme/{name}@sha256:{}", "d".repeat(64))
+    }
+
+    #[test]
+    fn a_connector_is_connected_for_the_project_rather_than_one_workload_in_it() {
+        let mut file = WorkloadGrantFile::default();
+        assert!(!file.is_connected("/work", "some-provider"));
+        assert!(
+            file.connect("/work", "some-provider"),
+            "connecting a connector this project had not connected is a change"
+        );
+        assert!(
+            file.is_connected("/work", "some-provider"),
+            "`lns connector connect` names a directory and no workload, so what it records has to answer for every workload run there"
+        );
+        assert!(
+            !file.is_connected("/other", "some-provider"),
+            "another project's directory decided nothing"
+        );
+        assert!(
+            !file.connect("/work", "some-provider"),
+            "connecting twice changes nothing, so nothing has to be written"
+        );
+        assert!(file.disconnect("/work", "some-provider"));
+        assert!(!file.is_connected("/work", "some-provider"));
     }
 
     #[test]

@@ -4,41 +4,64 @@ use std::sync::Arc;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 use crate::approval_flow::session::ApprovalSession;
-use lns_policy::Policy;
 
 pub struct PolicyWatcher {
     _watcher: notify::RecommendedWatcher,
 }
 
 impl PolicyWatcher {
-    pub fn spawn(path: PathBuf, session: Arc<ApprovalSession>) -> notify::Result<Self> {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let mut watcher = notify::recommended_watcher(event_handler(path.clone(), session))?;
-        watcher.watch(&parent, RecursiveMode::NonRecursive)?;
+    /// Watches both files a run's effective policy is read from: the developer's decisions, and the sidecar the machine keeps its connections in — a `lns connector disconnect` touches only the second, and a live run has to see it.
+    pub fn spawn(
+        policy_path: PathBuf,
+        grants_path: PathBuf,
+        session: Arc<ApprovalSession>,
+    ) -> notify::Result<Self> {
+        let mut watcher = notify::recommended_watcher(event_handler(
+            policy_path.clone(),
+            grants_path.clone(),
+            session,
+        ))?;
+        let mut watched: Vec<PathBuf> = Vec::new();
+        for target in [&policy_path, &grants_path] {
+            let parent = parent_of(target);
+            if watched.contains(&parent) {
+                continue;
+            }
+            watcher.watch(&parent, RecursiveMode::NonRecursive)?;
+            watched.push(parent);
+        }
         Ok(Self { _watcher: watcher })
     }
 }
 
-fn event_handler(
-    target: PathBuf,
-    session: Arc<ApprovalSession>,
-) -> impl Fn(notify::Result<Event>) + Send + 'static {
-    move |res| handle_event(res, &target, session.as_ref())
+fn parent_of(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn handle_event(res: notify::Result<Event>, target: &Path, session: &ApprovalSession) {
+fn event_handler(
+    policy_path: PathBuf,
+    grants_path: PathBuf,
+    session: Arc<ApprovalSession>,
+) -> impl Fn(notify::Result<Event>) + Send + 'static {
+    move |res| handle_event(res, &policy_path, &grants_path, session.as_ref())
+}
+
+fn handle_event(
+    res: notify::Result<Event>,
+    policy_path: &Path,
+    grants_path: &Path,
+    session: &ApprovalSession,
+) {
     let Ok(event) = res else {
         return;
     };
-    if !is_policy_change(&event, target) {
+    if !is_policy_change(&event, policy_path) && !is_policy_change(&event, grants_path) {
         return;
     }
-    if let Ok(p) = Policy::load_or_default(target) {
+    if let Ok(p) = crate::supervisor::adapter::reload_with_connections(policy_path, grants_path) {
         session.apply_external_policy(p);
     }
 }
@@ -133,7 +156,7 @@ mod tests {
             std::time::Duration::from_secs(30),
         ));
 
-        let _w = PolicyWatcher::spawn(path, session).unwrap();
+        let _w = PolicyWatcher::spawn(path, dir.path().join("grants.json"), session).unwrap();
     }
 
     #[test]
@@ -153,7 +176,7 @@ mod tests {
             tx,
             std::time::Duration::from_secs(30),
         ));
-        let _w = PolicyWatcher::spawn(path, session).unwrap();
+        let _w = PolicyWatcher::spawn(path, dir.path().join("grants.json"), session).unwrap();
     }
 
     fn make_session() -> (
@@ -183,7 +206,11 @@ mod tests {
         updated.save_atomic(&path).unwrap();
 
         let (session, mut rx) = make_session();
-        let handler = event_handler(path.clone(), session.clone());
+        let handler = event_handler(
+            path.clone(),
+            dir.path().join("grants.json"),
+            session.clone(),
+        );
         handler(Ok(evt(EventKind::Modify(ModifyKind::Any), &path)));
 
         assert_eq!(session.current_policy().network.egress.http.len(), 1);
@@ -203,11 +230,39 @@ mod tests {
         handle_event(
             Ok(evt(EventKind::Modify(ModifyKind::Any), &path)),
             &path,
+            &dir.path().join("grants.json"),
             session.as_ref(),
         );
 
         let cur = session.current_policy();
         assert_eq!(cur.network.egress.http.len(), 1);
+        assert!(rx.try_recv().is_ok(), "expected a Policy hot-swap frame");
+    }
+
+    #[test]
+    fn a_change_to_the_sidecar_reaches_the_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("lns-policy.yaml");
+        Policy::default().save_atomic(&path).unwrap();
+        let grants = dir.path().join("grants.json");
+        let store = lns_policy::grants::JsonFileGrantStore::new(grants.clone());
+        let mut file = lns_policy::grants::WorkloadGrantFile::default();
+        file.connect(&lns_policy::grants::project_key(&path), "some-provider");
+        lns_policy::grants::GrantStore::save(&store, &file).unwrap();
+
+        let (session, mut rx) = make_session();
+        handle_event(
+            Ok(evt(EventKind::Modify(ModifyKind::Any), &grants)),
+            &path,
+            &grants,
+            session.as_ref(),
+        );
+
+        assert_eq!(
+            session.current_policy().connectors,
+            ["some-provider"],
+            "`lns connector disconnect` touches only the sidecar now, so a run that watched the decisions file alone would keep an armed credential the developer just revoked"
+        );
         assert!(rx.try_recv().is_ok(), "expected a Policy hot-swap frame");
     }
 
@@ -223,6 +278,7 @@ mod tests {
         handle_event(
             Ok(evt(EventKind::Modify(ModifyKind::Any), &sibling)),
             &target,
+            &dir.path().join("grants.json"),
             session.as_ref(),
         );
 
@@ -238,6 +294,7 @@ mod tests {
         handle_event(
             Err(notify::Error::generic("simulated")),
             &path,
+            &dir.path().join("grants.json"),
             session.as_ref(),
         );
 
@@ -253,6 +310,7 @@ mod tests {
         handle_event(
             Ok(evt(EventKind::Modify(ModifyKind::Any), &path)),
             &path,
+            &dir.path().join("grants.json"),
             session.as_ref(),
         );
 
@@ -270,6 +328,7 @@ mod tests {
         handle_event(
             Ok(evt(EventKind::Modify(ModifyKind::Any), &path)),
             &path,
+            &dir.path().join("grants.json"),
             session.as_ref(),
         );
 

@@ -12,7 +12,7 @@ Feature: inspecting and forgetting per-workload connector grants
   a shipped service.
 
   Background:
-    Given this project's policy connects "some-provider"
+    Given this project connects "some-provider"
 
   Scenario: Listing shows the workload, connector, and verdict this project granted
     Given the workload "def:/work/app" was granted "some-provider"

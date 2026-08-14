@@ -23,7 +23,8 @@ mod test_env;
 pub struct Policy {
     #[serde(default)]
     pub network: NetworkPolicy,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The run's connected set, filled from the per-machine sidecar rather than this file: connecting is a per-machine risk acceptance, and a file that travels must not carry one.
+    #[serde(skip)]
     pub connectors: Vec<String>,
 }
 
@@ -430,12 +431,6 @@ impl Policy {
         if !self.connectors.contains(&id) {
             self.connectors.push(id);
         }
-    }
-
-    pub fn disconnect(&mut self, id: &str) -> bool {
-        let before = self.connectors.len();
-        self.connectors.retain(|i| i != id);
-        self.connectors.len() != before
     }
 }
 
@@ -1698,14 +1693,35 @@ network:
     }
 
     #[test]
-    fn policy_with_connectors_yaml_roundtrip_is_lossless() {
-        let mut p = Policy::default();
-        p.connect("gitlab");
-        p.connect("acme");
+    fn a_file_still_carrying_the_old_connectors_key_loads_and_decides_nothing() {
+        let p: Policy = serde_yaml::from_str(
+            "network:\n  egress:\n    http: []\nconnectors:\n  - some-provider\n",
+        )
+        .expect("a directory written before connections moved still opens");
+        assert!(
+            p.connectors.is_empty(),
+            "the key is ignored rather than read, so the connector is offered again on first use"
+        );
+    }
+
+    #[test]
+    fn the_decisions_file_never_carries_which_connectors_are_connected() {
+        let p = Policy {
+            connectors: vec!["some-provider".into()],
+            ..Policy::default()
+        };
         let yaml = serde_yaml::to_string(&p).unwrap();
-        assert!(yaml.contains("connectors"), "got:\n{yaml}");
-        let parsed: Policy = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(p, parsed);
+        assert!(
+            !yaml.contains("connectors"),
+            "connecting is a per-machine risk acceptance, and this file is meant to be committed; got:\n{yaml}"
+        );
+        assert!(
+            serde_yaml::from_str::<Policy>(&yaml)
+                .unwrap()
+                .connectors
+                .is_empty(),
+            "what a run may spend is read from the sidecar, never from a file that travels"
+        );
     }
 
     #[test]
@@ -1742,25 +1758,8 @@ credentials:
     #[test]
     fn connect_is_idempotent_and_does_not_duplicate() {
         let mut p = Policy::default();
-        p.connect("github");
-        p.connect("github");
-        assert_eq!(p.connectors, ["github"]);
-    }
-
-    #[test]
-    fn disconnect_removes_an_applied_connector_and_reports_true() {
-        let mut p = Policy::default();
-        p.connect("github");
-        p.connect("gitlab");
-        assert!(p.disconnect("github"));
-        assert_eq!(p.connectors, ["gitlab"]);
-    }
-
-    #[test]
-    fn disconnect_reports_false_when_the_id_is_not_applied() {
-        let mut p = Policy::default();
-        p.connect("gitlab");
-        assert!(!p.disconnect("github"));
-        assert_eq!(p.connectors, ["gitlab"]);
+        p.connect("some-provider");
+        p.connect("some-provider");
+        assert_eq!(p.connectors, ["some-provider"]);
     }
 }

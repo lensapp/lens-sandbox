@@ -26,6 +26,9 @@ pub type ConnectorRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send 
 /// Invoked on a policy reload with the reloaded connected-connector ids so the credential subsystem can revoke a disconnected connector's arming.
 pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
 
+/// Records that this project connected a connector. Connecting is a per-machine risk acceptance, so it lands in the sidecar beside the per-workload grants rather than in a file that travels.
+pub type ConnectionRecorder = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 /// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
 pub struct OfferableConnector {
     pub id: String,
@@ -143,6 +146,7 @@ pub struct ApprovalSession {
     credentials_provider: OnceLock<CredentialsProvider>,
     connector_routes: OnceLock<ConnectorRouteDeriver>,
     armed_reconciler: OnceLock<ArmedReconciler>,
+    connection_recorder: OnceLock<ConnectionRecorder>,
     offerable: Vec<OfferableConnector>,
     connector: OnceLock<Arc<dyn ConnectPort>>,
     connecting: Mutex<HashSet<String>>,
@@ -176,6 +180,7 @@ impl ApprovalSession {
             credentials_provider: OnceLock::new(),
             connector_routes: OnceLock::new(),
             armed_reconciler: OnceLock::new(),
+            connection_recorder: OnceLock::new(),
             offerable: Vec::new(),
             connector: OnceLock::new(),
             connecting: Mutex::new(HashSet::new()),
@@ -198,6 +203,11 @@ impl ApprovalSession {
     /// Installs the armed-reconciler once at boot so a watcher reload revokes a disconnected connector's arming; idempotent, the first wins.
     pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
         let _ = self.armed_reconciler.set(reconciler);
+    }
+
+    /// Installs the port a live connect records through; idempotent, the first wins.
+    pub fn set_connection_recorder(&self, recorder: ConnectionRecorder) {
+        let _ = self.connection_recorder.set(recorder);
     }
 
     /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
@@ -667,33 +677,32 @@ impl ApprovalSession {
         }
     }
 
-    /// Connects a connector live: records the id under `connectors:` and persists only that, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
+    /// Connects a connector live: records the connection where this machine keeps them, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
     pub fn connect_connector(&self, id: &str, routes: Vec<RouteRule>) {
-        let (to_persist, live_network) = {
+        let live_network = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
-            policy.connect(id);
+            policy.connect(id.to_string());
             crate::artifact::policy::splice_connector_routes(
                 &mut policy.network.egress.http,
                 routes,
             );
-            let mut persisted = self.persisted.lock().expect("persisted mutex poisoned");
-            persisted.connect(id);
-            (persisted.clone(), policy.network.clone())
+            policy.network.clone()
         };
         let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(live_network)),
             credentials,
         }));
-        if let Err(e) = self.store.save(&to_persist) {
-            self.notifier.inform(&format!(
-                "connector connected in-memory but not persisted: {e}"
-            ));
-        }
         // The routes are live above, so requests held on this connector's offer proceed no matter which surface the consent came from.
         for request_id in self.drain_offer_requests(id) {
             self.notifier.dismiss(&request_id);
             self.send_decision_frame(&request_id, Decision::AllowOnce);
+        }
+        // Recorded last: the sidecar takes a lock, and a held request must not wait on disk to be released.
+        if let Some(Err(e)) = self.connection_recorder.get().map(|record| record(id)) {
+            self.notifier.inform(&format!(
+                "connector connected in-memory but not persisted: {e}"
+            ));
         }
     }
 }
@@ -1088,31 +1097,6 @@ pub(crate) mod tests {
                 "the guest still enforces the whole effective policy; {expected} missing from {published:?}"
             );
         }
-    }
-
-    #[test]
-    fn a_connect_writes_only_the_developers_own_policy_back() {
-        let (session, _n, store, _rx) = fixture_over_a_merged_run();
-        session.connect_connector(
-            "some-provider",
-            vec![RouteRule::allow_host("api.some-provider.example")],
-        );
-
-        let saved = store.saves.lock().unwrap();
-        let policy = saved.last().expect("the connect is persisted");
-        let written: Vec<&str> = policy
-            .network
-            .egress
-            .http
-            .iter()
-            .map(|rule| rule.match_pattern.as_str())
-            .collect();
-        assert_eq!(
-            written,
-            vec!["mine.example.test"],
-            "a connect records an id; the artifact's rules and the connector's own routes are re-derived at boot, so writing them would outlive `lns connector disconnect`"
-        );
-        assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
     }
 
     #[test]
@@ -1766,6 +1750,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_live_connect_records_the_connection_where_the_machine_keeps_them() {
+        let (s, _n, _store, mut rx) = fixture();
+        let recorded: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen = recorded.clone();
+        s.set_connection_recorder(Box::new(move |id| {
+            seen.lock().unwrap().push(id.to_string());
+            Ok(())
+        }));
+
+        s.connect_connector(
+            "some-oauth",
+            vec![RouteRule::allow_host("api.some-oauth.example")],
+        );
+
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            &["some-oauth".to_string()],
+            "the decisions file no longer carries connections, so a connect the developer accepted mid-run would be lost on the next reload unless it is recorded per machine"
+        );
+        let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
     fn apply_external_policy_reconciles_armed_ids_with_the_reloaded_connectors() {
         let (s, _n, _store, _rx) = fixture();
         let seen: Arc<StdMutex<Vec<Vec<String>>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -1952,35 +1959,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connect_connector_persists_only_the_id_but_emits_the_route_live() {
+    fn connect_connector_leaves_the_developers_file_alone_and_emits_the_route_live() {
         let (s, _n, store, mut rx) = fixture();
-        s.connect_connector("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
-        let saves = store.saves.lock().unwrap();
-        assert_eq!(saves.len(), 1, "the connection is persisted once");
-        assert_eq!(saves[0].connectors, ["gitlab"]);
-        assert!(
-            !saves[0]
-                .network
-                .egress
-                .http
-                .iter()
-                .any(|r| r.match_pattern == "gitlab.com"),
-            "the route must not be baked into the file — boot re-derives it from the catalog, so persisting it would survive `disconnect`"
+        s.connect_connector(
+            "some-provider",
+            vec![RouteRule::allow_host("api.some-provider.example")],
         );
-        drop(saves);
+        assert!(
+            store.saves.lock().unwrap().is_empty(),
+            "the connection lives in the machine's sidecar and the route is re-derived at boot, so a connect has nothing left to write into a file the developer commits"
+        );
         let v = serde_json::to_value(rx.try_recv().expect("policy frame")).unwrap();
         assert_eq!(v["type"], "policy");
         assert_eq!(
-            v["network"]["egress"]["http"][0]["match"], "gitlab.com",
+            v["network"]["egress"]["http"][0]["match"], "api.some-provider.example",
             "the live frame still carries the route so a held request can proceed"
         );
     }
 
     #[test]
-    fn connect_connector_informs_when_persist_fails() {
-        let (s, n, store, _rx) = fixture();
-        store.fail_next(io::ErrorKind::PermissionDenied, "disk full");
-        s.connect_connector("gitlab", vec![RouteRule::allow_host("gitlab.com")]);
+    fn connect_connector_informs_when_the_connection_cannot_be_recorded() {
+        let (s, n, _store, _rx) = fixture();
+        s.set_connection_recorder(Box::new(|_| Err("disk full".to_string())));
+        s.connect_connector(
+            "some-provider",
+            vec![RouteRule::allow_host("api.some-provider.example")],
+        );
         let informed = n.informed.lock().unwrap();
         assert_eq!(informed.len(), 1);
         assert!(informed[0].contains("not persisted"), "got: {:?}", informed);
