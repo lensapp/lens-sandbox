@@ -12,7 +12,7 @@ Feature: a mixin a document reads from a directory
     And the local definition at "/work" declares the mixin "./mixins/postgres-tools"
     When the local sandbox is resolved and launched
     Then the run installs "python@3.12"
-    And the resolution names the mixin "/work/mixins/postgres-tools"
+    And the resolution names the mixin "/work/mixins/postgres-tools/lns.yaml"
 
   Scenario: a directory a published document names still refuses
     Given the sandbox definition declares the mixin "./mixins/postgres-tools"
@@ -31,4 +31,4 @@ Feature: a mixin a document reads from a directory
     Given a mixin directory "/work/mixins/postgres-tools" declaring the tool "python@3.12"
     And the local definition at "/work" declares the mixins "./mixins/postgres-tools" and "./mixins/../mixins/postgres-tools"
     When the local sandbox is resolved and launched
-    Then the resolution names only the mixin "/work/mixins/postgres-tools"
+    Then the resolution names only the mixin "/work/mixins/postgres-tools/lns.yaml"

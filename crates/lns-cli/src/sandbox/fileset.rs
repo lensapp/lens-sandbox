@@ -120,10 +120,14 @@ pub fn directory_mixin_problems<F: Fs + ?Sized>(
         .spec
         .mixins
         .iter()
-        .filter(|reference| lns_artifact::sandbox::names_a_local_directory(reference))
+        .filter(|reference| lns_artifact::sandbox::names_a_local_path(reference))
         .filter_map(|reference| {
-            let document =
-                lns_artifact::sandbox::fold_path(&project_dir.join(reference)).join("lns.yaml");
+            let named = lns_artifact::sandbox::fold_path(&project_dir.join(reference));
+            let document = if fs.is_dir(&named) {
+                named.join("lns.yaml")
+            } else {
+                named
+            };
             fs.read_to_string(&document)
                 .err()
                 .map(|e| format!("mixin {reference}: reading {}: {e}", document.display()))
@@ -147,7 +151,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_names_a_mixin_directory_that_holds_no_document() {
+    fn validate_accepts_a_mixin_named_by_its_document() {
+        let fs = MapFs::with(&[("/work/mixins/pg/lns.yaml", "kind: mixin")]);
+        let problems = directory_mixin_problems(
+            &fs,
+            Path::new("/work"),
+            &definition(r#"["./mixins/pg/lns.yaml"]"#),
+        );
+        assert!(
+            problems.is_empty(),
+            "a run resolves this entry, so validate calling it broken is validate being wrong; got {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_names_a_mixin_path_that_holds_no_document() {
         let fs = MapFs::with(&[("/work/mixins/present/lns.yaml", "kind: mixin")]);
         let problems = directory_mixin_problems(
             &fs,
@@ -160,8 +178,8 @@ mod tests {
             "a typo in a directory name is cheapest to correct at author time; got {problems:?}"
         );
         assert!(
-            problems[0].contains("/work/mixins/absent/lns.yaml"),
-            "the refusal has to name the file it looked for; got {problems:?}"
+            problems[0].contains("/work/mixins/absent"),
+            "a path that is neither a directory nor a document is named as the author wrote it, rather than as a file inside a directory that is not there; got {problems:?}"
         );
     }
 

@@ -37,6 +37,7 @@ pub trait Fs {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
+    fn is_dir(&self, path: &Path) -> bool;
     fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>>;
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>>;
 }

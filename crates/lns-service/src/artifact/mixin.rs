@@ -8,7 +8,8 @@ use lns_artifact::sandbox::{Definition, SandboxSpec};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Locator {
     Reference(String),
-    Directory(std::path::PathBuf),
+    /// The document on this machine a source was read from. A reference it declares joins onto the directory that document sits in, the way a reference keys on the digest a registry answered with.
+    Local(std::path::PathBuf),
 }
 
 impl Locator {
@@ -16,7 +17,7 @@ impl Locator {
     pub fn key(&self) -> String {
         match self {
             Locator::Reference(reference) => reference.clone(),
-            Locator::Directory(path) => path.display().to_string(),
+            Locator::Local(path) => path.display().to_string(),
         }
     }
 }
@@ -45,29 +46,31 @@ pub fn is_a_mixin_artifact(artifact_type: Option<&str>, config_media_type: Optio
     }
 }
 
-/// Resolve one reference against the document that named it: a directory is meaningful only to a document this machine read, and it roots where that document lives.
+/// Resolve one reference against the document that named it: a path the user typed is one this machine read whatever the run is, while a path a document declares roots at that document and so needs one this machine read.
 fn locate(reference: &str, home: &Locator, the_user_named_it: bool) -> Result<Locator> {
-    if !lns_artifact::sandbox::names_a_local_directory(reference) {
+    if !lns_artifact::sandbox::names_a_local_path(reference) {
         return Ok(Locator::Reference(reference.to_string()));
     }
-    let Locator::Directory(dir) = home else {
-        bail!(
-            "mixin {reference} is a directory, and this run's sandbox is published; a directory merges only into a document this machine read, so run the definition it belongs to"
-        );
-    };
     if the_user_named_it {
         if !std::path::Path::new(reference).is_absolute() {
             bail!(
-                "mixin {reference} reached the run as a relative directory; a run merges the absolute path its preflight showed"
+                "mixin {reference} reached the run as a relative path; a run merges the absolute path its preflight showed"
             );
         }
-        return Ok(Locator::Directory(lns_artifact::sandbox::fold_path(
+        return Ok(Locator::Local(lns_artifact::sandbox::fold_path(
             std::path::Path::new(reference),
         )));
     }
-    Ok(Locator::Directory(lns_artifact::sandbox::fold_path(
-        &dir.join(reference),
-    )))
+    let Locator::Local(document) = home else {
+        bail!(
+            "mixin {reference} is a local path declared by a published document, and a consumer has no copy of the machine that wrote it; publish that mixin and name it by digest"
+        );
+    };
+    let beside = document
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(reference);
+    Ok(Locator::Local(lns_artifact::sandbox::fold_path(&beside)))
 }
 
 /// The graph every ordering rule decides against, keyed by the identity each source resolved to, with every reference that names a source translated to the same key.
@@ -161,17 +164,15 @@ async fn visit<S: MixinSource>(
         .fetch(&locator)
         .await
         .with_context(|| format!("resolving mixin {reference}"))?;
-    let key = match &locator {
-        Locator::Reference(_) => fetched.pinned,
-        Locator::Directory(path) => path.display().to_string(),
-    };
+    // A local source keys on the document the path resolved to, exactly as a reference keys on the digest the registry answered with, so two spellings of one document are one source.
+    let key = fetched.pinned;
     walk.visited.insert(locator.key(), key.clone());
     walk.keys.insert(seen, key.clone());
     if !walk.graph.contains_key(&key) {
         let mixin = lns_artifact::sandbox::parse_mixin(fetched.document.as_bytes())
             .with_context(|| format!("reading mixin {reference}"))?;
         let child_home = match locator {
-            Locator::Directory(path) => Locator::Directory(path),
+            Locator::Local(_) => Locator::Local(std::path::PathBuf::from(&key)),
             Locator::Reference(_) => Locator::Reference(key.clone()),
         };
         walk.frontier.extend(
@@ -448,21 +449,27 @@ mod tests {
                 .lock()
                 .expect("fetch log poisoned")
                 .push(reference.clone());
+            // A local path answers under the document it names, the same as the reader this stands in for; a directory holds `lns.yaml`.
+            let pinned = match locator {
+                Locator::Local(path) if path.extension().is_none() => {
+                    path.join("lns.yaml").display().to_string()
+                }
+                _ => self.pins.get(&reference).cloned().unwrap_or(reference),
+            };
             let document = self
                 .documents
-                .get(&reference)
+                .get(&pinned)
+                .or_else(|| self.documents.get(&locator.key()))
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no such mixin here"))?;
-            Ok(FetchedMixin {
-                pinned: self.pins.get(&reference).cloned().unwrap_or(reference),
-                document,
-            })
+            Ok(FetchedMixin { pinned, document })
         }
     }
 
     /// Every scenario here resolves a published document unless it says otherwise.
-    fn decided_in(dir: &str) -> Locator {
-        Locator::Directory(std::path::PathBuf::from(dir))
+    /// A source read from a document on this machine, which is what a local reference joins onto.
+    fn decided_in(document: &str) -> Locator {
+        Locator::Local(std::path::PathBuf::from(document))
     }
 
     fn published() -> Locator {
@@ -788,7 +795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_local_directory_reached_from_a_published_document_refuses_the_run() {
+    async fn a_local_path_declared_by_a_published_document_refuses_the_run() {
         let err = resolve(
             &sandbox(r#"{"image":"x:1","mixins":["./mixins/postgres-tools/"]}"#),
             &[],
@@ -799,8 +806,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}")
-                .contains("a directory merges only into a document this machine read"),
+            format!("{err:#}").contains("a consumer has no copy of the machine that wrote it"),
             "a directory beside the author's file is not something a consumer can resolve, and reading whatever host path it names would be worse than refusing; got: {err:#}"
         );
     }
@@ -953,33 +959,33 @@ mod tests {
         let out = resolve(
             &sandbox(r#"{"image":"x:1","mixins":["./a","./b"]}"#),
             &[],
-            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &decided_in("/work/lns.yaml"),
             &source,
             None,
         )
         .await
         .expect("each mixin roots its own references");
         assert!(
-            out.mixins.contains(&"/work/a/m".to_string())
-                && out.mixins.contains(&"/work/b/m".to_string()),
+            out.mixins.contains(&"/work/a/m/lns.yaml".to_string())
+                && out.mixins.contains(&"/work/b/m/lns.yaml".to_string()),
             "`./m` means a different directory under each mixin that names it, so one identity for both would merge the wrong document; got {:?}",
             out.mixins
         );
     }
 
     #[tokio::test]
-    async fn a_relative_directory_the_user_names_refuses_rather_than_guessing_a_root() {
+    async fn a_relative_path_the_user_names_refuses_rather_than_guessing_a_root() {
         let err = resolve(
             &sandbox(r#"{"image":"x:1"}"#),
             &["./mixins/pg".to_string()],
-            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &decided_in("/work/lns.yaml"),
             &Fake::new(&[]),
             None,
         )
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("relative directory"),
+            format!("{err:#}").contains("reached the run as a relative path"),
             "only the caller knows the directory the user typed it from, so rooting it here would read some other directory with the same name; got: {err:#}"
         );
     }
@@ -990,7 +996,7 @@ mod tests {
         let out = resolve(
             &sandbox(r#"{"image":"x:1"}"#),
             &["/work/mixins/./pg".to_string()],
-            &Locator::Directory(std::path::PathBuf::from("/work")),
+            &decided_in("/work/lns.yaml"),
             &source,
             None,
         )
@@ -998,8 +1004,8 @@ mod tests {
         .expect("a directory the user named beside their own definition is theirs to merge");
         assert_eq!(
             out.mixins,
-            ["/work/mixins/pg"],
-            "a directory has no digest, so the folded absolute path is the identity the disclosure names"
+            ["/work/mixins/pg/lns.yaml"],
+            "a local source has no digest, so the document it resolved to is the identity the disclosure names"
         );
     }
 
@@ -1123,7 +1129,7 @@ mod tests {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"x","spec":{"image":"x:1"}}"#.to_string(),
             }),
-            decided_in("/work"),
+            decided_in("/work/lns.yaml"),
         )
         .unwrap_err();
         assert!(
@@ -1139,7 +1145,7 @@ mod tests {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#.to_string(),
             }),
-            decided_in("/work"),
+            decided_in("/work/lns.yaml"),
         )
         .expect("a written file reads")
         .expect("a written file contributes");
@@ -1157,7 +1163,7 @@ mod tests {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"mixins":["./tools"]}}"#.to_string(),
             }),
-            decided_in("/decisions"),
+            decided_in("/decisions/lns-local-mixin.yaml"),
         )
         .expect("a written file reads")
         .expect("a written file contributes");
@@ -1186,7 +1192,7 @@ mod tests {
                 pinned: "dev.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"dev","spec":{"mixins":["./tools"]}}"#.to_string(),
             }),
-            decided_in("/decisions"),
+            decided_in("/decisions/lns-local-mixin.yaml"),
         )
         .expect("a written file reads")
         .expect("a written file contributes");
@@ -1194,7 +1200,7 @@ mod tests {
         let out = resolve(
             &sandbox(r#"{"image":"x:1"}"#),
             &[],
-            &decided_in("/projdir"),
+            &decided_in("/projdir/lns.yaml"),
             &source,
             Some(local),
         )
@@ -1204,6 +1210,67 @@ mod tests {
             String::from_utf8_lossy(&out.document).contains("ripgrep@14"),
             "rooting at the project instead would merge whatever /projdir/tools happens to hold; got: {}",
             String::from_utf8_lossy(&out.document)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_the_user_named_merges_into_a_published_run() {
+        let source = Fake::new(&[("/work/mixins/debug", r#"{"tools":["ripgrep@14"]}"#)]);
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1"}"#),
+            &["/work/mixins/debug".to_string()],
+            &published(),
+            &source,
+            None,
+        )
+        .await
+        .expect("a path the user typed is one this machine read, whatever the sandbox is");
+        assert!(
+            String::from_utf8_lossy(&out.document).contains("ripgrep@14"),
+            "a directory the developer names for their own run is theirs to name; only a published document may not name one, because its consumer has no copy; got: {}",
+            String::from_utf8_lossy(&out.document)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mixin_a_document_path_names_roots_its_own_references_beside_the_document() {
+        let source = Fake::new(&[
+            ("/work/pg/lns.yaml", r#"{"mixins":["./sibling"]}"#),
+            ("/work/pg/sibling", r#"{"tools":["python@3.12"]}"#),
+        ]);
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1","mixins":["./pg/lns.yaml"]}"#),
+            &[],
+            &decided_in("/work/lns.yaml"),
+            &source,
+            None,
+        )
+        .await
+        .expect("a document names its own siblings beside itself");
+        assert!(
+            String::from_utf8_lossy(&out.document).contains("python@3.12"),
+            "§3.3.1 roots a declared entry at the directory of the document that named it, and naming that document by its own path does not move it; got: {}",
+            String::from_utf8_lossy(&out.document)
+        );
+    }
+
+    #[tokio::test]
+    async fn one_document_named_two_ways_is_one_source() {
+        let source = Fake::new(&[("/work/pg/lns.yaml", r#"{"tools":["python@3.12"]}"#)]);
+        let out = resolve(
+            &sandbox(r#"{"image":"x:1","mixins":["./pg","./pg/lns.yaml"]}"#),
+            &[],
+            &decided_in("/work/lns.yaml"),
+            &source,
+            None,
+        )
+        .await
+        .expect("both spellings resolve");
+        assert_eq!(
+            out.mixins.len(),
+            1,
+            "§3.3.2 has a source many documents name appear once, and two spellings of one path are not two sources; got {:?}",
+            out.mixins
         );
     }
 }

@@ -585,20 +585,27 @@ overrules what you decided here. That file's egress is the exception: it reaches
 the running sandbox live rather than through the merge, so a rule you delete
 mid-run stops applying.
 
-A directory entry is read from this machine, relative to the document that names
-it. A published sandbox may not name one — a consumer has no copy of your
+A local entry is read from this machine, relative to the document that names it.
+It may name the directory — whose `lns.yaml` is read — or the document itself,
+the same two spellings `lns run` takes. A published sandbox may not name one — a consumer has no copy of your
 working directory — so `spec.mixins` in a document you `lns push` must be
-digest-pinned. `lns validate` reports a directory that holds no `lns.yaml`.
+digest-pinned. `lns validate` reports a path that holds no document.
 
 You can add your own for a single run:
 
 ```bash
-lns run . --mixin ./mixins/debug-tools
-lns run ghcr.io/acme/agent:1 --mixin ghcr.io/acme/observability:2
+lns run --mixin ./mixins/debug-tools .
+lns run --mixin ./mixins/debug-tools/lns.yaml .
 ```
 
-A directory merges only into a document this machine read, whoever names it — so
-`--mixin ./dir` works on a local run and is refused for a published sandbox.
+**Every flag goes before the reference.** Anything after it is the workload's own
+command, exactly as in `docker run` — so `lns run <ref> --mixin ./x` runs
+`--mixin ./x` inside the sandbox rather than layering a mixin on it.
+
+`--mixin ./dir` works on any run, published or not — you typed it on this
+machine. A **document** may not name one: `spec.mixins` in something you `lns
+push` must be digest-pinned, because whoever pulls it has no copy of your
+directory.
 
 A `--mixin` may be a tag, where a document's entry may not. The run pins it
 before it reports it, so the summary names the exact bytes you approved:
