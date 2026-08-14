@@ -53,18 +53,30 @@ pub struct Merged {
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
 pub const MAX_DEPTH: usize = 5;
 
-/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it.
+/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it, then the directory's own decisions last.
 ///
-/// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting.
+/// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting. The local source is the exception: §8.1 puts it after every other source outright, so what it pulled merges before it.
 /// A source many documents name appears once, at the last place it was named: an earlier appearance can decide nothing a later one does not, since either a source after it sets a key or the source itself sets it again.
 pub fn flatten<'a>(
     root: &'a SandboxSpec,
     extra: &'a [String],
+    local: Option<Source<'a>>,
     graph: &'a BTreeMap<String, SandboxSpec>,
 ) -> Result<Vec<Source<'a>>> {
-    refuse_what_sits_out_of_reach(&root.mixins, extra, graph)?;
-    let mut sources = Vec::with_capacity(1 + graph.len());
+    let reachable: Vec<String> = local
+        .iter()
+        .flat_map(|local| local.spec.mixins.iter().cloned())
+        .chain(extra.iter().cloned())
+        .collect();
+    refuse_what_sits_out_of_reach(&root.mixins, &reachable, graph)?;
+    let mut sources = Vec::with_capacity(2 + graph.len());
     let mut seen = std::collections::BTreeSet::new();
+    // Pushed first because the list is built in reverse, so this is what lands last.
+    if let Some(local) = local {
+        let own = &local.spec.mixins;
+        sources.push(local);
+        expand(own, graph, &mut seen, &mut sources)?;
+    }
     expand(extra, graph, &mut seen, &mut sources)?;
     expand(&root.mixins, graph, &mut seen, &mut sources)?;
     sources.push(Source {
@@ -517,7 +529,7 @@ mod tests {
         let (root, graph) = a_chain_the_sandbox_names_flat(5_000);
         let walked = std::thread::Builder::new()
             .stack_size(256 * 1024)
-            .spawn(move || flatten(&root, &[], &graph).map(|sources| sources.len()))
+            .spawn(move || flatten(&root, &[], None, &graph).map(|sources| sources.len()))
             .expect("the walk gets its own thread")
             .join()
             .expect(
@@ -533,7 +545,7 @@ mod tests {
     #[test]
     fn a_mixin_many_documents_reach_is_one_source_and_not_one_per_path() {
         let (root, graph) = wide_dag();
-        let sources = flatten(&root, &[], &graph).expect("every reference resolves");
+        let sources = flatten(&root, &[], None, &graph).expect("every reference resolves");
         assert_eq!(
             labels(&sources).len(),
             1 + graph.len(),
@@ -551,11 +563,56 @@ mod tests {
             ("firsts-own", r#"{}"#),
             ("second", r#"{}"#),
         ]);
-        let sources = flatten(&root, &extra, &graph).expect("every reference resolves");
+        let sources = flatten(&root, &extra, None, &graph).expect("every reference resolves");
         assert_eq!(
             labels(&sources),
             [ROOT_LABEL, "own", "first", "firsts-own", "second"],
             "a mixin's own mixins follow it, and the user's flags are appended last, so each beats what came before it"
+        );
+    }
+
+    #[test]
+    fn the_source_list_ends_with_the_local_mixin_after_every_flag() {
+        let root = spec(r#"{"image":"x:1","mixins":["own"]}"#);
+        let extra = ["flag".to_string()];
+        let local = spec(r#"{"tools":["ripgrep@14"]}"#);
+        let graph = graph(&[("own", r#"{}"#), ("flag", r#"{}"#)]);
+        let sources = flatten(
+            &root,
+            &extra,
+            Some(Source {
+                label: "lns-policy.yaml",
+                spec: &local,
+            }),
+            &graph,
+        )
+        .expect("every reference resolves");
+        assert_eq!(
+            labels(&sources),
+            [ROOT_LABEL, "own", "flag", "lns-policy.yaml"],
+            "the developer's own decisions are last, so nothing they pulled can overrule them (docs/sandbox-spec.md §8.1)"
+        );
+    }
+
+    #[test]
+    fn a_local_mixins_own_mixins_are_expanded_before_it() {
+        let root = spec(r#"{"image":"x:1"}"#);
+        let local = spec(r#"{"mixins":["locals-own"]}"#);
+        let graph = graph(&[("locals-own", r#"{}"#)]);
+        let sources = flatten(
+            &root,
+            &[],
+            Some(Source {
+                label: "lns-policy.yaml",
+                spec: &local,
+            }),
+            &graph,
+        )
+        .expect("every reference resolves");
+        assert_eq!(
+            labels(&sources),
+            [ROOT_LABEL, "locals-own", "lns-policy.yaml"],
+            "§3.3.2 puts a mixin's own mixins after it, but §8.1 says the local one is last outright, and what it pulled is still something pulled"
         );
     }
 
@@ -569,12 +626,12 @@ mod tests {
             ("m5", r#"{}"#),
         ];
         let root = spec(r#"{"image":"x:1","mixins":["m1"]}"#);
-        assert_eq!(flatten(&root, &[], &graph(&chain)).unwrap().len(), 6);
+        assert_eq!(flatten(&root, &[], None, &graph(&chain)).unwrap().len(), 6);
 
         let mut deeper = chain;
         deeper[4] = ("m5", r#"{"mixins":["m6"]}"#);
         deeper.push(("m6", r#"{}"#));
-        let err = flatten(&root, &[], &graph(&deeper)).unwrap_err();
+        let err = flatten(&root, &[], None, &graph(&deeper)).unwrap_err();
         assert!(
             format!("{err:#}").contains("deeper than 5 mixins"),
             "got: {err:#}"
@@ -587,6 +644,7 @@ mod tests {
         let err = flatten(
             &root,
             &[],
+            None,
             &graph(&[("a", r#"{"mixins":["b"]}"#), ("b", r#"{"mixins":["a"]}"#)]),
         )
         .unwrap_err();
@@ -599,7 +657,7 @@ mod tests {
     #[test]
     fn a_reference_nothing_pulled_refuses_rather_than_being_skipped() {
         let root = spec(r#"{"image":"x:1","mixins":["absent"]}"#);
-        let err = flatten(&root, &[], &BTreeMap::new()).unwrap_err();
+        let err = flatten(&root, &[], None, &BTreeMap::new()).unwrap_err();
         assert!(
             format!("{err:#}").contains("is not resolved"),
             "skipping it would boot a sandbox without what its own document declared; got: {err:#}"

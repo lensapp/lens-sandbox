@@ -231,7 +231,7 @@ pub async fn resolve<S: MixinSource>(
     let fetched = collect(&def.spec.mixins, extra, home, source).await?;
     let mut root = def.spec.clone();
     root.mixins = fetched.pinned_roots;
-    let sources = flatten(&root, &fetched.pinned_extra, &fetched.graph)?;
+    let sources = flatten(&root, &fetched.pinned_extra, None, &fetched.graph)?;
     let merged = merge(&sources)?;
     let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
