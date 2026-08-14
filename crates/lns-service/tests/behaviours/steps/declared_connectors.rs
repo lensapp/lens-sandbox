@@ -504,23 +504,12 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
         .as_ref()
         .and_then(|r| r.running_policy.as_ref())
         .ok_or("no running policy was produced")?;
-    // The guest gate is first-match-wins; the merged policy must present the deny before the connector's allow.
-    let verdict = policy
-        .network
-        .egress
-        .http
-        .iter()
-        .find(|r| r.match_pattern == host)
-        .map(|r| r.verdict)
-        // Nothing names the host: the catch-all the closed overlay carries is what decides it.
-        .unwrap_or(Verdict::Deny);
-    if verdict == Verdict::Deny {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected {host} to be denied, first match gave {verdict:?}; routes: {:?}",
+    match super::mixin_resolution::gate_verdict(policy, &host) {
+        Some(lns_policy::Verdict::Deny) => Ok(()),
+        other => Err(format!(
+            "expected {host} to be denied, the gate's first match gave {other:?}; routes: {:?}",
             policy.network.egress.http
-        ))
+        )),
     }
 }
 

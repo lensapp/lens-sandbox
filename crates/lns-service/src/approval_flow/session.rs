@@ -1739,31 +1739,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_policy_floor_survives_a_reload_keeping_its_deny_deny_dominant() {
+    fn a_reloaded_decision_decides_over_the_document_it_layers_onto() {
         let (s, _n, _store, mut rx) = fixture();
-        let mut floor = Policy::default();
-        floor.add_rule(RouteRule::deny_host("api.example.test"));
-        s.set_policy_floor(floor);
+        let mut document = Policy::default();
+        document.add_rule(RouteRule::deny_host("api.example.test"));
+        s.set_policy_floor(document);
 
-        // A watcher reload of the local overlay that *allows* the host must not drop the floor's deny.
         let mut reloaded = Policy::default();
         reloaded.add_rule(RouteRule::allow_host("api.example.test"));
         s.apply_external_policy(reloaded);
 
         let routes = s.current_policy().network.egress.http;
-        let deny_idx = routes
-            .iter()
-            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Deny);
         let allow_idx = routes
             .iter()
-            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Allow);
+            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Allow)
+            .expect("the approval the developer just made must survive the reload");
+        let deny_idx = routes
+            .iter()
+            .position(|r| r.match_pattern == "api.example.test" && r.verdict == Verdict::Deny)
+            .expect("what the document said is still in the table, behind the decision that overruled it");
         assert!(
-            deny_idx.is_some(),
-            "the floor's deny must survive the reload"
-        );
-        assert!(
-            deny_idx < allow_idx,
-            "the floor's deny must stay ordered before the reloaded allow: {routes:?}"
+            allow_idx < deny_idx,
+            "the developer's decisions file is the last source, so an approval they just made must decide rather than be dropped by the document under it: {routes:?}"
         );
         let _ = policy_frame(&mut rx);
     }
