@@ -246,6 +246,9 @@ pub enum Response {
         /// Which source decided each entry of the merged document, so the disclosure can attribute every line it shows.
         #[serde(default)]
         contributions: Vec<SourceContribution>,
+        /// The egress every source but this directory's own decided, as JSON: the run folds the live decisions file over it rather than over the copy the merged document carries, so a rule deleted mid-run retracts.
+        #[serde(default)]
+        authored_egress: String,
     },
     ImageTagged {
         from: String,
@@ -604,6 +607,9 @@ pub struct RunImageArgs {
     /// The local definition's absolute directory, keying its per-workload connector grants; absent for a published reference (which keys by repo@digest instead).
     #[serde(default)]
     pub definition_dir: Option<String>,
+    /// What the preflight resolved from every source but this directory's own, as JSON egress: the gate folds the live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
+    #[serde(default)]
+    pub authored_egress: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,6 +945,7 @@ mod tests {
             verify_sandbox: false,
             definition: None,
             definition_dir: None,
+            authored_egress: None,
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -987,6 +994,7 @@ mod tests {
             verify_sandbox: false,
             definition: None,
             definition_dir: None,
+            authored_egress: None,
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1123,6 +1131,7 @@ mod tests {
             verify_sandbox: false,
             definition: Some(r#"{"kind":"sandbox"}"#.into()),
             definition_dir: Some("/work/proj".into()),
+            authored_egress: Some(r#"{"http":[],"tcp":[]}"#.into()),
         }
     }
 

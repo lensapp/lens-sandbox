@@ -105,20 +105,34 @@ fn local_mixin_declaring_a_tool(w: &mut BehaviourWorld, tool: String) {
     ));
 }
 
-#[given(regex = r#"^the directory's own decisions allow "([^"]+)"$"#)]
-fn local_mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
+/// The decisions file in both the roles it plays: the merge's last source, and the live table the guest's gate folds over what the run pulled.
+fn decided(w: &mut BehaviourWorld, spec: &str, allowing: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.local_mixin = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{{"tools":["curl@8"],"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{spec}}}"#
     ));
+    rig.overlay
+        .add_rule(lns_policy::RouteRule::allow_host(allowing));
+}
+
+#[given(regex = r#"^the directory's own decisions allow "([^"]+)"$"#)]
+fn local_mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
+    decided(
+        w,
+        &format!(
+            r#"{{"tools":["curl@8"],"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}"#
+        ),
+        &host,
+    );
 }
 
 #[given(regex = r#"^the directory's own decisions allow "([^"]+)" and nothing else$"#)]
 fn local_mixin_allowing_only_a_destination(w: &mut BehaviourWorld, host: String) {
-    let rig = w.declared.get_or_insert_with(Default::default);
-    rig.local_mixin = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
-    ));
+    decided(
+        w,
+        &format!(r#"{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}"#),
+        &host,
+    );
 }
 
 #[given(regex = r#"^the directory's own decisions declare the tool "([^"]+)" and that mixin$"#)]
@@ -132,6 +146,16 @@ fn local_mixin_declaring_a_tool_and_that_mixin(w: &mut BehaviourWorld, tool: Str
 #[given("the sandbox definition declares nothing but its image")]
 fn definition_declares_only_its_image(w: &mut BehaviourWorld) {
     definition(w, r#"{"image":"ghcr.io/team/base:1"}"#);
+}
+
+#[given(regex = r#"^the sandbox definition denies "([^"]+)"$"#)]
+fn definition_denying_a_destination(w: &mut BehaviourWorld, host: String) {
+    definition(
+        w,
+        &format!(
+            r#"{{"image":"ghcr.io/team/base:1","egress":{{"http":[{{"match":"{host}","verdict":"deny"}}]}}}}"#
+        ),
+    );
 }
 
 #[given("the sandbox definition declares that mixin")]
@@ -192,10 +216,15 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             rig.resolved_document =
                 Some(String::from_utf8_lossy(&resolution.document).into_owned());
             rig.resolved_mixins.clone_from(&resolution.mixins);
+            rig.contributions =
+                lns_service::artifact::mixin::on_the_wire(&resolution.contributions);
             lns_service::artifact::plan_published_sandbox(
                 &resolution.document,
                 "registry.example.test/some-sandbox:1",
             )
+            .map(|resolved| {
+                lns_service::artifact::with_authored_baseline(resolved, &resolution.authored_egress)
+            })
         }
         Err(e) => Err(e),
     };
@@ -273,29 +302,63 @@ fn error_says_the_definition_reached_the_plan_unresolved(
     }
 }
 
-#[then(regex = r#"^the resolved document decides nothing about "([^"]+)"$"#)]
-fn resolved_document_decides_nothing(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
+#[then(regex = r#"^the resolved document allows "([^"]+)"$"#)]
+fn resolved_document_allows(w: &mut BehaviourWorld, host: String) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let document = rig
         .resolved_document
         .as_ref()
         .ok_or("the resolution produced no document")?;
-    if document.contains(&host) {
-        return Err(format!(
-            "the directory's egress reaches the gate live, so freezing a copy into the booted document would survive the developer deleting the rule; got: {document}"
-        ));
+    let def = lns_artifact::sandbox::parse(document.as_bytes()).map_err(|e| format!("{e:#}"))?;
+    match super::mixin_resolution::gate_verdict(
+        &lns_policy::Policy {
+            network: lns_policy::NetworkPolicy {
+                egress: def.spec.egress,
+            },
+            ..lns_policy::Policy::default()
+        },
+        &host,
+    ) {
+        Some(lns_policy::Verdict::Allow) => Ok(()),
+        other => Err(format!(
+            "the document a run boots is the whole merge, and a decision missing from it has nowhere to be disclosed; the document's first match for {host} gave {other:?}: {document}"
+        )),
     }
-    Ok(())
 }
 
-#[then("the run resolved no source but the sandbox itself")]
-fn run_resolved_no_other_source(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then(regex = r#"^the disclosure attributes "([^"]+)" to "([^"]+)"$"#)]
+fn disclosure_attributes(
+    w: &mut BehaviourWorld,
+    entry: String,
+    source: String,
+) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
-    if rig.resolved_mixins.is_empty() {
+    let found: Vec<(&str, &str)> = rig
+        .contributions
+        .iter()
+        .map(|c| (c.key.as_str(), c.source.as_str()))
+        .collect();
+    if found.contains(&(entry.as_str(), source.as_str())) {
         Ok(())
     } else {
         Err(format!(
-            "a directory that decided only destinations decides them live, so the merge has nothing to do and the bytes that boot are the ones that were published; got {:?}",
+            "§1.5 has the disclosure name what each source contributed, so an override nobody intended has to be visible before boot; got {found:?}"
+        ))
+    }
+}
+
+#[then("the run resolved the directory's own decisions as a source")]
+fn run_resolved_the_directorys_decisions(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if rig
+        .resolved_mixins
+        .iter()
+        .any(|source| source == "lns-local-mixin.yaml")
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "a file holding only destinations still decides them, so a run that named no source for them leaves 'why did this run reach that host' unanswered; got {:?}",
             rig.resolved_mixins
         ))
     }

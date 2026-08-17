@@ -215,7 +215,7 @@ impl ApprovalSession {
         let _ = self.connector_routes.set(deriver);
     }
 
-    /// Installs a sandbox's shipped policy as the earlier source every reload re-merges under, so a watcher reload of the local decisions carries the sandbox's rules along rather than replacing them; idempotent, the first wins.
+    /// Installs the baseline every reload folds the decisions file over — what every source *but* this directory's own decided, since a copy of that file frozen here would outlive a rule the developer deletes; idempotent, the first wins.
     pub fn set_shipped_policy(&self, shipped: Policy) {
         let _ = self.shipped.set(shipped);
     }
@@ -1745,6 +1745,33 @@ pub(crate) mod tests {
         assert!(
             allow_idx < deny_idx,
             "the developer's decisions file is the last source, so an approval they just made must decide rather than be dropped by the document under it: {routes:?}"
+        );
+        let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
+    fn a_destination_the_developer_deleted_mid_run_stops_being_decided() {
+        let (s, _n, _store, mut rx) = fixture();
+        let mut authored = Policy::default();
+        authored.add_rule(RouteRule::deny_host("*"));
+        s.set_shipped_policy(authored);
+        let mut decided = Policy::default();
+        decided.add_rule(RouteRule::allow_host("docs.some-vendor.example"));
+        s.apply_external_policy(decided);
+        let _ = policy_frame(&mut rx);
+
+        s.apply_external_policy(Policy::default());
+
+        assert_eq!(
+            s.current_policy()
+                .network
+                .egress
+                .http
+                .iter()
+                .map(|rule| (rule.match_pattern.clone(), rule.verdict))
+                .collect::<Vec<_>>(),
+            [("*".to_string(), Verdict::Deny)],
+            "the baseline is what every source but this directory's own decided, so deleting the rule is what retracts it — a copy frozen at boot would keep the host open for the rest of the run"
         );
         let _ = policy_frame(&mut rx);
     }

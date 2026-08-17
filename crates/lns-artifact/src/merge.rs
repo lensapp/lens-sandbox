@@ -215,14 +215,8 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
     }
     spec.ports = ports.into_iter().map(|won| won.item).collect();
 
-    // A later source's entries are placed ahead of an earlier one's, so the latest entry matching a destination is the one that decides.
+    spec.egress = egress_of(sources);
     for source in sources.iter().rev() {
-        spec.egress
-            .http
-            .extend(source.spec.egress.http.iter().cloned());
-        spec.egress
-            .tcp
-            .extend(source.spec.egress.tcp.iter().cloned());
         // Egress is a union rather than a keyed replacement, so every entry is attributed and none displaces another.
         for rule in source.spec.egress.http.iter() {
             contributions.push(egress_contribution(
@@ -246,6 +240,16 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         spec,
         contributions,
     })
+}
+
+/// The egress an ordered source list decides: a union with each later source's entries ahead of an earlier one's, so the latest entry matching a destination is the one that decides (§4.2).
+pub fn egress_of(sources: &[Source]) -> lns_policy::Egress {
+    let mut egress = lns_policy::Egress::default();
+    for source in sources.iter().rev() {
+        egress.http.extend(source.spec.egress.http.iter().cloned());
+        egress.tcp.extend(source.spec.egress.tcp.iter().cloned());
+    }
+    egress
 }
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
@@ -1027,6 +1031,31 @@ mod tests {
             table[0].verdict,
             lns_policy::Verdict::Allow,
             "the gate reads first-match, so the later source's entry has to sit ahead for it to decide"
+        );
+    }
+
+    #[test]
+    fn the_egress_a_source_list_folds_to_is_the_one_the_merged_document_carries() {
+        let owned = sources(&[
+            (
+                "base",
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}],"tcp":[{"match":"db.example.test:5432","verdict":"allow"}]}}"#,
+            ),
+            (
+                "later",
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
+            ),
+        ]);
+        let list = as_sources(&owned);
+        assert_eq!(
+            egress_of(&list),
+            merge(&list).expect("these sources resolve").spec.egress,
+            "the gate re-folds a prefix of this list against a live source, so the fold has to be the one that produced the document"
+        );
+        assert_eq!(
+            egress_of(&list[..1]).http.len(),
+            1,
+            "a prefix folds to what those sources alone decided, which is what makes a source that is still being edited foldable over it"
         );
     }
 

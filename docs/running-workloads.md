@@ -581,9 +581,10 @@ the sandbox first, then each entry in `spec.mixins` in order with that mixin's
 own mixins expanded right after it, then each `--mixin` the user passed, and
 last the directory's own
 [`lns-local-mixin.yaml`](policy.md#the-policy-file) — so nothing you pulled
-overrules what you decided here. That file's egress is the exception: it reaches
-the running sandbox live rather than through the merge, so a rule you delete
-mid-run stops applying.
+overrules what you decided here. Every block of that file merges like any other
+source's, including its `egress`, so the summary lists your rules beside the ones
+they overruled. What the running sandbox enforces is folded from the file itself,
+so a rule you add or delete mid-run applies or stops applying at once.
 
 A local entry is read from this machine, relative to the document that names it.
 It may name the directory — whose `lns.yaml` is read — or the document itself,
@@ -640,15 +641,20 @@ where each line came from — and lists the rules and credentials the merge
 produced, which an uncomposed run has no second author to attribute:
 
 ```
+  Mixins:    /work/mixins/debug-tools, lns-local-mixin.yaml
   Volume:    cache → /home/agent/.cache  [from /work/mixins/debug-tools]
   Tools:     node@22  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…, replaced node@20 from the sandbox]
-  Rules:     allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
-             deny proxy.vendor.example  [from the sandbox]
+  Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]
+             allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
+             deny docs.vendor.example  [from the sandbox]
   Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
 ```
 
-A run that resolved no mixin prints what it always has: one author, nothing to
-attribute.
+A directory that has decided something is one of those sources, so its file is
+named too — and because it is the last one, its rules read first: the `allow`
+above is what the gate reaches, and the `deny` it overruled is still listed under
+it. A run in a directory that decided nothing prints what it always has: one
+author, nothing to attribute.
 
 `lns inspect <REF> --mixin <REF>` shows the same composition without starting a
 run.

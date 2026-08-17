@@ -43,6 +43,8 @@ pub struct DeclaredRig {
     pub mixin_pins: std::collections::BTreeMap<String, String>,
     /// Every source the resolution merged, as the disclosure names them.
     pub resolved_mixins: Vec<String>,
+    /// Which source decided each entry of the merged document, as the disclosure reads them.
+    pub contributions: Vec<lns_ipc::SourceContribution>,
     /// The pins for the references the user named, in the order they named them.
     pub pinned_extra: Vec<String>,
     /// Where a local definition sits, since a directory it names roots there.

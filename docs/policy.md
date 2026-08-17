@@ -27,7 +27,14 @@ choose to edit the file directly.
 The file is a **mixin** — the same document format a
 [sandbox definition](running-workloads.md#defining-a-sandbox) layers on. Every
 run in the directory resolves it without being named, after every other source,
-so nothing you pulled overrules what you decided.
+so nothing you pulled overrules what you decided. Because it is a source like any
+other, the summary a run prints before booting lists its rules and names the file
+they came from — so a rule of yours that overrules one the sandbox shipped is
+visible while you can still stop the run.
+
+The rules the run enforces are folded from this file as it stands, not from a copy
+taken at launch: a rule an approval appends mid-run applies at once, and one you
+delete mid-run stops applying.
 
 Being a mixin also means the file is not limited to `egress`. Any block a mixin
 can declare, this one can declare too — a tool, a mount, another mixin to layer

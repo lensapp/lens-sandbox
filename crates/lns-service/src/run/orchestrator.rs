@@ -81,7 +81,10 @@ async fn orchestrate(
     let sandbox_plan = match (args.definition.as_deref(), resolved_image) {
         (Some(definition), _) => {
             crate::artifact::mixin::refuse_mixins_without_a_document(&args.mixins)?;
-            Some(crate::artifact::real::plan_local(definition).await?)
+            Some(
+                crate::artifact::real::plan_local(definition, args.authored_egress.as_deref())
+                    .await?,
+            )
         }
         (None, Some(image_ref)) => {
             crate::artifact::real::peek_and_plan(

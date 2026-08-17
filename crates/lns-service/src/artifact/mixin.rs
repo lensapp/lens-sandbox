@@ -207,6 +207,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
             contributions: Vec::new(),
+            authored_egress: lns_policy::Egress::default(),
         });
     }
     resolve(config_json, extra, home, source, local).await
@@ -221,9 +222,11 @@ pub struct Resolution {
     pub pinned_extra: Vec<String>,
     /// Which source decided each entry of the merged document, and what that decision replaced.
     pub contributions: Vec<lns_artifact::merge::Contribution>,
+    /// What every source but the directory's own decided about egress: the run folds the decisions file over this live, so an approval made mid-run applies and a rule deleted mid-run retracts.
+    pub authored_egress: lns_policy::Egress,
 }
 
-/// What the directory decided, as the merge reads it: the label a disclosure names it by, and everything but the egress it decided. Egress is left out because it reaches the guest live — an approval made mid-run applies and a rule deleted mid-run retracts, and a copy frozen into the booted document could do neither.
+/// What the directory decided, as the merge reads it: the label a disclosure names it by, and everything it decided.
 #[derive(Debug)]
 pub struct LocalSource {
     pub label: String,
@@ -243,10 +246,7 @@ impl LocalSource {
         Ok(Some(Self {
             label: fetched.pinned,
             home,
-            spec: SandboxSpec {
-                egress: Default::default(),
-                ..document.spec
-            },
+            spec: document.spec,
         }))
     }
 
@@ -271,6 +271,7 @@ pub async fn resolve<S: MixinSource>(
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
             contributions: lns_artifact::merge::own_egress(&def.spec),
+            authored_egress: def.spec.egress.clone(),
         });
     }
     let decided = local
@@ -304,16 +305,24 @@ pub async fn resolve<S: MixinSource>(
     let merged = merge(&sources)?;
     let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
+    let authored_egress = authored_egress(&sources, local.is_some());
+    let mixins = sources
+        .iter()
+        .skip(1)
+        .map(|source| source.label.to_string())
+        .collect();
     Ok(Resolution {
         document,
-        mixins: sources
-            .iter()
-            .skip(1)
-            .map(|source| source.label.to_string())
-            .collect(),
+        mixins,
         pinned_extra: fetched.pinned_extra,
         contributions: merged.contributions,
+        authored_egress,
     })
+}
+
+/// The egress every source but the directory's own decided, which is what the gate folds the live decisions file over; §8.1 puts that source last, so it is the one the fold leaves out.
+fn authored_egress(sources: &[Source], the_directory_decided: bool) -> lns_policy::Egress {
+    lns_artifact::merge::egress_of(&sources[..sources.len() - usize::from(the_directory_decided)])
 }
 
 /// Restate a merge's attribution for the wire, since lns-ipc names the document format without depending on the crate that merges it.
@@ -1139,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_that_decided_only_destinations_contributes_nothing_to_the_merge() {
+    fn a_directory_that_decided_only_destinations_is_still_a_source_of_the_merge() {
         let local = LocalSource::read(
             Some(FetchedMixin {
                 pinned: "lns-local-mixin.yaml".to_string(),
@@ -1150,8 +1159,143 @@ mod tests {
         .expect("a written file reads")
         .expect("a written file contributes");
         assert!(
-            local.decides_nothing(),
-            "egress reaches the guest live, so a file holding only egress leaves the merge with nothing to do"
+            !local.decides_nothing(),
+            "§3.3.2 merges this file's egress like any other source's, so a file holding only egress still decides something"
+        );
+    }
+
+    /// The decisions file as the run reads it, holding whatever `spec` a scenario is about.
+    fn decided(spec: &str) -> Option<LocalSource> {
+        LocalSource::read(
+            Some(FetchedMixin {
+                pinned: "lns-local-mixin.yaml".to_string(),
+                document: format!(
+                    r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{spec}}}"#
+                ),
+            }),
+            decided_in("/work"),
+        )
+        .expect("a written file reads")
+    }
+
+    #[tokio::test]
+    async fn what_the_directory_decided_reaches_the_document_that_boots_attributed_to_the_file() {
+        let out = resolve(
+            &sandbox(
+                r#"{"image":"x:1","egress":{"http":[{"match":"docs.some-vendor.example","verdict":"deny"}]}}"#,
+            ),
+            &[],
+            &published(),
+            &Fake::new(&[]),
+            decided(
+                r#"{"egress":{"http":[{"match":"docs.some-vendor.example","verdict":"allow"}]}}"#,
+            ),
+        )
+        .await
+        .expect("a directory that decided a destination resolves");
+        let def = lns_artifact::sandbox::parse(&out.document).expect("the merge is a sandbox");
+        assert_eq!(
+            def.spec
+                .egress
+                .http
+                .iter()
+                .map(|rule| (rule.match_pattern.as_str(), rule.verdict))
+                .collect::<Vec<_>>(),
+            [
+                ("docs.some-vendor.example", lns_policy::Verdict::Allow),
+                ("docs.some-vendor.example", lns_policy::Verdict::Deny)
+            ],
+            "§8.1 puts the directory's decisions last, and §4.2 places a later source ahead, so the developer's allow is what a first-match gate reaches"
+        );
+        assert_eq!(
+            out.contributions
+                .iter()
+                .map(|c| (c.key.as_str(), c.source.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("allow docs.some-vendor.example", "lns-local-mixin.yaml"),
+                (
+                    "deny docs.some-vendor.example",
+                    lns_artifact::merge::ROOT_LABEL
+                )
+            ],
+            "§1.5 has the disclosure name what each source contributed, so an allow beating a pulled deny is visible while it can still be refused"
+        );
+        assert_eq!(
+            out.mixins,
+            ["lns-local-mixin.yaml"],
+            "a source the run merged is one the disclosure names"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gates_baseline_leaves_out_what_the_directory_decided() {
+        let out = resolve(
+            &sandbox(
+                r#"{"image":"x:1","egress":{"http":[{"match":"api.some-vendor.example","verdict":"allow"}],"tcp":[{"match":"db.some-vendor.example:5432","verdict":"allow"}]}}"#,
+            ),
+            &[],
+            &published(),
+            &Fake::new(&[]),
+            decided(
+                r#"{"egress":{"http":[{"match":"docs.some-vendor.example","verdict":"allow"}],"tcp":[{"match":"cache.some-vendor.example:6379","verdict":"allow"}]}}"#,
+            ),
+        )
+        .await
+        .expect("a directory that decided a destination resolves");
+        assert_eq!(
+            out.authored_egress
+                .http
+                .iter()
+                .map(|rule| rule.match_pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["api.some-vendor.example"],
+            "the run folds the live decisions file over this baseline, and a frozen copy of the file in it would outlive a rule the developer deletes mid-run"
+        );
+        assert_eq!(
+            out.authored_egress
+                .tcp
+                .iter()
+                .map(|rule| rule.match_pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["db.some-vendor.example:5432"],
+            "the raw table is folded live by the same rule as the inspected one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_layered_on_nothing_hands_the_gate_its_own_egress_as_the_baseline() {
+        let out = resolve(
+            &sandbox(
+                r#"{"image":"x:1","egress":{"http":[{"match":"api.some-vendor.example","verdict":"allow"}]}}"#,
+            ),
+            &[],
+            &published(),
+            &Fake::new(&[]),
+            None,
+        )
+        .await
+        .expect("a document with no mixins resolves to itself");
+        assert_eq!(
+            out.authored_egress
+                .http
+                .iter()
+                .map(|rule| rule.match_pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["api.some-vendor.example"],
+            "a run that resolved nothing still enforces what its own document said, so a baseline of nothing would drop it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_image_hands_the_gate_no_baseline_at_all() {
+        let out = resolve_if_a_sandbox(None, None, b"{}", &[], &published(), &Fake::new(&[]), None)
+            .await
+            .expect("an image has no document to merge");
+        assert_eq!(
+            out.authored_egress,
+            lns_policy::Egress::default(),
+            "an image declares no egress, so the directory's decisions govern it verbatim"
         );
     }
 
