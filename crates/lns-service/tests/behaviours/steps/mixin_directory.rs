@@ -79,7 +79,10 @@ async fn the_local_sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
         Ok(resolution) => {
             let rig = w.declared.get_or_insert_with(Default::default);
             rig.resolved_mixins.clone_from(&resolution.mixins);
-            lns_service::artifact::plan_local_sandbox(&resolution.document)
+            lns_service::artifact::plan_local_sandbox(
+                &resolution.document,
+                &resolution.fileset_origins,
+            )
         }
         Err(e) => Err(e),
     };

@@ -30,7 +30,7 @@ pub struct ResolvedSandbox {
     pub local_filesets: Vec<LocalFileset>,
     pub host_filesets: Vec<HostFileset>,
     pub inline_filesets: Vec<InlineFileset>,
-    pub filesets: Vec<ResolvedFileset>,
+    pub packed_filesets: Vec<PackedFileset>,
     pub command: Option<String>,
     pub user: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -40,12 +40,13 @@ pub struct ResolvedSandbox {
     pub tools: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResolvedFileset {
-    pub name: String,
-    pub paths: Vec<String>,
-    /// The digest-pinned OCI reference the fileset's content layer is pulled from at materialization.
+/// A `path` fileset whose files live in a pulled artifact: the document that shipped it, and which of that artifact's layers holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedFileset {
+    pub mount_path: String,
+    /// The digest-pinned OCI reference whose layer the content is pulled from at materialization.
     pub reference: String,
+    pub layer: usize,
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 

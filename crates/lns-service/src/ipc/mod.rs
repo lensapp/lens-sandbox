@@ -576,6 +576,7 @@ mod tests {
     async fn run_image_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
+                fileset_origins: Vec::new(),
                 image: None,
                 resolved_image: None,
                 mixins: Vec::new(),

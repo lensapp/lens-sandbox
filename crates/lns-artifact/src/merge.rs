@@ -43,11 +43,20 @@ pub struct Displaced {
     pub summary: String,
 }
 
+/// Where a surviving `path` fileset's files live: the source that declared it, and that entry's index among the same source's `path` filesets — which is the position §7 gives its layer in that document's artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesetOrigin {
+    pub source: String,
+    pub layer: usize,
+}
+
 /// A merged sandbox and the record of which source decided each thing in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     pub spec: SandboxSpec,
     pub contributions: Vec<Contribution>,
+    /// Which document ships each surviving `path` fileset's layer, keyed by mount path. A merged document no longer says where its files came from, and only the source that declared one can be asked for them.
+    pub fileset_origins: BTreeMap<String, FilesetOrigin>,
 }
 
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
@@ -202,7 +211,8 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         Block::Tool,
         &mut contributions,
     );
-    (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions);
+    let fileset_origins;
+    (spec.volumes, spec.filesets, fileset_origins) = fold_mounts(sources, &mut contributions);
     let ports = fold_labelled(
         sources,
         |s| &s.ports,
@@ -239,6 +249,7 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
     Ok(Merged {
         spec,
         contributions,
+        fileset_origins,
     })
 }
 
@@ -250,6 +261,24 @@ pub fn egress_of(sources: &[Source]) -> lns_policy::Egress {
         egress.tcp.extend(source.spec.egress.tcp.iter().cloned());
     }
     egress
+}
+
+/// Where a document's own `path` filesets come from when nothing merges into it, so a run that layered on nothing still knows which artifact ships each layer.
+pub fn own_fileset_origins(spec: &SandboxSpec) -> BTreeMap<String, FilesetOrigin> {
+    spec.filesets
+        .iter()
+        .filter(|fileset| fileset.path.is_some())
+        .enumerate()
+        .map(|(layer, fileset)| {
+            (
+                fileset.mount_path.clone(),
+                FilesetOrigin {
+                    source: ROOT_LABEL.to_string(),
+                    layer,
+                },
+            )
+        })
+        .collect()
 }
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
@@ -288,7 +317,7 @@ fn egress_contribution(
 #[derive(Clone)]
 enum Mount {
     Volume(Volume),
-    Fileset(FilesetEntry),
+    Fileset(FilesetEntry, Option<FilesetOrigin>),
 }
 
 impl Mount {
@@ -296,18 +325,22 @@ impl Mount {
     fn summary(&self) -> String {
         match self {
             Mount::Volume(volume) => format!("volume {}", volume.source()),
-            Mount::Fileset(_) => "fileset".to_string(),
+            Mount::Fileset(..) => "fileset".to_string(),
         }
     }
 }
 
-fn fold_mounts(
-    sources: &[Source],
-    into: &mut Vec<Contribution>,
-) -> (Vec<Volume>, Vec<FilesetEntry>) {
+type FoldedMounts = (
+    Vec<Volume>,
+    Vec<FilesetEntry>,
+    BTreeMap<String, FilesetOrigin>,
+);
+
+fn fold_mounts(sources: &[Source], into: &mut Vec<Contribution>) -> FoldedMounts {
     let mut order: Vec<String> = Vec::new();
     let mut winners: BTreeMap<String, Won<Mount>> = BTreeMap::new();
     for source in sources {
+        let mut layer = 0;
         for volume in &source.spec.volumes {
             claim(
                 &mut order,
@@ -319,11 +352,19 @@ fn fold_mounts(
             );
         }
         for fileset in &source.spec.filesets {
+            let origin = fileset.path.is_some().then(|| {
+                let origin = FilesetOrigin {
+                    source: source.label.to_string(),
+                    layer,
+                };
+                layer += 1;
+                origin
+            });
             claim(
                 &mut order,
                 &mut winners,
                 fileset.mount_path.clone(),
-                Mount::Fileset(fileset.clone()),
+                Mount::Fileset(fileset.clone(), origin),
                 source.label,
                 Mount::summary,
             );
@@ -331,6 +372,7 @@ fn fold_mounts(
     }
     let mut volumes = Vec::new();
     let mut filesets = Vec::new();
+    let mut origins = BTreeMap::new();
     for won in order
         .into_iter()
         .filter_map(|target| winners.remove(&target))
@@ -338,10 +380,15 @@ fn fold_mounts(
         into.push(won.contribution(Block::Mount));
         match won.item {
             Mount::Volume(volume) => volumes.push(volume),
-            Mount::Fileset(fileset) => filesets.push(fileset),
+            Mount::Fileset(fileset, origin) => {
+                if let Some(origin) = origin {
+                    origins.insert(fileset.mount_path.clone(), origin);
+                }
+                filesets.push(fileset);
+            }
         }
     }
-    (volumes, filesets)
+    (volumes, filesets, origins)
 }
 
 fn take_over<T: Clone>(into: &mut Option<T>, from: &Option<T>) {
@@ -901,6 +948,53 @@ mod tests {
         assert_eq!(merged.volumes[0].source(), "later");
         assert_eq!(merged.filesets.len(), 1);
         assert_eq!(merged.filesets[0].inline.as_ref().unwrap()["a.md"], "later");
+    }
+
+    fn origins(owned: &[(String, SandboxSpec)]) -> BTreeMap<String, FilesetOrigin> {
+        merge(&as_sources(owned))
+            .expect("these sources resolve")
+            .fileset_origins
+    }
+
+    #[test]
+    fn a_path_fileset_records_the_source_and_layer_its_files_come_from() {
+        // The merged document says only `path`, so without this the run could not tell which artifact ships the layer.
+        let origins = origins(&sources(&[
+            (
+                "the sandbox",
+                r#"{"filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./hooks","mountPath":"/b"}]}"#,
+            ),
+            (
+                "reg/tools@sha256:abc",
+                r#"{"filesets":[{"path":"./prompts","mountPath":"/c"}]}"#,
+            ),
+        ]));
+        assert_eq!(origins["/a"].source, "the sandbox");
+        assert_eq!(origins["/a"].layer, 0);
+        assert_eq!(origins["/b"].layer, 1);
+        assert_eq!(origins["/c"].source, "reg/tools@sha256:abc");
+        assert_eq!(
+            origins["/c"].layer, 0,
+            "a layer index counts within the document that declares it, not across the merge"
+        );
+    }
+
+    #[test]
+    fn only_a_path_fileset_has_an_origin_and_a_displaced_one_loses_it() {
+        let origins = origins(&sources(&[
+            (
+                "base",
+                r#"{"filesets":[{"path":"./skills","mountPath":"/a"},{"inline":{"n.md":"x"},"mountPath":"/b"}]}"#,
+            ),
+            (
+                "later",
+                r#"{"filesets":[{"inline":{"n.md":"later"},"mountPath":"/a"}]}"#,
+            ),
+        ]));
+        assert!(
+            origins.is_empty(),
+            "an inline entry ships no layer, and the displaced path fileset must not leave one behind: {origins:?}"
+        );
     }
 
     #[test]

@@ -55,8 +55,17 @@ pub(crate) async fn peek_and_plan(
             )
             .await
             .with_context(|| format!("resolving {image_ref}"))?;
+            let pinned_reference = format!(
+                "{}/{}@{digest}",
+                reference.registry(),
+                reference.repository()
+            );
             let resolved = crate::artifact::with_authored_baseline(
-                crate::artifact::plan_published_sandbox(&resolution.document, image_ref)?,
+                crate::artifact::plan_published_sandbox(
+                    &resolution.document,
+                    &pinned_reference,
+                    &resolution.fileset_origins,
+                )?,
                 &resolution.authored_egress,
             );
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
@@ -88,8 +97,10 @@ pub(crate) async fn peek_and_plan(
 pub(crate) async fn plan_local(
     definition_json: &str,
     authored_egress: Option<&str>,
+    fileset_origins: &[lns_ipc::FilesetOrigin],
 ) -> Result<SandboxPlan> {
-    let mut resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
+    let mut resolved =
+        crate::artifact::plan_local_sandbox(definition_json.as_bytes(), fileset_origins)?;
     if let Some(authored) = authored_egress {
         resolved = crate::artifact::with_authored_baseline(
             resolved,
@@ -245,84 +256,86 @@ fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
     lns_policy::connectors::effective_connectors(&user)
 }
 
-/// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
+/// Pull the layer each packed fileset sits in and expand it into guest-write specs, so the files a document shipped inside its own artifact land in the microVM at their mount paths.
 async fn materialize_filesets(
     resolved: &ResolvedSandbox,
 ) -> Result<crate::artifact::fileset::MaterializedFilesets> {
     let content_store =
         crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
     let mut out = crate::artifact::fileset::MaterializedFilesets::default();
-    for fileset in &resolved.filesets {
-        let Some(mount) = fileset.paths.first() else {
-            continue;
-        };
-        let layers = pull_fileset_layers(&fileset.reference, &content_store)
+    for fileset in &resolved.packed_filesets {
+        let layer = pull_fileset_layer(&fileset.reference, fileset.layer, &content_store)
             .await
-            .with_context(|| format!("materializing fileset {}", fileset.name))?;
-        let mut specs = Vec::new();
-        let mut budget = FilesetBudget::new();
-        for layer in layers {
-            let file = std::fs::File::open(&layer)
-                .with_context(|| format!("opening fileset layer {}", layer.display()))?;
-            specs.extend(fileset_runtime_specs_with_budget(
-                mount,
-                file,
-                &content_store,
-                &mut budget,
-            )?);
-        }
-        out.absorb(fileset.owner, mount, specs);
+            .with_context(|| {
+                format!(
+                    "materializing the fileset {} ships at {}",
+                    fileset.reference, fileset.mount_path
+                )
+            })?;
+        let file = std::fs::File::open(&layer)
+            .with_context(|| format!("opening fileset layer {}", layer.display()))?;
+        let specs = fileset_runtime_specs_with_budget(
+            &fileset.mount_path,
+            file,
+            &content_store,
+            &mut FilesetBudget::new(),
+        )?;
+        out.absorb(fileset.owner, &fileset.mount_path, specs);
     }
     crate::artifact::fileset::inline_fileset_specs(&resolved.inline_filesets, &mut out);
     Ok(out)
 }
 
-async fn pull_fileset_layers(
+async fn pull_fileset_layer(
     reference: &str,
+    layer: usize,
     content_store: &crate::content_store::ContentStore,
-) -> Result<Vec<std::path::PathBuf>> {
+) -> Result<std::path::PathBuf> {
     let parsed: Reference = reference
         .parse()
-        .with_context(|| format!("invalid fileset reference {reference}"))?;
+        .with_context(|| format!("invalid fileset source {reference}"))?;
     let registry = RealRegistry::for_reference(&parsed, registry_auth_for(reference));
-    pull_fileset_layers_with(&registry, &parsed, content_store).await
+    pull_fileset_layer_with(&registry, &parsed, layer, content_store).await
 }
 
-/// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the fileset is refused before any download unless it is a digest-pinned FileSet artifact within the byte ceiling, and a stream failure leaves no partial content staged.
-async fn pull_fileset_layers_with<R: Registry>(
+/// Pull the one tar layer a document's Nth `path` fileset occupies (§7); the source is refused before any download unless it is digest-pinned, carries only tar layers within the byte ceiling, and actually has that layer — and a stream failure leaves no partial content staged.
+async fn pull_fileset_layer_with<R: Registry>(
     registry: &R,
     parsed: &Reference,
+    index: usize,
     content_store: &crate::content_store::ContentStore,
-) -> Result<Vec<std::path::PathBuf>> {
-    let (manifest, digest, config) = registry.pull_manifest_and_config(parsed).await?;
+) -> Result<std::path::PathBuf> {
+    // Before the peek, not after: `verify_digest_pin` can only compare a digest the reference carries, so a tag would fetch first and be trusted anyway.
+    if parsed.digest().is_none() {
+        anyhow::bail!("fileset source {parsed} is not digest-pinned; refusing to fetch it");
+    }
+    let (manifest, digest, _config) = registry.pull_manifest_and_config(parsed).await?;
     crate::image::verify_digest_pin(parsed, &digest, &parsed.to_string())?;
-    crate::artifact::fileset::validate_fileset_artifact(parsed, &manifest, &config)?;
+    crate::artifact::fileset::validate_fileset_layers(parsed, &manifest)?;
     crate::artifact::fileset::validate_fileset_layer_sizes(
         &manifest,
         lns_artifact::build::MAX_FILESET_BYTES,
     )?;
-    let content: Vec<_> = manifest.layers.iter().collect();
-    if content.is_empty() {
-        anyhow::bail!("fileset {parsed} has no content layer");
+    let layer = manifest.layers.get(index).with_context(|| {
+        format!(
+            "{parsed} declares {} fileset layers, so it cannot ship the one at index {index}",
+            manifest.layers.len()
+        )
+    })?;
+    let expected_size = u64::try_from(layer.size)
+        .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
+    let staged = content_store.staging_path()?;
+    if let Err(error) = registry
+        .pull_blob_to_path(parsed, layer, expected_size, &staged, &|_| {})
+        .await
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
     }
-    let mut blobs = Vec::with_capacity(content.len());
-    for layer in content {
-        let expected_size = u64::try_from(layer.size)
-            .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
-        let staged = content_store.staging_path()?;
-        if let Err(error) = registry
-            .pull_blob_to_path(parsed, layer, expected_size, &staged, &|_| {})
-            .await
-        {
-            let _ = std::fs::remove_file(&staged);
-            return Err(error);
-        }
-        let installed = content_store
-            .commit_verified(staged, &layer.digest, expected_size)
-            .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
-        blobs.push(installed.path);
-    }
-    Ok(blobs)
+    let installed = content_store
+        .commit_verified(staged, &layer.digest, expected_size)
+        .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
+    Ok(installed.path)
 }
 
 /// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective connectors and shipped-policy hash; a recording failure is logged, never fatal to the launch.
@@ -408,6 +421,7 @@ pub(crate) async fn resolve_definition(
         contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
         authored_egress: serde_json::to_string(&resolution.authored_egress)
             .context("serializing the egress this run resolved")?,
+        fileset_origins: resolution.fileset_origins,
     })
 }
 
@@ -454,7 +468,7 @@ mod tests {
     use oci_client::manifest::{OciDescriptor, OciImageManifest};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn a_symlinked_host_file_reads_as_the_file_it_points_at() {
@@ -504,6 +518,8 @@ mod tests {
         fail: bool,
         manifest_digest: Option<String>,
         streamed: AtomicBool,
+        /// Counts every manifest read, so a test can pin that an unpinned source is refused before the registry is touched at all.
+        peeked: AtomicUsize,
     }
 
     impl StreamingRegistry {
@@ -513,6 +529,7 @@ mod tests {
                 fail,
                 manifest_digest: None,
                 streamed: AtomicBool::new(false),
+                peeked: AtomicUsize::new(0),
             }
         }
     }
@@ -522,12 +539,13 @@ mod tests {
             &self,
             reference: &Reference,
         ) -> Result<(OciImageManifest, String, String)> {
+            self.peeked.fetch_add(1, Ordering::Relaxed);
             let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
             Ok((
                 OciImageManifest {
-                    artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
+                    artifact_type: Some(lns_artifact::spec::Kind::Sandbox.artifact_type()),
                     config: OciDescriptor {
-                        media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
+                        media_type: lns_artifact::spec::Kind::Sandbox.config_media_type(),
                         ..Default::default()
                     },
                     layers: vec![OciDescriptor {
@@ -542,7 +560,7 @@ mod tests {
                     .clone()
                     .or_else(|| reference.digest().map(ToOwned::to_owned))
                     .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
-                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"files","mount":{"path":"/files"},"spec":{}}"#.into(),
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"files","spec":{"image":"x:1","filesets":[{"path":"./files","mountPath":"/files"}]}}"#.into(),
             ))
         }
 
@@ -596,13 +614,12 @@ mod tests {
         let store = crate::content_store::ContentStore::new(dir.path());
         let registry = StreamingRegistry::fileset(vec![7; 512 * 1024], false);
 
-        let paths = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
+        let path = pull_fileset_layer_with(&registry, &pinned_reference(), 0, &store)
             .await
             .unwrap();
 
         assert!(registry.streamed.load(Ordering::Relaxed));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(std::fs::read(&paths[0]).unwrap(), registry.blob);
+        assert_eq!(std::fs::read(&path).unwrap(), registry.blob);
     }
 
     #[tokio::test]
@@ -612,7 +629,7 @@ mod tests {
         let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
         registry.manifest_digest = Some(format!("sha256:{}", "b".repeat(64)));
 
-        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
+        let err = pull_fileset_layer_with(&registry, &pinned_reference(), 0, &store)
             .await
             .unwrap_err();
 
@@ -624,12 +641,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unpinned_fileset_source_is_refused_before_the_registry_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::fileset(vec![7; 1024], false);
+        let floating: Reference = "registry.example.test/team/skills:latest".parse().unwrap();
+
+        let err = pull_fileset_layer_with(&registry, &floating, 0, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("is not digest-pinned"),
+            "got: {err:#}"
+        );
+        assert_eq!(
+            registry.peeked.load(Ordering::Relaxed),
+            0,
+            "a tag can move between the approval and the pull, so an unpinned source must be refused before any byte is fetched"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_layer_the_declaring_artifact_does_not_carry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::fileset(vec![7; 1024], false);
+
+        let err = pull_fileset_layer_with(&registry, &pinned_reference(), 3, &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("cannot ship the one at index 3"),
+            "a document and its artifact disagreeing about layer count must refuse, not mount another fileset's files: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
     async fn a_failed_fileset_stream_leaves_no_partial_content() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
         let registry = StreamingRegistry::fileset(vec![7; 128 * 1024], true);
 
-        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
+        let err = pull_fileset_layer_with(&registry, &pinned_reference(), 0, &store)
             .await
             .unwrap_err();
 

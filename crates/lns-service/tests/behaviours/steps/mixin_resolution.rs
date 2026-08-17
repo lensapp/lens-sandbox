@@ -221,6 +221,7 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             lns_service::artifact::plan_published_sandbox(
                 &resolution.document,
                 "registry.example.test/some-sandbox:1",
+                &resolution.fileset_origins,
             )
             .map(|resolved| {
                 lns_service::artifact::with_authored_baseline(resolved, &resolution.authored_egress)

@@ -245,7 +245,7 @@ fn snapshot_into<D: SnapshotDir + ?Sized>(
     Ok(())
 }
 
-/// Expand a FileSet's tar layer into guest-write specs rooted at `mount_path`, so the fileset's files land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered fileset can't write outside its declared mount.
+/// Expand a fileset's tar layer into guest-write specs rooted at `mount_path`, so the fileset's files land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered fileset can't write outside its declared mount.
 pub fn fileset_runtime_specs<R: Read>(
     mount_path: &str,
     layer_tar: R,
@@ -316,52 +316,36 @@ pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
     Ok(specs)
 }
 
-/// Refuse a fileset whose declared layers exceed the byte ceiling before any download, returning the validated aggregate size.
+/// Refuse a fileset layer this build could not materialize, before any download. Each layer carries one fileset (§7), so each is measured against the per-fileset ceiling on its own — summing them would refuse a document that `lns push` accepted.
 pub(crate) fn validate_fileset_layer_sizes(
     manifest: &OciImageManifest,
     max_bytes: u64,
-) -> Result<u64> {
-    let mut total = 0_u64;
+) -> Result<()> {
     for layer in &manifest.layers {
         let size = u64::try_from(layer.size)
             .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
-        if size > max_bytes.saturating_sub(total) {
-            bail!("fileset layers exceed the {max_bytes}-byte limit");
+        if size > max_bytes {
+            bail!(
+                "fileset layer {} exceeds the {max_bytes}-byte limit",
+                layer.digest
+            );
         }
-        total += size;
     }
-    Ok(total)
+    Ok(())
 }
 
-/// Refuse a reference that isn't a FileSet artifact — wrong artifact type, wrong config media type, an unparseable FileSet config, or a non-tar (e.g. compressed) layer — before any download.
-pub(crate) fn validate_fileset_artifact(
+/// Refuse a document whose fileset layers this build cannot expand — a non-tar (e.g. compressed) layer — before any download.
+pub(crate) fn validate_fileset_layers(
     reference: &Reference,
     manifest: &OciImageManifest,
-    config: &str,
 ) -> Result<()> {
-    let kind = lns_artifact::spec::Kind::FileSet;
-    let expected_artifact_type = kind.artifact_type();
-    if let Some(actual) = manifest.artifact_type.as_deref()
-        && actual != expected_artifact_type
-    {
-        bail!("{reference} is not a FileSet artifact: artifact type is {actual}");
-    }
-    let expected_config_media_type = kind.config_media_type();
-    if manifest.config.media_type != expected_config_media_type {
-        bail!(
-            "{reference} is not a FileSet artifact: config media type is {}",
-            manifest.config.media_type
-        );
-    }
-    lns_artifact::spec::parse_fileset(config.as_bytes())
-        .with_context(|| format!("validating FileSet config for {reference}"))?;
     if let Some(layer) = manifest
         .layers
         .iter()
         .find(|layer| layer.media_type != "application/vnd.oci.image.layer.v1.tar")
     {
         bail!(
-            "FileSet {reference} has unsupported layer media type {}",
+            "{reference} carries a fileset layer of unsupported media type {}",
             layer.media_type
         );
     }
@@ -985,9 +969,9 @@ mod tests {
 
     fn fileset_manifest(layer_media_type: &str) -> OciImageManifest {
         OciImageManifest {
-            artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
+            artifact_type: Some(lns_artifact::spec::Kind::Sandbox.artifact_type()),
             config: OciDescriptor {
-                media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
+                media_type: lns_artifact::spec::Kind::Sandbox.config_media_type(),
                 ..Default::default()
             },
             layers: vec![OciDescriptor {
@@ -1000,47 +984,38 @@ mod tests {
         }
     }
 
-    const FILESET_CONFIG: &str = r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"files","mount":{"path":"/files"},"spec":{}}"#;
-
-    #[test]
-    fn declared_fileset_layers_are_rejected_before_their_aggregate_exceeds_the_limit() {
-        let manifest = OciImageManifest {
-            layers: vec![
-                OciDescriptor {
-                    digest: "sha256:a".into(),
-                    size: 3,
+    fn manifest_of_layer_sizes(sizes: &[i64]) -> OciImageManifest {
+        OciImageManifest {
+            layers: sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| OciDescriptor {
+                    digest: format!("sha256:{index}"),
+                    size: *size,
                     ..Default::default()
-                },
-                OciDescriptor {
-                    digest: "sha256:b".into(),
-                    size: 3,
-                    ..Default::default()
-                },
-            ],
+                })
+                .collect(),
             ..Default::default()
-        };
-        let err = validate_fileset_layer_sizes(&manifest, 5).unwrap_err();
-        assert!(format!("{err:#}").contains("5-byte limit"));
+        }
     }
 
     #[test]
-    fn declared_fileset_layers_within_the_limit_report_their_aggregate_size() {
-        let manifest = OciImageManifest {
-            layers: vec![
-                OciDescriptor {
-                    digest: "sha256:a".into(),
-                    size: 3,
-                    ..Default::default()
-                },
-                OciDescriptor {
-                    digest: "sha256:b".into(),
-                    size: 4,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(validate_fileset_layer_sizes(&manifest, 100).unwrap(), 7);
+    fn each_fileset_layer_is_measured_against_the_ceiling_on_its_own() {
+        // One layer carries one fileset (§7), so a document may ship several that only exceed the per-fileset cap when summed.
+        let manifest = manifest_of_layer_sizes(&[200, 200]);
+        validate_fileset_layer_sizes(&manifest, 256).expect(
+            "capping the sum would refuse a document push accepted, so no run could ever materialize it",
+        );
+    }
+
+    #[test]
+    fn a_fileset_layer_over_the_ceiling_is_refused_before_any_download() {
+        let manifest = manifest_of_layer_sizes(&[10, 300]);
+        let err = validate_fileset_layer_sizes(&manifest, 256).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("256-byte limit"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -1058,51 +1033,17 @@ mod tests {
     }
 
     #[test]
-    fn a_well_formed_fileset_artifact_passes_validation() {
+    fn a_well_formed_tar_fileset_layer_passes_validation() {
         let manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar");
-        validate_fileset_artifact(&reference(), &manifest, FILESET_CONFIG).unwrap();
-    }
-
-    #[test]
-    fn a_non_fileset_artifact_type_is_refused() {
-        let mut manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar");
-        manifest.artifact_type = Some("application/vnd.acme.thing".into());
-        let err = validate_fileset_artifact(&reference(), &manifest, FILESET_CONFIG).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not a FileSet artifact: artifact type is"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn a_non_fileset_config_media_type_is_refused() {
-        let mut manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar");
-        manifest.config.media_type = "application/vnd.oci.image.config.v1+json".into();
-        let err = validate_fileset_artifact(&reference(), &manifest, FILESET_CONFIG).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("config media type"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn a_fileset_config_of_the_wrong_kind_is_refused() {
-        let manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar");
-        let config =
-            r#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"files","spec":{}}"#;
-        let err = validate_fileset_artifact(&reference(), &manifest, config).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("expected kind fileset"),
-            "got: {err:#}"
-        );
+        validate_fileset_layers(&reference(), &manifest).unwrap();
     }
 
     #[test]
     fn a_compressed_fileset_layer_is_refused() {
         let manifest = fileset_manifest("application/vnd.oci.image.layer.v1.tar+gzip");
-        let err = validate_fileset_artifact(&reference(), &manifest, FILESET_CONFIG).unwrap_err();
+        let err = validate_fileset_layers(&reference(), &manifest).unwrap_err();
         assert!(
-            format!("{err:#}").contains("unsupported layer media type"),
+            format!("{err:#}").contains("unsupported media type"),
             "got: {err:#}"
         );
     }

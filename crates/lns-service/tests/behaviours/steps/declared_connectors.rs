@@ -18,6 +18,7 @@ use lns_service::credential_flow::connectors::{
 use lns_service::credential_flow::providers::Provider;
 use lns_service::credential_flow::registry::expand_credentials_with_custom;
 
+use super::own_fileset_origins;
 use crate::world::BehaviourWorld;
 
 fn credential_connector(id: &str, env_var: &str, route: Option<&str>) -> Connector {
@@ -238,7 +239,13 @@ fn sandbox_launched(w: &mut BehaviourWorld) {
         .definition
         .clone()
         .expect("a Given step must declare the definition");
-    launch(w, plan_local_sandbox(definition.as_bytes()));
+    launch(
+        w,
+        plan_local_sandbox(
+            definition.as_bytes(),
+            &own_fileset_origins(definition.as_bytes()),
+        ),
+    );
 }
 
 #[when("the published sandbox is launched")]
@@ -254,6 +261,7 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
         plan_published_sandbox(
             definition.as_bytes(),
             "registry.example.test/some-sandbox:1",
+            &own_fileset_origins(definition.as_bytes()),
         ),
     );
 }
@@ -294,7 +302,13 @@ fn relaunch(w: &mut BehaviourWorld) {
         .definition
         .clone()
         .expect("the blocked launch kept its definition");
-    launch(w, plan_local_sandbox(definition.as_bytes()));
+    launch(
+        w,
+        plan_local_sandbox(
+            definition.as_bytes(),
+            &own_fileset_origins(definition.as_bytes()),
+        ),
+    );
 }
 
 #[given(regex = r#"^the machine catalog has an oauth connector "([^"]+)"$"#)]

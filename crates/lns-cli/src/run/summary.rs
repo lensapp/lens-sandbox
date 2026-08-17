@@ -347,11 +347,10 @@ fn flags_line(args: &RunArgs) -> String {
     }
 }
 
-/// The summary shows a path verbatim, shortens a ref digest to 12 characters, names embedded files as inline, and names a host file as one so the operator sees which of their files a sandbox reads.
+/// The summary shows a path verbatim, names embedded files as inline, and names a host file as one so the operator sees which of their files a sandbox reads.
 pub fn fileset_source_display(fileset: &lns_artifact::sandbox::FilesetEntry) -> String {
     fileset_display(
         fileset.path.as_deref(),
-        fileset.reference.as_deref(),
         fileset.inline.is_some(),
         fileset.host_path.as_deref(),
         fileset.optional,
@@ -368,7 +367,6 @@ pub fn fileset_owner_display(owner: lns_artifact::sandbox::FilesetOwner) -> &'st
 pub fn fileset_view_source_display(fileset: &lns_ipc::SandboxFileset) -> String {
     fileset_display(
         fileset.path.as_deref(),
-        fileset.reference.as_deref(),
         fileset.inline,
         fileset.host_path.as_deref(),
         fileset.optional,
@@ -411,7 +409,6 @@ pub fn tools_from_view(view: &lns_ipc::SandboxView) -> Vec<String> {
 
 fn fileset_display(
     path: Option<&str>,
-    reference: Option<&str>,
     inline: bool,
     host_path: Option<&str>,
     optional: bool,
@@ -420,20 +417,10 @@ fn fileset_display(
         let suffix = if optional { " (optional)" } else { "" };
         return format!("host file {host_path}{suffix}");
     }
-    if let Some(path) = path {
-        return path.to_string();
-    }
     if inline {
         return "inline".to_string();
     }
-    let reference = reference.unwrap_or_default();
-    match reference.split_once("@sha256:") {
-        Some((repo, digest)) if digest.chars().count() > 12 => {
-            let short: String = digest.chars().take(12).collect();
-            format!("{repo}@sha256:{short}…")
-        }
-        _ => reference.to_string(),
-    }
+    path.unwrap_or_default().to_string()
 }
 
 fn ports_line(args: &RunArgs) -> String {
@@ -528,6 +515,7 @@ mod tests {
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
             contributions: Vec::new(),
+            fileset_origins: Vec::new(),
             image: image.map(str::to_string),
             file: None,
             name: None,
@@ -580,13 +568,9 @@ mod tests {
         )
     }
 
-    fn fileset_entry(
-        path: Option<&str>,
-        reference: Option<&str>,
-    ) -> lns_artifact::sandbox::FilesetEntry {
+    fn fileset_entry(path: Option<&str>) -> lns_artifact::sandbox::FilesetEntry {
         lns_artifact::sandbox::FilesetEntry {
             path: path.map(str::to_string),
-            reference: reference.map(str::to_string),
             inline: None,
             host_path: None,
             mount_path: "/s".into(),
@@ -596,21 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn fileset_display_keeps_a_path_verbatim_and_shortens_a_pinned_digest() {
+    fn fileset_display_keeps_a_path_verbatim() {
         assert_eq!(
-            fileset_source_display(&fileset_entry(Some("./skills"), None)),
+            fileset_source_display(&fileset_entry(Some("./skills"))),
             "./skills"
-        );
-        let long = format!("reg/skills@sha256:{}", "a".repeat(64));
-        assert_eq!(
-            fileset_source_display(&fileset_entry(None, Some(&long))),
-            format!("reg/skills@sha256:{}…", "a".repeat(12))
         );
     }
 
     #[test]
     fn fileset_display_names_a_host_file_and_marks_it_optional() {
-        let mut fileset = fileset_entry(None, None);
+        let mut fileset = fileset_entry(None);
         fileset.host_path = Some("~/.gitconfig".into());
 
         assert_eq!(
@@ -627,16 +606,8 @@ mod tests {
     }
 
     #[test]
-    fn fileset_display_shows_an_already_short_ref_verbatim() {
-        assert_eq!(
-            fileset_source_display(&fileset_entry(None, Some("reg/skills@sha256:abc"))),
-            "reg/skills@sha256:abc"
-        );
-    }
-
-    #[test]
     fn fileset_display_discloses_inline_source_and_owners_without_content() {
-        let mut fileset = fileset_entry(None, None);
+        let mut fileset = fileset_entry(None);
         fileset.inline = Some(std::collections::BTreeMap::from([(
             "settings.json".to_string(),
             "do-not-print".to_string(),
@@ -668,7 +639,6 @@ mod tests {
             ports: Vec::new(),
             filesets: vec![lns_ipc::SandboxFileset {
                 path: None,
-                reference: None,
                 inline: true,
                 host_path: None,
                 mount_path: "/etc/agent".into(),
@@ -692,16 +662,6 @@ mod tests {
                 owner: "root".to_string(),
                 from_host: false,
             }]
-        );
-    }
-
-    #[test]
-    fn fileset_display_shortens_a_multibyte_digest_by_chars_not_bytes() {
-        let reference = format!("reg/skills@sha256:{}{}", "a".repeat(11), "é".repeat(5));
-        assert_eq!(
-            fileset_source_display(&fileset_entry(None, Some(&reference))),
-            format!("reg/skills@sha256:{}é…", "a".repeat(11)),
-            "a crafted pulled fileset digest must truncate by chars, never panic on a byte boundary"
         );
     }
 

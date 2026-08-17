@@ -46,7 +46,6 @@ fn declared_view_filesets(
         .iter()
         .map(|fileset| lns_ipc::SandboxFileset {
             path: fileset.path.clone(),
-            reference: fileset.reference.clone(),
             inline: fileset.inline.is_some(),
             host_path: fileset.host_path.clone(),
             optional: fileset.optional,
@@ -110,13 +109,14 @@ pub(crate) fn project_inspection(
                 }),
             })))
         }
-        Some(other) if other != lns_artifact::spec::Kind::Sandbox => {
-            anyhow::bail!("a {} artifact has no definition to show", other.as_str())
-        }
-        Some(_) => {
+        Some(lns_artifact::spec::Kind::Sandbox) => {
             let def = lns_artifact::sandbox::parse(&resolution.document)
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
-            let resolved = resolved_from_sandbox(&def);
+            let resolved = resolved_from_sandbox(
+                &def,
+                &resolution.fileset_origins,
+                crate::artifact::RootSource::Pulled(image_ref),
+            );
             let (declared_size, _) = lns_artifact::resources::DeclaredSize::from_resources(
                 def.spec.resources.as_ref(),
                 host,
@@ -173,6 +173,7 @@ mod tests {
             pinned_extra: Vec::new(),
             contributions: Vec::new(),
             authored_egress: Default::default(),
+            fileset_origins: Vec::new(),
         }
     }
 
@@ -333,24 +334,6 @@ mod tests {
             cpus: None,
             mem_mib: None,
         }))
-    }
-
-    #[test]
-    fn a_kind_with_no_definition_to_show_is_refused_rather_than_projected() {
-        let fileset = lns_artifact::spec::Kind::FileSet;
-        let err = project_inspection(
-            "ghcr.io/acme/skills:1",
-            digest(),
-            Some(&fileset.artifact_type()),
-            &fileset.config_media_type(),
-            &resolution("{}", &[]),
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("has no definition to show"),
-            "a fileset is content, not a document, so projecting one as a sandbox would print fields it never had; got: {err:#}"
-        );
     }
 
     #[test]
@@ -528,7 +511,6 @@ mod tests {
             .unwrap(),
             sandbox_view_with_filesets(vec![SandboxFileset {
                 path: None,
-                reference: None,
                 inline: false,
                 host_path: Some("~/.gitconfig".into()),
                 mount_path: "/home/agent/.gitconfig".into(),
@@ -565,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"ref":"registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -610,11 +592,7 @@ mod tests {
                 ],
                 filesets: vec![
                     SandboxFileset {
-                        path: None,
-                        reference: Some(
-                            "registry.example.test/team/skills@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                                .into()
-                        ),
+                        path: Some("./skills".into()),
                         inline: false,
                         host_path: None,
                         optional: false,
@@ -623,7 +601,6 @@ mod tests {
                     },
                     SandboxFileset {
                         path: None,
-                        reference: None,
                         inline: true,
                         host_path: None,
                         optional: false,

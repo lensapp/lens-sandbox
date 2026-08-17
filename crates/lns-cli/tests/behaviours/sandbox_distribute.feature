@@ -45,13 +45,12 @@ Feature: distributing a sandbox
     And the output contains "nothing uploaded"
     And nothing is pushed
 
-  Scenario: push --dry-run packs path filesets and reports their pinned refs
+  Scenario: push --dry-run packs path filesets into the digest it previews
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
     When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
-    And the output contains "would push fileset"
-    And the output contains "@sha256:"
+    And the output contains "would push ghcr.io/team/hermes:1.4.0@sha256:"
     And nothing is pushed
 
   Scenario: push --dry-run refuses an invalid definition like a real push
@@ -70,14 +69,15 @@ Feature: distributing a sandbox
     And the output contains "push scope"
     And the output contains "ghcr.io"
 
-  Scenario: push packs each path fileset and pins it into the published config
+  Scenario: push packs each path fileset into a layer of the sandbox artifact
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
     And the registry accepts the push
     When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
-    And a FileSet artifact is pushed alongside the sandbox
-    And the published sandbox config carries the fileset as a digest-pinned ref, not a path
+    And the sandbox artifact carries a packed layer holding "prompts.md"
+    And only the sandbox artifact is pushed
+    And the published sandbox config carries the fileset path unchanged
 
   Scenario: a secret-shaped file in a path fileset refuses the push
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
@@ -87,12 +87,13 @@ Feature: distributing a sandbox
     And the output contains ".env"
     And nothing is pushed
 
-  Scenario: push carries inline files in the sandbox artifact without a companion fileset artifact
+  Scenario: push carries inline files in the sandbox artifact without a layer of their own
     Given a valid lns.yaml in the current directory declaring an inline fileset at "/home/sandbox"
     And the registry accepts the push
     When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And only the sandbox artifact is pushed
+    And no fileset layer is packed
     And the published sandbox config carries the inline content unchanged
 
   Scenario: Publishing pins resolved tool versions

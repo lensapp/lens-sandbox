@@ -191,6 +191,7 @@ struct ResolvedDefinition {
     pinned_mixins: Vec<String>,
     contributions: Vec<lns_ipc::SourceContribution>,
     authored_egress: String,
+    fileset_origins: Vec<lns_ipc::FilesetOrigin>,
 }
 
 /// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
@@ -224,12 +225,14 @@ async fn preflight_local(
             pinned_mixins,
             contributions,
             authored_egress,
+            fileset_origins,
         }) => Ok(ResolvedDefinition {
             definition,
             mixins,
             pinned_mixins,
             contributions,
             authored_egress,
+            fileset_origins,
         }),
         Some(Response::Error { message }) => anyhow::bail!("{message}"),
         Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
@@ -303,6 +306,7 @@ pub async fn run_image(
             &resolved.pinned_mixins,
             &resolved.contributions,
         );
+        args.fileset_origins = resolved.fileset_origins;
     }
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
@@ -469,6 +473,7 @@ pub async fn run_image(
         auto_remove: args.auto_remove,
         verify_sandbox: target.verify_sandbox(),
         definition: target.definition_json(),
+        fileset_origins: args.fileset_origins,
         definition_dir: target
             .project_dir()
             .map(|p| p.to_string_lossy().into_owned()),
@@ -1306,11 +1311,7 @@ mod tests {
                 }],
                 ports: Vec::new(),
                 filesets: vec![lns_ipc::SandboxFileset {
-                    path: None,
-                    reference: Some(format!(
-                        "registry.example.test/team/skills@sha256:{}",
-                        "b".repeat(64)
-                    )),
+                    path: Some("./skills".into()),
                     inline: false,
                     host_path: None,
                     optional: false,
@@ -1336,10 +1337,7 @@ mod tests {
         assert_eq!(
             target.filesets,
             [crate::run::summary::FilesetSummary {
-                source: format!(
-                    "registry.example.test/team/skills@sha256:{}…",
-                    "b".repeat(12)
-                ),
+                source: "./skills".to_string(),
                 mount_path: "/root/.agent/skills".to_string(),
                 owner: "workload".to_string(),
                 from_host: false,

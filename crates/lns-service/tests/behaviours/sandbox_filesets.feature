@@ -1,30 +1,41 @@
 Feature: a sandbox's declared filesets are planned into the launch
-  A sandbox definition may ship files via spec.filesets. The service
-  plans them into the run: a published sandbox's fileset refs join the
-  resolved plan (materialized into the guest by the fileset-pull
-  machinery), a local definition's path filesets are walked into
-  guest-write specs at plan time, and inline filesets are lowered directly
-  from the sandbox definition — all as launch-time snapshots. The trust
-  story is digest pinning plus disclosure, not signatures: a published
-  sandbox whose fileset ref is not digest-pinned (or that smuggles a
-  local path) is refused. The absence of any signature warning on a
-  fileset-carrying sandbox run is pinned end to end in the Layer 1
-  suite.
+  A sandbox definition may ship files via spec.filesets. A fileset is
+  not a separate artifact: a path entry's files travel in a layer of the
+  document's own artifact. The service plans them into the run: a
+  pulled document's path filesets resolve to the layer of the artifact
+  that shipped them, a local definition's path filesets are walked into
+  guest-write specs at plan time, and inline filesets are lowered
+  directly from the sandbox definition — all as launch-time snapshots.
+  The trust story is digest pinning plus disclosure, not signatures: a
+  published sandbox whose files no digest-pinned artifact ships is
+  refused. The absence of any signature warning on a fileset-carrying
+  sandbox run is pinned end to end in the Layer 1 suite.
 
-  Scenario: planning a published sandbox carries its fileset refs into the resolved plan
-    Given a published sandbox declaring a digest-pinned fileset at "/root/.agent/skills"
+  Scenario: planning a published sandbox points each path fileset at the layer that ships it
+    Given a published sandbox declaring a path fileset at "/root/.agent/skills"
     When the sandbox is planned
-    Then the resolved plan carries the fileset ref at "/root/.agent/skills"
+    Then the resolved plan pulls "/root/.agent/skills" from layer 0 of the sandbox artifact
 
-  Scenario: a published sandbox with a floating fileset ref is refused
-    Given a published sandbox declaring a fileset by floating tag
+  Scenario: a mixin's path fileset is pulled from that mixin's own artifact
+    Given a published sandbox whose mixin ships a path fileset at "/root/.agent/prompts"
     When the sandbox is planned
-    Then the plan is refused naming the unpinned fileset ref
+    Then the resolved plan pulls "/root/.agent/prompts" from the mixin artifact
+
+  Scenario: a fileset the directory itself decided is never fetched from a registry
+    Given a published sandbox whose decisions file ships a path fileset at "/root/.agent/notes"
+    When the sandbox is planned
+    Then the plan reads "/root/.agent/notes" from disk instead of pulling it
+    And the plan is refused because no pinned artifact ships "/root/.agent/notes"
+
+  Scenario: a published sandbox whose fileset source is a floating tag is refused
+    Given a published sandbox whose fileset source is a floating tag
+    When the sandbox is planned
+    Then the plan is refused because no pinned artifact ships "/root/.agent/skills"
 
   Scenario: a published sandbox smuggling a local path fileset is refused
     Given a published sandbox declaring a local path fileset
     When the sandbox is planned
-    Then the plan is refused naming the local path
+    Then the plan is refused because no pinned artifact ships "/root/.agent/skills"
 
   Scenario: planning a local definition snapshots each path fileset into guest-write specs
     Given a local definition declaring a path fileset containing "prompts.md" at "/root/.agent/skills"
@@ -56,10 +67,10 @@ Feature: a sandbox's declared filesets are planned into the launch
     Then the plan carries an inline guest-write spec for "/etc/agent/mcp.json"
     And the plan ships no chown manifest
 
-  Scenario: a published sandbox may carry inline files without a pinned fileset ref
+  Scenario: a published sandbox may carry inline files without any layer
     Given a published sandbox declaring an inline file at "/home/sandbox"
     When the sandbox is planned
-    Then the plan accepts the inline fileset without a fileset ref
+    Then the plan accepts the inline fileset without a packed layer
 
   Scenario: a hostPath fileset lands at its mountPath as a host-file write
     Given a definition declaring a hostPath fileset "/etc/gitconfig" at "/home/agent/.gitconfig"

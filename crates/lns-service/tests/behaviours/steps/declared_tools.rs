@@ -1,6 +1,7 @@
 use cucumber::{given, then, when};
 use lns_service::tools::{Arch, Libc, ProvisionTarget};
 
+use super::own_fileset_origins;
 use crate::world::BehaviourWorld;
 
 fn definition_with_tools(entries: &str) -> String {
@@ -18,7 +19,10 @@ async fn launch(w: &mut BehaviourWorld) {
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.error = None;
     let definition = rig.definition.clone().expect("a definition is staged");
-    let resolved = match lns_service::artifact::plan_local_sandbox(definition.as_bytes()) {
+    let resolved = match lns_service::artifact::plan_local_sandbox(
+        definition.as_bytes(),
+        &own_fileset_origins(definition.as_bytes()),
+    ) {
         Ok(resolved) => resolved,
         Err(e) => {
             rig.error = Some(format!("{e:#}"));

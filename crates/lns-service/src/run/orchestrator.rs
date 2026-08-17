@@ -82,8 +82,12 @@ async fn orchestrate(
         (Some(definition), _) => {
             crate::artifact::mixin::refuse_mixins_without_a_document(&args.mixins)?;
             Some(
-                crate::artifact::real::plan_local(definition, args.authored_egress.as_deref())
-                    .await?,
+                crate::artifact::real::plan_local(
+                    definition,
+                    args.authored_egress.as_deref(),
+                    &args.fileset_origins,
+                )
+                .await?,
             )
         }
         (None, Some(image_ref)) => {

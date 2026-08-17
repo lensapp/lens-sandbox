@@ -256,27 +256,24 @@ impl author::Fs for StepFs {
 struct StepProducer {
     outcome: Result<String, String>,
     docs: RefCell<Vec<Vec<u8>>>,
-    filesets: RefCell<Vec<String>>,
+    packed: RefCell<Vec<Vec<String>>>,
 }
 
 impl distribute::Producer for StepProducer {
     fn build_and_push<'a>(
         &'a self,
         doc: &'a [u8],
+        path_filesets: &'a [Vec<lns_artifact::build::FileEntry>],
         _reference: &'a str,
     ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
         self.docs.borrow_mut().push(doc.to_vec());
+        self.packed.borrow_mut().extend(
+            path_filesets
+                .iter()
+                .map(|layer| layer.iter().map(|file| file.path.clone()).collect()),
+        );
         let outcome = self.outcome.clone().map_err(|m| anyhow::anyhow!(m));
         Box::pin(async move { outcome })
-    }
-
-    fn push_prebuilt<'a>(
-        &'a self,
-        _built: &'a lns_artifact::build::BuiltArtifact,
-        reference: &'a str,
-    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
-        self.filesets.borrow_mut().push(reference.to_string());
-        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -370,7 +367,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
                 "the push must refuse before reaching the producer".into(),
             )),
             docs: RefCell::new(Vec::new()),
-            filesets: RefCell::new(Vec::new()),
+            packed: RefCell::new(Vec::new()),
         };
         let mut out: Vec<u8> = Vec::new();
         let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
@@ -397,8 +394,10 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             }
             Err(e) => Err(e),
         };
-        w.pushed_filesets = producer.filesets.into_inner();
-        w.pushed_doc = producer.docs.into_inner().into_iter().next();
+        w.packed_fileset_layers = producer.packed.into_inner();
+        let docs = producer.docs.into_inner();
+        w.pushed_artifacts = docs.len();
+        w.pushed_doc = docs.into_iter().next();
         w.result = Some(match result {
             Ok(exit_code) => CliRun {
                 exit_code,

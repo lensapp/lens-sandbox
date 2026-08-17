@@ -129,15 +129,11 @@ async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
     let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
     assert_eq!(
         pushed.exit_code, 0,
-        "lns push must pack the fileset and upload the pinned sandbox:\n{}\n{}",
+        "lns push must pack the fileset into the sandbox artifact and upload it:\n{}\n{}",
         pushed.stdout, pushed.stderr
     );
-    assert!(
-        pushed.stdout.contains("pushed fileset"),
-        "push must report the packed fileset ref:\n{}",
-        pushed.stdout
-    );
     world.pushed_ref = Some(reference);
+    world.result = Some(pushed);
 }
 
 #[when(
@@ -164,22 +160,35 @@ async fn push_sandbox_with_inline_fileset(world: &mut E2eWorld, content: String)
     world.result = Some(pushed);
 }
 
-#[then("no companion FileSet artifact is uploaded")]
-fn no_companion_fileset_artifact(world: &mut E2eWorld) {
-    let result = world.result.as_ref().expect("inline push result");
+#[then("no separate fileset artifact is uploaded")]
+fn no_separate_fileset_artifact(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a push result");
     assert!(
         !result.stdout.contains("pushed fileset"),
-        "inline push must not publish a companion FileSet:\n{}",
+        "a fileset is not a separate artifact, so one push publishes everything:\n{}",
         result.stdout
     );
+    let pushed_repository = world
+        .pushed_ref
+        .as_ref()
+        .and_then(|reference| reference.rsplit('/').next())
+        .and_then(|tail| tail.split(':').next())
+        .expect("a pushed reference")
+        .to_string();
+    // The base image `seed_base_image` uploaded is the only other repository a push scenario legitimately leaves behind.
+    let expected = [pushed_repository.as_str(), "e2e-base"];
     let repositories = world
         .registry
         .as_ref()
         .expect("a registry")
         .manifest_repositories();
+    let extra: Vec<&String> = repositories
+        .iter()
+        .filter(|name| !expected.iter().any(|allowed| name.ends_with(allowed)))
+        .collect();
     assert!(
-        repositories.iter().all(|name| !name.contains("fileset")),
-        "inline push unexpectedly published a FileSet repository: {repositories:?}"
+        extra.is_empty(),
+        "push published a repository beside the sandbox: {extra:?} (of {repositories:?})"
     );
 }
 

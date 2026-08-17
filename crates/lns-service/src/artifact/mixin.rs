@@ -208,6 +208,7 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             pinned_extra: Vec::new(),
             contributions: Vec::new(),
             authored_egress: lns_policy::Egress::default(),
+            fileset_origins: Vec::new(),
         });
     }
     resolve(config_json, extra, home, source, local).await
@@ -224,6 +225,8 @@ pub struct Resolution {
     pub contributions: Vec<lns_artifact::merge::Contribution>,
     /// What every source but the directory's own decided about egress: the run folds the decisions file over this live, so an approval made mid-run applies and a rule deleted mid-run retracts.
     pub authored_egress: lns_policy::Egress,
+    /// Which document ships each `path` fileset of the merged document, since the merged bytes no longer say.
+    pub fileset_origins: Vec<lns_ipc::FilesetOrigin>,
 }
 
 /// What the directory decided, as the merge reads it: the label a disclosure names it by, and everything it decided.
@@ -272,6 +275,9 @@ pub async fn resolve<S: MixinSource>(
             pinned_extra: Vec::new(),
             contributions: lns_artifact::merge::own_egress(&def.spec),
             authored_egress: def.spec.egress.clone(),
+            fileset_origins: fileset_origins_on_the_wire(
+                &lns_artifact::merge::own_fileset_origins(&def.spec),
+            ),
         });
     }
     let decided = local
@@ -317,12 +323,27 @@ pub async fn resolve<S: MixinSource>(
         pinned_extra: fetched.pinned_extra,
         contributions: merged.contributions,
         authored_egress,
+        fileset_origins: fileset_origins_on_the_wire(&merged.fileset_origins),
     })
 }
 
 /// The egress every source but the directory's own decided, which is what the gate folds the live decisions file over; §8.1 puts that source last, so it is the one the fold leaves out.
 fn authored_egress(sources: &[Source], the_directory_decided: bool) -> lns_policy::Egress {
     lns_artifact::merge::egress_of(&sources[..sources.len() - usize::from(the_directory_decided)])
+}
+
+/// Restate where each `path` fileset's files live for the wire, since lns-ipc names the document format without depending on the crate that merges it.
+pub fn fileset_origins_on_the_wire(
+    origins: &std::collections::BTreeMap<String, lns_artifact::merge::FilesetOrigin>,
+) -> Vec<lns_ipc::FilesetOrigin> {
+    origins
+        .iter()
+        .map(|(mount_path, origin)| lns_ipc::FilesetOrigin {
+            mount_path: mount_path.clone(),
+            source: origin.source.clone(),
+            layer: origin.layer,
+        })
+        .collect()
 }
 
 /// Restate a merge's attribution for the wire, since lns-ipc names the document format without depending on the crate that merges it.

@@ -2,24 +2,19 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use lns_artifact::build::BuiltArtifact;
+use lns_artifact::build::{BuiltArtifact, FileEntry};
 
 use super::author::Fs;
 use crate::connector::LocalBoxFuture;
 
-/// Builds a sandbox definition into an OCI artifact and uploads it, returning the pushed manifest digest; the real impl reuses the `lns login` credential, a fake drives the push scenarios offline.
+/// Builds a sandbox definition and its packed filesets into one OCI artifact and uploads it, returning the pushed manifest digest; the real impl reuses the `lns login` credential, a fake drives the push scenarios offline.
 pub trait Producer {
     fn build_and_push<'a>(
         &'a self,
         doc: &'a [u8],
+        path_filesets: &'a [Vec<FileEntry>],
         reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<String>>;
-
-    fn push_prebuilt<'a>(
-        &'a self,
-        built: &'a BuiltArtifact,
-        reference: &'a str,
-    ) -> LocalBoxFuture<'a, Result<()>>;
 }
 
 /// Resolves a declared tool's (possibly fuzzy) version to the exact version the published artifact pins, by consulting the tool's public version index; a fake scripts it offline.
@@ -89,68 +84,23 @@ pub async fn pin_declared_tools<R: ToolResolver + ?Sized>(
     Ok((doc, pinned))
 }
 
-#[derive(Debug)]
-pub struct PackedFileset {
-    pub built: BuiltArtifact,
-    pub reference: String,
-}
-
-/// Pack every path fileset into a FileSet artifact addressed by digest in the target repository, returning the definition rewritten to carry only digest-pinned refs; a pre-declared ref must already be digest-pinned.
-pub fn pack_path_filesets<F: Fs + ?Sized>(
+/// Read every `path` fileset's directory in declaration order, so publish can pack one layer per entry into the artifact the document configures (§7); the document is validated first, because a fileset that no consumer could resolve must not reach the registry.
+pub fn read_path_filesets<F: Fs + ?Sized>(
     fs: &F,
     cwd: &Path,
     doc: &[u8],
-    reference: &str,
-) -> Result<(Vec<u8>, Vec<PackedFileset>)> {
+) -> Result<Vec<Vec<FileEntry>>> {
     let def = lns_artifact::sandbox::parse_document(doc)
         .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
     refuse_unpinned_mixins(&def)?;
-    if def.spec.filesets.is_empty() {
-        return Ok((doc.to_vec(), Vec::new()));
-    }
-    let target: oci_client::Reference = reference
-        .parse()
-        .with_context(|| format!("invalid target ref {reference}"))?;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(doc).context("re-reading the definition for fileset pinning")?;
-    let entries = value["spec"]["filesets"]
-        .as_array_mut()
-        .context("spec.filesets is not an array")?;
-    let mut packed = Vec::new();
-    for (index, fileset) in def.spec.filesets.iter().enumerate() {
-        if let Some(path) = &fileset.path {
-            let files = super::fileset::walk(fs, &cwd.join(path))
-                .with_context(|| format!("fileset {path}"))?;
-            let built = lns_artifact::build::build_fileset(
-                &fileset_name(path),
-                &fileset.mount_path,
-                &files,
-            )?;
-            let pinned = format!(
-                "{}/{}@{}",
-                target.registry(),
-                target.repository(),
-                built.manifest_digest
-            );
-            entries[index] = serde_json::json!({
-                "ref": pinned,
-                "mountPath": fileset.mount_path,
-                "owner": owner_str(fileset.owner),
-            });
-            packed.push(PackedFileset {
-                built,
-                reference: pinned,
-            });
-        } else if let Some(declared) = &fileset.reference
-            && !lns_artifact::spec::is_digest_pinned_image(declared)
-        {
-            bail!(
-                "fileset ref {declared} is not digest-pinned; a published sandbox pins every fileset by digest"
-            );
-        }
-    }
-    let rewritten = serde_json::to_vec(&value).context("serializing the pinned definition")?;
-    Ok((rewritten, packed))
+    def.spec
+        .filesets
+        .iter()
+        .filter_map(|fileset| fileset.path.as_ref())
+        .map(|path| {
+            super::fileset::walk(fs, &cwd.join(path)).with_context(|| format!("fileset {path}"))
+        })
+        .collect()
 }
 
 /// A local directory means nothing on the machine that pulls the published document, and §3.3.1 pins a published `spec.mixins` entry by digest — so publish refuses what authoring accepts, exactly as it does for a fileset `path`.
@@ -165,40 +115,13 @@ fn refuse_unpinned_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()>
     Ok(())
 }
 
-fn owner_str(owner: lns_artifact::sandbox::FilesetOwner) -> &'static str {
-    match owner {
-        lns_artifact::sandbox::FilesetOwner::Workload => "workload",
-        lns_artifact::sandbox::FilesetOwner::Root => "root",
-    }
-}
-
-fn fileset_name(path: &str) -> String {
-    let base = Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let sanitized: String = base
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let sanitized = sanitized.trim_matches('-');
-    let mut name = if sanitized.is_empty() {
-        "fileset".to_string()
-    } else {
-        sanitized.to_string()
-    };
-    name.truncate(63);
-    name.trim_end_matches('-').to_string()
-}
-
 fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
     lns_artifact::validate::refuse_unprovisionable_tools(doc).map_err(|problem| {
         anyhow::anyhow!("refusing to push a sandbox no consumer can start: {problem}")
     })
 }
 
-/// `lns push <ref>`: validate the sandbox definition, pack and upload its path filesets, then build and upload the pinned definition as a sandbox artifact in one step. The caller reads `./lns.yaml` into `doc`.
+/// `lns push <ref>`: validate the sandbox definition, pack its path filesets, then build and upload the pinned definition as one sandbox artifact. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
     fs: &F,
     cwd: &Path,
@@ -215,14 +138,8 @@ where
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
-    let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
-    let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
-    for fileset in &packed {
-        producer
-            .push_prebuilt(&fileset.built, &fileset.reference)
-            .await?;
-        writeln!(out, "pushed fileset {}", fileset.reference)?;
-    }
+    let path_filesets = read_path_filesets(fs, cwd, doc)?;
+    let (doc, pinned_tools) = pin_declared_tools(resolver, doc).await?;
     for tool in &pinned_tools {
         if tool.verification == Some(IndexVerification::Absent) {
             writeln!(
@@ -233,7 +150,9 @@ where
         }
         writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
-    let digest = producer.build_and_push(&doc, reference).await?;
+    let digest = producer
+        .build_and_push(&doc, &path_filesets, reference)
+        .await?;
     writeln!(out, "built and pushed {reference}@{digest}")?;
     Ok(0)
 }
@@ -251,13 +170,9 @@ where
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
-    let (doc, packed) = pack_path_filesets(fs, cwd, doc, reference)?;
-    for fileset in &packed {
-        let bytes = blob_bytes(&fileset.built);
-        writeln!(out, "would push fileset {} ({bytes})", fileset.reference)?;
-    }
+    let path_filesets = read_path_filesets(fs, cwd, doc)?;
     // Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
-    let unresolved_tools = serde_json::from_slice::<serde_json::Value>(&doc)
+    let unresolved_tools = serde_json::from_slice::<serde_json::Value>(doc)
         .ok()
         .and_then(|value| value["spec"]["tools"].as_array().cloned())
         .unwrap_or_default()
@@ -275,7 +190,7 @@ where
             "note: {unresolved_tools} tool version(s) resolve at push time; the published digest may differ from this preview"
         )?;
     }
-    let built = lns_artifact::build::build_artifact(&doc)?;
+    let built = lns_artifact::build::build_artifact(doc, &path_filesets)?;
     let bytes = blob_bytes(&built);
     writeln!(
         out,
@@ -300,7 +215,7 @@ mod tests {
     struct FakeProducer {
         outcome: Option<Result<String, String>>,
         docs: RefCell<Vec<Vec<u8>>>,
-        prebuilt: RefCell<Vec<String>>,
+        packed: RefCell<Vec<Vec<Vec<FileEntry>>>>,
     }
 
     impl FakeProducer {
@@ -322,24 +237,17 @@ mod tests {
         fn build_and_push<'a>(
             &'a self,
             doc: &'a [u8],
+            path_filesets: &'a [Vec<FileEntry>],
             _reference: &'a str,
         ) -> LocalBoxFuture<'a, Result<String>> {
             self.docs.borrow_mut().push(doc.to_vec());
+            self.packed.borrow_mut().push(path_filesets.to_vec());
             let outcome = self
                 .outcome
                 .clone()
                 .expect("outcome set")
                 .map_err(|message| anyhow::anyhow!(message));
             Box::pin(async move { outcome })
-        }
-
-        fn push_prebuilt<'a>(
-            &'a self,
-            _built: &'a BuiltArtifact,
-            reference: &'a str,
-        ) -> LocalBoxFuture<'a, Result<()>> {
-            self.prebuilt.borrow_mut().push(reference.to_string());
-            Box::pin(async move { Ok(()) })
         }
     }
 
@@ -407,6 +315,8 @@ mod tests {
     const VALID: &[u8] =
         br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#;
 
+    const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
+
     const WITH_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}}"#;
 
     fn cwd() -> &'static Path {
@@ -449,7 +359,10 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("built"), "got: {text}");
         assert!(text.contains("ghcr.io/team/hermes:1.4.0"), "got: {text}");
-        assert!(producer.prebuilt.borrow().is_empty());
+        assert!(
+            producer.packed.borrow()[0].is_empty(),
+            "a document with no path fileset packs no layer"
+        );
     }
 
     #[tokio::test]
@@ -494,7 +407,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_packs_a_path_fileset_and_pins_it_into_the_published_config() {
+    async fn push_packs_a_path_fileset_into_the_sandbox_artifact_and_publishes_the_entry_as_written()
+     {
         let producer = FakeProducer::ok(&format!("sha256:{}", "a".repeat(64)));
         let mut out = Vec::new();
         let code = push(
@@ -509,30 +423,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, 0);
-        let prebuilt = producer.prebuilt.borrow();
-        assert_eq!(prebuilt.len(), 1);
-        let fileset_ref = &prebuilt[0];
-        assert!(
-            fileset_ref.starts_with("ghcr.io/team/hermes@sha256:"),
-            "got: {fileset_ref}"
-        );
+        let packed = producer.packed.borrow();
+        assert_eq!(packed[0].len(), 1, "one packed layer per path entry");
+        assert_eq!(packed[0][0][0].path, "prompts.md");
         let docs = producer.docs.borrow();
         let published: serde_json::Value = serde_json::from_slice(&docs[0]).unwrap();
         let entry = &published["spec"]["filesets"][0];
-        assert!(entry.get("path").is_none(), "got: {entry}");
-        assert_eq!(entry["ref"], serde_json::Value::String(prebuilt[0].clone()));
+        assert_eq!(
+            entry["path"], "./skills",
+            "§6: the entry keeps its path, because the content now lives in this artifact: {entry}"
+        );
         assert_eq!(entry["mountPath"], "/root/.agent/skills");
-        assert_eq!(entry["owner"], "workload");
+        assert!(
+            String::from_utf8(out).unwrap().find("fileset").is_none(),
+            "a path fileset is no longer a thing of its own to push"
+        );
     }
 
     #[test]
-    fn pack_preserves_an_explicit_root_owner_on_the_pinned_entry() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
-        let (rewritten, packed) =
-            pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0").unwrap();
-        assert_eq!(packed.len(), 1);
-        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(value["spec"]["filesets"][0]["owner"], "root");
+    fn reading_path_filesets_walks_each_declared_directory_in_order() {
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"},{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
+        let packed = read_path_filesets(&fs_with_skills(), cwd(), doc).unwrap();
+        assert_eq!(
+            packed.len(),
+            1,
+            "an inline entry ships in the config blob, so it claims no layer"
+        );
+        assert_eq!(packed[0][0].path, "prompts.md");
     }
 
     #[tokio::test]
@@ -578,61 +495,6 @@ mod tests {
             "a directory beside the author's file means nothing to a consumer, so publishing one would ship a reference nobody else can resolve; got: {err:#}"
         );
     }
-
-    #[tokio::test]
-    async fn push_refuses_a_floating_declared_fileset_ref() {
-        let producer = FakeProducer::err("must not reach the producer");
-        let mut out = Vec::new();
-        let err = push(
-            &fs_with_skills(),
-            cwd(),
-            &producer,
-            &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills:latest","mountPath":"/s"}]}}"#,
-            "ghcr.io/team/hermes:1.4.0",
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not digest-pinned"),
-            "got: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn push_keeps_a_digest_pinned_declared_ref_verbatim() {
-        let pinned = format!(
-            "registry.example.test/team/skills@sha256:{}",
-            "a".repeat(64)
-        );
-        let doc = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"x:1","filesets":[{{"ref":"{pinned}","mountPath":"/s"}}]}}}}"#
-        );
-        let (rewritten, packed) = pack_path_filesets(
-            &fs_with_skills(),
-            cwd(),
-            doc.as_bytes(),
-            "ghcr.io/team/hermes:1.4.0",
-        )
-        .unwrap();
-        assert!(packed.is_empty());
-        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(value["spec"]["filesets"][0]["ref"], pinned);
-    }
-
-    #[tokio::test]
-    async fn push_refuses_a_declared_fileset_ref_with_a_malformed_digest() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"ref":"registry.example.test/team/skills@sha256:abc","mountPath":"/s"}]}}"#;
-        let err = pack_path_filesets(&fs_with_skills(), cwd(), doc, "ghcr.io/team/hermes:1.4.0")
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not digest-pinned"),
-            "a truncated sha256 must not pass as pinned: {err:#}"
-        );
-    }
-
-    const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
 
     #[tokio::test]
     async fn push_pins_resolved_tool_versions_into_the_published_config() {
@@ -951,16 +813,5 @@ mod tests {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","tools":[42]}}"#;
         let err = pin_declared_tools(&unconsultable(), doc).await.unwrap_err();
         assert!(format!("{err:#}").contains("not a string"), "got: {err:#}");
-    }
-
-    #[test]
-    fn fileset_name_sanitizes_to_a_dns_label() {
-        assert_eq!(fileset_name("./skills"), "skills");
-        assert_eq!(fileset_name("./My_Skills.v2"), "my-skills-v2");
-        assert_eq!(fileset_name("./---"), "fileset");
-        assert_eq!(
-            fileset_name(&format!("./{}", "a".repeat(80))),
-            "a".repeat(63)
-        );
     }
 }

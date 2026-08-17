@@ -23,3 +23,13 @@ pub mod sandbox_filesets;
 pub mod volume_management;
 pub mod volumes;
 pub mod workdir;
+
+/// The origins a document's own `path` filesets have when nothing merges into it, which is what the service's resolution hands a plan.
+pub fn own_fileset_origins(definition: &[u8]) -> Vec<lns_ipc::FilesetOrigin> {
+    let Ok(def) = lns_artifact::sandbox::parse(definition) else {
+        return Vec::new();
+    };
+    lns_service::artifact::mixin::fileset_origins_on_the_wire(
+        &lns_artifact::merge::own_fileset_origins(&def.spec),
+    )
+}

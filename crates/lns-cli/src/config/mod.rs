@@ -692,6 +692,7 @@ mod tests {
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
             contributions: Vec::new(),
+            fileset_origins: Vec::new(),
             image: Some("alpine".to_string()),
             file: None,
             name: None,

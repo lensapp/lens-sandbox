@@ -40,8 +40,10 @@ pub struct BehaviourWorld {
     pub sandbox_run: SandboxRunRig,
     /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
     pub push_outcome: Option<Result<String, String>>,
-    /// FileSet artifact refs the push uploaded, in order.
-    pub pushed_filesets: Vec<String>,
+    /// The file names in each layer the push packed, in declaration order.
+    pub packed_fileset_layers: Vec<Vec<String>>,
+    /// How many artifacts the push uploaded, so a scenario can pin that a fileset is not one of its own.
+    pub pushed_artifacts: usize,
     /// The definition JSON a prepared local run would send to the service.
     pub wire_definition: Option<String>,
     /// The preflight view a pulled-run scenario stages.

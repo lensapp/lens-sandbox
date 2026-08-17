@@ -271,21 +271,14 @@ impl super::distribute::Producer for RealProducer {
     fn build_and_push<'a>(
         &'a self,
         doc: &'a [u8],
+        path_filesets: &'a [Vec<lns_artifact::build::FileEntry>],
         reference: &'a str,
     ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let built = lns_artifact::build::build_artifact(doc)?;
+            let built = lns_artifact::build::build_artifact(doc, path_filesets)?;
             crate::build::push::push_artifact(&built, reference).await?;
             Ok(built.manifest_digest)
         })
-    }
-
-    fn push_prebuilt<'a>(
-        &'a self,
-        built: &'a lns_artifact::build::BuiltArtifact,
-        reference: &'a str,
-    ) -> crate::connector::LocalBoxFuture<'a, Result<()>> {
-        Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
     }
 }
 

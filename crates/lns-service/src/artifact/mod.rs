@@ -101,23 +101,65 @@ pub fn authored_egress(json: &str) -> Result<lns_policy::Egress> {
     serde_json::from_str(json).context("reading the egress this run's preflight resolved")
 }
 
-/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble.
-pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
+/// Where the document being planned came from, which is what decides whether its own `path` filesets name a layer of a pulled artifact or a directory on this machine.
+#[derive(Debug, Clone, Copy)]
+pub enum RootSource<'a> {
+    Pulled(&'a str),
+    Local,
+}
+
+/// Which artifact ships a `path` fileset's layer, or `None` when the declaring document is a file on this machine and the directory is read directly.
+///
+/// Only a digest-pinned label names an artifact, so anything else — a directory mixin's path, the decisions file's own name — is read off this machine rather than fetched. A label is a name, not a promise: routing anything unpinned to a registry would fetch whatever squats that name.
+fn packed_source(
+    origin: Option<&lns_ipc::FilesetOrigin>,
+    root: RootSource<'_>,
+) -> Option<(String, usize)> {
+    let origin = origin?;
+    if origin.source == lns_artifact::merge::ROOT_LABEL {
+        return match root {
+            RootSource::Pulled(reference) => Some((reference.to_string(), origin.layer)),
+            RootSource::Local => None,
+        };
+    }
+    lns_artifact::spec::is_digest_pinned_image(&origin.source)
+        .then(|| (origin.source.clone(), origin.layer))
+}
+
+/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
+pub fn resolved_from_sandbox(
+    def: &lns_artifact::sandbox::Definition,
+    origins: &[lns_ipc::FilesetOrigin],
+    root: RootSource<'_>,
+) -> ResolvedSandbox {
+    let mut local_filesets = Vec::new();
+    let mut packed_filesets = Vec::new();
+    for fileset in def.spec.filesets.iter() {
+        let Some(path) = &fileset.path else {
+            continue;
+        };
+        let origin = origins
+            .iter()
+            .find(|origin| origin.mount_path == fileset.mount_path);
+        match packed_source(origin, root) {
+            Some((reference, layer)) => packed_filesets.push(assembly::PackedFileset {
+                mount_path: fileset.mount_path.clone(),
+                reference,
+                layer,
+                owner: fileset.owner,
+            }),
+            None => local_filesets.push(assembly::LocalFileset {
+                source: path.clone(),
+                mount_path: fileset.mount_path.clone(),
+                owner: fileset.owner,
+            }),
+        }
+    }
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
-        local_filesets: def
-            .spec
-            .filesets
-            .iter()
-            .filter_map(|fileset| {
-                fileset.path.as_ref().map(|path| assembly::LocalFileset {
-                    source: path.clone(),
-                    mount_path: fileset.mount_path.clone(),
-                    owner: fileset.owner,
-                })
-            })
-            .collect(),
+        local_filesets,
+        packed_filesets,
         host_filesets: def
             .spec
             .filesets
@@ -149,22 +191,6 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                     })
             })
             .collect(),
-        filesets: def
-            .spec
-            .filesets
-            .iter()
-            .filter_map(|fileset| {
-                fileset
-                    .reference
-                    .as_ref()
-                    .map(|reference| assembly::ResolvedFileset {
-                        name: fileset.mount_path.clone(),
-                        paths: vec![fileset.mount_path.clone()],
-                        reference: reference.clone(),
-                        owner: fileset.owner,
-                    })
-            })
-            .collect(),
         command: def.spec.command.clone(),
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
@@ -174,35 +200,26 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
     }
 }
 
-/// The digest-pin trust gate for a published sandbox's filesets: a local path has no meaning off the author's machine, and a floating ref defeats pinning — both refuse the plan.
+/// The trust gate for a published run's filesets: every `path` entry must draw its files from a digest-pinned artifact, since a directory means nothing off the machine it was written on. `packed_source` routes only a pinned label, so an entry that reached `local_filesets` here is one no artifact ships.
 pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
-    let mut problems: Vec<String> = resolved
+    resolved
         .local_filesets
         .iter()
         .map(|local| {
             format!(
-                "published sandbox declares a local path fileset {}; publish pins filesets by digest",
-                local.source
+                "no digest-pinned artifact ships the fileset mounted at {} (declared as {}); refusing to run it",
+                local.mount_path, local.source
             )
         })
-        .collect();
-    problems.extend(
-        resolved
-            .filesets
-            .iter()
-            .filter(|fileset| !lns_artifact::spec::is_digest_pinned_image(&fileset.reference))
-            .map(|fileset| {
-                format!(
-                    "fileset ref {} is not digest-pinned; refusing to run it",
-                    fileset.reference
-                )
-            }),
-    );
-    problems
+        .collect()
 }
 
 /// Plan a published sandbox's config blob: the one place the pulled path turns a document into a run, so every guard between the two applies to a stranger's artifact as much as to a local file.
-pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<ResolvedSandbox> {
+pub fn plan_published_sandbox(
+    config_json: &[u8],
+    image_ref: &str,
+    origins: &[lns_ipc::FilesetOrigin],
+) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .with_context(|| format!("parsing published sandbox {image_ref}"))?;
     if !def.spec.mixins.is_empty() {
@@ -211,7 +228,11 @@ pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<Res
             def.spec.mixins.join(", ")
         );
     }
-    Ok(resolved_from_sandbox(&def))
+    Ok(resolved_from_sandbox(
+        &def,
+        origins,
+        RootSource::Pulled(image_ref),
+    ))
 }
 
 /// Resolution is what empties this list, so a definition still carrying one never went through it and would boot without what its mixins contribute.
@@ -226,64 +247,134 @@ pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -
 }
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
-pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
+pub fn plan_local_sandbox(
+    config_json: &[u8],
+    origins: &[lns_ipc::FilesetOrigin],
+) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
     refuse_unresolved_local_mixins(&def)?;
-    Ok(resolved_from_sandbox(&def))
+    Ok(resolved_from_sandbox(&def, origins, RootSource::Local))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolved_from_sandbox_splits_path_and_ref_filesets() {
-        let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b","owner":"root"}]}}"#,
-        )
-        .unwrap();
-        let resolved = resolved_from_sandbox(&def);
-        assert_eq!(
-            resolved.local_filesets,
-            [assembly::LocalFileset {
-                source: "/work/skills".into(),
-                mount_path: "/a".into(),
-                owner: lns_artifact::sandbox::FilesetOwner::Workload,
-            }]
-        );
-        assert_eq!(resolved.filesets.len(), 1);
-        assert_eq!(resolved.filesets[0].reference, "reg/skills@sha256:abc");
-        assert_eq!(resolved.filesets[0].paths, ["/b"]);
-        assert_eq!(
-            resolved.filesets[0].owner,
-            lns_artifact::sandbox::FilesetOwner::Root,
-            "a declared owner must survive resolution"
-        );
+    fn origin(mount_path: &str, source: &str, layer: usize) -> lns_ipc::FilesetOrigin {
+        lns_ipc::FilesetOrigin {
+            mount_path: mount_path.into(),
+            source: source.into(),
+            layer,
+        }
     }
 
     #[test]
-    fn published_fileset_problems_refuse_paths_and_floating_refs_but_pass_pinned_refs() {
+    fn a_pulled_documents_path_fileset_resolves_to_a_layer_of_the_artifact_that_ships_it() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./prompts","mountPath":"/b","owner":"root"}]}}"#,
         )
         .unwrap();
-        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
-        assert_eq!(problems.len(), 2, "got: {problems:?}");
-        assert!(problems[0].contains("local path fileset ./skills"));
-        assert!(problems[1].contains("reg/skills:latest is not digest-pinned"));
-    }
-
-    #[test]
-    fn published_fileset_problems_refuses_a_truncated_or_malformed_digest_ref() {
-        let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"ref":"reg/skills@sha256:abc","mountPath":"/a"}]}}"#,
-        )
-        .unwrap();
-        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
+        let origins = [
+            origin("/a", lns_artifact::merge::ROOT_LABEL, 0),
+            origin(
+                "/b",
+                "reg/tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                0,
+            ),
+        ];
+        let resolved = resolved_from_sandbox(&def, &origins, RootSource::Pulled("reg/s@sha256:d"));
         assert!(
-            !problems.is_empty(),
-            "a fileset ref with a truncated @sha256 digest is not digest-pinned and must be refused by the trust gate, not admitted by a loose contains(\"@sha256:\") check: {problems:?}"
+            resolved.local_filesets.is_empty(),
+            "nothing on a pulled document names a directory on this machine"
+        );
+        assert_eq!(
+            resolved.packed_filesets,
+            [
+                assembly::PackedFileset {
+                    mount_path: "/a".into(),
+                    reference: "reg/s@sha256:d".into(),
+                    layer: 0,
+                    owner: lns_artifact::sandbox::FilesetOwner::Workload,
+                },
+                assembly::PackedFileset {
+                    mount_path: "/b".into(),
+                    reference: "reg/tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    layer: 0,
+                    owner: lns_artifact::sandbox::FilesetOwner::Root,
+                },
+            ],
+            "the sandbox's own entry comes from the sandbox artifact; a mixin's comes from that mixin's"
+        );
+    }
+
+    #[test]
+    fn a_local_documents_path_fileset_is_read_from_the_directory_it_names() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"path":"/work/mixins/tools/prompts","mountPath":"/b"}]}}"#,
+        )
+        .unwrap();
+        let origins = [
+            origin("/a", lns_artifact::merge::ROOT_LABEL, 0),
+            origin("/b", "./mixins/tools", 0),
+        ];
+        let resolved = resolved_from_sandbox(&def, &origins, RootSource::Local);
+        assert_eq!(
+            resolved.local_filesets.len(),
+            2,
+            "a directory mixin ships no artifact, so its files are read where they sit"
+        );
+        assert!(resolved.packed_filesets.is_empty());
+    }
+
+    #[test]
+    fn published_fileset_problems_refuse_a_path_no_pinned_artifact_ships() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./tools","mountPath":"/b"},{"path":"./ok","mountPath":"/c"}]}}"#,
+        )
+        .unwrap();
+        let pinned = format!("reg/settings@sha256:{}", "a".repeat(64));
+        let origins = [
+            origin("/b", "reg/skills:latest", 0),
+            origin("/c", &pinned, 0),
+        ];
+        let resolved = resolved_from_sandbox(&def, &origins, RootSource::Local);
+        let problems = published_fileset_problems(&resolved);
+        assert_eq!(problems.len(), 2, "got: {problems:?}");
+        assert!(
+            problems.iter().any(|p| p.contains("at /a")),
+            "an entry no source claims ships nothing: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("at /b")),
+            "a floating tag names no artifact, so it must not pass as one: {problems:?}"
+        );
+        assert!(
+            resolved
+                .packed_filesets
+                .iter()
+                .all(|fileset| fileset.reference == pinned),
+            "only the digest-pinned source may be fetched: {:?}",
+            resolved.packed_filesets
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_malformed_digest_never_becomes_a_fetchable_source() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"}]}}"#,
+        )
+        .unwrap();
+        let origins = [origin("/a", "reg/skills@sha256:abc", 0)];
+        let resolved = resolved_from_sandbox(&def, &origins, RootSource::Local);
+        assert!(
+            resolved.packed_filesets.is_empty(),
+            "a truncated @sha256 is not a pin, so it must never be routed to a registry, not admitted by a loose contains(\"@sha256:\") check: {:?}",
+            resolved.packed_filesets
+        );
+        assert!(
+            !published_fileset_problems(&resolved).is_empty(),
+            "and the run is refused rather than silently reading the publisher's path off this machine"
         );
     }
 
@@ -306,7 +397,7 @@ mod tests {
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"egress":{"http":[{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"user":"root"}}"#,
         )
         .unwrap();
-        let resolved = resolved_from_sandbox(&def);
+        let resolved = resolved_from_sandbox(&def, &[], RootSource::Local);
         assert_eq!(resolved.base_image, "ghcr.io/team/base@sha256:abc");
         assert_eq!(resolved.command.as_deref(), Some("agent --serve"));
         assert_eq!(
@@ -318,7 +409,7 @@ mod tests {
             resolved.env.get("MODE").map(String::as_str),
             Some("research")
         );
-        assert!(resolved.filesets.is_empty());
+        assert!(resolved.packed_filesets.is_empty());
         let policy = resolved
             .policy
             .expect("a flat sandbox carries its inline policy");
@@ -340,9 +431,12 @@ mod tests {
         )
         .expect("the baseline a preflight resolved parses");
 
-        let policy = with_authored_baseline(resolved_from_sandbox(&def), &authored)
-            .policy
-            .expect("a sandbox that ships egress keeps a baseline");
+        let policy = with_authored_baseline(
+            resolved_from_sandbox(&def, &[], RootSource::Local),
+            &authored,
+        )
+        .policy
+        .expect("a sandbox that ships egress keeps a baseline");
 
         assert_eq!(
             policy
@@ -370,8 +464,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
-                .policy,
+            with_authored_baseline(
+                resolved_from_sandbox(&def, &[], RootSource::Local),
+                &lns_policy::Egress::default()
+            )
+            .policy,
             None,
             "nothing but the developer decided anything here, so the file governs verbatim rather than through a merge with itself"
         );
@@ -385,8 +482,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
-                .policy,
+            with_authored_baseline(
+                resolved_from_sandbox(&def, &[], RootSource::Local),
+                &lns_policy::Egress::default()
+            )
+            .policy,
             None,
             "a directory whose decisions are the only word on the network has nothing to layer them over, and inventing an empty baseline would merge the file with itself"
         );
@@ -408,7 +508,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolved_from_sandbox(&def).policy,
+            resolved_from_sandbox(&def, &[], RootSource::Local).policy,
             None,
             "a plain definition must leave the directory overlay governing verbatim"
         );
@@ -418,6 +518,7 @@ mod tests {
     fn plan_local_sandbox_resolves_the_definition_like_a_published_one() {
         let resolved = plan_local_sandbox(
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
+            &[],
         )
         .unwrap();
         assert_eq!(resolved.base_image, "ghcr.io/team/base:1");
@@ -433,6 +534,7 @@ mod tests {
     fn plan_local_sandbox_surfaces_a_broken_definition() {
         let err = plan_local_sandbox(
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{}}"#,
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -450,6 +552,7 @@ mod tests {
             )
             .as_bytes(),
             "registry.example.test/team/sandbox:1",
+            &[],
         )
         .unwrap_err();
         assert!(

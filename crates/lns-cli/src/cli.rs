@@ -228,6 +228,10 @@ pub struct RunArgs {
     #[arg(skip)]
     pub contributions: Vec<lns_ipc::SourceContribution>,
 
+    /// Where each `path` fileset of the resolved definition gets its files; the merged document no longer says which document shipped them.
+    #[arg(skip)]
+    pub fileset_origins: Vec<lns_ipc::FilesetOrigin>,
+
     #[arg(
         short = 'v',
         long = "volume",

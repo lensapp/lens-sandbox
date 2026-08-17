@@ -303,10 +303,6 @@ pub(crate) async fn pull_kit_with<R: Registry>(client: &R, image: &str) -> Resul
             }));
         }
         Some(lns_artifact::spec::Kind::Sandbox) => {}
-        Some(other) => anyhow::bail!(
-            "{image} is a {} artifact; `lns pull` takes a published sandbox or mixin",
-            other.as_str()
-        ),
         None => anyhow::bail!(
             "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` takes a published sandbox or mixin"
         ),
@@ -1232,13 +1228,12 @@ mod tests {
         }
     }
 
-    fn build_fileset_artifact() -> FakeImage {
-        let fileset = lns_artifact::spec::Kind::FileSet;
+    fn build_fileset_typed_artifact() -> FakeImage {
         let document = r#"{"apiVersion":"lns.run/v1","kind":"fileset","name":"skills","spec":{"mountPath":"/skills"}}"#.to_string();
         let manifest = OciImageManifest {
-            artifact_type: Some(fileset.artifact_type()),
+            artifact_type: Some("application/vnd.lens.fileset.v1+json".into()),
             config: OciDescriptor {
-                media_type: fileset.config_media_type(),
+                media_type: "application/vnd.lens.fileset.config.v1+json".into(),
                 digest: sha256_hex(document.as_bytes()),
                 size: document.len() as i64,
                 ..Default::default()
@@ -1294,15 +1289,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_refuses_a_kind_it_has_no_use_for() {
+    async fn pull_refuses_an_artifact_type_that_names_no_kind() {
         ensure_global_trace_subscriber();
-        let registry = build_fileset_artifact().into_registry();
+        let registry = build_fileset_typed_artifact().into_registry();
         let err = pull_kit_with(&registry, "registry.example.test/skills:1")
             .await
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("takes a published sandbox or mixin"),
-            "a fileset travels inside a kit rather than being pulled on its own, so the refusal has to say what pull does take; got: {err:#}"
+            format!("{err:#}")
+                .contains("unsupported artifact type application/vnd.lens.fileset.v1+json"),
+            "a fileset travels inside the document that declares it, so its old artifact type names nothing lns pulls; got: {err:#}"
         );
     }
 

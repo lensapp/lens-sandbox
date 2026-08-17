@@ -249,6 +249,9 @@ pub enum Response {
         /// The egress every source but this directory's own decided, as JSON: the run folds the live decisions file over it rather than over the copy the merged document carries, so a rule deleted mid-run retracts.
         #[serde(default)]
         authored_egress: String,
+        /// Where each `path` fileset of the merged document gets its files, since the merged bytes no longer say which document shipped them.
+        #[serde(default)]
+        fileset_origins: Vec<FilesetOrigin>,
     },
     ImageTagged {
         from: String,
@@ -401,8 +404,6 @@ pub struct SandboxView {
 pub struct SandboxFileset {
     #[serde(default)]
     pub path: Option<String>,
-    #[serde(rename = "ref", default)]
-    pub reference: Option<String>,
     #[serde(default)]
     pub inline: bool,
     /// The host file the sandbox declared, verbatim — shape, never payload, so a consumer sees which of their files it reads.
@@ -547,6 +548,16 @@ pub struct PortPublish {
     pub protocol: Protocol,
 }
 
+/// Which document ships a `path` fileset's files, and where in that document's artifact they sit. A merged document says only `path`, so the resolution that produced it has to say the rest — the same reason `contributions` travels beside the merged bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesetOrigin {
+    pub mount_path: String,
+    /// The source as the merge labelled it: the resolved sandbox itself, or the reference of the mixin that declared the entry.
+    pub source: String,
+    /// The entry's index among its own document's `path` filesets, which is the position of its layer in that document's artifact.
+    pub layer: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
@@ -610,6 +621,9 @@ pub struct RunImageArgs {
     /// What the preflight resolved from every source but this directory's own, as JSON egress: the gate folds the live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
     #[serde(default)]
     pub authored_egress: Option<String>,
+    /// Where each `path` fileset of the merged definition gets its files, as the preflight's resolution decided.
+    #[serde(default)]
+    pub fileset_origins: Vec<FilesetOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -946,6 +960,7 @@ mod tests {
             definition: None,
             definition_dir: None,
             authored_egress: None,
+            fileset_origins: Vec::new(),
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -995,6 +1010,7 @@ mod tests {
             definition: None,
             definition_dir: None,
             authored_egress: None,
+            fileset_origins: Vec::new(),
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1132,6 +1148,7 @@ mod tests {
             definition: Some(r#"{"kind":"sandbox"}"#.into()),
             definition_dir: Some("/work/proj".into()),
             authored_egress: Some(r#"{"http":[],"tcp":[]}"#.into()),
+            fileset_origins: Vec::new(),
         }
     }
 
@@ -1535,11 +1552,7 @@ mod tests {
                 },
             ],
             filesets: vec![SandboxFileset {
-                path: None,
-                reference: Some(format!(
-                    "registry.example.test/team/skills@sha256:{}",
-                    "a".repeat(64)
-                )),
+                path: Some("./skills".into()),
                 inline: false,
                 host_path: None,
                 optional: false,
