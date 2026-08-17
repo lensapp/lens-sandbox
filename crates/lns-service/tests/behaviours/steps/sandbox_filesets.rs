@@ -16,26 +16,19 @@ fn sandbox_json(filesets: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-#[given(regex = r#"^a published sandbox declaring a digest-pinned fileset at "([^"]+)"$"#)]
-fn published_with_pinned_fileset(world: &mut BehaviourWorld, mount: String) {
+/// The reference the scenario's own artifact was pulled at, digest-pinned as every published run's is.
+const SANDBOX_ARTIFACT: &str = "registry.example.test/team/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[given(regex = r#"^a published sandbox declaring a path fileset at "([^"]+)"$"#)]
+fn published_with_path_fileset(world: &mut BehaviourWorld, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"ref":"registry.example.test/team/skills@sha256:{}","mountPath":"{mount}"}}"#,
-        "a".repeat(64)
+        r#"{{"path":"./skills","mountPath":"{mount}"}}"#
     )));
 }
 
-#[given("a published sandbox declaring a fileset by floating tag")]
-fn published_with_floating_fileset(world: &mut BehaviourWorld) {
-    world.fileset_definition = Some(sandbox_json(
-        r#"{"ref":"registry.example.test/team/skills:latest","mountPath":"/root/.agent/skills"}"#,
-    ));
-}
-
-#[given("a published sandbox declaring a local path fileset")]
-fn published_with_path_fileset(world: &mut BehaviourWorld) {
-    world.fileset_definition = Some(sandbox_json(
-        r#"{"path":"./skills","mountPath":"/root/.agent/skills"}"#,
-    ));
+#[given(regex = r#"^its artifact carries (\d+) packed layers?$"#)]
+fn artifact_carries_layers(world: &mut BehaviourWorld, layers: usize) {
+    world.fileset_artifact_layers = Some(layers);
 }
 
 #[when("the sandbox is planned")]
@@ -45,7 +38,35 @@ fn plan_published_sandbox(world: &mut BehaviourWorld) {
         .take()
         .expect("the scenario must declare a sandbox");
     let def = lns_artifact::sandbox::parse(&json).expect("valid sandbox fixture");
-    let resolved = resolved_from_sandbox(&def);
+    let carriers = [(
+        lns_artifact::merge::ROOT_LABEL.to_string(),
+        lns_service::artifact::Carrier {
+            reference: SANDBOX_ARTIFACT.to_string(),
+            layers: (0..world.fileset_artifact_layers.take().unwrap_or_default())
+                .map(|i| lns_service::artifact::PackedLayer {
+                    digest: format!("sha256:{}", (b'a' + i as u8) as char),
+                    size: 512,
+                })
+                .collect(),
+        },
+    )]
+    .into();
+    let packed = match lns_service::artifact::correlate_packed_filesets(
+        &lns_artifact::merge::own_fileset_origins(&def.spec),
+        &[(
+            lns_artifact::merge::ROOT_LABEL.to_string(),
+            lns_artifact::merge::path_filesets(&def.spec).count(),
+        )]
+        .into(),
+        &carriers,
+    ) {
+        Ok(packed) => packed,
+        Err(problems) => {
+            world.fileset_problems = Some(problems);
+            return;
+        }
+    };
+    let resolved = resolved_from_sandbox(&def, &packed);
     world.fileset_problems = Some(published_fileset_problems(&resolved));
     let mut materialized = MaterializedFilesets::default();
     inline_fileset_specs(&resolved.inline_filesets, &mut materialized);
@@ -81,52 +102,42 @@ fn capture_materialized(world: &mut BehaviourWorld, materialized: MaterializedFi
     world.fileset_specs = Some(specs.into_iter().map(|spec| spec.guest_path).collect());
 }
 
-#[then(regex = r#"^the resolved plan carries the fileset ref at "([^"]+)"$"#)]
-fn plan_carries_fileset(world: &mut BehaviourWorld, mount: String) -> Result<(), String> {
+#[then(regex = r#"^the plan pulls the fileset at "([^"]+)" from the sandbox's own artifact$"#)]
+fn plan_pulls_fileset_from_its_own_artifact(
+    world: &mut BehaviourWorld,
+    mount: String,
+) -> Result<(), String> {
     let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
     if !problems.is_empty() {
         return Err(format!("the plan was unexpectedly refused: {problems:?}"));
     }
     let plan = world.fileset_plan.as_ref().ok_or("no plan captured")?;
     if plan
-        .filesets
+        .packed_filesets
         .iter()
-        .any(|fileset| fileset.paths == [mount.clone()] && fileset.reference.contains("@sha256:"))
+        .any(|fileset| fileset.mount_path == mount && fileset.source.reference == SANDBOX_ARTIFACT)
     {
         Ok(())
     } else {
         Err(format!(
-            "expected a pinned fileset at {mount:?}, got {:?}",
-            plan.filesets
+            "the files and the declaration that mounts them share one digest, so the layer has to come out of the approved artifact; got {:?} and {:?}",
+            plan.packed_filesets, plan.local_filesets
         ))
     }
 }
 
-#[then("the plan is refused naming the unpinned fileset ref")]
-fn plan_refused_floating(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the plan is refused naming the layer count")]
+fn plan_refused_layer_count(world: &mut BehaviourWorld) -> Result<(), String> {
     let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
     if problems
         .iter()
-        .any(|problem| problem.contains("registry.example.test/team/skills:latest"))
+        .any(|problem| problem.contains("declares 1 path fileset(s) but its artifact carries 0"))
     {
         Ok(())
     } else {
         Err(format!(
-            "expected an unpinned-ref refusal, got {problems:?}"
+            "an artifact carries one layer per path entry, so a mismatch has to refuse the run rather than leave a mount unseeded; got {problems:?}"
         ))
-    }
-}
-
-#[then("the plan is refused naming the local path")]
-fn plan_refused_path(world: &mut BehaviourWorld) -> Result<(), String> {
-    let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
-    if problems
-        .iter()
-        .any(|problem| problem.contains("local path fileset ./skills"))
-    {
-        Ok(())
-    } else {
-        Err(format!("expected a local-path refusal, got {problems:?}"))
     }
 }
 
@@ -176,7 +187,7 @@ fn plan_local_definition(world: &mut BehaviourWorld) {
         .take()
         .expect("the scenario must declare a definition");
     let def = lns_artifact::sandbox::parse(&json).expect("valid sandbox fixture");
-    let resolved = resolved_from_sandbox(&def);
+    let resolved = resolved_from_sandbox(&def, &Default::default());
     let file = world
         .fileset_snapshot_file
         .take()
@@ -273,16 +284,16 @@ fn plan_carries_inline_spec(world: &mut BehaviourWorld, guest_path: String) -> R
     plan_carries_spec(world, guest_path)
 }
 
-#[then("the plan accepts the inline fileset without a fileset ref")]
-fn plan_accepts_inline_without_ref(world: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the plan accepts the inline fileset with nothing to pull")]
+fn plan_accepts_inline_with_nothing_to_pull(world: &mut BehaviourWorld) -> Result<(), String> {
     let problems = world.fileset_problems.as_ref().ok_or("no plan ran")?;
     let plan = world.fileset_plan.as_ref().ok_or("no plan captured")?;
-    if problems.is_empty() && plan.filesets.is_empty() && plan.inline_filesets.len() == 1 {
+    if problems.is_empty() && plan.packed_filesets.is_empty() && plan.inline_filesets.len() == 1 {
         Ok(())
     } else {
         Err(format!(
-            "expected one accepted inline fileset, got problems={problems:?}, refs={:?}, inline={:?}",
-            plan.filesets, plan.inline_filesets
+            "inline content lives in the document itself, so nothing is fetched for it; got problems={problems:?}, packed={:?}, inline={:?}",
+            plan.packed_filesets, plan.inline_filesets
         ))
     }
 }
@@ -347,7 +358,7 @@ fn plan_host_files(world: &mut BehaviourWorld) {
         .take()
         .expect("the scenario must declare a definition");
     let def = lns_artifact::sandbox::parse(&json).expect("valid sandbox fixture");
-    let resolved = resolved_from_sandbox(&def);
+    let resolved = resolved_from_sandbox(&def, &Default::default());
     let probe = StagedHost {
         files: world.host_files.clone(),
         home: world.host_home.clone(),

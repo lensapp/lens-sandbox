@@ -43,11 +43,21 @@ pub struct Displaced {
     pub summary: String,
 }
 
+/// Where a merged `path` fileset came from: the source document that declared it, and its index among that document's own `path` entries — the coordinates §7 addresses its layer by, since a merged document's own order says nothing about any one artifact's layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesetOrigin {
+    pub mount_path: String,
+    pub source: String,
+    pub layer_index: usize,
+}
+
 /// A merged sandbox and the record of which source decided each thing in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     pub spec: SandboxSpec,
     pub contributions: Vec<Contribution>,
+    /// Every surviving `path` fileset, addressed by the source that declared it.
+    pub fileset_origins: Vec<FilesetOrigin>,
 }
 
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
@@ -202,7 +212,8 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         Block::Tool,
         &mut contributions,
     );
-    (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions);
+    let mut fileset_origins = Vec::new();
+    (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions, &mut fileset_origins);
     let ports = fold_labelled(
         sources,
         |s| &s.ports,
@@ -239,6 +250,7 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
     Ok(Merged {
         spec,
         contributions,
+        fileset_origins,
     })
 }
 
@@ -250,6 +262,25 @@ pub fn egress_of(sources: &[Source]) -> lns_policy::Egress {
         egress.tcp.extend(source.spec.egress.tcp.iter().cloned());
     }
     egress
+}
+
+/// Where a document's own `path` filesets came from when nothing merges into it, so a run that layered on nothing still addresses each one's layer by its source.
+pub fn own_fileset_origins(spec: &SandboxSpec) -> Vec<FilesetOrigin> {
+    path_filesets(spec)
+        .map(|(layer_index, fileset)| FilesetOrigin {
+            mount_path: fileset.mount_path.clone(),
+            source: ROOT_LABEL.to_string(),
+            layer_index,
+        })
+        .collect()
+}
+
+/// Every `path` fileset a document declares, numbered in declaration order — the numbering publish packs layers in (§6).
+pub fn path_filesets(spec: &SandboxSpec) -> impl Iterator<Item = (usize, &FilesetEntry)> {
+    spec.filesets
+        .iter()
+        .filter(|fileset| fileset.path.is_some())
+        .enumerate()
 }
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
@@ -284,11 +315,11 @@ fn egress_contribution(
     }
 }
 
-/// A mount, whichever block claimed it: one target is one keyspace across `volumes` and `filesets`, so a later source's claim of either kind displaces an earlier source's claim of either kind.
+/// A mount, whichever block claimed it: one target is one keyspace across `volumes` and `filesets`, so a later source's claim of either kind displaces an earlier source's claim of either kind. A packed fileset carries its index among its own document's `path` entries, because that is what names its layer.
 #[derive(Clone)]
 enum Mount {
     Volume(Volume),
-    Fileset(FilesetEntry),
+    Fileset(FilesetEntry, Option<usize>),
 }
 
 impl Mount {
@@ -296,7 +327,7 @@ impl Mount {
     fn summary(&self) -> String {
         match self {
             Mount::Volume(volume) => format!("volume {}", volume.source()),
-            Mount::Fileset(_) => "fileset".to_string(),
+            Mount::Fileset(..) => "fileset".to_string(),
         }
     }
 }
@@ -304,6 +335,7 @@ impl Mount {
 fn fold_mounts(
     sources: &[Source],
     into: &mut Vec<Contribution>,
+    origins: &mut Vec<FilesetOrigin>,
 ) -> (Vec<Volume>, Vec<FilesetEntry>) {
     let mut order: Vec<String> = Vec::new();
     let mut winners: BTreeMap<String, Won<Mount>> = BTreeMap::new();
@@ -318,12 +350,17 @@ fn fold_mounts(
                 Mount::summary,
             );
         }
+        let mut layers = 0;
         for fileset in &source.spec.filesets {
+            let layer_index = fileset.path.as_ref().map(|_| {
+                layers += 1;
+                layers - 1
+            });
             claim(
                 &mut order,
                 &mut winners,
                 fileset.mount_path.clone(),
-                Mount::Fileset(fileset.clone()),
+                Mount::Fileset(fileset.clone(), layer_index),
                 source.label,
                 Mount::summary,
             );
@@ -336,9 +373,19 @@ fn fold_mounts(
         .filter_map(|target| winners.remove(&target))
     {
         into.push(won.contribution(Block::Mount));
+        let source = won.source;
         match won.item {
             Mount::Volume(volume) => volumes.push(volume),
-            Mount::Fileset(fileset) => filesets.push(fileset),
+            Mount::Fileset(fileset, layer_index) => {
+                if let Some(layer_index) = layer_index {
+                    origins.push(FilesetOrigin {
+                        mount_path: fileset.mount_path.clone(),
+                        source,
+                        layer_index,
+                    });
+                }
+                filesets.push(fileset);
+            }
         }
     }
     (volumes, filesets)
@@ -854,6 +901,104 @@ mod tests {
         ]));
         assert_eq!(merged.env.get("MODE").map(String::as_str), Some("strict"));
         assert_eq!(merged.env.get("KEEP").map(String::as_str), Some("1"));
+    }
+
+    fn origins(owned: &[(String, SandboxSpec)]) -> Vec<FilesetOrigin> {
+        merge(&as_sources(owned))
+            .expect("these sources resolve")
+            .fileset_origins
+    }
+
+    #[test]
+    fn a_packed_fileset_is_addressed_by_its_own_documents_layer_order() {
+        let found = origins(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"image":"x:1","filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"},{"path":"./skills","mountPath":"/skills"},{"path":"./hooks","mountPath":"/hooks"}]}"#,
+            ),
+            (
+                "obs",
+                r#"{"filesets":[{"path":"./tools","mountPath":"/tools"}]}"#,
+            ),
+        ]));
+        assert_eq!(
+            found,
+            [
+                FilesetOrigin {
+                    mount_path: "/skills".into(),
+                    source: ROOT_LABEL.into(),
+                    layer_index: 0
+                },
+                FilesetOrigin {
+                    mount_path: "/hooks".into(),
+                    source: ROOT_LABEL.into(),
+                    layer_index: 1
+                },
+                FilesetOrigin {
+                    mount_path: "/tools".into(),
+                    source: "obs".into(),
+                    layer_index: 0
+                },
+            ],
+            "a layer is named by (source document, index among that document's own path entries) — inline entries carry no layer, and a mixin's first path entry is its own artifact's first layer, not the merged document's third"
+        );
+    }
+
+    #[test]
+    fn a_fileset_a_later_source_replaced_is_addressed_by_the_source_that_won() {
+        let found = origins(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+            ),
+            (
+                "obs",
+                r#"{"filesets":[{"path":"./better-skills","mountPath":"/skills"}]}"#,
+            ),
+        ]));
+        assert_eq!(
+            found,
+            [FilesetOrigin {
+                mount_path: "/skills".into(),
+                source: "obs".into(),
+                layer_index: 0
+            }],
+            "pulling the layer from the displaced source's artifact would mount files the run does not declare"
+        );
+    }
+
+    #[test]
+    fn a_fileset_a_volume_took_the_target_from_leaves_no_layer_to_pull() {
+        assert!(
+            origins(&sources(&[
+                (
+                    ROOT_LABEL,
+                    r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+                ),
+                (
+                    "obs",
+                    r#"{"volumes":[{"type":"volume","name":"cache","target":"/skills"}]}"#,
+                ),
+            ]))
+            .is_empty(),
+            "the fileset lost the target, so materializing its layer would write files under a volume the run mounts instead"
+        );
+    }
+
+    #[test]
+    fn a_document_that_layers_on_nothing_still_addresses_its_own_packed_filesets() {
+        let spec = spec(
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/g"},{"path":"./skills","mountPath":"/skills"}]}"#,
+        );
+        assert_eq!(
+            own_fileset_origins(&spec),
+            [FilesetOrigin {
+                mount_path: "/skills".into(),
+                source: ROOT_LABEL.into(),
+                layer_index: 0
+            }],
+            "the no-mixin path skips the merge, so it has to number the layers the same way (docs/sandbox-spec.md §6)"
+        );
     }
 
     #[test]

@@ -91,9 +91,9 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
 }
 
 #[cucumber::given(
-    regex = r#"^a pulled sandbox whose view declares fileset ref "([^"]+)" mounted at "([^"]+)"$"#
+    regex = r#"^a pulled sandbox whose view declares a packed fileset "([^"]+)" mounted at "([^"]+)"$"#
 )]
-fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount: String) {
+fn pulled_view_with_fileset(world: &mut BehaviourWorld, path: String, mount: String) {
     world.pulled_view = Some(lns_ipc::SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
@@ -106,8 +106,7 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
-            path: None,
-            reference: Some(reference),
+            path: Some(path),
             inline: false,
             host_path: None,
             optional: false,
@@ -141,7 +140,6 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
             path: None,
-            reference: None,
             inline: true,
             host_path: None,
             optional: false,
@@ -200,19 +198,6 @@ fn wire_definition_roots_path(world: &mut BehaviourWorld) -> Result<(), String> 
         Ok(())
     } else {
         Err(format!("expected a project-rooted path in: {wire}"))
-    }
-}
-
-#[then("the definition sent to the service carries the fileset ref unchanged")]
-fn wire_definition_keeps_ref(world: &mut BehaviourWorld) -> Result<(), String> {
-    let wire = world.wire_definition.as_ref().ok_or("no wire definition")?;
-    if wire.contains(&format!(
-        "registry.example.test/team/skills@sha256:{}",
-        "a".repeat(64)
-    )) {
-        Ok(())
-    } else {
-        Err(format!("expected the declared ref verbatim in: {wire}"))
     }
 }
 
@@ -305,7 +290,6 @@ fn pulled_view_with_host_path_fileset(world: &mut BehaviourWorld, source: String
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
             path: None,
-            reference: None,
             inline: false,
             host_path: Some(source),
             mount_path: mount,

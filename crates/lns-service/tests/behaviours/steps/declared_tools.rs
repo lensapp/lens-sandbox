@@ -18,13 +18,15 @@ async fn launch(w: &mut BehaviourWorld) {
     let rig = w.tools.get_or_insert_with(Default::default);
     rig.error = None;
     let definition = rig.definition.clone().expect("a definition is staged");
-    let resolved = match lns_service::artifact::plan_local_sandbox(definition.as_bytes()) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            rig.error = Some(format!("{e:#}"));
-            return;
-        }
-    };
+    let resolved =
+        match lns_service::artifact::plan_local_sandbox(definition.as_bytes(), &Default::default())
+        {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                rig.error = Some(format!("{e:#}"));
+                return;
+            }
+        };
     let requests = match lns_artifact::tools::parse_all(&resolved.tools) {
         Ok(requests) => requests,
         Err(e) => {

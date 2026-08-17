@@ -41,6 +41,10 @@ pub struct DeclaredRig {
     pub tools: Vec<String>,
     /// What a reference resolves to, so a scenario can publish a mixin under a tag.
     pub mixin_pins: std::collections::BTreeMap<String, String>,
+    /// The packed fileset layers each published mixin's artifact carries, keyed by reference.
+    pub mixin_layers: std::collections::BTreeMap<String, Vec<lns_service::artifact::PackedLayer>>,
+    /// Which artifact the launch decided each packed fileset is pulled from.
+    pub packed_filesets: lns_service::artifact::PackedFilesets,
     /// Every source the resolution merged, as the disclosure names them.
     pub resolved_mixins: Vec<String>,
     /// Which source decided each entry of the merged document, as the disclosure reads them.

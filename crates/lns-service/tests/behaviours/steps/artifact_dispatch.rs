@@ -13,11 +13,6 @@ async fn explicit_artifact_type(world: &mut BehaviourWorld, artifact_type: Strin
     world.artifact().artifact_type = Some(artifact_type);
 }
 
-#[given("a pulled reference whose manifest is a fileset artifact")]
-async fn fileset_artifact(world: &mut BehaviourWorld) {
-    world.artifact().artifact_type = Some(Kind::FileSet.artifact_type());
-}
-
 #[given("a pulled reference whose manifest is a mixin artifact")]
 async fn mixin_artifact(world: &mut BehaviourWorld) {
     world.artifact().artifact_type = Some(Kind::Mixin.artifact_type());

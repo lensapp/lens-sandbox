@@ -303,10 +303,6 @@ pub(crate) async fn pull_kit_with<R: Registry>(client: &R, image: &str) -> Resul
             }));
         }
         Some(lns_artifact::spec::Kind::Sandbox) => {}
-        Some(other) => anyhow::bail!(
-            "{image} is a {} artifact; `lns pull` takes a published sandbox or mixin",
-            other.as_str()
-        ),
         None => anyhow::bail!(
             "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` takes a published sandbox or mixin"
         ),
@@ -340,6 +336,7 @@ pub(crate) async fn pull_mixin_with<R: Registry>(
     Ok(crate::artifact::mixin::FetchedMixin {
         pinned: parsed.clone_with_digest(manifest_digest).to_string(),
         document: config_json,
+        layers: crate::artifact::fileset::packed_layers(&manifest),
     })
 }
 
@@ -1232,27 +1229,6 @@ mod tests {
         }
     }
 
-    fn build_fileset_artifact() -> FakeImage {
-        let fileset = lns_artifact::spec::Kind::FileSet;
-        let document = r#"{"apiVersion":"lns.run/v1","kind":"fileset","name":"skills","spec":{"mountPath":"/skills"}}"#.to_string();
-        let manifest = OciImageManifest {
-            artifact_type: Some(fileset.artifact_type()),
-            config: OciDescriptor {
-                media_type: fileset.config_media_type(),
-                digest: sha256_hex(document.as_bytes()),
-                size: document.len() as i64,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        FakeImage {
-            manifest,
-            config_json: document,
-            manifest_digest: format!("sha256:{}", "d".repeat(64)),
-            blobs: vec![],
-        }
-    }
-
     #[test]
     fn a_pulled_kit_answers_only_as_the_kind_it_is() {
         let sandbox = PulledKit::Sandbox(PulledArtifact {
@@ -1291,19 +1267,6 @@ mod tests {
         );
         assert!(sandbox.sandbox().is_some());
         assert!(mixin.mixin().is_some());
-    }
-
-    #[tokio::test]
-    async fn pull_refuses_a_kind_it_has_no_use_for() {
-        ensure_global_trace_subscriber();
-        let registry = build_fileset_artifact().into_registry();
-        let err = pull_kit_with(&registry, "registry.example.test/skills:1")
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("takes a published sandbox or mixin"),
-            "a fileset travels inside a kit rather than being pulled on its own, so the refusal has to say what pull does take; got: {err:#}"
-        );
     }
 
     #[tokio::test]

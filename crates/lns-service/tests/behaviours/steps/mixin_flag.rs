@@ -56,6 +56,7 @@ async fn resolve_with(w: &mut BehaviourWorld, extra: &[String]) {
             lns_service::artifact::plan_published_sandbox(
                 &resolution.document,
                 "registry.example.test/some-sandbox:1",
+                &Default::default(),
             )
         }
         Err(e) => Err(e),

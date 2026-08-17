@@ -1,23 +1,19 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const API_VERSION: &str = "lens.dev/v1alpha1";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Sandbox,
     Mixin,
-    FileSet,
 }
 
-const ALL_KINDS: [Kind; 3] = [Kind::Sandbox, Kind::Mixin, Kind::FileSet];
+const ALL_KINDS: [Kind; 2] = [Kind::Sandbox, Kind::Mixin];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Sandbox => "sandbox",
             Kind::Mixin => "mixin",
-            Kind::FileSet => "fileset",
         }
     }
 
@@ -47,14 +43,6 @@ impl Kind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Mount {
-    pub path: String,
-    #[serde(rename = "readOnly", default)]
-    pub read_only: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Quantity {
     Int(i64),
@@ -78,48 +66,6 @@ pub struct Port {
     pub container: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileSet {
-    pub name: String,
-    pub mount: Mount,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Doc {
-    #[serde(rename = "apiVersion", default)]
-    api_version: String,
-    #[serde(default)]
-    kind: String,
-    name: String,
-    #[serde(default)]
-    mount: Option<Mount>,
-    // Every FileSet artifact ever published carries `spec: {}`, so the strict decoder has to know the key even though nothing reads it.
-    #[serde(rename = "spec", default)]
-    _spec: serde::de::IgnoredAny,
-}
-
-fn parse_doc(config_json: &[u8], expected: Kind) -> Result<Doc> {
-    let doc: Doc = serde_json::from_slice(config_json).context("parsing artifact config")?;
-    if doc.api_version != API_VERSION {
-        bail!(
-            "unexpected apiVersion {:?}; expected {API_VERSION}",
-            doc.api_version
-        );
-    }
-    if doc.kind != expected.as_str() {
-        bail!(
-            "expected kind {} but config declares {:?}",
-            expected.as_str(),
-            doc.kind
-        );
-    }
-    if !is_valid_name(&doc.name) {
-        bail!("invalid name {:?}", doc.name);
-    }
-    Ok(doc)
-}
-
 pub fn validate_mount_path(path: &str) -> Result<()> {
     if path.is_empty() {
         bail!("mount path must not be empty");
@@ -134,18 +80,6 @@ pub fn validate_mount_path(path: &str) -> Result<()> {
         bail!("mount path {path} must not contain a `..` segment");
     }
     Ok(())
-}
-
-pub fn parse_fileset(config_json: &[u8]) -> Result<FileSet> {
-    let doc = parse_doc(config_json, Kind::FileSet)?;
-    let Some(mount) = doc.mount else {
-        bail!("FileSet is an application-layer artifact and requires a mount");
-    };
-    validate_mount_path(&mount.path)?;
-    Ok(FileSet {
-        name: doc.name,
-        mount,
-    })
 }
 
 #[derive(Deserialize)]
@@ -198,11 +132,7 @@ mod tests {
 
     #[test]
     fn a_kind_is_spelled_the_way_the_specification_writes_it() {
-        for (kind, spelling) in [
-            (Kind::Sandbox, "sandbox"),
-            (Kind::Mixin, "mixin"),
-            (Kind::FileSet, "fileset"),
-        ] {
+        for (kind, spelling) in [(Kind::Sandbox, "sandbox"), (Kind::Mixin, "mixin")] {
             assert_eq!(
                 kind.as_str(),
                 spelling,
@@ -230,12 +160,6 @@ mod tests {
                 "mixin",
                 "application/vnd.lens.mixin.v1+json",
                 "application/vnd.lens.mixin.config.v1+json",
-            ),
-            (
-                Kind::FileSet,
-                "fileset",
-                "application/vnd.lens.fileset.v1+json",
-                "application/vnd.lens.fileset.config.v1+json",
             ),
         ] {
             assert_eq!(kind.as_str(), name);
@@ -286,48 +210,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_doc_rejects_wrong_api_version_kind_and_name() {
-        let bad_api = br#"{"apiVersion":"v0","kind":"fileset","name":"skills","mount":{"path":"/skills"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_fileset(bad_api).unwrap_err()).contains("apiVersion"));
-        let bad_kind = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"skills","mount":{"path":"/skills"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_fileset(bad_kind).unwrap_err()).contains("expected kind"));
-        let bad_name = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"-bad","mount":{"path":"/skills"},"spec":{}}"#;
-        assert!(format!("{:#}", parse_fileset(bad_name).unwrap_err()).contains("invalid name"));
-    }
-
-    #[test]
-    fn parse_doc_rejects_malformed_json() {
+    fn read_kind_rejects_a_malformed_document_and_an_unknown_kind() {
         assert!(
-            format!("{:#}", parse_fileset(b"not json").unwrap_err()).contains("parsing artifact")
+            format!("{:#}", read_kind(b"not json").unwrap_err()).contains("parsing artifact kind")
         );
-    }
-
-    #[test]
-    fn parse_fileset_requires_a_mount() {
-        let with_mount = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"skills","mount":{"path":"/root/.some-agent/skills","readOnly":true},"spec":{}}"#;
-        let fileset = parse_fileset(with_mount).unwrap();
-        assert_eq!(fileset.mount.path, "/root/.some-agent/skills");
-        assert_eq!(fileset.mount.read_only, Some(true));
-
-        let no_mount =
-            br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"skills","spec":{}}"#;
-        let err = parse_fileset(no_mount).unwrap_err();
-        assert!(format!("{err:#}").contains("requires a mount"));
-    }
-
-    #[test]
-    fn parse_fileset_rejects_a_traversing_or_relative_mount_path() {
-        let escaping = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"skills","mount":{"path":"/root/../../etc"},"spec":{}}"#;
-        let err = parse_fileset(escaping).unwrap_err();
         assert!(
-            format!("{err:#}").contains("`..` segment"),
-            "a fileset must not mount a traversing path: {err:#}"
-        );
-        let relative = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"skills","mount":{"path":"root/skills"},"spec":{}}"#;
-        let err = parse_fileset(relative).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must be absolute"),
-            "got: {err:#}"
+            format!("{:#}", read_kind(br#"{"kind":"fileset"}"#).unwrap_err())
+                .contains("unknown artifact kind"),
+            "a fileset is not addressable on its own (docs/sandbox-spec.md §7), so a document declaring one has no reader"
         );
     }
 
@@ -364,5 +254,26 @@ mod tests {
             assert_eq!(Kind::from_kind_str(kind.as_str()), Some(kind));
         }
         assert_eq!(Kind::from_kind_str("Sorcery"), None);
+    }
+
+    #[test]
+    fn a_kind_the_specification_retired_is_addressable_by_nothing() {
+        for retired in ["fileset", "policy", "integration"] {
+            assert_eq!(
+                Kind::from_kind_str(retired),
+                None,
+                "docs/sandbox-spec.md §7: nothing but a kit is addressable on its own"
+            );
+            assert_eq!(
+                Kind::from_artifact_type(&format!("application/vnd.lens.{retired}.v1+json")),
+                None
+            );
+            assert_eq!(
+                Kind::from_config_media_type(&format!(
+                    "application/vnd.lens.{retired}.config.v1+json"
+                )),
+                None
+            );
+        }
     }
 }

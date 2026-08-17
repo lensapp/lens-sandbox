@@ -25,7 +25,8 @@ fn sandbox_manifest() -> Vec<u8> {
 #[tokio::test]
 async fn build_push_and_pull_round_trip_through_the_local_registry() {
     let reg = registry::LocalRegistry::start();
-    let built = lns_artifact::build::build_artifact(&sandbox_manifest()).expect("build sandbox");
+    let built =
+        lns_artifact::build::build_artifact(&sandbox_manifest(), &[]).expect("build sandbox");
 
     let reference: Reference = format!("{}/some/sandbox:1", reg.host())
         .parse()

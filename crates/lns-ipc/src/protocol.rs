@@ -249,6 +249,9 @@ pub enum Response {
         /// The egress every source but this directory's own decided, as JSON: the run folds the live decisions file over it rather than over the copy the merged document carries, so a rule deleted mid-run retracts.
         #[serde(default)]
         authored_egress: String,
+        /// Which artifact carries each packed fileset the merge reached; the merged document alone cannot say, since a mixin's entry is a layer of the mixin's own artifact.
+        #[serde(default)]
+        packed_filesets: Vec<PackedFilesetSource>,
     },
     ImageTagged {
         from: String,
@@ -401,8 +404,6 @@ pub struct SandboxView {
 pub struct SandboxFileset {
     #[serde(default)]
     pub path: Option<String>,
-    #[serde(rename = "ref", default)]
-    pub reference: Option<String>,
     #[serde(default)]
     pub inline: bool,
     /// The host file the sandbox declared, verbatim — shape, never payload, so a consumer sees which of their files it reads.
@@ -610,6 +611,18 @@ pub struct RunImageArgs {
     /// What the preflight resolved from every source but this directory's own, as JSON egress: the gate folds the live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
     #[serde(default)]
     pub authored_egress: Option<String>,
+    /// Which artifact carries each of the merged definition's packed filesets, as the resolve answered; a published reference is peeked at boot and needs none of this.
+    #[serde(default)]
+    pub packed_filesets: Vec<PackedFilesetSource>,
+}
+
+/// One packed fileset's coordinates: the mount path it lands at, the digest-pinned artifact whose layer carries it, and that layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackedFilesetSource {
+    pub mount_path: String,
+    pub reference: String,
+    pub digest: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -946,6 +959,7 @@ mod tests {
             definition: None,
             definition_dir: None,
             authored_egress: None,
+            packed_filesets: Vec::new(),
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -995,10 +1009,19 @@ mod tests {
             definition: None,
             definition_dir: None,
             authored_egress: None,
+            packed_filesets: vec![PackedFilesetSource {
+                mount_path: "/root/.agent/skills".into(),
+                reference: format!("ghcr.io/acme/skills@sha256:{}", "b".repeat(64)),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                size: 4096,
+            }],
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
-        assert_eq!(decoded, args);
+        assert_eq!(
+            decoded, args,
+            "a mixin's packed fileset is a layer of the mixin's own artifact, so the run has to carry which artifact and which layer or the boot cannot materialize it"
+        );
     }
 
     #[test]
@@ -1132,6 +1155,7 @@ mod tests {
             definition: Some(r#"{"kind":"sandbox"}"#.into()),
             definition_dir: Some("/work/proj".into()),
             authored_egress: Some(r#"{"http":[],"tcp":[]}"#.into()),
+            packed_filesets: Vec::new(),
         }
     }
 
@@ -1535,11 +1559,7 @@ mod tests {
                 },
             ],
             filesets: vec![SandboxFileset {
-                path: None,
-                reference: Some(format!(
-                    "registry.example.test/team/skills@sha256:{}",
-                    "a".repeat(64)
-                )),
+                path: Some("./skills".into()),
                 inline: false,
                 host_path: None,
                 optional: false,

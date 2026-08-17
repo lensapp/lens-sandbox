@@ -606,6 +606,7 @@ mod tests {
                 definition: None,
                 definition_dir: None,
                 authored_egress: None,
+                packed_filesets: Vec::new(),
             })),
             Instant::now(),
         )

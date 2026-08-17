@@ -184,13 +184,14 @@ fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String])
     }
 }
 
-/// What the service answered for a local definition: the merged document, the sources that produced it, and the egress baseline the run folds this directory's live decisions over.
+/// What the service answered for a local definition: the merged document, the sources that produced it, the egress baseline the run folds this directory's live decisions over, and which artifact carries each packed fileset they contributed.
 struct ResolvedDefinition {
     definition: String,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
     contributions: Vec<lns_ipc::SourceContribution>,
     authored_egress: String,
+    packed_filesets: Vec<lns_ipc::PackedFilesetSource>,
 }
 
 /// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
@@ -224,12 +225,14 @@ async fn preflight_local(
             pinned_mixins,
             contributions,
             authored_egress,
+            packed_filesets,
         }) => Ok(ResolvedDefinition {
             definition,
             mixins,
             pinned_mixins,
             contributions,
             authored_egress,
+            packed_filesets,
         }),
         Some(Response::Error { message }) => anyhow::bail!("{message}"),
         Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
@@ -284,6 +287,8 @@ pub async fn run_image(
     // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
     let decisions = crate::run::summary::policy_path(args.policy.as_deref(), &cwd);
     let mut authored_egress = None;
+    // A mixin the preflight pulled brings its filesets packed in its own artifact, and the merged document alone cannot say which.
+    let mut packed_filesets = Vec::new();
     if let crate::run::target::RunTarget::Local {
         def,
         json,
@@ -297,6 +302,7 @@ pub async fn run_image(
             .context("reading the resolved definition")?;
         *json = resolved.definition;
         authored_egress = Some(resolved.authored_egress);
+        packed_filesets = resolved.packed_filesets;
         crate::run::summary::adopt_pinned_mixins(
             &mut args,
             &resolved.mixins,
@@ -473,6 +479,7 @@ pub async fn run_image(
             .project_dir()
             .map(|p| p.to_string_lossy().into_owned()),
         authored_egress,
+        packed_filesets,
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
@@ -1306,11 +1313,7 @@ mod tests {
                 }],
                 ports: Vec::new(),
                 filesets: vec![lns_ipc::SandboxFileset {
-                    path: None,
-                    reference: Some(format!(
-                        "registry.example.test/team/skills@sha256:{}",
-                        "b".repeat(64)
-                    )),
+                    path: Some("./skills".into()),
                     inline: false,
                     host_path: None,
                     optional: false,
@@ -1336,10 +1339,7 @@ mod tests {
         assert_eq!(
             target.filesets,
             [crate::run::summary::FilesetSummary {
-                source: format!(
-                    "registry.example.test/team/skills@sha256:{}…",
-                    "b".repeat(12)
-                ),
+                source: "./skills".to_string(),
                 mount_path: "/root/.agent/skills".to_string(),
                 owner: "workload".to_string(),
                 from_host: false,

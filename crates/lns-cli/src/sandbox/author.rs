@@ -541,8 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn inspect_local_renders_path_and_ref_filesets() {
-        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
+    fn inspect_local_renders_path_and_inline_filesets() {
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - inline:\n        settings.json: '{}'\n      mountPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &[], &mut out).unwrap();
@@ -552,9 +552,7 @@ mod tests {
             "got: {text}"
         );
         assert!(
-            text.contains(
-                "fileset:      registry.example.test/team/settings@sha256:abc -> /root/.agent/settings"
-            ),
+            text.contains("fileset:      inline -> /root/.agent/settings"),
             "got: {text}"
         );
         assert!(

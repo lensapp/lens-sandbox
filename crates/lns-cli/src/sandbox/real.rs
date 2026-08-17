@@ -268,19 +268,7 @@ async fn capped_body(response: reqwest::Response, url: &str, max_bytes: usize) -
 struct RealProducer;
 
 impl super::distribute::Producer for RealProducer {
-    fn build_and_push<'a>(
-        &'a self,
-        doc: &'a [u8],
-        reference: &'a str,
-    ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
-        Box::pin(async move {
-            let built = lns_artifact::build::build_artifact(doc)?;
-            crate::build::push::push_artifact(&built, reference).await?;
-            Ok(built.manifest_digest)
-        })
-    }
-
-    fn push_prebuilt<'a>(
+    fn push_built<'a>(
         &'a self,
         built: &'a lns_artifact::build::BuiltArtifact,
         reference: &'a str,
