@@ -184,12 +184,13 @@ fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String])
     }
 }
 
-/// What the service answered for a local definition: the merged document, and the sources that produced it.
+/// What the service answered for a local definition: the merged document, the sources that produced it, and the egress baseline the run folds this directory's live decisions over.
 struct ResolvedDefinition {
     definition: String,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
     contributions: Vec<lns_ipc::SourceContribution>,
+    authored_egress: String,
 }
 
 /// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
@@ -222,11 +223,13 @@ async fn preflight_local(
             mixins,
             pinned_mixins,
             contributions,
+            authored_egress,
         }) => Ok(ResolvedDefinition {
             definition,
             mixins,
             pinned_mixins,
             contributions,
+            authored_egress,
         }),
         Some(Response::Error { message }) => anyhow::bail!("{message}"),
         Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
@@ -280,6 +283,7 @@ pub async fn run_image(
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
     // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
     let decisions = crate::run::summary::policy_path(args.policy.as_deref(), &cwd);
+    let mut authored_egress = None;
     if let crate::run::target::RunTarget::Local {
         def,
         json,
@@ -292,6 +296,7 @@ pub async fn run_image(
         **def = lns_artifact::sandbox::parse(resolved.definition.as_bytes())
             .context("reading the resolved definition")?;
         *json = resolved.definition;
+        authored_egress = Some(resolved.authored_egress);
         crate::run::summary::adopt_pinned_mixins(
             &mut args,
             &resolved.mixins,
@@ -467,6 +472,7 @@ pub async fn run_image(
         definition_dir: target
             .project_dir()
             .map(|p| p.to_string_lossy().into_owned()),
+        authored_egress,
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream

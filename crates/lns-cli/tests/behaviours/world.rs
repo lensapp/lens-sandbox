@@ -57,6 +57,14 @@ pub struct BehaviourWorld {
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
     pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
+    pub decisions: LocalDecisionsRig,
+}
+
+/// What the service answered when a run resolved this directory's decisions: the sources the merge reached, and which of them decided each entry.
+#[derive(Debug, Default)]
+pub struct LocalDecisionsRig {
+    pub sources: Vec<String>,
+    pub contributions: Vec<lns_ipc::SourceContribution>,
 }
 
 use lns_policy::host_bind_decisions::SecretDisposition;

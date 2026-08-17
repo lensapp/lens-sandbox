@@ -67,10 +67,42 @@ pub fn dispatch_run(
     Ok(path)
 }
 
-/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
+/// The baseline the guest's gate folds this directory's live decisions over. A source that ships neither egress nor connectors leaves no baseline at all, so the directory's decisions govern verbatim.
+fn baseline_policy(
+    egress: &lns_policy::Egress,
+    connectors: &[String],
+) -> Option<lns_policy::Policy> {
+    let ships_policy = *egress != lns_policy::Egress::default() || !connectors.is_empty();
+    ships_policy.then(|| lns_policy::Policy {
+        network: lns_policy::NetworkPolicy {
+            egress: egress.clone(),
+        },
+        connectors: connectors.to_vec(),
+        ..lns_policy::Policy::default()
+    })
+}
+
+/// Re-base a plan's policy on the egress every source but the directory's own decided, because the gate folds this directory's live decisions over that baseline rather than over the copy of them the resolved document carries (`docs/sandbox-spec.md` §8.1).
+pub fn with_authored_baseline(
+    mut resolved: ResolvedSandbox,
+    authored: &lns_policy::Egress,
+) -> ResolvedSandbox {
+    let connectors = resolved
+        .policy
+        .as_ref()
+        .map(|policy| policy.connectors.clone())
+        .unwrap_or_default();
+    resolved.policy = baseline_policy(authored, &connectors);
+    resolved
+}
+
+/// The baseline a preflight resolved, as it travelled to the run that boots it.
+pub fn authored_egress(json: &str) -> Result<lns_policy::Egress> {
+    serde_json::from_str(json).context("reading the egress this run's preflight resolved")
+}
+
+/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
-    let ships_policy =
-        def.spec.egress != lns_policy::Egress::default() || !def.spec.connectors.is_empty();
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
@@ -136,13 +168,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         command: def.spec.command.clone(),
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
-        policy: ships_policy.then(|| lns_policy::Policy {
-            network: lns_policy::NetworkPolicy {
-                egress: def.spec.egress.clone(),
-            },
-            connectors: def.spec.connectors.clone(),
-            ..lns_policy::Policy::default()
-        }),
+        policy: baseline_policy(&def.spec.egress, &def.spec.connectors),
         credentials: def.spec.credentials.clone(),
         tools: def.spec.tools.clone(),
     }
@@ -301,6 +327,78 @@ mod tests {
             "the baseline's lockdown is a catch-all deny it carries in the table"
         );
         assert_eq!(policy.connectors, vec!["some-provider".to_string()]);
+    }
+
+    #[test]
+    fn a_plan_re_based_on_the_authored_egress_leaves_out_what_the_directory_decided() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"egress":{"http":[{"match":"docs.some-vendor.example","verdict":"allow"},{"match":"api.some-vendor.example","verdict":"deny"}]}}}"#,
+        )
+        .unwrap();
+        let authored = authored_egress(
+            r#"{"http":[{"match":"api.some-vendor.example","verdict":"deny"}],"tcp":[]}"#,
+        )
+        .expect("the baseline a preflight resolved parses");
+
+        let policy = with_authored_baseline(resolved_from_sandbox(&def), &authored)
+            .policy
+            .expect("a sandbox that ships egress keeps a baseline");
+
+        assert_eq!(
+            policy
+                .network
+                .egress
+                .http
+                .iter()
+                .map(|rule| rule.match_pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["api.some-vendor.example"],
+            "the gate folds the live decisions file over this, and the developer's own allow frozen into it would outlive them deleting the rule"
+        );
+        assert_eq!(
+            policy.connectors,
+            vec!["some-provider".to_string()],
+            "no mixin can name a connector, so re-basing the egress must not drop the list the sandbox itself declared"
+        );
+    }
+
+    #[test]
+    fn a_plan_whose_only_egress_was_the_directorys_own_leaves_the_gate_no_baseline() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","egress":{"http":[{"match":"docs.some-vendor.example","verdict":"allow"}]}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
+                .policy,
+            None,
+            "nothing but the developer decided anything here, so the file governs verbatim rather than through a merge with itself"
+        );
+    }
+
+    #[test]
+    fn a_definition_that_shipped_nothing_still_leaves_the_gate_no_baseline_to_fold_over() {
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
+                .policy,
+            None,
+            "a directory whose decisions are the only word on the network has nothing to layer them over, and inventing an empty baseline would merge the file with itself"
+        );
+    }
+
+    #[test]
+    fn a_baseline_that_is_not_an_egress_table_refuses_rather_than_governing_as_nothing() {
+        let err = authored_egress("not json").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("the egress this run's preflight resolved"),
+            "a baseline read as empty would silently drop every rule the sandbox ships; got: {err:#}"
+        );
     }
 
     #[test]

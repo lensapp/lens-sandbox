@@ -605,6 +605,7 @@ mod tests {
                 verify_sandbox: false,
                 definition: None,
                 definition_dir: None,
+                authored_egress: None,
             })),
             Instant::now(),
         )

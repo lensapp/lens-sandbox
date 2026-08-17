@@ -12,6 +12,11 @@ Feature: a run resolves the mixins its document declares
   an entry never went through it and is refused rather than booted without what
   it contributes.
 
+  The directory's own decisions are the last source in that list, so they merge
+  into the document like any other and the disclosure attributes them to the
+  file. What the guest enforces is folded from that file live, so a rule the
+  developer deletes mid-run stops applying.
+
   Scenario: what a mixin declares reaches the run
     Given a mixin declaring the tool "python@3.12"
     And the sandbox definition declares that mixin
@@ -31,18 +36,33 @@ Feature: a run resolves the mixins its document declares
     When the published sandbox is resolved and launched
     Then the run installs "python@3.12"
 
-  Scenario: the directory's egress stays live rather than being frozen into the document
+  Scenario: what the directory decided merges into the document that boots
     Given the sandbox definition declares nothing but its image
     And the directory's own decisions allow "api.some-provider.example"
     When the published sandbox is resolved and launched
     Then the run installs "curl@8"
-    And the resolved document decides nothing about "api.some-provider.example"
+    And the resolved document allows "api.some-provider.example"
+    And the disclosure attributes "allow api.some-provider.example" to "lns-local-mixin.yaml"
 
-  Scenario: a directory that decided only destinations leaves the document alone
+  Scenario: a directory that decided only destinations is a source the disclosure names
     Given the sandbox definition declares nothing but its image
     And the directory's own decisions allow "api.some-provider.example" and nothing else
     When the published sandbox is resolved and launched
-    Then the run resolved no source but the sandbox itself
+    Then the run resolved the directory's own decisions as a source
+
+  Scenario: what the directory decided outranks a destination the sandbox denies
+    Given the sandbox definition denies "docs.some-vendor.example"
+    And the directory's own decisions allow "docs.some-vendor.example" and nothing else
+    When the published sandbox is resolved and launched
+    Then a workload request to "docs.some-vendor.example" is allowed by policy
+    And the disclosure attributes "allow docs.some-vendor.example" to "lns-local-mixin.yaml"
+    And the disclosure attributes "deny docs.some-vendor.example" to "the sandbox"
+
+  Scenario: a destination the developer never decided stays the sandbox's to deny
+    Given the sandbox definition denies "docs.some-vendor.example"
+    And the directory's own decisions allow "api.some-provider.example" and nothing else
+    When the published sandbox is resolved and launched
+    Then a workload request to "docs.some-vendor.example" is denied by policy
 
   Scenario: a mixin the directory's decisions name merges before them
     Given a mixin declaring the tools "node@22" and "python@3.11"

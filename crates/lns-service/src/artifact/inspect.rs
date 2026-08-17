@@ -172,6 +172,7 @@ mod tests {
             mixins: mixins.to_vec(),
             pinned_extra: Vec::new(),
             contributions: Vec::new(),
+            authored_egress: Default::default(),
         }
     }
 
@@ -342,12 +343,7 @@ mod tests {
             digest(),
             Some(&fileset.artifact_type()),
             &fileset.config_media_type(),
-            &crate::artifact::mixin::Resolution {
-                document: b"{}".to_vec(),
-                mixins: Vec::new(),
-                pinned_extra: Vec::new(),
-                contributions: Vec::new(),
-            },
+            &resolution("{}", &[]),
             None,
         )
         .unwrap_err();
@@ -368,12 +364,7 @@ mod tests {
             digest(),
             Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
             &lns_artifact::spec::Kind::Mixin.config_media_type(),
-            &crate::artifact::mixin::Resolution {
-                document: document.into_bytes(),
-                mixins: Vec::new(),
-                pinned_extra: Vec::new(),
-                contributions: Vec::new(),
-            },
+            &resolution(&document, &[]),
             None,
         )
         .unwrap();
@@ -402,12 +393,10 @@ mod tests {
             digest(),
             Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
             &lns_artifact::spec::Kind::Mixin.config_media_type(),
-            &crate::artifact::mixin::Resolution {
-                document: br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs","spec":{"image":"x:1"}}"#.to_vec(),
-                mixins: Vec::new(),
-                pinned_extra: Vec::new(),
-                contributions: Vec::new(),
-            },
+            &resolution(
+                r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs","spec":{"image":"x:1"}}"#,
+                &[],
+            ),
             None,
         )
         .unwrap_err();
@@ -428,10 +417,11 @@ mod tests {
                 Some(&lns_artifact::spec::Kind::Sandbox.artifact_type()),
                 &lns_artifact::spec::Kind::Sandbox.config_media_type(),
                 &crate::artifact::mixin::Resolution {
-                    document: br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1"}}"#.to_vec(),
-                    mixins: vec![declared.clone(), pinned.clone()],
                     pinned_extra: vec![pinned.clone()],
-                    contributions: Vec::new(),
+                    ..resolution(
+                        r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1"}}"#,
+                        &[declared.clone(), pinned.clone()],
+                    )
                 },
                 None,
             )

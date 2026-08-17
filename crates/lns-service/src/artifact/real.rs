@@ -46,7 +46,7 @@ pub(crate) async fn peek_and_plan(
         }
         RunPath::Sandbox => {
             crate::artifact::mixin::require_pinned_extras(mixins)?;
-            let document = crate::artifact::mixin::resolve(
+            let resolution = crate::artifact::mixin::resolve(
                 config_json.as_bytes(),
                 mixins,
                 &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
@@ -54,9 +54,11 @@ pub(crate) async fn peek_and_plan(
                 local_source(decisions)?,
             )
             .await
-            .with_context(|| format!("resolving {image_ref}"))?
-            .document;
-            let resolved = crate::artifact::plan_published_sandbox(&document, image_ref)?;
+            .with_context(|| format!("resolving {image_ref}"))?;
+            let resolved = crate::artifact::with_authored_baseline(
+                crate::artifact::plan_published_sandbox(&resolution.document, image_ref)?,
+                &resolution.authored_egress,
+            );
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
             crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
                 .await
@@ -82,9 +84,18 @@ pub(crate) async fn peek_and_plan(
     }
 }
 
-/// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run.
-pub(crate) async fn plan_local(definition_json: &str) -> Result<SandboxPlan> {
-    let resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
+/// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run. `authored_egress` is what the preflight resolved from every source but this directory's own, absent when the run resolved nothing to layer on.
+pub(crate) async fn plan_local(
+    definition_json: &str,
+    authored_egress: Option<&str>,
+) -> Result<SandboxPlan> {
+    let mut resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
+    if let Some(authored) = authored_egress {
+        resolved = crate::artifact::with_authored_baseline(
+            resolved,
+            &crate::artifact::authored_egress(authored)?,
+        );
+    }
     disclose_effective_policy(resolved.policy.as_ref());
     let mut materialized = materialize_filesets(&resolved).await?;
     crate::artifact::fileset::local_fileset_specs(
@@ -395,6 +406,8 @@ pub(crate) async fn resolve_definition(
         mixins: resolution.mixins,
         pinned_mixins: resolution.pinned_extra,
         contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
+        authored_egress: serde_json::to_string(&resolution.authored_egress)
+            .context("serializing the egress this run resolved")?,
     })
 }
 

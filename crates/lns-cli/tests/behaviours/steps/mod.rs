@@ -9,6 +9,7 @@ pub mod declared_tools;
 pub mod definition_selection;
 pub mod env_file;
 pub mod host_bind;
+pub mod local_decisions;
 pub mod machine_output;
 pub mod policy_cli;
 pub mod publish;
