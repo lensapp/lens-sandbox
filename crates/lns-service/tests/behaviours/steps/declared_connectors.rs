@@ -58,7 +58,7 @@ fn definition_declaring(ids: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":[{list}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","connectors":[{list}]}}}}"#
     )
 }
 
@@ -138,9 +138,7 @@ fn launch(
         .collect();
     rig.offered = run.connectable_ids.iter().cloned().collect();
     // The launch consents to its applied connectors by default (the grant a prior first-use card would have left); a scenario withholds an id to model a cloned overlay or a slot with no machine-local grant, and the gate then keeps it unarmed.
-    let workload = WorkloadIdentity::Definition {
-        dir: "/rig/project".into(),
-    };
+    let workload = WorkloadIdentity::definition("/rig/project");
     let mut grants = WorkloadGrantFile::default();
     for p in &run.providers {
         if run.armed.contains(p.id()) && !rig.withhold_grants.contains(p.id()) {
@@ -154,15 +152,16 @@ fn launch(
             ));
         }
     }
+    let composed = workload.clone().composed_with(rig.composed_mixins.clone());
     // A completed boot-gate sign-in grants the workload even where a prior grant was withheld, exactly as adapter::start records it before the gate.
-    for record in boot_sign_in_grants(&rig.signed_in, &run.providers, "rig-project", &workload) {
+    for record in boot_sign_in_grants(&rig.signed_in, &run.providers, "rig-project", &composed) {
         grants.upsert(record);
     }
     let armed = gate_armed_by_grant(
         &run.armed,
         &run.providers,
         "rig-project",
-        &workload,
+        &composed,
         &grants,
     );
     rig.wire = expand_credentials_with_custom(&rig.store, &run.providers, &armed, &|_| None);
@@ -202,20 +201,27 @@ fn published_declares_one(w: &mut BehaviourWorld, id: String) {
 fn definition_declares_with_allowed_route(w: &mut BehaviourWorld, id: String, host: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"policy":{{"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","connectors":["{id}"],"egress":{{"http":[{{"match":"{host}","verdict":"allow"}}]}}}}}}"#
     ));
 }
 
-#[given("the directory's lns-policy.yaml connects no connectors")]
+#[given("the directory's lns-local-mixin.yaml connects no connectors")]
 fn overlay_connects_nothing(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay = Policy::default();
 }
 
-#[given(regex = r#"^the directory's lns-policy.yaml connects "([^"]+)"$"#)]
+#[given(regex = r#"^the directory's lns-local-mixin.yaml connects "([^"]+)"$"#)]
 fn overlay_connects(w: &mut BehaviourWorld, id: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.connectors.push(id);
+}
+
+#[given(regex = r#"^the run composes the mixin "([^"]+)"$"#)]
+fn run_composes_mixin(w: &mut BehaviourWorld, reference: String) {
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.composed_mixins
+        .push(format!("{reference}@sha256:{}", "d".repeat(64)));
 }
 
 #[given(regex = r#"^this workload has no grant for "([^"]+)"$"#)]
@@ -459,7 +465,7 @@ fn launched_sandbox_declaring(w: &mut BehaviourWorld, id: String) {
     w.approval();
 }
 
-#[given("the directory's lns-policy.yaml denies all by default")]
+#[given("the directory's lns-local-mixin.yaml denies all by default")]
 fn overlay_denies_by_default(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.add_rule(lns_policy::RouteRule::deny_host("*"));
@@ -498,27 +504,16 @@ fn request_denied_by_policy(w: &mut BehaviourWorld, host: String) -> Result<(), 
         .as_ref()
         .and_then(|r| r.running_policy.as_ref())
         .ok_or("no running policy was produced")?;
-    // The guest gate is first-match-wins; the merged policy must present the deny before the connector's allow.
-    let verdict = policy
-        .network
-        .egress
-        .http
-        .iter()
-        .find(|r| r.match_pattern == host)
-        .map(|r| r.verdict)
-        // Nothing names the host: the catch-all the closed overlay carries is what decides it.
-        .unwrap_or(Verdict::Deny);
-    if verdict == Verdict::Deny {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected {host} to be denied, first match gave {verdict:?}; routes: {:?}",
+    match super::mixin_resolution::gate_verdict(policy, &host) {
+        Some(lns_policy::Verdict::Deny) => Ok(()),
+        other => Err(format!(
+            "expected {host} to be denied, the gate's first match gave {other:?}; routes: {:?}",
             policy.network.egress.http
-        ))
+        )),
     }
 }
 
-#[then("the allow rule is written to the directory's lns-policy.yaml")]
+#[then("the allow rule is written to the directory's lns-local-mixin.yaml")]
 fn allow_rule_written_to_policy_file(w: &mut BehaviourWorld) -> Result<(), String> {
     let rig = w.approval();
     let on_disk = Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())?;
@@ -685,7 +680,7 @@ fn connector_is_offered(w: &mut BehaviourWorld, id: String) -> Result<(), String
 
 fn definition_with_credential_on(env: &str, domain: &str) -> String {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env}","placeholder":"lns-placeholder-{env}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","credentials":[{{"envVar":"{env}","placeholder":"lns-placeholder-{env}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}}}"#
     )
 }
 

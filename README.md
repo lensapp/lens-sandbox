@@ -39,13 +39,13 @@ lns run
   Flags:     -i -t
   Ports:     127.0.0.1:8642 -> 8642, 127.0.0.1:9119 -> 9119
   Policy:
-    file: /Users/you/dev/my-app/lns-policy.yaml
+    file: /Users/you/dev/my-app/lns-local-mixin.yaml
     default verdict: ask
     rules: none defined; anything else asks
     source: auto-created (no policy in this directory)
 ```
 
-When the workload opens a connection no rule covers, the background service raises an approval prompt showing the host and action (e.g. `CONNECT api.linear.app:443`). You choose allow/deny — once, or always. "Always" writes a matching rule to `lns-policy.yaml`, so future runs load the decision automatically.
+When the workload opens a connection no rule covers, the background service raises an approval prompt showing the host and action (e.g. `CONNECT api.linear.app:443`). You choose allow/deny — once, or always. "Always" writes a matching rule to `lns-local-mixin.yaml`, so future runs load the decision automatically.
 
 ## What it does
 

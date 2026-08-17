@@ -4,9 +4,7 @@ use crate::steps::mixin_resolution::Installed;
 use crate::world::BehaviourWorld;
 
 fn mixin_document(name: &str, spec: &str) -> String {
-    format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
-    )
+    format!(r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"{name}","spec":{spec}}}"#)
 }
 
 fn install_directory(w: &mut BehaviourWorld, dir: &str, spec: &str) {
@@ -47,7 +45,7 @@ fn local_definition(w: &mut BehaviourWorld, dir: &str, mixins: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.project_dir = Some(dir.to_string());
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":{mixins}}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","mixins":{mixins}}}}}"#
     ));
 }
 
@@ -65,18 +63,26 @@ async fn the_local_sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
             Installed::from_rig(rig),
         )
     };
-    let home = lns_service::artifact::mixin::Locator::Directory(std::path::PathBuf::from(home));
-    let planned =
-        match lns_service::artifact::mixin::resolve(definition.as_bytes(), &[], &home, &installed)
-            .await
-        {
-            Ok(resolution) => {
-                let rig = w.declared.get_or_insert_with(Default::default);
-                rig.resolved_mixins.clone_from(&resolution.mixins);
-                lns_service::artifact::plan_local_sandbox(&resolution.document)
-            }
-            Err(e) => Err(e),
-        };
+    // A local source is named by the document it was read from, so the project's own `lns.yaml` is what its references join onto.
+    let home = lns_service::artifact::mixin::Locator::Local(
+        std::path::PathBuf::from(home).join("lns.yaml"),
+    );
+    let planned = match lns_service::artifact::mixin::resolve(
+        definition.as_bytes(),
+        &[],
+        &home,
+        &installed,
+        None,
+    )
+    .await
+    {
+        Ok(resolution) => {
+            let rig = w.declared.get_or_insert_with(Default::default);
+            rig.resolved_mixins.clone_from(&resolution.mixins);
+            lns_service::artifact::plan_local_sandbox(&resolution.document)
+        }
+        Err(e) => Err(e),
+    };
     crate::steps::declared_connectors::launch_resolved(w, planned);
 }
 
@@ -113,7 +119,7 @@ fn the_resolution_names_only_the_mixin(
 fn the_published_definition_declares_a_mixin(w: &mut BehaviourWorld, reference: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.definition = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{reference}"]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","mixins":["{reference}"]}}}}"#
     ));
 }
 
@@ -123,7 +129,7 @@ fn the_error_says_a_published_document_cannot_read_a_directory(
 ) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     let error = rig.error.as_deref().ok_or("no launch error was recorded")?;
-    if error.contains("a directory merges only into a document this machine read") {
+    if error.contains("a consumer has no copy of the machine that wrote it") {
         Ok(())
     } else {
         Err(format!(

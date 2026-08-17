@@ -32,16 +32,16 @@ Declare your own for an internal API with `lns connector add`
 (see [Connectors](connectors.md)). A sandbox definition that lists a provider
 under `spec.connectors` seeds its placeholder env var but only *offers* it —
 the workload is prompted on first use, never armed automatically.
-`lns connector connect <id>` records the id under `connectors:` in that
-directory's `lns-policy.yaml` and binds the value on your machine, but that
-alone does not arm the credential for a workload — see
+`lns connector connect <id>` records the connection for that project on this
+machine and binds the value, but that alone does not arm the credential for a
+workload — see
 [Workload grants](#workload-grants) below.
 
 ## Value decisions
 
 A provider's *value decision* is per-machine — it's how the real secret is bound
 on your machine. It's stored in `~/.lns-credentials.json`, separate from the
-shareable `lns-policy.yaml`, so secrets are never committed.
+shareable `lns-local-mixin.yaml`, so secrets are never committed.
 
 Decisions are made interactively, at either of two moments:
 
@@ -70,7 +70,7 @@ remembered as a per-workload deny instead — see
 Having a value bound on your machine is not the same as letting a *particular*
 workload spend it. Binding is machine-wide; the decision to spend is per
 workload. So a connector arms only where you have granted it — a copied
-`lns-policy.yaml`, or a sandbox definition that declares a connector you happen
+`lns-local-mixin.yaml`, or a sandbox definition that declares a connector you happen
 to have connected, still meets a first-use card rather than silently reaching
 for the real secret.
 
@@ -112,7 +112,7 @@ than a pasted secret it's obtained by an interactive **sign-in**
 **token set**, refreshed automatically and re-prompted when the grant can no longer be
 refreshed; a pkce connector yields a **durable key** captured through your browser,
 with no refresh or expiry. Either way it lives in the same per-machine file and is
-never written to `lns-policy.yaml`.
+never written to `lns-local-mixin.yaml`.
 
 When a workload asks for an `oauth` connector you are already signed in to, the
 card offers both: grant the connection you have, or **reconnect** — sign in

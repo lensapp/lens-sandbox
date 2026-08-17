@@ -26,7 +26,7 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
-    #[command(about = "Scaffold a default ./lns.yaml (kind: Sandbox) in this directory.")]
+    #[command(about = "Scaffold a default ./lns.yaml (kind: sandbox) in this directory.")]
     Init,
     #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
     Validate(SandboxValidateArgs),
@@ -509,6 +509,7 @@ where
         .one_shot(Request::InspectImage {
             image: args.reference.clone(),
             mixins: Vec::new(),
+            decisions: None,
         })
         .await?;
     // A mixin pull installs nothing: it caches documents, so there is no effect to consent to and its tools are disclosed where they are installed.
@@ -958,6 +959,7 @@ async fn inspect_cached<W: std::io::Write>(
         .one_shot(Request::InspectImage {
             image: reference.to_string(),
             mixins: mixins.to_vec(),
+            decisions: None,
         })
         .await?
     {
@@ -977,7 +979,7 @@ fn render_cached_inspect<W: std::io::Write>(
 ) -> Result<()> {
     match inspection {
         lns_ipc::ArtifactInspection::Sandbox(view) => {
-            writeln!(out, "kind: Sandbox")?;
+            writeln!(out, "kind: sandbox")?;
             writeln!(out, "reference: {}", view.reference)?;
             if !view.digest.is_empty() {
                 writeln!(out, "digest: {}", view.digest)?;
@@ -1012,7 +1014,7 @@ fn render_cached_inspect<W: std::io::Write>(
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
-            writeln!(out, "kind: Mixin")?;
+            writeln!(out, "kind: mixin")?;
             writeln!(out, "reference: {}", view.reference)?;
             if !view.digest.is_empty() {
                 writeln!(out, "digest: {}", view.digest)?;
@@ -1037,7 +1039,7 @@ fn render_cached_inspect<W: std::io::Write>(
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Image(view) => {
-            writeln!(out, "kind: Image")?;
+            writeln!(out, "kind: image")?;
             writeln!(out, "reference: {}", view.reference)?;
             writeln!(out, "digest: {}", view.digest)?;
         }
@@ -1378,6 +1380,7 @@ mod tests {
             inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest,
                 image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2135,7 +2138,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {
-                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    policy_path: Some("/work/lns-local-mixin.yaml".into()),
                     ..Default::default()
                 },
             }),
@@ -2184,6 +2187,7 @@ mod tests {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                     mixins: Vec::new(),
                     pinned_mixins: Vec::new(),
+                    contributions: Vec::new(),
                     reference: "hermes:1.4.0".into(),
                     digest: format!("sha256:{}", "a".repeat(64)),
                     image: "docker.io/library/alpine@sha256:abc".into(),
@@ -2208,7 +2212,7 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("kind: Sandbox"), "got: {text}");
+        assert!(text.contains("kind: sandbox"), "got: {text}");
         assert!(
             text.contains("image: docker.io/library/alpine"),
             "got: {text}"
@@ -2233,7 +2237,7 @@ mod tests {
         let mut out = Vec::new();
         inspect(&image, "x", None, &[], &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("kind: Image"), "got: {text}");
+        assert!(text.contains("kind: image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
     }
 
@@ -2684,7 +2688,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {
-                    policy_path: Some("/work/lns-policy.yaml".into()),
+                    policy_path: Some("/work/lns-local-mixin.yaml".into()),
                     ..Default::default()
                 },
             }),
@@ -2701,15 +2705,15 @@ mod tests {
 
     #[test]
     fn policy_doc_marks_an_unreadable_file() {
-        let doc = policy_doc("/work/lns-policy.yaml", None);
-        assert_eq!(doc["path"], "/work/lns-policy.yaml");
+        let doc = policy_doc("/work/lns-local-mixin.yaml", None);
+        assert_eq!(doc["path"], "/work/lns-local-mixin.yaml");
         assert!(doc["error"].as_str().unwrap().contains("could not be read"));
     }
 
     #[test]
     fn policy_doc_embeds_a_parsed_policy() {
         let doc = policy_doc(
-            "/work/lns-policy.yaml",
+            "/work/lns-local-mixin.yaml",
             Some(serde_json::json!({"network": {"egress": {"http": []}}})),
         );
         assert_eq!(

@@ -33,7 +33,7 @@ Feature: distributing a sandbox through a registry end to end
     When I run lns "pull <pushed-ref>" against the service
     And I run lns "inspect <pushed-ref>" against the service
     Then the exit code is 0
-    And the output contains "kind: Sandbox"
+    And the output contains "kind: sandbox"
     And the output contains the pushed reference
     And the output contains "workdir: /workspace"
     And the output contains "bind . -> /workspace"

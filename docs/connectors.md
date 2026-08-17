@@ -59,8 +59,8 @@ A connector reaches a project's workloads in any of three ways:
   route is opened and no bound value is injected on its behalf, even for a
   credential already bound on this machine. The workload is offered a live
   connect the first time it reaches the connector's domain; accepting it arms
-  the connector and records the id in this directory's
-  [`lns-policy.yaml`](policy.md). This is what keeps an untrusted published
+  the connector and records the connection for this project, per machine. This
+  is what keeps an untrusted published
   sandbox from spending a bound credential or opening a route behind your back.
   An id the machine's catalog doesn't know refuses the launch and points at
   `lns connector add`.
@@ -83,25 +83,17 @@ A connector reaches a project's workloads in any of three ways:
 - **Connected to the directory.** `lns connector connect` binds the
   connector's per-machine [value decision](credentials.md#value-decisions) —
   the approval-window card for a credential connector, the sign-in for an
-  `oauth` one — and records the id in that directory's
-  [`lns-policy.yaml`](policy.md), which is also how a directory with no
-  definition connects one:
+  `oauth` one — and records the connection for that project, which is also how a
+  directory with no definition connects one:
 
 ```bash
 lns connector connect gitlab
 lns connector disconnect gitlab
 ```
 
-The policy stores the connector by id under `connectors:`, so the definition
-resolves from the catalog at run time and the shareable policy stays small:
-
-```yaml
-network:
-  egress:
-    http: []
-connectors:
-  - gitlab
-```
+The connection is recorded by id for the project, per machine, so the
+definition resolves from the catalog at run time and nothing about which
+connectors you use travels with a file you commit.
 
 Only a connector you have **connected** to this directory opens its declared
 routes and seeds its placeholder at launch, and the first request carrying that
@@ -109,8 +101,8 @@ placeholder follows the ordinary credential
 [value decision](credentials.md#value-decisions) — where you choose to use the
 host value, store one, or deny. Connecting is a property of the directory, not
 of any one workload, so the value itself arms only where this workload holds a
-[grant](credentials.md#workload-grants); a copied policy file asks again rather
-than inheriting your approval. A **declared** id from a sandbox definition
+[grant](credentials.md#workload-grants); a clone of the project asks again
+rather than inheriting your approval. A **declared** id from a sandbox definition
 seeds its placeholder but never arms on its own; it is offered reactively on
 first use, so an untrusted published sandbox can't open a route or spend a
 bound credential without your say-so. A connector supplying a declared
@@ -152,7 +144,7 @@ and HTTP method/path `rules` for least-privilege access — beyond the bare `mat
 interactive **sign-in** the background service drives for you — `lns connector
 connect <id>` walks you through it and records the connector only once it completes,
 and the obtained credential is injected at the boundary like any other, stored per
-machine and never in `lns-policy.yaml`. An `oauth` entry carries an `oauth:` block (in
+machine and never in a file a project commits. An `oauth` entry carries an `oauth:` block (in
 place of `credential:`) whose `flow` selects one of two shapes:
 
 - **`flow: device`** (RFC 8628, the default) — `connect` prints a verification URL and
@@ -171,5 +163,5 @@ place of `credential:`) whose `flow` selects one of two shapes:
 
 - [Credentials](credentials.md) — how placeholders keep real secrets out of the
   workload, and the per-machine value decisions connectors reuse.
-- [Policy and approvals](policy.md) — the `lns-policy.yaml` file that records which
-  connectors a project has connected.
+- [Policy and approvals](policy.md) — the `lns-local-mixin.yaml` file that records the
+  destinations a project decided.

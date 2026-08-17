@@ -1168,7 +1168,7 @@ mod tests {
 
     fn build_sandbox_artifact() -> FakeImage {
         let definition = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"registry.example.test/base@sha256:{}"}}}}"#,
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"registry.example.test/base@sha256:{}"}}}}"#,
             "b".repeat(64)
         );
         let manifest = OciImageManifest {
@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     fn build_mixin_artifact() -> FakeImage {
-        let document = r#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"tools":["node@22"]}}"#.to_string();
+        let document = r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"tools":["node@22"]}}"#.to_string();
         let manifest = OciImageManifest {
             artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
             config: OciDescriptor {
@@ -1234,7 +1234,7 @@ mod tests {
 
     fn build_fileset_artifact() -> FakeImage {
         let fileset = lns_artifact::spec::Kind::FileSet;
-        let document = r#"{"apiVersion":"lns.run/v1","kind":"FileSet","metadata":{"name":"skills"},"spec":{"mountPath":"/skills"}}"#.to_string();
+        let document = r#"{"apiVersion":"lns.run/v1","kind":"fileset","name":"skills","spec":{"mountPath":"/skills"}}"#.to_string();
         let manifest = OciImageManifest {
             artifact_type: Some(fileset.artifact_type()),
             config: OciDescriptor {
@@ -1330,7 +1330,7 @@ mod tests {
         let pinned = format!("registry.example.test/m@sha256:{}", "c".repeat(64));
         let fetched = pull_mixin_with(&registry, &pinned).await.unwrap();
         assert!(
-            fetched.document.contains(r#""kind":"Mixin""#),
+            fetched.document.contains(r#""kind":"mixin""#),
             "got: {}",
             fetched.document
         );

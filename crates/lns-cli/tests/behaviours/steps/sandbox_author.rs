@@ -5,7 +5,7 @@ use cucumber::{given, then};
 use crate::world::BehaviourWorld;
 
 const EXISTING_SENTINEL: &str =
-    "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: kept\nspec:\n  image: kept:1\n";
+    "apiVersion: lns.run/v1\nkind: sandbox\nname: kept\nspec:\n  image: kept:1\n";
 
 fn yaml_key() -> PathBuf {
     PathBuf::from("/work/lns.yaml")
@@ -29,7 +29,7 @@ fn existing_lns_yaml(w: &mut BehaviourWorld) {
 fn valid_lns_yaml(w: &mut BehaviourWorld) {
     seed(
         w,
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n",
     );
 }
 
@@ -38,7 +38,7 @@ fn lns_yaml_with_user(w: &mut BehaviourWorld, user: String) {
     seed(
         w,
         &format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  user: {user}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  user: {user}\n"
         ),
     );
 }
@@ -48,7 +48,7 @@ fn lns_yaml_with_credential(w: &mut BehaviourWorld, env_var: String, domain: Str
     seed(
         w,
         &format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n      injections:\n        - kind: bearer_header\n          domain: {domain}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n      injections:\n        - kind: bearer_header\n          domain: {domain}\n"
         ),
     );
 }
@@ -58,7 +58,7 @@ fn lns_yaml_with_credential_without_injections(w: &mut BehaviourWorld, env_var: 
     seed(
         w,
         &format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  credentials:\n    - envVar: {env_var}\n      placeholder: lns-placeholder-{env_var}\n"
         ),
     );
 }
@@ -67,7 +67,7 @@ fn lns_yaml_with_credential_without_injections(w: &mut BehaviourWorld, env_var: 
 fn lns_yaml_holding_a_mixin(w: &mut BehaviourWorld) {
     seed(
         w,
-        "apiVersion: lns.run/v1\nkind: Mixin\nmetadata:\n  name: postgres-tools\nspec:\n  tools:\n    - node@22\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  tools:\n    - node@22\n",
     );
 }
 
@@ -75,7 +75,7 @@ fn lns_yaml_holding_a_mixin(w: &mut BehaviourWorld) {
 fn lns_yaml_holding_a_mixin_with_an_image(w: &mut BehaviourWorld) {
     seed(
         w,
-        "apiVersion: lns.run/v1\nkind: Mixin\nmetadata:\n  name: postgres-tools\nspec:\n  image: ghcr.io/team/base:1\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  image: ghcr.io/team/base:1\n",
     );
 }
 
@@ -84,7 +84,7 @@ fn lns_yaml_from_the_retired_group(w: &mut BehaviourWorld) {
     seed(
         w,
         &format!(
-            "apiVersion: lens.dev/v1alpha1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  isolation: microvm\n  baseImage: ghcr.io/team/base@sha256:{}\n",
+            "apiVersion: lens.dev/v1alpha1\nkind: sandbox\nname: hermes\nspec:\n  isolation: microvm\n  baseImage: ghcr.io/team/base@sha256:{}\n",
             "a".repeat(64)
         ),
     );
@@ -94,13 +94,13 @@ fn lns_yaml_from_the_retired_group(w: &mut BehaviourWorld) {
 fn lns_yaml_with_unknown_nested_field(w: &mut BehaviourWorld) {
     seed(
         w,
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  volumes:\n    - name: data\n      target: /data\n      readOlny: true\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  volumes:\n    - name: data\n      target: /data\n      readOlny: true\n",
     );
 }
 
 fn fileset_yaml(entries: &str) -> String {
     format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n{entries}"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n{entries}"
     )
 }
 

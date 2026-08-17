@@ -241,9 +241,7 @@ impl CredentialRig {
                 .with_custom_providers(Arc::new(fixture_providers()))
                 .with_grants(
                     "rig-other-project".to_string(),
-                    WorkloadIdentity::Definition {
-                        dir: "/rig-other".to_string(),
-                    },
+                    WorkloadIdentity::definition("/rig-other"),
                     self.grant_store.clone(),
                 );
         session.submit_pending(
@@ -551,9 +549,7 @@ fn rig_grant_context(dir: &TempDir) -> (Arc<dyn GrantStore>, String, WorkloadIde
     (
         store,
         "rig-project".to_string(),
-        WorkloadIdentity::Definition {
-            dir: "/rig".to_string(),
-        },
+        WorkloadIdentity::definition("/rig"),
     )
 }
 

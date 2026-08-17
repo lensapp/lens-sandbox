@@ -21,6 +21,13 @@ struct StepFs {
 }
 
 impl Fs for StepFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        self.files
+            .borrow()
+            .keys()
+            .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
+    }
+
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         self.files
             .borrow()
@@ -65,6 +72,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference,
             digest,
             image: "docker.io/library/alpine@sha256:abc".into(),
@@ -225,16 +233,16 @@ fn surface_service_refusal(message: &str) -> CliRun {
     }
 }
 
-#[given("a valid lns.yaml declaring a policy, connectors, and resources")]
+#[given("a valid lns.yaml declaring egress, connectors, and resources")]
 fn lns_yaml_with_policy_connectors_resources(w: &mut BehaviourWorld) {
     w.author_files.insert(
         PathBuf::from("/work/lns.yaml"),
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  policy:\n    egress:\n      http: []\n  connectors:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  egress:\n    http: []\n  connectors:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
             .to_string(),
     );
 }
 
-#[then("the service request carries the definition's policy, connectors, and resources")]
+#[then("the service request carries the definition's egress, connectors, and resources")]
 fn request_carries_definition(w: &mut BehaviourWorld) -> Result<(), String> {
     let json = w
         .sandbox_run
@@ -244,9 +252,9 @@ fn request_carries_definition(w: &mut BehaviourWorld) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("definition was not json: {e}"))?;
     let spec = &value["spec"];
-    if spec["policy"].is_null() || spec["connectors"].is_null() || spec["resources"].is_null() {
+    if spec["egress"].is_null() || spec["connectors"].is_null() || spec["resources"].is_null() {
         return Err(format!(
-            "expected policy, connectors, and resources in the definition, got: {spec}"
+            "expected egress, connectors, and resources in the definition, got: {spec}"
         ));
     }
     Ok(())

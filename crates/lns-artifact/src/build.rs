@@ -109,8 +109,8 @@ pub fn build_fileset(name: &str, mount_path: &str, entries: &[FileEntry]) -> Res
 
     let config_doc = json!({
         "apiVersion": "lens.dev/v1alpha1",
-        "kind": "FileSet",
-        "metadata": {"name": name},
+        "kind":"fileset",
+        "name": name,
         "mount": {"path": mount_path},
         "spec": {},
     });
@@ -209,7 +209,7 @@ mod tests {
 
     fn sandbox() -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"reg/base@sha256:{}"}}}}"#,
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"reg/base@sha256:{}"}}}}"#,
             "a".repeat(64)
         )
         .into_bytes()
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn a_mixin_publishes_under_its_own_artifact_type() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"tools":["node@22"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"tools":["node@22"]}}"#;
         let built = build_artifact(doc).expect("a mixin is a kit, published like any other");
         assert_eq!(built.artifact_type, "application/vnd.lens.mixin.v1+json");
         let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_mixin_that_declares_a_launch_block_is_refused_before_it_publishes() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{"name":"postgres-tools"},"spec":{"image":"reg/base:1"}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"image":"reg/base:1"}}"#;
         let err = build_artifact(doc).unwrap_err();
         assert!(
             format!("{err:#}").contains("a mixin must not declare image"),
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn build_artifact_preserves_declarative_workdir_and_mounts() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{"image":"registry.example.test/runtime:1","workdir":"/workspace","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"some-cache","target":"/home/node/.cache","readOnly":true}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/workspace","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"some-cache","target":"/home/node/.cache","readOnly":true}]}}"#;
         let built = build_artifact(doc).unwrap();
         let config = built
             .blobs
@@ -309,7 +309,8 @@ mod tests {
 
     #[test]
     fn build_artifact_refuses_an_invalid_manifest() {
-        let imageless = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"some-sandbox"},"spec":{}}"#;
+        let imageless =
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{}}"#;
         let err = build_artifact(imageless).unwrap_err();
         assert!(
             format!("{err:#}").contains("must carry an image"),
@@ -319,7 +320,7 @@ mod tests {
 
     #[test]
     fn build_artifact_refuses_an_unknown_kind() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","metadata":{"name":"x"},"spec":{"image":"reg/base:1"}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","name":"x","spec":{"image":"reg/base:1"}}"#;
         let err = build_artifact(doc).unwrap_err();
         assert!(format!("{err:#}").contains("kind"), "got: {err:#}");
     }
@@ -328,7 +329,7 @@ mod tests {
     fn build_artifact_refuses_a_document_no_verb_can_run() {
         // Publishing a retired-group document would put an artifact in a registry that `lns run` and `lns inspect` both refuse to read.
         let doc = format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}"}}}}"#,
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"some-sandbox","spec":{{"isolation":"microvm","baseImage":"reg/base@sha256:{}"}}}}"#,
             "a".repeat(64)
         );
         let err = build_artifact(doc.as_bytes()).unwrap_err();

@@ -22,6 +22,7 @@ pub(crate) async fn peek_and_plan(
     mixins: &[String],
     run_id: &str,
     microvm: &str,
+    decisions: Option<&std::path::Path>,
 ) -> Result<Option<SandboxPlan>> {
     let reference: Reference = image_ref
         .parse()
@@ -50,6 +51,7 @@ pub(crate) async fn peek_and_plan(
                 mixins,
                 &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
                 &RegistryMixins,
+                local_source(decisions)?,
             )
             .await
             .with_context(|| format!("resolving {image_ref}"))?
@@ -173,10 +175,27 @@ pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> 
     anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
 }
 
+/// The directory's own decisions as a merge source, read off this machine; a run that named no decisions file resolves without one.
+fn local_source(
+    decisions: Option<&std::path::Path>,
+) -> Result<Option<crate::artifact::mixin::LocalSource>> {
+    let Some(path) = decisions else {
+        return Ok(None);
+    };
+    crate::artifact::mixin::LocalSource::read(
+        crate::artifact::mixin_dir::read_local_mixin(&RealMixinDir, path)?,
+        crate::artifact::mixin::Locator::Local(lns_artifact::sandbox::fold_path(path)),
+    )
+}
+
 /// Reads a directory mixin off this machine's filesystem.
 pub(crate) struct RealMixinDir;
 
 impl crate::artifact::mixin_dir::MixinDir for RealMixinDir {
+    fn is_dir(&self, path: &std::path::Path) -> bool {
+        path.is_dir()
+    }
+
     fn read(&self, path: &std::path::Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
     }
@@ -195,8 +214,8 @@ impl crate::artifact::mixin::MixinSource for RegistryMixins {
                 let registry = crate::image::caching_registry_for(reference)?;
                 crate::image::pull_mixin_with(&registry, reference).await
             }
-            crate::artifact::mixin::Locator::Directory(dir) => {
-                crate::artifact::mixin_dir::read_directory_mixin(&RealMixinDir, dir)
+            crate::artifact::mixin::Locator::Local(dir) => {
+                crate::artifact::mixin_dir::read_path_mixin(&RealMixinDir, dir)
             }
         }
     }
@@ -326,7 +345,7 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the deny-dominant baseline under the local overlay (warning if it is over-broad), and disclose that declared connectors seed placeholders but are offered on first use, never armed automatically.
+/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the source your own decisions layer over (warning if it is over-broad), and disclose that declared connectors seed placeholders but are offered on first use, never armed automatically.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
@@ -334,7 +353,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     if policy.network != lns_policy::NetworkPolicy::default() {
         crate::log::info!(
             "policy",
-            "this sandbox ships a network policy; it governs the run as a deny-dominant baseline under your local lns-policy.yaml overlay"
+            "this sandbox ships a network policy; it governs the run except where your own lns-local-mixin.yaml decides otherwise"
         );
         let summary =
             crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));
@@ -356,23 +375,34 @@ pub(crate) async fn resolve_definition(
     definition: &str,
     project_dir: &str,
     mixins: &[String],
+    decisions: Option<&std::path::Path>,
 ) -> Result<lns_ipc::Response> {
     let project_dir = std::path::Path::new(project_dir);
     crate::artifact::mixin::require_a_rooted_project_dir(project_dir)?;
-    let home = crate::artifact::mixin::Locator::Directory(project_dir.to_path_buf());
-    let resolution =
-        crate::artifact::mixin::resolve(definition.as_bytes(), mixins, &home, &RegistryMixins)
-            .await
-            .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
+    let home = crate::artifact::mixin::Locator::Local(project_dir.join("lns.yaml"));
+    let resolution = crate::artifact::mixin::resolve(
+        definition.as_bytes(),
+        mixins,
+        &home,
+        &RegistryMixins,
+        local_source(decisions)?,
+    )
+    .await
+    .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
     Ok(lns_ipc::Response::DefinitionResolved {
         definition: String::from_utf8(resolution.document)
             .context("the resolved definition is not utf-8")?,
         mixins: resolution.mixins,
         pinned_mixins: resolution.pinned_extra,
+        contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
     })
 }
 
-pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<ArtifactInspection> {
+pub(crate) async fn inspect(
+    image_ref: &str,
+    mixins: &[String],
+    decisions: Option<&std::path::Path>,
+) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -390,6 +420,7 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         mixins,
         &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
         &RegistryMixins,
+        local_source(decisions)?,
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;
@@ -498,7 +529,7 @@ mod tests {
                     .clone()
                     .or_else(|| reference.digest().map(ToOwned::to_owned))
                     .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
-                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"FileSet","metadata":{"name":"files"},"mount":{"path":"/files"},"spec":{}}"#.into(),
+                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"files","mount":{"path":"/files"},"spec":{}}"#.into(),
             ))
         }
 

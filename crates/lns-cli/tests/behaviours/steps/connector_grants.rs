@@ -1,6 +1,5 @@
 use crate::world::BehaviourWorld;
 use cucumber::{given, then};
-use lns_policy::Policy;
 use lns_policy::grants::{
     GrantRecord, GrantStore, JsonFileGrantStore, WorkloadGrantFile, WorkloadIdentity, project_key,
 };
@@ -19,16 +18,14 @@ fn store(world: &mut BehaviourWorld) -> JsonFileGrantStore {
 
 /// Derived the same way the commands derive it, so a seeded grant keys identically to one a real run would have left.
 fn this_project(world: &mut BehaviourWorld) -> String {
-    project_key(&cwd(world).join("lns-policy.yaml"))
+    project_key(&cwd(world).join("lns-local-mixin.yaml"))
 }
 
 fn workload_of(key: &str) -> WorkloadIdentity {
     let dir = key
         .strip_prefix("def:")
         .unwrap_or_else(|| panic!("unrecognized workload key {key}"));
-    WorkloadIdentity::Definition {
-        dir: dir.to_string(),
-    }
+    WorkloadIdentity::definition(dir)
 }
 
 fn seed(world: &mut BehaviourWorld, record: GrantRecord) {
@@ -50,12 +47,13 @@ fn output(world: &BehaviourWorld) -> &str {
         .output
 }
 
-#[given(regex = r#"^this project's policy connects "([^"]+)"$"#)]
-fn policy_connects(world: &mut BehaviourWorld, id: String) {
-    let path = cwd(world).join("lns-policy.yaml");
-    let mut policy = Policy::load_or_default(&path).expect("load policy");
-    policy.connect(id);
-    policy.save_atomic(&path).expect("save policy");
+#[given(regex = r#"^this project connects "([^"]+)"$"#)]
+fn project_connects(world: &mut BehaviourWorld, id: String) {
+    let project = this_project(world);
+    let store = JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"));
+    let mut file = store.load().expect("the sidecar reads back");
+    file.connect(&project, &id);
+    store.save(&file).expect("seeding the sidecar");
 }
 
 #[given(regex = r#"^the workload "([^"]+)" was granted "([^"]+)"$"#)]
@@ -96,12 +94,13 @@ fn grant_sidecar_unwritable(world: &mut BehaviourWorld) {
 
 #[then(regex = r#"^this project still connects "([^"]+)"$"#)]
 fn project_still_connects(world: &mut BehaviourWorld, id: String) {
-    let path = cwd(world).join("lns-policy.yaml");
-    let policy = Policy::load_or_default(&path).expect("load policy");
+    let connected = JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
+        .load()
+        .expect("the sidecar reads back")
+        .connected_in(&project_key(&cwd(world).join("lns-local-mixin.yaml")));
     assert!(
-        policy.connectors.contains(&id),
-        "a disconnect that could not forget the grants must not have dropped {id} from the policy, got: {:?}",
-        policy.connectors
+        connected.contains(&id),
+        "the connection and the grants under it are one write now, so a disconnect that could not land leaves {id} connected for a retry, got: {connected:?}"
     );
 }
 
@@ -111,9 +110,7 @@ fn other_project_granted(world: &mut BehaviourWorld, project: String, id: String
         world,
         GrantRecord::allow(
             project,
-            &WorkloadIdentity::Definition {
-                dir: "/work/other".into(),
-            },
+            &WorkloadIdentity::definition("/work/other"),
             id,
             "SOME_TOKEN",
             vec!["api.some-provider.example".into()],

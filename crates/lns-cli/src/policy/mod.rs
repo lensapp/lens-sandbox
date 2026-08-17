@@ -54,7 +54,7 @@ pub struct PolicyRuleArgs {
     pub description: Option<String>,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -63,7 +63,7 @@ pub struct PolicyRuleArgs {
 pub struct PolicyScopeArgs {
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
     #[command(flatten)]
@@ -76,7 +76,7 @@ pub struct PolicyRemoveArgs {
     pub pattern: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -722,7 +722,7 @@ mod tests {
     }
 
     fn seeded(dir: &Path, rules: Vec<RouteRule>) -> PathBuf {
-        let path = dir.join("lns-policy.yaml");
+        let path = dir.join("lns-local-mixin.yaml");
         let mut policy = Policy::default();
         policy.network.egress.http = rules;
         policy.save_atomic(&path).unwrap();
@@ -808,7 +808,7 @@ mod tests {
         seeded.add_rule(RouteRule::deny_host("*"));
         seeded.add_rule(RouteRule::allow_host("*"));
         seeded
-            .save_atomic(&dir.path().join("lns-policy.yaml"))
+            .save_atomic(&dir.path().join("lns-local-mixin.yaml"))
             .unwrap();
 
         let mut out = Vec::new();
@@ -821,7 +821,7 @@ mod tests {
         )
         .unwrap();
 
-        let held = Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
+        let held = Policy::load_or_default(&dir.path().join("lns-local-mixin.yaml"))
             .unwrap()
             .network
             .egress
@@ -886,7 +886,7 @@ mod tests {
             text.contains("is already in"),
             "nothing about the rule changed, so reporting an edit would be a lie:\n{text}"
         );
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        let policy = Policy::load_or_default(&dir.path().join("lns-local-mixin.yaml")).unwrap();
         assert_eq!(policy.network.egress.http.len(), 1);
     }
 
@@ -897,7 +897,7 @@ mod tests {
         let mut out = Vec::new();
         let code = add_rule(&args, Verdict::Allow, &[], dir.path(), &mut out).unwrap();
         assert_eq!(code, 0);
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        let policy = Policy::load_or_default(&dir.path().join("lns-local-mixin.yaml")).unwrap();
         assert_eq!(policy.network.egress.http.len(), 1);
         assert_eq!(policy.network.egress.http[0].verdict, Verdict::Allow);
         assert_eq!(policy.network.egress.http[0].transport, Transport::Direct);
@@ -914,7 +914,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(code, 0);
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        let policy = Policy::load_or_default(&dir.path().join("lns-local-mixin.yaml")).unwrap();
         assert!(
             policy
                 .network
@@ -941,7 +941,7 @@ mod tests {
             out: &mut out,
         };
         assert_eq!(run_command(sub, ctx).await.unwrap(), 0);
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
+        let policy = Policy::load_or_default(&dir.path().join("lns-local-mixin.yaml")).unwrap();
         assert!(
             policy
                 .network
@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn list_reports_each_verdict_and_its_description() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let mut policy = Policy::default();
         policy.add_rule(RouteRule {
             match_pattern: "blocked.example".into(),
@@ -998,7 +998,7 @@ mod tests {
     #[test]
     fn remove_on_a_missing_rule_errors_and_leaves_the_file_untouched() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
+        let path = dir.path().join("lns-local-mixin.yaml");
         let mut policy = Policy::default();
         policy.add_rule(RouteRule::allow_host("keep.example"));
         policy.save_atomic(&path).unwrap();
@@ -1021,8 +1021,8 @@ mod tests {
     #[test]
     fn add_surfaces_a_clear_error_for_a_malformed_policy_file() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-policy.yaml");
-        std::fs::write(&path, "network: not-a-map\n").unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        std::fs::write(&path, "apiVersion: [\n").unwrap();
         let mut out = Vec::new();
         let err = add_rule(
             &rule_args("x", None),

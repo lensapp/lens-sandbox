@@ -1,4 +1,4 @@
-//! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-policy.yaml`.
+//! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-local-mixin.yaml`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -340,7 +340,7 @@ impl CredentialSession {
         self
     }
 
-    /// The value keys of the run's artifact-declared credentials, which `lns-policy.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the credential was granted at boot or consented at first use.
+    /// The value keys of the run's artifact-declared credentials, which `lns-local-mixin.yaml` has no authority over — a policy reload retains their live arming rather than revoking it, whether the credential was granted at boot or consented at first use.
     pub fn with_declared_ids(mut self, declared: HashSet<String>) -> Self {
         self.declared_ids = declared;
         self
@@ -1576,9 +1576,7 @@ mod tests {
     #[test]
     fn a_consent_allow_persists_an_allow_grant_to_the_sidecar() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision(
@@ -1599,9 +1597,7 @@ mod tests {
     #[test]
     fn a_forget_from_before_this_run_does_not_block_the_grant_it_consents_to_now() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut prior = WorkloadGrantFile::default();
         prior.revoke_project_connector("proj", "some-provider");
         store.save(&prior).unwrap();
@@ -1647,9 +1643,7 @@ mod tests {
     #[test]
     fn a_forget_landing_while_the_card_is_open_cancels_that_decision_and_no_later_one() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
 
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
@@ -1708,9 +1702,7 @@ mod tests {
     #[test]
     fn a_card_raised_over_an_unreadable_sidecar_can_only_cancel_never_wave_through() {
         let store = Arc::new(FlakyReadGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
         forget_from_another_process(store.as_ref());
 
@@ -1732,9 +1724,7 @@ mod tests {
     #[test]
     fn a_forget_that_landed_before_the_card_went_up_is_answered_by_it() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![some_provider()]);
 
         forget_from_another_process(store.as_ref());
@@ -1765,9 +1755,7 @@ mod tests {
         .with_custom_providers(Arc::new(vec![some_provider()]))
         .with_grants(
             "proj".into(),
-            WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            WorkloadIdentity::definition("/proj"),
             Arc::new(FailingGrantStore),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
@@ -1816,9 +1804,7 @@ mod tests {
     #[test]
     fn a_consent_whose_value_cannot_be_written_persists_no_grant() {
         let grants = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let store = Arc::new(CapturingStore::default());
         let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
         store.fail_next(io::ErrorKind::PermissionDenied, "denied");
@@ -1848,9 +1834,7 @@ mod tests {
     #[test]
     fn a_connect_whose_token_cannot_be_written_persists_no_grant() {
         let grants = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let store = Arc::new(CapturingStore::default());
         let session = grants_session_with_store(grants.clone(), workload.clone(), store.clone());
         store.fail_next(io::ErrorKind::PermissionDenied, "denied");
@@ -1870,13 +1854,7 @@ mod tests {
     #[test]
     fn a_consent_for_an_undisclosed_id_persists_no_grant() {
         let store = Arc::new(CapturingGrantStore::default());
-        let session = grants_session(
-            store.clone(),
-            WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
-            vec![],
-        );
+        let session = grants_session(store.clone(), WorkloadIdentity::definition("/proj"), vec![]);
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision(
             "c1",
@@ -1913,9 +1891,7 @@ mod tests {
     #[tokio::test]
     async fn a_network_offer_connect_persists_the_grant() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session_connectable(store.clone(), workload.clone());
         assert!(session.connect_connector_now("some-provider").await);
         assert!(
@@ -1931,9 +1907,7 @@ mod tests {
     #[test]
     fn a_connect_by_pasted_token_persists_the_grant() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session_connectable(store.clone(), workload.clone());
         session.connect_connector_with_token("some-provider", "some-real".into());
         assert!(
@@ -2139,9 +2113,7 @@ mod tests {
     #[test]
     fn a_card_deny_persists_a_per_workload_deny_and_emits_a_deny_frame() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let session = CredentialSession::new(
             CredentialStateFile::new(),
@@ -2177,9 +2149,7 @@ mod tests {
     #[test]
     fn the_run_flow_cannot_widen_a_deny_past_the_workload_even_when_asked_to() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![]);
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
 
@@ -2205,9 +2175,7 @@ mod tests {
     #[test]
     fn a_card_deny_for_an_undisclosed_id_persists_a_standing_deny() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let session = grants_session(store.clone(), workload.clone(), vec![]);
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
         session.record_decision("c1", CredentialDecisionRequest::Deny);
@@ -2222,9 +2190,7 @@ mod tests {
     #[test]
     fn a_prior_workload_deny_suppresses_the_offer_without_re_prompting() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut prior = WorkloadGrantFile::default();
         prior.upsert(GrantRecord::deny(
             "proj",
@@ -2274,13 +2240,7 @@ mod tests {
             TEST_TIMEOUT,
         )
         .with_custom_providers(Arc::new(vec![some_provider()]))
-        .with_grants(
-            "proj".into(),
-            WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
-            store,
-        );
+        .with_grants("proj".into(), WorkloadIdentity::definition("/proj"), store);
         (session, notifier)
     }
 
@@ -2288,9 +2248,7 @@ mod tests {
     fn a_prior_deny_for_another_workload_does_not_suppress_this_workloads_card() {
         let foreign = GrantRecord::deny(
             "proj",
-            &WorkloadIdentity::Definition {
-                dir: "/other".into(),
-            },
+            &WorkloadIdentity::definition("/other"),
             "some-provider",
             "SOME_TOKEN",
             vec!["api.some-provider.example".into()],
@@ -2322,9 +2280,7 @@ mod tests {
     fn a_prior_deny_whose_connector_was_redefined_asks_again() {
         let stale = GrantRecord::deny(
             "proj",
-            &WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            &WorkloadIdentity::definition("/proj"),
             "some-provider",
             "OLD_TOKEN",
             vec!["api.old.example".into()],
@@ -2341,9 +2297,7 @@ mod tests {
     #[test]
     fn a_prior_deny_holds_when_the_run_resolves_no_provider_to_compare_against() {
         let store = Arc::new(CapturingGrantStore::default());
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut prior = WorkloadGrantFile::default();
         prior.upsert(GrantRecord::deny(
             "proj",
@@ -2375,9 +2329,7 @@ mod tests {
     fn a_prior_deny_recorded_without_a_disclosure_still_suppresses_the_offer() {
         let unpinned = GrantRecord::deny(
             "proj",
-            &WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            &WorkloadIdentity::definition("/proj"),
             "some-provider",
             "",
             vec![],
@@ -2404,9 +2356,7 @@ mod tests {
         .with_custom_providers(Arc::new(vec![some_provider()]))
         .with_grants(
             "proj".into(),
-            WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            WorkloadIdentity::definition("/proj"),
             Arc::new(FailingGrantStore),
         );
         session.submit_pending(pending("c1", "some-provider"), Instant::now());
@@ -4302,7 +4252,7 @@ mod tests {
                 )),
             "while connected, the stored value arms"
         );
-        // `lns connector disconnect` drops the id from lns-policy.yaml; the reload reconciles with the remaining connectors.
+        // `lns connector disconnect` drops the connection from the sidecar; the reload reconciles with the remaining connectors.
         session.reconcile_armed(&[], &[]);
         assert!(
             wire_injections(&session, "some-provider")

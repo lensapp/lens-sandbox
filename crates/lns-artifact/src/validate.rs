@@ -32,7 +32,7 @@ mod tests {
 
     fn retired_group_sandbox(base_image: &str) -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"isolation":"microvm","baseImage":"{base_image}"}}}}"#
+            r#"{{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"some-sandbox","spec":{{"isolation":"microvm","baseImage":"{base_image}"}}}}"#
         )
         .into_bytes()
     }
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn a_tool_this_build_cannot_provision_is_an_authoring_problem() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
         let problems = validate(doc).unwrap_err();
         assert!(
             problems
@@ -73,7 +73,7 @@ mod tests {
         );
         let unsupported = unsupported_backend_tool();
         let plugin_backed = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","tools":["{unsupported}@1"]}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","tools":["{unsupported}@1"]}}}}"#
         );
         assert!(
             validate(plugin_backed.as_bytes())
@@ -104,14 +104,14 @@ mod tests {
     #[test]
     fn parsing_an_artifact_declaring_such_a_tool_still_succeeds() {
         // The shipped registry shrinks over time; a consumer must still be able to see what a published sandbox declares.
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["definitely-not-a-tool@1"]}}"#;
         let def = crate::sandbox::parse(doc).expect("the definition still parses and inspects");
         assert_eq!(def.spec.tools, vec!["definitely-not-a-tool@1".to_string()]);
     }
 
     #[test]
     fn an_unknown_kind_is_reported() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","metadata":{"name":"x"},"spec":{"image":"reg/base:1"}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sorcery","name":"x","spec":{"image":"reg/base:1"}}"#;
         let problems = validate(doc).unwrap_err();
         assert!(
             problems.iter().any(|p| p.contains("kind")),
@@ -128,13 +128,13 @@ mod tests {
 
     #[test]
     fn a_well_formed_flat_sandbox_definition_validates() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#;
         validate(doc).expect("a lns.run/v1 sandbox routes to the flat validator");
     }
 
     #[test]
     fn a_flat_sandbox_schema_violation_is_reported() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{}}"#;
         let problems = validate(doc).unwrap_err();
         assert!(
             problems.iter().any(|p| p.contains("must carry an image")),

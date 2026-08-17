@@ -90,6 +90,7 @@ async fn orchestrate(
                 &args.mixins,
                 &run_id,
                 &microvm,
+                policy.as_deref(),
             )
             .await?
         }
@@ -97,7 +98,7 @@ async fn orchestrate(
     };
     // Refuse an unidentifiable run before its sign-in gate can drag the user through a device flow.
     let workload = workload_identity(
-        args.definition_dir.as_deref(),
+        &args,
         resolved_image,
         sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
     )?;

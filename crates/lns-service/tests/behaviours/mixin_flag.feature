@@ -24,7 +24,12 @@ Feature: a user adds their own mixins to a run
     Then the resolution reports the mixin pinned by digest
     And the resolution answers for the tag "obs-tools:2"
 
-  Scenario: a directory named for a published sandbox refuses the run
+  Scenario: a path the user names merges into a published sandbox
+    Given a mixin directory "/work/obs-tools" declaring the tool "python@3.12"
+    When the published sandbox is resolved with the user's mixin "/work/obs-tools"
+    Then the run installs "python@3.12"
+
+  Scenario: a relative path refuses rather than being rooted at a guess
     When the published sandbox is resolved with the user's mixin "./obs-tools"
     Then the launch is refused
-    And the error says a directory merges only into a document this machine read
+    And the error says the run merges the absolute path its preflight showed

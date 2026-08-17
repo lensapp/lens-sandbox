@@ -226,13 +226,28 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition,
             project_dir,
             mixins,
+            decisions,
         } => image_response(
-            crate::artifact::real::resolve_definition(definition, project_dir, mixins).await,
+            crate::artifact::real::resolve_definition(
+                definition,
+                project_dir,
+                mixins,
+                decisions.as_deref().map(std::path::Path::new),
+            )
+            .await,
         ),
-        Request::InspectImage { image, mixins } => image_response(
-            crate::artifact::real::inspect(image, mixins)
-                .await
-                .map(|inspection| Response::ImageInspected { inspection }),
+        Request::InspectImage {
+            image,
+            mixins,
+            decisions,
+        } => image_response(
+            crate::artifact::real::inspect(
+                image,
+                mixins,
+                decisions.as_deref().map(std::path::Path::new),
+            )
+            .await
+            .map(|inspection| Response::ImageInspected { inspection }),
         ),
         Request::TagImage { from, to } => {
             image_response(crate::image_store::tag(from, to).await.map(|()| {
@@ -564,6 +579,7 @@ mod tests {
                 image: None,
                 resolved_image: None,
                 mixins: Vec::new(),
+                composed_mixins: Vec::new(),
                 name: None,
                 cpus: 1,
                 mem: 0,
@@ -2118,9 +2134,10 @@ mod tests {
         let resp = as_json(
             handle_request(
                 &Request::ResolveDefinition {
-                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
                     project_dir: "/work".into(),
                     mixins: Vec::new(),
+                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -2146,9 +2163,10 @@ mod tests {
         let resp = as_json(
             handle_request(
                 &Request::ResolveDefinition {
-                    definition: r#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
+                    definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
                     project_dir: "work".into(),
                     mixins: Vec::new(),
+                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -2172,6 +2190,7 @@ mod tests {
                     definition: "{}".into(),
                     project_dir: "/work".into(),
                     mixins: Vec::new(),
+                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -2194,6 +2213,7 @@ mod tests {
                 &Request::InspectImage {
                     image: "###".into(),
                     mixins: Vec::new(),
+                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -2315,7 +2335,7 @@ mod tests {
     ) -> (String, String) {
         use sha2::Digest;
         let document = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"{name}"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"{name}","spec":{spec}}}"#
         );
         let manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
@@ -2393,7 +2413,7 @@ mod tests {
             )
             .unwrap();
         let definition = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"cached-lifecycle"}},"spec":{{"image":"{base_ref}"}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"cached-lifecycle","spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
@@ -2563,7 +2583,7 @@ mod tests {
             .unwrap();
 
         let definition = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"{base_ref}"}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
             artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),

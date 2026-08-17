@@ -27,7 +27,7 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
             &resolved,
             lns_cli::run::summary::resolved_size(Default::default(), &resolved),
             &Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &PolicySource::FoundInCwd,
         ),
         ..Default::default()

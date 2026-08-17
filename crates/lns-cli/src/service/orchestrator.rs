@@ -133,6 +133,7 @@ struct PublishedTarget {
     tools: Vec<String>,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
+    contributions: Vec<lns_ipc::SourceContribution>,
 }
 
 fn published_target(
@@ -154,6 +155,7 @@ fn published_target(
                 tools: crate::run::summary::tools_from_view(&view),
                 mixins: view.mixins.clone(),
                 pinned_mixins: view.pinned_mixins.clone(),
+                contributions: view.contributions.clone(),
             })
         }
         lns_ipc::ArtifactInspection::Mixin(_) => anyhow::bail!(
@@ -166,10 +168,19 @@ fn published_target(
 }
 
 /// A local run sends the merged document, so the mixins that produced it are already in it; a published one sends the pins its preflight showed, because the service merges them itself.
-fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String]) -> Vec<String> {
-    match target {
-        crate::run::target::RunTarget::Local { .. } => Vec::new(),
-        crate::run::target::RunTarget::Reference(_) => pinned.to_vec(),
+/// What a run request says about mixins: the boot merges `to_merge`, and a connector grant keys on `composed`.
+struct RunMixins {
+    to_merge: Vec<String>,
+    composed: Vec<String>,
+}
+
+fn mixins_for_the_run(target: &crate::run::target::RunTarget, pinned: &[String]) -> RunMixins {
+    RunMixins {
+        to_merge: match target {
+            crate::run::target::RunTarget::Local { .. } => Vec::new(),
+            crate::run::target::RunTarget::Reference(_) => pinned.to_vec(),
+        },
+        composed: pinned.to_vec(),
     }
 }
 
@@ -178,6 +189,7 @@ struct ResolvedDefinition {
     definition: String,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
+    contributions: Vec<lns_ipc::SourceContribution>,
 }
 
 /// Ask the service to resolve a local definition's mixins, since only it can pull a reference and read a directory the way the run will.
@@ -186,11 +198,13 @@ async fn preflight_local(
     definition: &str,
     project_dir: &Path,
     mixins: &[String],
+    decisions: &Path,
 ) -> Result<ResolvedDefinition> {
     let request = Request::ResolveDefinition {
         definition: definition.to_string(),
         project_dir: project_dir.display().to_string(),
         mixins: mixins.to_vec(),
+        decisions: Some(decisions.display().to_string()),
     };
     match timeout(
         PUBLISHED_PREFLIGHT_TIMEOUT,
@@ -207,10 +221,12 @@ async fn preflight_local(
             definition,
             mixins,
             pinned_mixins,
+            contributions,
         }) => Ok(ResolvedDefinition {
             definition,
             mixins,
             pinned_mixins,
+            contributions,
         }),
         Some(Response::Error { message }) => anyhow::bail!("{message}"),
         Some(other) => anyhow::bail!("unexpected response from daemon: {other:?}"),
@@ -224,10 +240,12 @@ async fn preflight_published(
     socket: &Path,
     reference: &str,
     mixins: &[String],
+    decisions: &Path,
 ) -> Result<PublishedTarget> {
     let request = Request::InspectImage {
         image: reference.to_string(),
         mixins: mixins.to_vec(),
+        decisions: Some(decisions.display().to_string()),
     };
     await_published_preflight(reference, real::send_request(socket, &request)).await
 }
@@ -260,14 +278,17 @@ pub async fn run_image(
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
+    // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
+    let decisions = crate::run::summary::policy_path(args.policy.as_deref(), &cwd);
     if let crate::run::target::RunTarget::Local {
         def,
         json,
         project_dir,
     } = &mut target
-        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty())
+        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty() || decisions.is_file())
     {
-        let resolved = preflight_local(client.socket(), json, project_dir, &args.mixins).await?;
+        let resolved =
+            preflight_local(client.socket(), json, project_dir, &args.mixins, &decisions).await?;
         **def = lns_artifact::sandbox::parse(resolved.definition.as_bytes())
             .context("reading the resolved definition")?;
         *json = resolved.definition;
@@ -275,11 +296,12 @@ pub async fn run_image(
             &mut args,
             &resolved.mixins,
             &resolved.pinned_mixins,
+            &resolved.contributions,
         );
     }
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
-            Some(preflight_published(client.socket(), reference, &args.mixins).await?)
+            Some(preflight_published(client.socket(), reference, &args.mixins, &decisions).await?)
         }
         crate::run::target::RunTarget::Local { .. } => {
             // A path-shaped REF resolved to a definition; the summary names its image, not the path.
@@ -347,8 +369,10 @@ pub async fn run_image(
             &mut args,
             &published.mixins,
             &published.pinned_mixins,
+            &published.contributions,
         );
     }
+    crate::run::summary::drop_overridden_mounts(&mut args, &consumer_mount_targets);
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
@@ -409,6 +433,7 @@ pub async fn run_image(
     let detach_chord = args.detach_keys.0.clone();
     let sandbox_user = args.effective_sandbox_user();
     let sandbox_uid = args.effective_sandbox_uid();
+    let run_mixins = mixins_for_the_run(&target, &args.mixins);
 
     let request = Request::RunImage(Box::new(RunImageArgs {
         cpus: args.effective_cpus(),
@@ -419,7 +444,8 @@ pub async fn run_image(
         env: args.env,
         image: Some(target.image()),
         resolved_image: published.as_ref().map(|published| published.image.clone()),
-        mixins: mixins_for_the_run(&target, &args.mixins),
+        mixins: run_mixins.to_merge,
+        composed_mixins: run_mixins.composed,
         name: args.name,
         policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
@@ -1223,7 +1249,7 @@ mod tests {
         let local = crate::run::target::RunTarget::Local {
             def: Box::new(
                 lns_artifact::sandbox::parse(
-                    br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#,
+                    br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"}}"#,
                 )
                 .expect("the fixture is a valid definition"),
             ),
@@ -1231,16 +1257,22 @@ mod tests {
             project_dir: std::path::PathBuf::from("/work"),
         };
         assert!(
-            mixins_for_the_run(&local, &pinned).is_empty(),
+            mixins_for_the_run(&local, &pinned).to_merge.is_empty(),
             "the local preflight already merged them, so sending them again asks the service to merge a document it was not given"
         );
         assert_eq!(
             mixins_for_the_run(
                 &crate::run::target::RunTarget::Reference("ghcr.io/acme/agent:1".into()),
                 &pinned
-            ),
+            )
+            .to_merge,
             pinned,
             "a published run merges service-side, so the boot needs the pins its preflight showed"
+        );
+        assert_eq!(
+            mixins_for_the_run(&local, &pinned).composed,
+            pinned,
+            "a local run is still composed of what it merged, and a connector grant keys on that — sending nothing here spends the bare run's grant on a mixin the user added"
         );
     }
 
@@ -1252,6 +1284,7 @@ mod tests {
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()],
                 pinned_mixins: vec!["ghcr.io/acme/obs@sha256:5b9e1f0a".into()],
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: digest.clone(),
                 image: "registry.example.test/runtime:1".into(),
@@ -1338,6 +1371,7 @@ mod tests {
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
+                contributions: Vec::new(),
                 reference: "registry.example.test/team/sandbox:1".into(),
                 digest: String::new(),
                 image: "registry.example.test/runtime:1".into(),

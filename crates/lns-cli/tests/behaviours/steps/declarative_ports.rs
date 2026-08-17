@@ -21,7 +21,7 @@ fn ports_yaml(ports: &str) -> String {
         })
         .collect();
     format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  ports:\n{entries}"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  ports:\n{entries}"
     )
 }
 
@@ -39,6 +39,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
     lns_ipc::SandboxView {
         mixins: def.spec.mixins.clone(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: def.spec.image.clone(),

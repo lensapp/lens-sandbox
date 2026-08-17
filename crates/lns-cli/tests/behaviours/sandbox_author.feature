@@ -1,5 +1,5 @@
 Feature: authoring a sandbox
-  A sandbox is authored on disk as `./lns.yaml` (kind: Sandbox). The author
+  A sandbox is authored on disk as `./lns.yaml` (kind: sandbox). The author
   verbs scaffold it and validate it offline; `inspect` with no target (or a
   path-shaped one) renders its effective definition, also offline.
 
@@ -8,7 +8,7 @@ Feature: authoring a sandbox
     When the user runs sandbox command "init"
     Then the exit code is 0
     And a file "lns.yaml" is created
-    And the file "lns.yaml" contains "kind: Sandbox"
+    And the file "lns.yaml" contains "kind: sandbox"
     And the file "lns.yaml" contains "apiVersion: lns.run/v1"
     And the file "lns.yaml" contains "workdir: /workspace"
     And the file "lns.yaml" contains "volumes:"
@@ -87,7 +87,7 @@ Feature: authoring a sandbox
     When the user runs sandbox command "inspect"
     Then the exit code is 0
     And the output contains "image"
-    And the output contains "policy"
+    And the output contains "egress"
     And the service received no request
 
   Scenario: inspect discloses the run-as user a definition asks for

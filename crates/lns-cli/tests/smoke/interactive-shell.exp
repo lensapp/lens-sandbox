@@ -38,9 +38,8 @@ if {![file executable $wrapper]} {
 set project [exec mktemp -d]
 set def [open "$project/lns.yaml" w]
 puts $def "apiVersion: lns.run/v1"
-puts $def "kind: Sandbox"
-puts $def "metadata:"
-puts $def "  name: detach-smoke"
+puts $def "kind: sandbox"
+puts $def "name: detach-smoke"
 puts $def "spec:"
 puts $def "  image: public.ecr.aws/docker/library/alpine:3.20"
 close $def

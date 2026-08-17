@@ -17,6 +17,13 @@ struct StepFs {
 }
 
 impl Fs for StepFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        self.files
+            .borrow()
+            .keys()
+            .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
+    }
+
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         self.files
             .borrow()
@@ -90,6 +97,7 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, reference: String, mount
     world.pulled_view = Some(lns_ipc::SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
@@ -123,6 +131,7 @@ fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
     world.pulled_view = Some(lns_ipc::SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),
@@ -286,6 +295,7 @@ fn pulled_view_with_host_path_fileset(world: &mut BehaviourWorld, source: String
     world.pulled_view = Some(lns_ipc::SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),

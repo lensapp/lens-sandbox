@@ -146,7 +146,7 @@ pub fn root_named_directories(mixins: &[String], cwd: &Path) -> Result<Vec<Strin
     mixins
         .iter()
         .map(|reference| {
-            if !lns_artifact::sandbox::names_a_local_directory(reference) {
+            if !lns_artifact::sandbox::names_a_local_path(reference) {
                 return Ok(reference.clone());
             }
             let rooted = lns_artifact::sandbox::fold_path(&cwd.join(reference));
@@ -187,7 +187,7 @@ mod tests {
     }
 
     fn local_yaml() -> &'static str {
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  command: agent --serve\n  env:\n    MODE: research\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  command: agent --serve\n  env:\n    MODE: research\n"
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         let fs = MapFs::with(&[
             (
                 "/other/lns.yaml",
-                "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
             ),
             ("/other/skills/prompts.md", "p"),
         ]);
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn a_yaml_file_reference_selects_the_variant_over_the_default() {
-        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let variant = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
         let fs = MapFs::with(&[
             ("/work/lns.yaml", local_yaml()),
             ("/work/lns.dev.yaml", variant),
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn the_file_selector_resolves_the_named_definition() {
-        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let variant = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
         let fs = MapFs::with(&[
             ("/work/lns.yaml", local_yaml()),
             ("/work/lns.dev.yaml", variant),
@@ -389,7 +389,7 @@ mod tests {
         let fs = MapFs::with(&[
             (
                 "/work/lns.yaml",
-                "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
             ),
             ("/work/skills/prompts.md", "p"),
         ]);
@@ -411,7 +411,7 @@ mod tests {
     fn a_missing_fileset_directory_refuses_the_local_run() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
         );
         let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("./skills"), "got: {err:#}");
@@ -421,7 +421,7 @@ mod tests {
     fn an_invalid_local_definition_surfaces_the_parse_error() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec: {}\n",
         );
         let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(

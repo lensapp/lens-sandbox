@@ -79,10 +79,10 @@ fn sandbox_running_with_policy(world: &mut BehaviourWorld) {
     let _ = cwd(world);
 }
 
-#[given(regex = r#"^the developer is in a directory with no "lns-policy\.yaml"$"#)]
+#[given(regex = r#"^the developer is in a directory with no "lns-local-mixin\.yaml"$"#)]
 fn directory_without_policy(world: &mut BehaviourWorld) {
     let dir = cwd(world);
-    assert!(!dir.join("lns-policy.yaml").exists());
+    assert!(!dir.join("lns-local-mixin.yaml").exists());
 }
 
 #[given(regex = r#"^"([^"]+)" has an allow rule for "([^"]+)" and a deny rule for "([^"]+)"$"#)]
@@ -183,7 +183,7 @@ fn raw_allow_precedes_raw_rule(
     first: String,
     second: String,
 ) -> Result<(), String> {
-    let policy = load(world, "lns-policy.yaml");
+    let policy = load(world, "lns-local-mixin.yaml");
     let patterns: Vec<&str> = policy
         .network
         .egress
@@ -431,9 +431,11 @@ fn policy_uses_the_removed_key(world: &mut BehaviourWorld, file: String, pattern
     let dir = cwd(world);
     std::fs::write(
         dir.join(file),
-        format!("network:\n  allowedRoutes:\n    - match: {pattern}\n      verdict: allow\n"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    allowedRoutes:\n      - match: {pattern}\n        verdict: allow\n"
+        ),
     )
-    .expect("seed a policy file in the pre-egress shape");
+    .expect("seed a decisions file naming a table nothing reads");
 }
 
 #[given(regex = r#"^"([^"]+)" has no rule for "([^"]+)"$"#)]
@@ -671,7 +673,7 @@ fn file_is_created(world: &mut BehaviourWorld, file: String) -> Result<(), Strin
 
 #[then(regex = r#"^it contains an allow rule for "([^"]+)"$"#)]
 fn it_contains_allow(world: &mut BehaviourWorld, pattern: String) -> Result<(), String> {
-    file_contains_allow(world, "lns-policy.yaml".to_string(), pattern)
+    file_contains_allow(world, "lns-local-mixin.yaml".to_string(), pattern)
 }
 
 #[then(regex = r#"^"([^"]+)" contains the allow rule$"#)]
@@ -689,11 +691,11 @@ fn explicit_file_contains_rule(world: &mut BehaviourWorld, path: String) -> Resu
     }
 }
 
-#[then(regex = r#"^"\./lns-policy\.yaml" is not created$"#)]
+#[then(regex = r#"^"\./lns-local-mixin\.yaml" is not created$"#)]
 fn default_file_not_created(world: &mut BehaviourWorld) -> Result<(), String> {
     let dir = cwd(world);
-    if dir.join("lns-policy.yaml").exists() {
-        Err("default lns-policy.yaml should not have been created".to_string())
+    if dir.join("lns-local-mixin.yaml").exists() {
+        Err("default lns-local-mixin.yaml should not have been created".to_string())
     } else {
         Ok(())
     }
@@ -1576,7 +1578,7 @@ fn command_fails(world: &mut BehaviourWorld) -> Result<(), String> {
 
 #[then(regex = r"^the policy file is unchanged$")]
 fn policy_file_unchanged(world: &mut BehaviourWorld) -> Result<(), String> {
-    let policy = load(world, "lns-policy.yaml");
+    let policy = load(world, "lns-local-mixin.yaml");
     if policy.network.egress.http.is_empty() {
         Ok(())
     } else {

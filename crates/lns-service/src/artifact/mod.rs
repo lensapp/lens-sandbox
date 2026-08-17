@@ -67,10 +67,10 @@ pub fn dispatch_run(
     Ok(path)
 }
 
-/// Map a flat `kind: Sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
+/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. A definition that ships neither a network policy nor connectors plans with no policy baseline, so the directory's overlay governs verbatim.
 pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
     let ships_policy =
-        def.spec.policy != lns_policy::NetworkPolicy::default() || !def.spec.connectors.is_empty();
+        def.spec.egress != lns_policy::Egress::default() || !def.spec.connectors.is_empty();
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
@@ -137,8 +137,11 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
         env: def.spec.env.clone(),
         resources: def.spec.resources.clone(),
         policy: ships_policy.then(|| lns_policy::Policy {
-            network: def.spec.policy.clone(),
+            network: lns_policy::NetworkPolicy {
+                egress: def.spec.egress.clone(),
+            },
             connectors: def.spec.connectors.clone(),
+            ..lns_policy::Policy::default()
         }),
         credentials: def.spec.credentials.clone(),
         tools: def.spec.tools.clone(),
@@ -211,7 +214,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_splits_path_and_ref_filesets() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b","owner":"root"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b","owner":"root"}]}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
@@ -236,7 +239,7 @@ mod tests {
     #[test]
     fn published_fileset_problems_refuse_paths_and_floating_refs_but_pass_pinned_refs() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/c"}]}}"#,
         )
         .unwrap();
         let problems = published_fileset_problems(&resolved_from_sandbox(&def));
@@ -248,7 +251,7 @@ mod tests {
     #[test]
     fn published_fileset_problems_refuses_a_truncated_or_malformed_digest_ref() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"s"},"spec":{"image":"x:1","filesets":[{"ref":"reg/skills@sha256:abc","mountPath":"/a"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"ref":"reg/skills@sha256:abc","mountPath":"/a"}]}}"#,
         )
         .unwrap();
         let problems = published_fileset_problems(&resolved_from_sandbox(&def));
@@ -274,7 +277,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_carries_the_base_image_command_env_and_policy() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"policy":{"egress":{"http":[{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"],"user":"root"}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"egress":{"http":[{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"user":"root"}}"#,
         )
         .unwrap();
         let resolved = resolved_from_sandbox(&def);
@@ -303,7 +306,7 @@ mod tests {
     #[test]
     fn a_definition_shipping_no_policy_or_connectors_plans_without_a_baseline() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1"}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -316,7 +319,7 @@ mod tests {
     #[test]
     fn plan_local_sandbox_resolves_the_definition_like_a_published_one() {
         let resolved = plan_local_sandbox(
-            br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
         )
         .unwrap();
         assert_eq!(resolved.base_image, "ghcr.io/team/base:1");
@@ -330,8 +333,10 @@ mod tests {
 
     #[test]
     fn plan_local_sandbox_surfaces_a_broken_definition() {
-        let err = plan_local_sandbox(br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{}}"#)
-            .unwrap_err();
+        let err = plan_local_sandbox(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{}}"#,
+        )
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("must carry an image"),
             "got: {err:#}"
@@ -343,7 +348,7 @@ mod tests {
         let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
         let err = plan_published_sandbox(
             format!(
-                r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{{"image":"ghcr.io/team/base:1","mixins":["{pinned}"]}}}}"#
+                r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","mixins":["{pinned}"]}}}}"#
             )
             .as_bytes(),
             "registry.example.test/team/sandbox:1",

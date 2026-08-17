@@ -21,7 +21,7 @@ fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
 
 fn declarative_yaml(bind_source: &str) -> String {
     format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: {bind_source}\n      target: /workspace\n    - type: volume\n      source: some-cache\n      target: /home/node/.cache\n      readOnly: true\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: {bind_source}\n      target: /workspace\n    - type: volume\n      source: some-cache\n      target: /home/node/.cache\n      readOnly: true\n"
     )
 }
 
@@ -37,7 +37,7 @@ fn definition_with_bind_exclude(world: &mut BehaviourWorld, exclude: String) {
     world.author_files.insert(
         "/work/lns.yaml".into(),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      exclude:\n        - '{exclude}'\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      exclude:\n        - '{exclude}'\n"
         ),
     );
 }
@@ -47,7 +47,7 @@ fn definition_with_bind_source(world: &mut BehaviourWorld, source: String) {
     world.author_files.insert(
         "/work/lns.yaml".into(),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: '{source}'\n      target: /workspace\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n  volumes:\n    - type: bind\n      source: '{source}'\n      target: /workspace\n"
         ),
     );
 }
@@ -113,7 +113,7 @@ fn install_definition(world: &mut BehaviourWorld, extra_spec: &str) {
     world.author_files.insert(
         Path::new("/work/lns.yaml").to_path_buf(),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: some-sandbox\nspec:\n  image: example.test/runtime:1\n{extra_spec}"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: some-sandbox\nspec:\n  image: example.test/runtime:1\n{extra_spec}"
         ),
     );
 }
@@ -146,7 +146,7 @@ fn compose_summary(world: &mut BehaviourWorld, defaults: Defaults, flags: &str) 
             &args,
             size,
             &lns_policy::Policy::default(),
-            Path::new("./lns-policy.yaml"),
+            Path::new("./lns-local-mixin.yaml"),
             &lns_cli::run::summary::PolicySource::FoundInCwd,
         ),
         ..Default::default()
@@ -180,6 +180,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
     lns_ipc::SandboxView {
         mixins: def.spec.mixins.clone(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: "registry.example.test/team/sandbox:1".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: def.spec.image.clone(),

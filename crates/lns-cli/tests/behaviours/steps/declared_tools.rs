@@ -22,7 +22,7 @@ fn lns_yaml_with_tools(w: &mut BehaviourWorld, list: String) {
     w.author_files.insert(
         PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools:\n{entries}"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools:\n{entries}"
         ),
     );
 }
@@ -68,6 +68,7 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
     let view = SandboxView {
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
         reference: TOOLS_REFERENCE.into(),
         digest: format!("sha256:{}", "a".repeat(64)),
         image: "registry.example.test/runtime:1".into(),

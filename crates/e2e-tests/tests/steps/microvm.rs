@@ -121,11 +121,9 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         }
     }
     if !world.project_egress.is_empty() {
-        spec_tail.push_str("\n  policy:\n    egress:\n      http:");
+        spec_tail.push_str("\n  egress:\n    http:");
         for host in &world.project_egress {
-            spec_tail.push_str(&format!(
-                "\n        - match: {host}\n          verdict: allow"
-            ));
+            spec_tail.push_str(&format!("\n      - match: {host}\n        verdict: allow"));
         }
     }
     if !world.project_tools.is_empty() {
@@ -180,7 +178,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         }
     }
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
         world
             .project_image
             .clone()
@@ -188,8 +186,8 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
-        root.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http: []\n",
+        root.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n",
     )
     .expect("write the project policy");
     root
@@ -256,7 +254,7 @@ fn last_run(world: &E2eWorld) -> Result<String, String> {
 
 fn write_policy(world: &mut E2eWorld, yaml: &str) {
     let dir = tempfile::TempDir::new().expect("tempdir for policy");
-    let path = dir.path().join("lns-policy.yaml");
+    let path = dir.path().join("lns-local-mixin.yaml");
     std::fs::write(&path, yaml).expect("write policy file");
     world.policy_dir = Some(dir);
     world.policy_path = Some(path);
@@ -344,7 +342,7 @@ fn base_image_without_a_trust_store(world: &mut E2eWorld) {
 fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
     let project = microvm_project(world);
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-declarative\nspec:\n  image: {}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: e2e-declarative\n      target: /data\n",
         pinned_microvm_image()
     );
     std::fs::write(project.join("lns.yaml"), definition)
@@ -725,7 +723,7 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     let volume = format!("e2e-declarative-published-{seq}");
     let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-declarative-published\nspec:\n  image: {base}\n  workdir: /workspace\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n      readOnly: true\n    - type: volume\n      source: {volume}\n      target: /data\n"
     );
     std::fs::write(publisher.path().join("lns.yaml"), definition)
         .expect("write published declarative lns.yaml");
@@ -755,8 +753,8 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     std::fs::write(consumer.join("consumer-marker"), "consumer project\n")
         .expect("write consumer marker");
     std::fs::write(
-        consumer.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     track_volume(world, &volume);
@@ -1042,7 +1040,7 @@ async fn publish_tools_sandbox(world: &mut E2eWorld, entry: &str) {
     let reference = format!("{host}/e2e-tools-sandbox:{seq}");
     let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - {entry}\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-tools-published\nspec:\n  image: {base}\n  tools:\n    - {entry}\n"
     );
     std::fs::write(publisher.path().join("lns.yaml"), definition)
         .expect("write published tools lns.yaml");
@@ -1138,8 +1136,8 @@ fn run_pulled_sandbox_offline(world: &mut E2eWorld, cmd_line: &str) {
         .path()
         .to_path_buf();
     std::fs::write(
-        consumer.join("lns-policy.yaml"),
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join("lns-local-mixin.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     let mut args = vec![
@@ -1195,7 +1193,7 @@ async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String
         .parse()
         .expect("run-sandbox ref parses");
     let doc = format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"e2e-run-sandbox"}},"spec":{{"image":"{image}"}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"e2e-run-sandbox","spec":{{"image":"{image}"}}}}"#
     );
     let built = lns_artifact::build::build_artifact(doc.as_bytes()).expect("build run sandbox");
     let client = oci_client::Client::new(oci_client::client::ClientConfig {
@@ -1543,7 +1541,7 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 
@@ -1551,7 +1549,7 @@ fn policy_ask_with_direct_route(world: &mut E2eWorld) {
 fn policy_deny_all(world: &mut E2eWorld) {
     write_policy(
         world,
-        "network:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     );
 }
 

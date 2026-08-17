@@ -10,22 +10,22 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "Usage: lns inspect"
 
-  Scenario: inspecting a published mixin labels it Mixin and shows every block it carries
+  Scenario: inspecting a published mixin labels it mixin and shows every block it carries
     Given the service inspects "ghcr.io/acme/obs-tools:2" as a mixin declaring the tool "node@22.11.0"
     When the user runs "lns inspect ghcr.io/acme/obs-tools:2"
     Then the exit code is 0
-    And the output contains "kind: Mixin"
+    And the output contains "kind: mixin"
     And the output contains "tool: node@22.11.0"
     And the output contains "mixin: ghcr.io/acme/base@sha256:"
     And the output contains "env: MODE=research"
     And the output contains "ports: 9090"
     And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
-  Scenario: inspecting a plain image labels it Image
+  Scenario: inspecting a plain image labels it image
     Given the service inspects "registry.example.test/some-image:1.0" as a plain image
     When the user runs "lns inspect registry.example.test/some-image:1.0"
     Then the exit code is 0
-    And the output contains "Image"
+    And the output contains "kind: image"
 
   Scenario: inspecting a sandbox shows its workdir and declared mounts
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox with launch settings

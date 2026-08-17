@@ -11,7 +11,7 @@ use crate::world::BehaviourWorld;
 
 fn sandbox_json(filesets: &str) -> Vec<u8> {
     format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"some-sandbox"}},"spec":{{"image":"registry.example.test/runtime:1","filesets":[{filesets}]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"registry.example.test/runtime:1","filesets":[{filesets}]}}}}"#
     )
     .into_bytes()
 }

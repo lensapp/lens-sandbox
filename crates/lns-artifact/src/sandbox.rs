@@ -1,12 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
-use lns_policy::NetworkPolicy;
+use lns_policy::Egress;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::spec::{self, Metadata, Port, Resources};
+use crate::spec::{self, Port, Resources};
 
 pub const API_VERSION: &str = "lns.run/v1";
-pub const KIND: &str = "Sandbox";
 pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
 pub const MAX_INLINE_TOTAL_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_FILES: usize = 256;
@@ -36,7 +35,7 @@ const EXACT_SECRET_NAMES: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
-    pub metadata: Metadata,
+    pub name: String,
     pub spec: SandboxSpec,
 }
 
@@ -110,7 +109,7 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub resources: Option<Resources>,
     #[serde(default)]
-    pub policy: NetworkPolicy,
+    pub egress: Egress,
     #[serde(default)]
     pub connectors: Vec<String>,
     #[serde(default)]
@@ -164,7 +163,7 @@ struct Doc {
     api_version: String,
     #[serde(default)]
     kind: String,
-    metadata: Metadata,
+    name: String,
     /// Read only after the group and kind decide, so another group's field names cannot answer as unknown fields of this one.
     #[serde(default)]
     spec: serde_json::Value,
@@ -185,7 +184,7 @@ pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
 }
 
 /// Whether a mixin entry names a directory rather than a registry coordinate — the one predicate validation, rooting and resolution all read, so they cannot disagree about which entries are local.
-pub fn names_a_local_directory(reference: &str) -> bool {
+pub fn names_a_local_path(reference: &str) -> bool {
     reference == "."
         || reference == ".."
         || reference.starts_with("./")
@@ -212,9 +211,9 @@ fn validate_mixin_reference(reference: &str) -> Result<()> {
     if reference.trim().is_empty() {
         bail!("a mixin entry must name a directory or an OCI reference");
     }
-    if !names_a_local_directory(reference) && !spec::is_digest_pinned_image(reference) {
+    if !names_a_local_path(reference) && !spec::is_digest_pinned_image(reference) {
         bail!(
-            "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local directory starts with `./`, `../` or `/`"
+            "mixin reference {reference:?} must be digest-pinned (…@sha256:<64 hex>), so every consumer resolves the same document; a local path starts with `./`, `../` or `/`"
         );
     }
     Ok(())
@@ -255,11 +254,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             doc.kind
         );
     }
-    if !spec::is_valid_name(&doc.metadata.name) {
-        bail!("invalid metadata.name {:?}", doc.metadata.name);
+    if !spec::is_valid_name(&doc.name) {
+        bail!("invalid name {:?}", doc.name);
     }
     let doc = Definition {
-        metadata: doc.metadata,
+        name: doc.name,
         spec: serde_json::from_value(doc.spec).context("parsing sandbox spec")?,
     };
     if kind == spec::Kind::Mixin {
@@ -279,11 +278,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
         validate_resources(resources)?;
     }
     doc.spec
-        .policy
+        .egress
         .validate_local_transport()
         .context("sandbox policy")?;
     doc.spec
-        .policy
+        .egress
         .validate_binary_scopes()
         .context("sandbox policy")?;
     if let Some(workdir) = &doc.spec.workdir {
@@ -687,15 +686,13 @@ mod tests {
     }
 
     fn def_json(spec: &str) -> Vec<u8> {
-        format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{{"name":"hermes"}},"spec":{spec}}}"#
-        )
-        .into_bytes()
+        format!(r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{spec}}}"#)
+            .into_bytes()
     }
 
     fn mixin_json(spec: &str) -> Vec<u8> {
         format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"Mixin","metadata":{{"name":"postgres-tools"}},"spec":{spec}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{spec}}}"#
         )
         .into_bytes()
     }
@@ -705,10 +702,10 @@ mod tests {
     #[test]
     fn a_mixin_reads_every_block_it_shares_with_a_sandbox() {
         let def = parse_mixin(&mixin_json(
-            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"mountPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
+            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"mountPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
         ))
         .expect("a mixin's shared blocks follow the same rules as a sandbox's");
-        assert_eq!(def.metadata.name, "postgres-tools");
+        assert_eq!(def.name, "postgres-tools");
         assert_eq!(def.spec.tools, vec!["postgresql@17".to_string()]);
         assert_eq!(
             def.spec.env.get("MODE").map(String::as_str),
@@ -716,7 +713,7 @@ mod tests {
         );
         assert_eq!(def.spec.ports[0].container, 8080);
         assert_eq!(def.spec.volumes[0].target, "/home/agent/.cache");
-        assert_eq!(def.spec.policy.egress.tcp.len(), 1);
+        assert_eq!(def.spec.egress.tcp.len(), 1);
         assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
         assert_eq!(def.spec.filesets[0].mount_path, "/home/agent/notes");
     }
@@ -768,13 +765,47 @@ mod tests {
     fn each_reader_answers_only_for_its_own_kind() {
         let sandbox_err = parse_mixin(&def_json(r#"{"image":"x:1"}"#)).unwrap_err();
         assert!(
-            format!("{sandbox_err:#}").contains("expected kind Mixin"),
+            format!("{sandbox_err:#}").contains("expected kind mixin"),
             "got: {sandbox_err:#}"
         );
         let mixin_err = parse(&mixin_json(r#"{"tools":["postgresql@17"]}"#)).unwrap_err();
         assert!(
-            format!("{mixin_err:#}").contains("expected kind Sandbox"),
+            format!("{mixin_err:#}").contains("expected kind sandbox"),
             "got: {mixin_err:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_carries_its_name_above_the_spec() {
+        let def = parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"reviewer","spec":{"image":"x:1"}}"#,
+        )
+        .expect("§2 puts identity above spec and content inside it");
+        assert_eq!(def.name, "reviewer");
+        let err = parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","metadata":{"name":"reviewer"},"spec":{"image":"x:1"}}"#,
+        )
+        .expect_err("the old nesting is gone rather than accepted alongside it");
+        assert!(
+            format!("{err:#}").contains("metadata"),
+            "the refusal has to name the key it did not know; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_names_its_egress_where_the_specification_names_it() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
+        ))
+        .expect("§3.1's field table names this block `egress`, not `policy`");
+        assert_eq!(def.spec.egress.http.len(), 1);
+        let err = parse(&def_json(
+            r#"{"image":"x:1","policy":{"egress":{"http":[]}}}"#,
+        ))
+        .expect_err("the old spelling is gone rather than accepted alongside the new one");
+        assert!(
+            format!("{err:#}").contains("policy"),
+            "the refusal has to name the key it did not know; got: {err:#}"
         );
     }
 
@@ -887,10 +918,10 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}},"connectors":["some-provider"],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
-        assert_eq!(def.metadata.name, "hermes");
+        assert_eq!(def.name, "hermes");
         assert_eq!(def.spec.image, "ghcr.io/team/base:1");
         assert_eq!(def.spec.command.as_deref(), Some("agent --serve"));
         assert_eq!(def.spec.workdir.as_deref(), Some("/workspace"));
@@ -899,11 +930,11 @@ mod tests {
             Some("research")
         );
         assert_eq!(
-            def.spec.policy.egress.http.last().unwrap().match_pattern,
+            def.spec.egress.http.last().unwrap().match_pattern,
             "*",
             "a closed baseline carries its lockdown as a catch-all deny"
         );
-        assert_eq!(def.spec.policy.egress.http.len(), 2);
+        assert_eq!(def.spec.egress.http.len(), 2);
         assert_eq!(def.spec.connectors, vec!["some-provider".to_string()]);
         assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
         assert_eq!(def.spec.volumes[0].source(), ".");
@@ -916,27 +947,15 @@ mod tests {
     #[test]
     fn parse_reads_an_omitted_policy_as_deciding_nothing() {
         let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
-        assert!(def.spec.policy.egress.http.is_empty());
-        assert!(def.spec.policy.egress.tcp.is_empty());
+        assert!(def.spec.egress.http.is_empty());
+        assert!(def.spec.egress.tcp.is_empty());
         assert!(def.spec.connectors.is_empty());
-    }
-
-    #[test]
-    fn parse_rejects_a_default_transport_the_file_no_longer_carries() {
-        let err = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"defaultTransport":"upstream"}}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("defaultTransport is no longer part of a policy file"),
-            "got: {err:#}"
-        );
     }
 
     #[test]
     fn parse_rejects_an_upstream_route_transport() {
         let err = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","transport":"upstream"}]}}}"#,
+            r#"{"image":"ghcr.io/team/base:1","egress":{"http":[{"match":"api.example.test","verdict":"allow","transport":"upstream"}]}}"#,
         ))
         .unwrap_err();
         assert!(
@@ -948,7 +967,7 @@ mod tests {
     #[test]
     fn parse_rejects_a_relative_binary_scope() {
         let err = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["git"]}]}}}"#,
+            r#"{"image":"ghcr.io/team/base:1","egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["git"]}]}}"#,
         ))
         .unwrap_err();
         assert!(
@@ -960,7 +979,7 @@ mod tests {
     #[test]
     fn parse_rejects_an_empty_binary_scope() {
         let err = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":[]}]}}}"#,
+            r#"{"image":"ghcr.io/team/base:1","egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":[]}]}}"#,
         ))
         .unwrap_err();
         assert!(
@@ -972,11 +991,11 @@ mod tests {
     #[test]
     fn parse_accepts_an_absolute_binary_scope() {
         let def = parse(&def_json(
-            r#"{"image":"ghcr.io/team/base:1","policy":{"egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["/usr/bin/git"]}]}}}"#,
+            r#"{"image":"ghcr.io/team/base:1","egress":{"http":[{"match":"git.example.test","verdict":"allow","binaries":["/usr/bin/git"]}]}}"#,
         ))
         .unwrap();
         assert_eq!(
-            def.spec.policy.egress.http[0].binaries,
+            def.spec.egress.http[0].binaries,
             Some(vec!["/usr/bin/git".to_string()])
         );
     }
@@ -989,7 +1008,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_foreign_api_version() {
-        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#;
+        let json = br#"{"apiVersion":"lens.dev/v1alpha1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
         assert!(
             format!("{err:#}").contains("unexpected apiVersion"),
@@ -999,19 +1018,20 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_wrong_kind() {
-        let json = br#"{"apiVersion":"lns.run/v1","kind":"Policy","metadata":{"name":"hermes"},"spec":{"image":"x:1"}}"#;
+        let json = br#"{"apiVersion":"lns.run/v1","kind":"Policy","name":"hermes","spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
         assert!(
-            format!("{err:#}").contains("expected kind Sandbox"),
+            format!("{err:#}").contains("expected kind sandbox"),
             "got: {err:#}"
         );
     }
 
     #[test]
     fn parse_rejects_an_invalid_name() {
-        let json = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"-bad"},"spec":{"image":"x:1"}}"#;
+        let json =
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"-bad","spec":{"image":"x:1"}}"#;
         let err = parse(json).unwrap_err();
-        assert!(format!("{err:#}").contains("metadata.name"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("invalid name"), "got: {err:#}");
     }
 
     #[test]
@@ -1998,8 +2018,8 @@ mod tests {
 
     #[test]
     fn parse_surfaces_a_malformed_document_as_a_parse_error() {
-        let no_metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","spec":{"image":"x:1"}}"#;
-        let err = parse(no_metadata).unwrap_err();
+        let no_name = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","spec":{"image":"x:1"}}"#;
+        let err = parse(no_name).unwrap_err();
         assert!(
             format!("{err:#}").contains("parsing sandbox definition"),
             "got: {err:#}"
@@ -2011,9 +2031,9 @@ mod tests {
         let specs = [
             r#"{"image":"x:1","unexpected":true}"#,
             r#"{"image":"x:1","resources":{"cpu":1,"unexpected":true}}"#,
-            r#"{"image":"x:1","policy":{"unexpected":true}}"#,
-            r#"{"image":"x:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","unexpected":true}]}}}"#,
-            r#"{"image":"x:1","policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}}"#,
+            r#"{"image":"x:1","egress":{"unexpected":true}}"#,
+            r#"{"image":"x:1","egress":{"http":[{"match":"api.example.test","verdict":"allow","unexpected":true}]}}"#,
+            r#"{"image":"x:1","egress":{"http":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}"#,
             r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-fake","injectons":[]}]}"#,
             r#"{"image":"x:1","volumes":[{"name":"data","target":"/data","readOlny":true}]}"#,
             r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills","unexpected":true}]}"#,
@@ -2024,12 +2044,8 @@ mod tests {
             assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
         }
 
-        let top_level = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes"},"spec":{"image":"x:1"},"unexpected":true}"#;
+        let top_level = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"},"unexpected":true}"#;
         let err = parse(top_level).unwrap_err();
-        assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
-
-        let metadata = br#"{"apiVersion":"lns.run/v1","kind":"Sandbox","metadata":{"name":"hermes","unexpected":true},"spec":{"image":"x:1"}}"#;
-        let err = parse(metadata).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
     }
 }

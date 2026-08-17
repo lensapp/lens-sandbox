@@ -1,6 +1,6 @@
 [package]
 name = "lns-service"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 description = "Lens Sandbox background service — tray-resident process exposing local IPC and orchestrating microVM runs"
 license = "Apache-2.0"
@@ -75,7 +75,7 @@ tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"
 
-# Approval-flow deps. serde_yaml: lns-policy.yaml load/save. notify:
+# Approval-flow deps. serde_yaml: lns-local-mixin.yaml load/save. notify:
 # filesystem watcher for hot-swap on manual policy edits. The
 # approval UI itself is rendered by the eframe/egui setup above —
 # no HTTP stack is involved.

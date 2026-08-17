@@ -17,21 +17,66 @@ pub struct Source<'a> {
 /// The label the sandbox's own spec resolves under; every other source is labelled by the reference that named it.
 pub const ROOT_LABEL: &str = "the sandbox";
 
+/// The blocks a disclosure attributes, which are the ones §1.5 names plus `ports`, whose winners already have to answer for one another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    Credential,
+    Tool,
+    Mount,
+    Port,
+    Egress,
+}
+
+/// What one source decided, and what deciding it replaced, so a reader sees where every line of a resolved sandbox came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contribution {
+    pub block: Block,
+    pub key: String,
+    pub source: String,
+    pub displaced: Vec<Displaced>,
+}
+
+/// An entry a later source replaced, named as the reader would have seen it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displaced {
+    pub source: String,
+    pub summary: String,
+}
+
+/// A merged sandbox and the record of which source decided each thing in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub spec: SandboxSpec,
+    pub contributions: Vec<Contribution>,
+}
+
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
 pub const MAX_DEPTH: usize = 5;
 
-/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it.
+/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it, then the directory's own decisions last.
 ///
-/// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting.
+/// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting. The local source is the exception: §8.1 puts it after every other source outright, so what it pulled merges before it.
 /// A source many documents name appears once, at the last place it was named: an earlier appearance can decide nothing a later one does not, since either a source after it sets a key or the source itself sets it again.
 pub fn flatten<'a>(
     root: &'a SandboxSpec,
     extra: &'a [String],
+    local: Option<Source<'a>>,
     graph: &'a BTreeMap<String, SandboxSpec>,
 ) -> Result<Vec<Source<'a>>> {
-    refuse_what_sits_out_of_reach(&root.mixins, extra, graph)?;
-    let mut sources = Vec::with_capacity(1 + graph.len());
+    let reachable: Vec<String> = local
+        .iter()
+        .flat_map(|local| local.spec.mixins.iter().cloned())
+        .chain(extra.iter().cloned())
+        .collect();
+    refuse_what_sits_out_of_reach(&root.mixins, &reachable, graph)?;
+    let mut sources = Vec::with_capacity(2 + graph.len());
     let mut seen = std::collections::BTreeSet::new();
+    // Pushed first because the list is built in reverse, so this is what lands last.
+    if let Some(local) = local {
+        let own = &local.spec.mixins;
+        sources.push(local);
+        expand(own, graph, &mut seen, &mut sources)?;
+    }
     expand(extra, graph, &mut seen, &mut sources)?;
     expand(&root.mixins, graph, &mut seen, &mut sources)?;
     sources.push(Source {
@@ -121,7 +166,7 @@ fn refuse_what_sits_out_of_reach(
 }
 
 /// Merge an ordered source list per §3.3.2: the last source to say something about a thing wins, and every keyed block unions by its key.
-pub fn merge(sources: &[Source]) -> Result<SandboxSpec> {
+pub fn merge(sources: &[Source]) -> Result<Merged> {
     let mut spec = SandboxSpec::default();
 
     for source in sources {
@@ -140,59 +185,154 @@ pub fn merge(sources: &[Source]) -> Result<SandboxSpec> {
         }
     }
 
-    spec.credentials = fold(sources, |s| &s.credentials, |c| c.env_var.clone());
-    spec.tools = fold(sources, |s| &s.tools, |t| tool_name(t).to_string());
-    (spec.volumes, spec.filesets) = fold_mounts(sources);
-    let ports = fold_labelled(sources, |s| &s.ports, |p| p.container.to_string());
+    let mut contributions = Vec::new();
+    spec.credentials = fold(
+        sources,
+        |s| &s.credentials,
+        |c| c.env_var.clone(),
+        |c| c.env_var.clone(),
+        Block::Credential,
+        &mut contributions,
+    );
+    spec.tools = fold(
+        sources,
+        |s| &s.tools,
+        |t| tool_name(t).to_string(),
+        Clone::clone,
+        Block::Tool,
+        &mut contributions,
+    );
+    (spec.volumes, spec.filesets) = fold_mounts(sources, &mut contributions);
+    let ports = fold_labelled(
+        sources,
+        |s| &s.ports,
+        |p| p.container.to_string(),
+        |p| p.container.to_string(),
+    );
     refuse_a_host_port_two_sources_publish(&ports)?;
-    spec.ports = ports.into_iter().map(|(port, _)| port).collect();
+    for won in &ports {
+        contributions.push(won.contribution(Block::Port));
+    }
+    spec.ports = ports.into_iter().map(|won| won.item).collect();
 
     // A later source's entries are placed ahead of an earlier one's, so the latest entry matching a destination is the one that decides.
     for source in sources.iter().rev() {
-        spec.policy
-            .egress
+        spec.egress
             .http
-            .extend(source.spec.policy.egress.http.iter().cloned());
-        spec.policy
-            .egress
+            .extend(source.spec.egress.http.iter().cloned());
+        spec.egress
             .tcp
-            .extend(source.spec.policy.egress.tcp.iter().cloned());
+            .extend(source.spec.egress.tcp.iter().cloned());
+        // Egress is a union rather than a keyed replacement, so every entry is attributed and none displaces another.
+        for rule in source.spec.egress.http.iter() {
+            contributions.push(egress_contribution(
+                rule.verdict,
+                &rule.match_pattern,
+                source.label,
+            ));
+        }
+        for rule in source.spec.egress.tcp.iter() {
+            contributions.push(egress_contribution(
+                rule.verdict,
+                &rule.match_pattern,
+                source.label,
+            ));
+        }
     }
 
     // The mixins are what produced this document, so the resolved one declares none of its own.
     spec.mixins = Vec::new();
-    Ok(spec)
+    Ok(Merged {
+        spec,
+        contributions,
+    })
+}
+
+/// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
+pub fn own_egress(spec: &SandboxSpec) -> Vec<Contribution> {
+    let http = spec.egress.http.iter();
+    let tcp = spec
+        .egress
+        .tcp
+        .iter()
+        .map(|rule| (rule.verdict, &rule.match_pattern));
+    http.map(|rule| (rule.verdict, &rule.match_pattern))
+        .chain(tcp)
+        .map(|(verdict, pattern)| egress_contribution(verdict, pattern, ROOT_LABEL))
+        .collect()
+}
+
+/// A rule is its verdict and its pattern together, because the verdict is the half that decides and two sources may disagree about one destination.
+fn egress_contribution(
+    verdict: lns_policy::Verdict,
+    match_pattern: &str,
+    source: &str,
+) -> Contribution {
+    let verdict = match verdict {
+        lns_policy::Verdict::Allow => "allow",
+        lns_policy::Verdict::Deny => "deny",
+    };
+    Contribution {
+        block: Block::Egress,
+        key: format!("{verdict} {match_pattern}"),
+        source: source.to_string(),
+        displaced: Vec::new(),
+    }
 }
 
 /// A mount, whichever block claimed it: one target is one keyspace across `volumes` and `filesets`, so a later source's claim of either kind displaces an earlier source's claim of either kind.
+#[derive(Clone)]
 enum Mount {
     Volume(Volume),
     Fileset(FilesetEntry),
 }
 
-fn fold_mounts(sources: &[Source]) -> (Vec<Volume>, Vec<FilesetEntry>) {
-    let mut order: Vec<String> = Vec::new();
-    let mut winners: BTreeMap<String, Mount> = BTreeMap::new();
-    let mut claim = |target: String, mount: Mount| {
-        if winners.insert(target.clone(), mount).is_none() {
-            order.push(target);
+impl Mount {
+    /// How a replaced mount reads back to the developer: the kind that held the target, and what it mounted there.
+    fn summary(&self) -> String {
+        match self {
+            Mount::Volume(volume) => format!("volume {}", volume.source()),
+            Mount::Fileset(_) => "fileset".to_string(),
         }
-    };
+    }
+}
+
+fn fold_mounts(
+    sources: &[Source],
+    into: &mut Vec<Contribution>,
+) -> (Vec<Volume>, Vec<FilesetEntry>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut winners: BTreeMap<String, Won<Mount>> = BTreeMap::new();
     for source in sources {
         for volume in &source.spec.volumes {
-            claim(volume.target.clone(), Mount::Volume(volume.clone()));
+            claim(
+                &mut order,
+                &mut winners,
+                volume.target.clone(),
+                Mount::Volume(volume.clone()),
+                source.label,
+                Mount::summary,
+            );
         }
         for fileset in &source.spec.filesets {
-            claim(fileset.mount_path.clone(), Mount::Fileset(fileset.clone()));
+            claim(
+                &mut order,
+                &mut winners,
+                fileset.mount_path.clone(),
+                Mount::Fileset(fileset.clone()),
+                source.label,
+                Mount::summary,
+            );
         }
     }
     let mut volumes = Vec::new();
     let mut filesets = Vec::new();
-    for mount in order
+    for won in order
         .into_iter()
         .filter_map(|target| winners.remove(&target))
     {
-        match mount {
+        into.push(won.contribution(Block::Mount));
+        match won.item {
             Mount::Volume(volume) => volumes.push(volume),
             Mount::Fileset(fileset) => filesets.push(fileset),
         }
@@ -211,35 +351,62 @@ fn tool_name(entry: &str) -> &str {
     entry.split_once('@').map_or(entry, |(name, _)| name)
 }
 
+/// A key's winner, the source that decided it, and every entry that decision replaced.
+struct Won<T> {
+    item: T,
+    key: String,
+    source: String,
+    displaced: Vec<Displaced>,
+}
+
+impl<T> Won<T> {
+    fn contribution(&self, block: Block) -> Contribution {
+        Contribution {
+            block,
+            key: self.key.clone(),
+            source: self.source.clone(),
+            displaced: self.displaced.clone(),
+        }
+    }
+}
+
 /// Union one keyed block across every source, last-wins, in first-appearance order of the key so a reader sees the document's own entries before what a mixin added.
 fn fold<T: Clone>(
     sources: &[Source],
     items: fn(&SandboxSpec) -> &Vec<T>,
     key: fn(&T) -> String,
+    summary: fn(&T) -> String,
+    block: Block,
+    into: &mut Vec<Contribution>,
 ) -> Vec<T> {
-    fold_labelled(sources, items, key)
+    fold_labelled(sources, items, key, summary)
         .into_iter()
-        .map(|(item, _)| item)
+        .map(|won| {
+            into.push(won.contribution(block));
+            won.item
+        })
         .collect()
 }
 
-/// [`fold`], keeping the source each winner came from, for a block whose winners still have to answer for one another.
+/// [`fold`], keeping each winner whole, for a block whose winners still have to answer for one another.
 fn fold_labelled<T: Clone>(
     sources: &[Source],
     items: fn(&SandboxSpec) -> &Vec<T>,
     key: fn(&T) -> String,
-) -> Vec<(T, String)> {
+    summary: fn(&T) -> String,
+) -> Vec<Won<T>> {
     let mut order: Vec<String> = Vec::new();
-    let mut winners: BTreeMap<String, (T, String)> = BTreeMap::new();
+    let mut winners: BTreeMap<String, Won<T>> = BTreeMap::new();
     for source in sources {
         for item in items(source.spec) {
-            let key = key(item);
-            if winners
-                .insert(key.clone(), (item.clone(), source.label.to_string()))
-                .is_none()
-            {
-                order.push(key);
-            }
+            claim(
+                &mut order,
+                &mut winners,
+                key(item),
+                item.clone(),
+                source.label,
+                summary,
+            );
         }
     }
     order
@@ -248,11 +415,43 @@ fn fold_labelled<T: Clone>(
         .collect()
 }
 
+/// Record one source's claim of a key, keeping what it replaced so the disclosure can say what changed rather than only what won.
+fn claim<T: Clone>(
+    order: &mut Vec<String>,
+    winners: &mut BTreeMap<String, Won<T>>,
+    key: String,
+    item: T,
+    source: &str,
+    summary: fn(&T) -> String,
+) {
+    match winners.get_mut(&key) {
+        Some(won) => {
+            won.displaced.push(Displaced {
+                source: std::mem::replace(&mut won.source, source.to_string()),
+                summary: summary(&std::mem::replace(&mut won.item, item)),
+            });
+        }
+        None => {
+            order.push(key.clone());
+            winners.insert(
+                key.clone(),
+                Won {
+                    item,
+                    key,
+                    source: source.to_string(),
+                    displaced: Vec::new(),
+                },
+            );
+        }
+    }
+}
+
 /// A host port is one socket, so precedence cannot settle two sources publishing onto it: keeping the later mapping would silently unpublish a port the sandbox declared, and the resolved document would claim a host port twice — which `sandbox::parse` itself refuses.
-fn refuse_a_host_port_two_sources_publish(ports: &[(Port, String)]) -> Result<()> {
+fn refuse_a_host_port_two_sources_publish(ports: &[Won<Port>]) -> Result<()> {
     let mut held: BTreeMap<i64, &str> = BTreeMap::new();
-    for (port, label) in ports {
-        let Some(host) = port.host else { continue };
+    for won in ports {
+        let Some(host) = won.item.host else { continue };
+        let label = won.source.as_str();
         if let Some(holder) = held.insert(host, label) {
             bail!("{holder} and {label} both publish host port {host}; one of them has to move it");
         }
@@ -330,7 +529,7 @@ mod tests {
         let (root, graph) = a_chain_the_sandbox_names_flat(5_000);
         let walked = std::thread::Builder::new()
             .stack_size(256 * 1024)
-            .spawn(move || flatten(&root, &[], &graph).map(|sources| sources.len()))
+            .spawn(move || flatten(&root, &[], None, &graph).map(|sources| sources.len()))
             .expect("the walk gets its own thread")
             .join()
             .expect(
@@ -346,7 +545,7 @@ mod tests {
     #[test]
     fn a_mixin_many_documents_reach_is_one_source_and_not_one_per_path() {
         let (root, graph) = wide_dag();
-        let sources = flatten(&root, &[], &graph).expect("every reference resolves");
+        let sources = flatten(&root, &[], None, &graph).expect("every reference resolves");
         assert_eq!(
             labels(&sources).len(),
             1 + graph.len(),
@@ -364,11 +563,56 @@ mod tests {
             ("firsts-own", r#"{}"#),
             ("second", r#"{}"#),
         ]);
-        let sources = flatten(&root, &extra, &graph).expect("every reference resolves");
+        let sources = flatten(&root, &extra, None, &graph).expect("every reference resolves");
         assert_eq!(
             labels(&sources),
             [ROOT_LABEL, "own", "first", "firsts-own", "second"],
             "a mixin's own mixins follow it, and the user's flags are appended last, so each beats what came before it"
+        );
+    }
+
+    #[test]
+    fn the_source_list_ends_with_the_local_mixin_after_every_flag() {
+        let root = spec(r#"{"image":"x:1","mixins":["own"]}"#);
+        let extra = ["flag".to_string()];
+        let local = spec(r#"{"tools":["ripgrep@14"]}"#);
+        let graph = graph(&[("own", r#"{}"#), ("flag", r#"{}"#)]);
+        let sources = flatten(
+            &root,
+            &extra,
+            Some(Source {
+                label: "lns-local-mixin.yaml",
+                spec: &local,
+            }),
+            &graph,
+        )
+        .expect("every reference resolves");
+        assert_eq!(
+            labels(&sources),
+            [ROOT_LABEL, "own", "flag", "lns-local-mixin.yaml"],
+            "the developer's own decisions are last, so nothing they pulled can overrule them (docs/sandbox-spec.md §8.1)"
+        );
+    }
+
+    #[test]
+    fn a_local_mixins_own_mixins_are_expanded_before_it() {
+        let root = spec(r#"{"image":"x:1"}"#);
+        let local = spec(r#"{"mixins":["locals-own"]}"#);
+        let graph = graph(&[("locals-own", r#"{}"#)]);
+        let sources = flatten(
+            &root,
+            &[],
+            Some(Source {
+                label: "lns-local-mixin.yaml",
+                spec: &local,
+            }),
+            &graph,
+        )
+        .expect("every reference resolves");
+        assert_eq!(
+            labels(&sources),
+            [ROOT_LABEL, "locals-own", "lns-local-mixin.yaml"],
+            "§3.3.2 puts a mixin's own mixins after it, but §8.1 says the local one is last outright, and what it pulled is still something pulled"
         );
     }
 
@@ -382,12 +626,12 @@ mod tests {
             ("m5", r#"{}"#),
         ];
         let root = spec(r#"{"image":"x:1","mixins":["m1"]}"#);
-        assert_eq!(flatten(&root, &[], &graph(&chain)).unwrap().len(), 6);
+        assert_eq!(flatten(&root, &[], None, &graph(&chain)).unwrap().len(), 6);
 
         let mut deeper = chain;
         deeper[4] = ("m5", r#"{"mixins":["m6"]}"#);
         deeper.push(("m6", r#"{}"#));
-        let err = flatten(&root, &[], &graph(&deeper)).unwrap_err();
+        let err = flatten(&root, &[], None, &graph(&deeper)).unwrap_err();
         assert!(
             format!("{err:#}").contains("deeper than 5 mixins"),
             "got: {err:#}"
@@ -400,6 +644,7 @@ mod tests {
         let err = flatten(
             &root,
             &[],
+            None,
             &graph(&[("a", r#"{"mixins":["b"]}"#), ("b", r#"{"mixins":["a"]}"#)]),
         )
         .unwrap_err();
@@ -412,7 +657,7 @@ mod tests {
     #[test]
     fn a_reference_nothing_pulled_refuses_rather_than_being_skipped() {
         let root = spec(r#"{"image":"x:1","mixins":["absent"]}"#);
-        let err = flatten(&root, &[], &BTreeMap::new()).unwrap_err();
+        let err = flatten(&root, &[], None, &BTreeMap::new()).unwrap_err();
         assert!(
             format!("{err:#}").contains("is not resolved"),
             "skipping it would boot a sandbox without what its own document declared; got: {err:#}"
@@ -434,7 +679,167 @@ mod tests {
     }
 
     fn merged(owned: &[(String, SandboxSpec)]) -> SandboxSpec {
-        merge(&as_sources(owned)).expect("these sources resolve")
+        merge(&as_sources(owned))
+            .expect("these sources resolve")
+            .spec
+    }
+
+    fn contributions(owned: &[(String, SandboxSpec)]) -> Vec<Contribution> {
+        merge(&as_sources(owned))
+            .expect("these sources resolve")
+            .contributions
+    }
+
+    fn contribution(owned: &[(String, SandboxSpec)], block: Block, key: &str) -> Contribution {
+        contributions(owned)
+            .into_iter()
+            .find(|c| c.block == block && c.key == key)
+            .unwrap_or_else(|| panic!("no {block:?} contribution for {key}"))
+    }
+
+    #[test]
+    fn a_tool_a_later_source_redefines_names_the_source_and_what_it_replaced() {
+        let found = contribution(
+            &sources(&[
+                (ROOT_LABEL, r#"{"tools":["node@20","python@3.12"]}"#),
+                ("obs", r#"{"tools":["node@22"]}"#),
+            ]),
+            Block::Tool,
+            "node",
+        );
+        assert_eq!(found.source, "obs");
+        assert_eq!(
+            found.displaced,
+            [Displaced {
+                source: ROOT_LABEL.to_string(),
+                summary: "node@20".to_string()
+            }],
+            "a tool the developer read in the document is gone from the run, so the disclosure has to say which source took it and what it took it from"
+        );
+    }
+
+    #[test]
+    fn a_source_nothing_replaced_is_attributed_with_an_empty_displacement() {
+        let found = contribution(
+            &sources(&[
+                (ROOT_LABEL, r#"{"tools":["node@20"]}"#),
+                ("obs", r#"{"tools":["ripgrep@14"]}"#),
+            ]),
+            Block::Tool,
+            "ripgrep",
+        );
+        assert_eq!(found.source, "obs");
+        assert!(
+            found.displaced.is_empty(),
+            "a mixin that adds a tool replaced nothing, and saying otherwise would invent a conflict"
+        );
+    }
+
+    #[test]
+    fn a_mount_records_the_kind_that_held_the_target_before_it() {
+        let found = contribution(
+            &sources(&[
+                (
+                    ROOT_LABEL,
+                    r#"{"volumes":[{"type":"volume","name":"cache","target":"/cache"}]}"#,
+                ),
+                (
+                    "obs",
+                    r#"{"filesets":[{"inline":{"a.md":"x"},"mountPath":"/cache"}]}"#,
+                ),
+            ]),
+            Block::Mount,
+            "/cache",
+        );
+        assert_eq!(found.source, "obs");
+        assert_eq!(
+            found.displaced,
+            [Displaced {
+                source: ROOT_LABEL.to_string(),
+                summary: "volume cache".to_string()
+            }],
+            "one target is one keyspace, so a fileset taking a volume's target has to read as the replacement it is"
+        );
+    }
+
+    #[test]
+    fn a_credential_a_mixin_contributes_names_the_mixin() {
+        let found = contribution(
+            &sources(&[
+                (ROOT_LABEL, r#"{"image":"x:1"}"#),
+                (
+                    "obs",
+                    r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}"#,
+                ),
+            ]),
+            Block::Credential,
+            "SOME_TOKEN",
+        );
+        assert_eq!(
+            found.source, "obs",
+            "a credential the sandbox never asked for is exactly what a reader has to be able to trace to its mixin"
+        );
+    }
+
+    #[test]
+    fn every_egress_entry_is_attributed_and_none_displaces_another() {
+        let found = contributions(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"egress":{"http":[{"match":"api.base.example","verdict":"allow"}]}}"#,
+            ),
+            (
+                "obs",
+                r#"{"egress":{"http":[{"match":"api.obs.example","verdict":"allow"}]}}"#,
+            ),
+        ]));
+        let rules: Vec<(&str, &str)> = found
+            .iter()
+            .filter(|c| c.block == Block::Egress)
+            .map(|c| (c.key.as_str(), c.source.as_str()))
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                ("allow api.obs.example", "obs"),
+                ("allow api.base.example", ROOT_LABEL)
+            ],
+            "egress is a union in decision order, so every entry keeps its own source and nothing is reported as replaced"
+        );
+        assert!(
+            found
+                .iter()
+                .filter(|c| c.block == Block::Egress)
+                .all(|c| c.displaced.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_third_source_records_both_the_sources_it_displaced() {
+        let found = contribution(
+            &sources(&[
+                (ROOT_LABEL, r#"{"tools":["node@20"]}"#),
+                ("obs", r#"{"tools":["node@21"]}"#),
+                ("pg", r#"{"tools":["node@22"]}"#),
+            ]),
+            Block::Tool,
+            "node",
+        );
+        assert_eq!(found.source, "pg");
+        assert_eq!(
+            found.displaced,
+            [
+                Displaced {
+                    source: ROOT_LABEL.to_string(),
+                    summary: "node@20".to_string()
+                },
+                Displaced {
+                    source: "obs".to_string(),
+                    summary: "node@21".to_string()
+                }
+            ],
+            "reporting only the last loser would hide that the document's own version lost too"
+        );
     }
 
     #[test]
@@ -609,14 +1014,14 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"deny"}]}}"#,
             ),
             (
                 "later",
-                r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
             ),
         ]));
-        let table = &merged.policy.egress.http;
+        let table = &merged.egress.http;
         assert_eq!(table.len(), 2, "both entries survive the union");
         assert_eq!(
             table[0].verdict,
@@ -630,14 +1035,14 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"deny"}]}}}"#,
+                r#"{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"deny"}]}}"#,
             ),
             (
                 "later",
-                r#"{"policy":{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}}}"#,
+                r#"{"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]}}"#,
             ),
         ]));
-        let table = &merged.policy.egress.tcp;
+        let table = &merged.egress.tcp;
         assert_eq!(table.len(), 2);
         assert_eq!(
             table[0].verdict,
@@ -666,10 +1071,9 @@ mod tests {
     fn one_documents_own_order_survives_inside_its_own_entries() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}}"#,
+            r#"{"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]}}"#,
         )]));
         let patterns: Vec<&str> = merged
-            .policy
             .egress
             .http
             .iter()
@@ -711,7 +1115,7 @@ mod tests {
     fn a_merged_document_round_trips_through_its_own_serialization() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"policy":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#,
+            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
         )]));
         let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(

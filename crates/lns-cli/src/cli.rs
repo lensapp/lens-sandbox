@@ -77,7 +77,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory, auto-created with no rules if absent."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory, auto-created with no rules if absent."
     )]
     pub policy: Option<PathBuf>,
 
@@ -223,6 +223,10 @@ pub struct RunArgs {
     /// The mixins a pulled sandbox resolved into, ready to display; the merged document declares none of its own, so this is the only place a composed sandbox says so.
     #[arg(skip)]
     pub resolved_mixins: Vec<String>,
+
+    /// Which source decided each entry the summary shows, and what that decision replaced.
+    #[arg(skip)]
+    pub contributions: Vec<lns_ipc::SourceContribution>,
 
     #[arg(
         short = 'v',

@@ -14,7 +14,7 @@ Feature: lns-service credential flow
   dismissing a card is not a decision and settles nothing.
   Decisions and any typed values land in `~/.lns-credentials.json` (a
   pluggable host-side store, JSON-file v1). They do NOT live in
-  `lns-policy.yaml`: the shareable policy file stays free of
+  `lns-local-mixin.yaml`: the shareable policy file stays free of
   per-machine credential state. Manual edits to
   `~/.lns-credentials.json` are picked up live and double as the
   revocation mechanism.
@@ -61,7 +61,7 @@ Feature: lns-service credential flow
     And the workload's request leaves the boundary with the host-detected some-provider credential substituted in
     And the workload still sees only the placeholder
     And a future request carrying the some-provider placeholder is exchanged silently using the currently host-detected value
-    And "lns-policy.yaml" is unchanged
+    And "lns-local-mixin.yaml" is unchanged
 
   Scenario: A typed value arms the credential at the boundary and persists a stored rule
     Given a credential card for "some-provider" is visible
@@ -69,7 +69,7 @@ Feature: lns-service credential flow
     Then "~/.lns-credentials.json" gains an entry for "some-provider" with kind "stored" carrying the typed value
     And the workload's request leaves the boundary with the typed value substituted for the placeholder
     And a future request carrying the some-provider placeholder is exchanged silently using the stored value
-    And "lns-policy.yaml" is unchanged
+    And "lns-local-mixin.yaml" is unchanged
 
   Scenario: A value already bound on this machine is granted without binding it again
     Given a value for "some-provider" is bound on this machine but this workload holds no grant
@@ -94,7 +94,7 @@ Feature: lns-service credential flow
     Then the workload grant sidecar records a deny for "some-provider"
     And the workload's held request is failed at the boundary
     And a future request carrying the some-provider placeholder is failed at the boundary without prompting
-    And "lns-policy.yaml" is unchanged
+    And "lns-local-mixin.yaml" is unchanged
 
   Scenario: Closing a credential card decides nothing and asks again on the next use
     Given a credential card for "some-provider" is visible

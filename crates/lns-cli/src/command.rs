@@ -215,9 +215,11 @@ fn normalize_workload_argv(
 ) -> Vec<OsString> {
     let mut consumes = value_consuming_options(app);
     consumes.extend(value_consuming_options(cmd));
+    let mut claimed = declared_flags(app);
+    claimed.extend(declared_flags(cmd));
     let mut out = raw[..=idx].to_vec();
     let rest = &raw[idx + 1..];
-    let mut positional_seen = false;
+    let mut reference_seen = false;
     let mut i = 0;
     while i < rest.len() {
         let arg = &rest[i];
@@ -225,7 +227,10 @@ fn normalize_workload_argv(
             out.extend(rest[i..].iter().cloned());
             return out;
         }
-        if positional_seen {
+        let s = arg.to_string_lossy();
+        let named = s.split_once('=').map_or(&*s, |(name, _)| name);
+        // Past the reference a word starts the workload's command, and everything after it is the workload's; a flag lns declares is still lns's, and `--` hands the rest over whatever it looks like.
+        if reference_seen && !claimed.contains(named) && expand_it(arg).is_none() {
             out.push(OsString::from("--"));
             out.extend(rest[i..].iter().cloned());
             return out;
@@ -236,8 +241,7 @@ fn normalize_workload_argv(
             continue;
         }
         out.push(arg.clone());
-        let s = arg.to_string_lossy();
-        if consumes.contains(s.as_ref())
+        if consumes.contains(named)
             && !s.contains('=')
             && let Some(value) = rest.get(i + 1)
         {
@@ -246,11 +250,36 @@ fn normalize_workload_argv(
             continue;
         }
         if !s.starts_with('-') {
-            positional_seen = true;
+            reference_seen = true;
         }
         i += 1;
     }
     out
+}
+
+/// The flags a command declares itself, which stay its own wherever they are written; clap's `--help` and `--version` are not among them, so `lns run node --version` still asks node.
+fn declared_flags(cmd: &clap::Command) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for arg in cmd.get_arguments() {
+        if arg.is_positional()
+            || matches!(
+                arg.get_action(),
+                clap::ArgAction::Help
+                    | clap::ArgAction::HelpShort
+                    | clap::ArgAction::HelpLong
+                    | clap::ArgAction::Version
+            )
+        {
+            continue;
+        }
+        for long in arg.get_long_and_visible_aliases().into_iter().flatten() {
+            set.insert(format!("--{long}"));
+        }
+        for short in arg.get_short_and_visible_aliases().into_iter().flatten() {
+            set.insert(format!("-{short}"));
+        }
+    }
+    set
 }
 
 fn expand_it(arg: &OsString) -> Option<Vec<OsString>> {
@@ -742,5 +771,92 @@ mod tests {
         let err =
             try_get_matches_from(["lns", "run", "--help"]).expect_err("--help exits through clap");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn a_flag_lns_declares_is_lns_wherever_it_is_written() {
+        let args: crate::cli::RunArgs = parse_args([
+            "lns", "run", "alpine", "--mixin", "XYZ", "--", "echo", "hello",
+        ])
+        .expect("a flag lns declares is lns's, and `--` is what hands the rest over");
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.mixins, ["XYZ"]);
+        assert_eq!(args.cmd, ["echo", "hello"]);
+    }
+
+    #[test]
+    fn the_workloads_command_needs_no_separator_when_it_starts_with_a_word() {
+        let args: crate::cli::RunArgs =
+            parse_args(["lns", "run", "alpine", "--mixin", "XYZ", "echo", "hello"])
+                .expect("a word is not a flag, so it starts the command");
+        assert_eq!(args.mixins, ["XYZ"]);
+        assert_eq!(args.cmd, ["echo", "hello"]);
+    }
+
+    #[test]
+    fn a_global_flag_after_the_reference_is_lns_too() {
+        let matches = try_get_matches_from(["lns", "run", "alpine", "--log-level", "debug"])
+            .expect("a flag lns declares at the top level is still lns's");
+        assert_eq!(
+            matches.get_one::<crate::cli::LogLevel>("log_level"),
+            Some(&crate::cli::LogLevel::Debug),
+            "a global flag reaches the subcommand at parse time, not at normalise time, so it is the one an argv walk forgets"
+        );
+    }
+
+    #[test]
+    fn a_flag_written_with_its_value_attached_is_lns_too() {
+        let args: crate::cli::RunArgs = parse_args(["lns", "run", "alpine", "--mixin=./x"])
+            .expect("one spelling of a flag is not more the workload's than another");
+        assert_eq!(args.mixins, ["./x"]);
+        assert!(args.cmd.is_empty());
+    }
+
+    #[test]
+    fn a_combined_it_after_the_reference_is_still_lns() {
+        let args: crate::cli::RunArgs = parse_args(["lns", "run", "alpine", "-it"])
+            .expect("-it is two flags lns declares, however they are written together");
+        assert!(
+            args.interactive && args.tty && args.cmd.is_empty(),
+            "a combined short is not a word, so it does not start the workload's command; got interactive={} tty={} cmd={:?}",
+            args.interactive,
+            args.tty,
+            args.cmd
+        );
+    }
+
+    #[test]
+    fn an_explicit_separator_still_passes_a_flag_shaped_command() {
+        let args: crate::cli::RunArgs =
+            parse_args(["lns", "run", "alpine", "--", "--mixin", "./x"]).unwrap();
+        assert_eq!(
+            args.cmd,
+            ["--mixin", "./x"],
+            "`--` is what says the rest is the workload's, so it has to survive the refusal"
+        );
+        assert!(args.mixins.is_empty());
+    }
+
+    #[test]
+    fn a_flag_lns_does_not_own_still_reaches_the_workload() {
+        for (argv, expected) in [
+            (["lns", "run", "node", "--version"], "--version"),
+            (["lns", "run", "alpine", "--help"], "--help"),
+        ] {
+            let args: crate::cli::RunArgs = parse_args(argv)
+                .unwrap_or_else(|e| panic!("`{}` asks the workload, not lns: {e}", argv.join(" ")));
+            assert_eq!(args.cmd, [expected]);
+        }
+    }
+
+    #[test]
+    fn a_flag_after_the_workloads_own_command_is_the_workloads() {
+        let args: crate::cli::RunArgs =
+            parse_args(["lns", "run", "alpine", "sh", "--mixin", "x"]).unwrap();
+        assert_eq!(
+            args.cmd,
+            ["sh", "--mixin", "x"],
+            "only the first token after the reference can be a misplaced flag; past it the workload owns every word"
+        );
     }
 }

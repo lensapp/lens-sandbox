@@ -29,6 +29,13 @@ impl MapFs {
 }
 
 impl Fs for MapFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        self.files
+            .borrow()
+            .keys()
+            .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
+    }
+
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         self.files
             .borrow()

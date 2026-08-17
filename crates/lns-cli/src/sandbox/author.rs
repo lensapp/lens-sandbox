@@ -8,9 +8,8 @@ use super::SandboxCommand;
 pub const LNS_YAML: &str = "lns.yaml";
 
 const SCAFFOLD: &str = "apiVersion: lns.run/v1
-kind: Sandbox
-metadata:
-  name: sandbox
+kind: sandbox
+name: sandbox
 spec:
   image: docker.io/library/alpine:3.20
   command: sh
@@ -19,10 +18,9 @@ spec:
   resources:
     cpu: 1
     memory: 512Mi
-  policy:
-    egress:
-      http: []
-      tcp: []
+  egress:
+    http: []
+    tcp: []
   connectors: []
   credentials: []
   volumes:
@@ -39,6 +37,7 @@ pub trait Fs {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
+    fn is_dir(&self, path: &Path) -> bool;
     fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>>;
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>>;
 }
@@ -200,7 +199,7 @@ pub fn inspect_local<F: Fs, W: Write>(
 }
 
 fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut W) -> Result<()> {
-    writeln!(out, "Sandbox: {}", def.metadata.name)?;
+    writeln!(out, "Sandbox: {}", def.name)?;
     writeln!(out, "  image:        {}", def.spec.image)?;
     for mixin in &def.spec.mixins {
         writeln!(out, "  mixin: {mixin}")?;
@@ -242,9 +241,9 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
     }
     writeln!(
         out,
-        "  policy:       {} route(s){}",
-        def.spec.policy.egress.http.len(),
-        raw_rule_note(def.spec.policy.egress.tcp.len())
+        "  egress:       {} route(s){}",
+        def.spec.egress.http.len(),
+        raw_rule_note(def.spec.egress.tcp.len())
     )?;
     if !def.spec.connectors.is_empty() {
         writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;
@@ -286,7 +285,7 @@ mod tests {
     }
 
     fn valid_yaml() -> &'static str {
-        "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n"
     }
 
     fn inspect_cmd(target: Option<&str>) -> SandboxCommand {
@@ -328,7 +327,7 @@ mod tests {
         let code = init(&fs, cwd(), &mut out).unwrap();
         assert_eq!(code, 0);
         let written = fs.read_to_string(&yaml_path(cwd())).unwrap();
-        assert!(written.contains("kind: Sandbox"));
+        assert!(written.contains("kind: sandbox"));
         assert!(written.contains("apiVersion: lns.run/v1"));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("✓ created lns.yaml"), "got: {text}");
@@ -366,7 +365,7 @@ mod tests {
 
     #[test]
     fn validate_file_selector_roots_filesets_at_the_files_directory_and_names_it() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
         let fs = MapFs::with(&[
             ("/other/lns.dev.yaml", yaml),
             ("/other/skills/prompts.md", "p"),
@@ -391,7 +390,7 @@ mod tests {
     fn validate_file_selector_reports_problems_under_the_selected_name() {
         let fs = fake(
             "/work/lns.dev.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec: {}\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec: {}\n",
         );
         let mut out = Vec::new();
         let code = validate(&fs, cwd(), Some(Path::new("lns.dev.yaml")), &mut out).unwrap();
@@ -460,7 +459,7 @@ mod tests {
             "got: {text}"
         );
         assert!(
-            text.contains("policy:") && text.contains("route(s)"),
+            text.contains("egress:") && text.contains("route(s)"),
             "got: {text}"
         );
         assert!(text.contains("connectors: some-provider"), "got: {text}");
@@ -468,7 +467,7 @@ mod tests {
 
     #[test]
     fn inspect_local_lists_the_mixins_the_definition_layers_on() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  mixins:\n    - ./mixins/postgres-tools/\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  mixins:\n    - ./mixins/postgres-tools/\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
@@ -481,7 +480,7 @@ mod tests {
 
     #[test]
     fn inspect_local_counts_raw_rules_apart_from_routes() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  policy:\n    egress:\n      http:\n        - match: api.example.test\n          verdict: allow\n      tcp:\n        - match: db.internal:5432\n          verdict: allow\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n    tcp:\n      - match: db.internal:5432\n        verdict: allow\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
@@ -494,7 +493,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_a_command_when_present() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  command: agent --serve\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  command: agent --serve\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
@@ -507,7 +506,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_env_sorted_by_key() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  env:\n    SHELL: /bin/sh\n    FOO: bar\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  env:\n    SHELL: /bin/sh\n    FOO: bar\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
@@ -524,7 +523,7 @@ mod tests {
     fn validate_reports_a_broken_path_fileset_with_its_path() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
         );
         let mut out = Vec::new();
         let code = validate(&fs, cwd(), None, &mut out).unwrap();
@@ -543,7 +542,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_path_and_ref_filesets() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - ref: registry.example.test/team/settings@sha256:abc\n      mountPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &[], &mut out).unwrap();
@@ -566,7 +565,7 @@ mod tests {
 
     #[test]
     fn inspect_local_lists_each_declared_tool() {
-        let yaml = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec:\n  image: x:1\n  tools:\n    - node@22\n    - python@3.12\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  tools:\n    - node@22\n    - python@3.12\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &[], &mut out).unwrap();
@@ -587,7 +586,7 @@ mod tests {
 
     #[test]
     fn inspect_file_selector_renders_the_named_definition() {
-        let variant = "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
+        let variant = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: ghcr.io/team/dev:1\n";
         let fs = MapFs::with(&[
             ("/work/lns.yaml", valid_yaml()),
             ("/work/lns.dev.yaml", variant),
@@ -638,7 +637,7 @@ mod tests {
     fn inspect_local_refuses_an_invalid_definition() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: Sandbox\nmetadata:\n  name: hermes\nspec: {}\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec: {}\n",
         );
         let mut out = Vec::new();
         let err = inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap_err();

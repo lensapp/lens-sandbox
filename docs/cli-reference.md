@@ -100,7 +100,7 @@ the `./lns.yaml` definition with its command overridden.
 | `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory roots the definition's relative binds and filesets. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
-| `--policy <PATH>`            | `lns-policy.yaml`| Policy file; auto-created with no rules if absent.                      |
+| `--policy <PATH>`            | `lns-local-mixin.yaml`| Policy file; auto-created with no rules if absent.                      |
 | `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Takes a reference or a directory. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`, and a directory shows its absolute path. |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
@@ -163,9 +163,9 @@ interchangeable everywhere a run is addressed.
 
 | Subcommand | Shortcut       | Meaning |
 | ---------- | -------------- | ------- |
-| `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: Sandbox`) in this directory. |
+| `init`     | `lns init`     | Scaffold a default `./lns.yaml` (`kind: sandbox`) in this directory. |
 | `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. Exits non-zero and lists each problem when the definition is broken. `-f`/`--file` validates another definition file instead. |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a kit artifact — a `kind: Sandbox` document publishes as a sandbox, a `kind: Mixin` one as a mixin — in one step. `<REF>` is the registry reference to publish at; a bare one (`you/agent`) resolves against the `run.registry` default, else the Lens hub (`hub.lns.run`). Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing (declared tools are not resolved — it notes when the published digest may differ). `-f`/`--file` publishes another definition file instead. |
+| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as a kit artifact — a `kind: sandbox` document publishes as a sandbox, a `kind: mixin` one as a mixin — in one step. `<REF>` is the registry reference to publish at; a bare one (`you/agent`) resolves against the `run.registry` default, else the Lens hub (`hub.lns.run`). Each `spec.filesets` `path` directory is packed into a FileSet artifact, pushed alongside, and pinned by digest in the published config; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. `--dry-run` validates, packs, and builds all of it offline, prints the digests that would publish, and uploads nothing (declared tools are not resolved — it notes when the published digest may differ). `-f`/`--file` publishes another definition file instead. |
 | `pull`     | `lns pull`     | Inspect and fetch a published sandbox and its base image into the local cache. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — it takes no index entry, so it never appears in `lns image ls`. A bare `<REF>` resolves the same way as for `push`. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). A bare `<SOURCE>` resolves the same way as for `push`; a bare `<TARGET>` follows `<SOURCE>`'s registry, so a same-repo retag never has to repeat it. |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
@@ -175,13 +175,13 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `Sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `Mixin`'s own blocks as its author wrote them, unresolved; or a plain `Image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. A bare reference resolves the same way as for `push`. |
+| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <ref> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. A bare reference resolves the same way as for `push`. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). A bare reference resolves the same way as for `push`. |
 | `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Requires `-f`/`--force` — there is no interactive prompt. |
 
-The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: Sandbox`) carries a
+The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
-`workdir`, `volumes`, `env`, `policy`, and `connectors`. Declarative mounts
+`workdir`, `volumes`, `env`, `egress`, and `connectors`. Declarative mounts
 accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
 `readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).
@@ -294,7 +294,7 @@ lns update [--force] [--dry-run]
 ## `lns policy`
 
 Edit network rules in a policy file. All subcommands accept `--policy <PATH>`
-(default `lns-policy.yaml` in the current directory).
+(default `lns-local-mixin.yaml` in the current directory).
 
 ```bash
 lns policy allow     <PATTERN> [--description <TEXT>] [--binary <PATH>]…
@@ -344,8 +344,8 @@ Manage the credential-connector catalog — the services whose credentials reach
 workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
 declared in a sandbox definition's `spec.connectors` seeds its placeholder env
 var but is only offered — the workload is prompted on first use, never armed
-automatically. Connecting one records it under `connectors:` in that
-directory's `lns-policy.yaml` and binds its value on your machine; the workload
+automatically. Connecting one records the connection for that project on this
+machine and binds its value; the workload
 still meets a first-use card, and answering it is what grants that workload the
 value.
 

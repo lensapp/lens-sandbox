@@ -94,12 +94,18 @@ pub enum Request {
         project_dir: String,
         #[serde(default)]
         mixins: Vec<String>,
+        /// The decisions file this run reads, so what the preflight resolves is what the boot resolves.
+        #[serde(default)]
+        decisions: Option<String>,
     },
     InspectImage {
         image: String,
         /// The mixin references the user named on the command line, in flag order, so the preflight describes the document that will boot.
         #[serde(default)]
         mixins: Vec<String>,
+        /// The decisions file this run reads, absent when the question is about the artifact rather than about a run in some directory.
+        #[serde(default)]
+        decisions: Option<String>,
     },
     TagImage {
         from: String,
@@ -237,6 +243,9 @@ pub enum Response {
         mixins: Vec<String>,
         /// What each mixin the user named resolved to, in the order they named them.
         pinned_mixins: Vec<String>,
+        /// Which source decided each entry of the merged document, so the disclosure can attribute every line it shows.
+        #[serde(default)]
+        contributions: Vec<SourceContribution>,
     },
     ImageTagged {
         from: String,
@@ -315,6 +324,33 @@ pub struct MixinView {
     pub policy_flags: Vec<String>,
 }
 
+/// The block a contribution belongs to, which is what tells a renderer which line to attribute it to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContributionBlock {
+    Credential,
+    Tool,
+    Mount,
+    Port,
+    Egress,
+}
+
+/// One entry of a resolved sandbox, named by the source that decided it and by whatever that decision replaced (`docs/sandbox-spec.md` §1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceContribution {
+    pub block: ContributionBlock,
+    pub key: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displaced: Vec<DisplacedEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplacedEntry {
+    pub source: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxView {
     pub reference: String,
@@ -327,6 +363,9 @@ pub struct SandboxView {
     /// What each mixin the user named resolved to, in the order they named them, so the run boots the bytes its preflight pinned.
     #[serde(default)]
     pub pinned_mixins: Vec<String>,
+    /// Which source decided each entry below, and what that decision replaced.
+    #[serde(default)]
+    pub contributions: Vec<SourceContribution>,
     #[serde(default)]
     pub workdir: Option<String>,
     /// The run-as user the sandbox declared, so a pulled artifact asking for root is visible before it boots.
@@ -513,6 +552,9 @@ pub struct RunImageArgs {
     /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
     #[serde(default)]
     pub mixins: Vec<String>,
+    /// The same references, still named for a local run whose document the preflight already merged: a connector grant keys on the composition, so layering one more mixin is asked about instead of inheriting the bare run's answer.
+    #[serde(default)]
+    pub composed_mixins: Vec<String>,
     #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
@@ -871,6 +913,7 @@ mod tests {
             image: Some("prism".into()),
             resolved_image: None,
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -908,6 +951,7 @@ mod tests {
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 1,
             mem: 512,
@@ -1038,12 +1082,13 @@ mod tests {
             image: Some("some-image:1".into()),
             resolved_image: None,
             mixins: Vec::new(),
+            composed_mixins: Vec::new(),
             name: None,
             cpus: 2,
             mem: 1024,
             cpus_explicit: true,
             mem_explicit: true,
-            policy_path: Some("/work/lns-policy.yaml".into()),
+            policy_path: Some("/work/lns-local-mixin.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
             entrypoint: Some("/bin/sh".into()),
@@ -1076,7 +1121,7 @@ mod tests {
             }],
             auto_remove: true,
             verify_sandbox: false,
-            definition: Some(r#"{"kind":"Sandbox"}"#.into()),
+            definition: Some(r#"{"kind":"sandbox"}"#.into()),
             definition_dir: Some("/work/proj".into()),
         }
     }
@@ -1087,7 +1132,10 @@ mod tests {
         let config = RunConfig::from_run_args(&args);
         assert_eq!(config.cpus, 2);
         assert_eq!(config.mem_mib, 1024);
-        assert_eq!(config.policy_path.as_deref(), Some("/work/lns-policy.yaml"));
+        assert_eq!(
+            config.policy_path.as_deref(),
+            Some("/work/lns-local-mixin.yaml")
+        );
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
         assert_eq!(config.entrypoint.as_deref(), Some("/bin/sh"));
         assert_eq!(config.hostname.as_deref(), Some("demo"));
@@ -1397,6 +1445,7 @@ mod tests {
         let req = Request::InspectImage {
             image: "registry.example.test/team/sandbox:1".into(),
             mixins: vec!["ghcr.io/acme/obs-tools:2".into()],
+            decisions: Some("/work/lns-local-mixin.yaml".into()),
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1452,6 +1501,7 @@ mod tests {
         let view = SandboxView {
             mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
             reference: "registry.example.test/team/sandbox:1".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             image: "registry.example.test/runtime:1".into(),

@@ -26,9 +26,8 @@ lns init
 
 ```yaml
 apiVersion: lns.run/v1
-kind: Sandbox
-metadata:
-  name: sandbox
+kind: sandbox
+name: sandbox
 spec:
   image: docker.io/library/alpine:3.20
   command: sh
@@ -37,9 +36,8 @@ spec:
   resources:
     cpu: 1
     memory: 512Mi
-  policy:
-    egress:
-      http: []
+  egress:
+    http: []
   connectors: []
   credentials: []
   volumes:
@@ -64,7 +62,7 @@ The `spec` fields:
 | `workdir`      | Absolute guest working directory. It is created when missing.                 |
 | `user`         | The run-as user the sandbox needs, `USER[:GROUP]` like `-u`, so a definition that needs root is runnable as published. A per-run `-u` still wins, and the image's own `USER` is the fallback when this is unset. |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
-| `policy`       | The network policy — the `egress.http` and `egress.tcp` rule tables (see [Policy](policy.md)). |
+| `egress`       | Where the workload may reach — the `http` and `tcp` rule tables (see [Policy](policy.md)). |
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
@@ -117,7 +115,7 @@ lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
 You run `lns run` from a project directory; that's where Lens Sandbox looks for the
-`lns-policy.yaml` that governs the run. To expose your actual host files to the
+`lns-local-mixin.yaml` that governs the run. To expose your actual host files to the
 workload, bind-mount a directory with `-v /host/path:/guest/path` (see
 [Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
 attach a named volume instead.
@@ -565,7 +563,7 @@ spec:
     - ghcr.io/acme/observability@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582
 ```
 
-A mixin is a document of `kind: Mixin`. It may carry anything a sandbox can
+A mixin is a document of `kind: mixin`. It may carry anything a sandbox can
 except the blocks that describe one launch — `image`, `command`, `workdir`,
 `user`, `resources` — and it may not name a connector.
 
@@ -580,29 +578,77 @@ lns pull ghcr.io/acme/observability:2      # cache it and the mixins it names
 
 **The last source to say something about a thing wins.** Sources are ordered:
 the sandbox first, then each entry in `spec.mixins` in order with that mixin's
-own mixins expanded right after it, then each `--mixin` the user passed.
+own mixins expanded right after it, then each `--mixin` the user passed, and
+last the directory's own
+[`lns-local-mixin.yaml`](policy.md#the-policy-file) — so nothing you pulled
+overrules what you decided here. That file's egress is the exception: it reaches
+the running sandbox live rather than through the merge, so a rule you delete
+mid-run stops applying.
 
-A directory entry is read from this machine, relative to the document that names
-it. A published sandbox may not name one — a consumer has no copy of your
+A local entry is read from this machine, relative to the document that names it.
+It may name the directory — whose `lns.yaml` is read — or the document itself,
+the same two spellings `lns run` takes. A published sandbox may not name one — a consumer has no copy of your
 working directory — so `spec.mixins` in a document you `lns push` must be
-digest-pinned. `lns validate` reports a directory that holds no `lns.yaml`.
+digest-pinned. `lns validate` reports a path that holds no document.
 
 You can add your own for a single run:
 
 ```bash
-lns run . --mixin ./mixins/debug-tools
-lns run ghcr.io/acme/agent:1 --mixin ghcr.io/acme/observability:2
+lns run --mixin ./mixins/debug-tools .
+lns run --mixin ./mixins/debug-tools/lns.yaml .
 ```
 
-A directory merges only into a document this machine read, whoever names it — so
-`--mixin ./dir` works on a local run and is refused for a published sandbox.
+**`--` hands the rest to the workload.** An `lns` flag stays `lns`'s wherever you
+write it, so these are the same run:
+
+```bash
+lns run --mixin ./mixins/debug-tools alpine -- echo hello
+lns run alpine --mixin ./mixins/debug-tools -- echo hello
+```
+
+Without `--`, the workload's command starts at the first word `lns` does not
+claim, and every word after it belongs to the workload:
+
+```bash
+lns run alpine --mixin ./mixins/debug-tools echo hello   # command: echo hello
+lns run alpine sh -c 'echo hi'                           # command: sh -c 'echo hi'
+```
+
+A flag `lns run` does not declare belongs to the workload, so `lns run node
+--version` asks node for its version. Use `--` when you want to pass a flag
+`lns` does declare: `lns run alpine -- --mixin x`.
+
+After the reference, `lns` claims a short flag written apart from its value
+(`-e FOO=1`) or joined with `=` (`-e=FOO=1`); written against its value
+(`-eFOO=1`) it starts the workload's command instead. Before the reference every
+spelling is `lns`'s, as usual. Anything after `--` is the workload's, always.
+
+`--mixin ./dir` works on any run, published or not — you typed it on this
+machine. A **document** may not name one: `spec.mixins` in something you `lns
+push` must be digest-pinned, because whoever pulls it has no copy of your
+directory.
 
 A `--mixin` may be a tag, where a document's entry may not. The run pins it
 before it reports it, so the summary names the exact bytes you approved:
 
 ```
-  Mixins:    /work/mixins/debug-tools, observability:2 → ghcr.io/acme/observability@sha256:c41e8b7d…
+  Mixins:    /work/mixins/debug-tools, observability:2 → ghcr.io/acme/observability@sha256:c41e8b7d20a9…
 ```
+
+A composed run is a document you did not write in full, so the summary says
+where each line came from — and lists the rules and credentials the merge
+produced, which an uncomposed run has no second author to attribute:
+
+```
+  Volume:    cache → /home/agent/.cache  [from /work/mixins/debug-tools]
+  Tools:     node@22  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…, replaced node@20 from the sandbox]
+  Rules:     allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
+             deny proxy.vendor.example  [from the sandbox]
+  Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
+```
+
+A run that resolved no mixin prints what it always has: one author, nothing to
+attribute.
 
 `lns inspect <REF> --mixin <REF>` shows the same composition without starting a
 run.
@@ -1006,8 +1052,8 @@ primarily a live view of its output.
 **running** run it prints one JSON document with the run's status, image, command,
 and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
 the contents of its policy file when that file is readable on this machine. For a
-**cached** reference it prints the artifact's kind and definition — a plain `Image`,
-or a `Sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
+**cached** reference it prints the artifact's kind and definition — a plain `image`,
+or a `sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
 flagging a permissive default policy.
 
 ### Listing resource use
@@ -1045,7 +1091,7 @@ or `lns pull` simply fetches or rebuilds it again.
 
 [`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
-plus node declared under `spec.tools`, `spec.env`, a tight `policy` allowlist,
+plus node declared under `spec.tools`, `spec.env`, a tight `spec.egress` allowlist,
 the `claude-code-subscription` connector, a `.` bind at `/workspace`, and a
 self-contained inline fileset that seeds the agent's home. Copy its `lns.yaml`
 into your project and `lns run`.

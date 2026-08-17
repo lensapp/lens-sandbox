@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::relay::Relay;
 
-mod adapter;
+pub(crate) mod adapter;
 pub(crate) use adapter::revocations_before_gate;
 mod real;
 mod traits;
@@ -542,9 +542,7 @@ mod tests {
     fn test_consent(credentials: &[lns_spec::Credential]) -> RunConsent<'_> {
         RunConsent {
             credentials,
-            workload: lns_policy::grants::WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            workload: lns_policy::grants::WorkloadIdentity::definition("/proj"),
             signed_in: vec![],
             revocations_at_gate: std::collections::HashMap::new(),
         }
@@ -571,8 +569,8 @@ mod tests {
             EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH"),
             EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
         ];
-        let policy_path = dir.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = dir.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
         lns_policy::connectors::Catalog {
             connectors: vec![lns_policy::connectors::Connector {
                 id: "some-oauth".into(),
@@ -650,9 +648,7 @@ mod tests {
             GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
         };
         let fixture = boot_sign_in_fixture();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
 
         let session = start_with_boot_sign_in(&fixture, &workload).await;
 
@@ -681,9 +677,7 @@ mod tests {
 
         let session = start_with_boot_sign_in(
             &fixture,
-            &lns_policy::grants::WorkloadIdentity::Definition {
-                dir: "/proj".into(),
-            },
+            &lns_policy::grants::WorkloadIdentity::definition("/proj"),
         )
         .await;
 
@@ -707,8 +701,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
 
         let result = SupervisorSession::start(
             "deadbeef00000000000000000000aa99".to_string(),
@@ -729,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn start_merges_a_sandbox_policy_floor_under_the_local_overlay() {
+    async fn start_merges_a_sandbox_shipped_policy_under_the_local_decisions() {
         use crate::approval_flow::window::{self, WindowState};
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
@@ -738,8 +732,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-policy.yaml");
-        std::fs::write(&policy_path, "network:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("lns-local-mixin.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
         let mut sandbox_policy = lns_policy::Policy::default();
         sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 

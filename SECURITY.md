@@ -28,7 +28,7 @@ Security-sensitive areas include:
 
 - Guest/host isolation — the microVM boundary (Vz on macOS, KVM on Linux) and the host-side service that owns its lifecycle
 - Policy enforcement — whether a workload can reach a network gate, port, or credential-backed action that policy did not approve
-- The approval flow — decisions written to `lns-policy.yaml`, and whether a denied request can be silently turned into an allowed one
+- The approval flow — decisions written to `lns-local-mixin.yaml`, and whether a denied request can be silently turned into an allowed one
 - Credential handling — placeholder substitution and boundary credential exchange, and whether any real secret can reach the guest VM
 - The audit chain — tamper-evidence of the recorded run history, and the `lns audit` verifier
 - The host IPC surface — the local Unix socket between `lns` and `lns-service`

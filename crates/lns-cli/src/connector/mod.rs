@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lns_policy::Policy;
 use lns_policy::connectors::{
     AuthKind, Catalog, Connector, ConnectorRoute, CredentialAuth, bundled_connectors,
     effective_connectors,
@@ -83,7 +82,7 @@ pub struct ConnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -94,7 +93,7 @@ pub struct DisconnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -109,7 +108,7 @@ pub struct ConnectorListArgs {
 pub struct GrantsArgs {
     #[arg(
         long,
-        help = "Policy file path whose project the grants are listed for; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path whose project the grants are listed for; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
     #[arg(
@@ -127,7 +126,7 @@ pub struct RevokeArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path whose project the grant is revoked from; defaults to `lns-policy.yaml` in the current directory."
+        help = "Policy file path whose project the grant is revoked from; defaults to `lns-local-mixin.yaml` in the current directory."
     )]
     pub policy: Option<PathBuf>,
 }
@@ -404,12 +403,7 @@ pub async fn connect(
         }
     };
     let path = policy_path(args.policy.as_deref(), cwd);
-    let mut policy = Policy::load_or_default(&path)
-        .with_context(|| format!("loading policy from {}", path.display()))?;
-    policy.connect(args.id.clone());
-    policy
-        .save_atomic(&path)
-        .with_context(|| format!("writing policy to {}", path.display()))?;
+    connect_project(grants_path, &project_key(&path), &args.id)?;
     writeln!(writer, "{closing}")?;
     // Binding the value cannot lift a workload's decline, so say what will: otherwise the connect reports success and the workload goes on being refused with nothing on screen explaining it.
     match standing_declines(grants_path, &project_key(&path), &args.id) {
@@ -455,22 +449,39 @@ pub fn disconnect(
     writer: &mut impl Write,
 ) -> Result<i32> {
     let path = policy_path(args.policy.as_deref(), cwd);
-    let mut policy = Policy::load_or_default(&path)
-        .with_context(|| format!("loading policy from {}", path.display()))?;
-    if !policy.disconnect(&args.id) {
-        bail!("{:?} is not connected in {}", args.id, path.display());
-    }
-    // Forget the grants before dropping the id, so a sidecar this run cannot update leaves a still-connected policy to retry rather than stale grants a later reconnect would inherit.
-    let cleared = clear_project_grants(grants_path, &project_key(&path), &args.id)?;
-    policy
-        .save_atomic(&path)
-        .with_context(|| format!("writing policy to {}", path.display()))?;
+    let project = project_key(&path);
+    let cleared = disconnect_project(grants_path, &project, &args.id)?
+        .ok_or_else(|| anyhow::anyhow!("{:?} is not connected in {project}", args.id))?;
     let grants_note = match cleared {
         0 => String::new(),
         n => format!(" and forgot {n} per-workload grant(s)"),
     };
     writeln!(writer, "Disconnected {:?}{grants_note}", args.id)?;
     Ok(0)
+}
+
+/// Record that this project connected a connector, in the one file that also holds what each workload in it may spend.
+fn connect_project(grants_path: &Path, project: &str, connector: &str) -> Result<()> {
+    JsonFileGrantStore::new(grants_path.to_path_buf())
+        .update(&mut |file| file.connect(project, connector))
+        .with_context(|| format!("updating grants at {}", grants_path.display()))?;
+    Ok(())
+}
+
+/// Drop the project's connection and every grant under it in one write, answering with how many grants went; `None` when it was never connected.
+fn disconnect_project(grants_path: &Path, project: &str, connector: &str) -> Result<Option<usize>> {
+    let store = JsonFileGrantStore::new(grants_path.to_path_buf());
+    let mut cleared = None;
+    store
+        .update(&mut |file| {
+            if !file.disconnect(project, connector) {
+                return false;
+            }
+            cleared = Some(file.revoke_project_connector(project, connector));
+            true
+        })
+        .with_context(|| format!("updating grants at {}", grants_path.display()))?;
+    Ok(cleared)
 }
 
 /// Drop every per-workload grant for one connector in a project from the sidecar, returning how many were removed; the forget is always recorded, even with nothing to remove, because a run still deciding is exactly the one whose grant this has to cancel.
@@ -584,6 +595,13 @@ mod tests {
     use lns_policy::connectors::{OauthAuth, OauthFlow};
     use lns_policy::providers::{InjectionDef, InjectionKind};
     use tempfile::TempDir;
+
+    fn connected_at(dir: &Path) -> Vec<String> {
+        JsonFileGrantStore::new(dir.join("grants.json"))
+            .load()
+            .expect("the sidecar reads back")
+            .connected_in(&project_key(&dir.join("lns-local-mixin.yaml")))
+    }
 
     #[test]
     fn standing_declines_reports_none_when_the_sidecar_cannot_be_read() {
@@ -1019,8 +1037,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
-        assert_eq!(policy.connectors, ["gitlab"]);
+        assert_eq!(
+            connected_at(dir.path()),
+            ["gitlab"],
+            "connecting names a directory and no workload, so it records per project beside the per-workload grants"
+        );
     }
 
     #[tokio::test]
@@ -1060,9 +1081,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert_eq!(
-            policy.connectors,
+            connected_at(dir.path()),
             ["somesaas"],
             "a completed sign-in records the connector"
         );
@@ -1087,9 +1107,8 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("access_denied"), "got: {err:#}");
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert!(
-            policy.connectors.is_empty(),
+            connected_at(dir.path()).is_empty(),
             "a failed sign-in must not record the connector"
         );
     }
@@ -1164,9 +1183,8 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
         assert!(
-            policy.connectors.is_empty(),
+            connected_at(dir.path()).is_empty(),
             "a failed bind must not record the connector"
         );
     }
@@ -1244,8 +1262,7 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
-        let policy = Policy::load_or_default(&dir.path().join("lns-policy.yaml")).unwrap();
-        assert!(policy.connectors.is_empty());
+        assert!(connected_at(dir.path()).is_empty());
     }
 
     #[test]
@@ -1326,12 +1343,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
-                .unwrap()
-                .connectors,
-            ["gitlab"]
-        );
+        assert_eq!(connected_at(dir.path()), ["gitlab"]);
         run(
             &ConnectorCommand::Disconnect(DisconnectArgs {
                 id: "gitlab".into(),
@@ -1345,11 +1357,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            Policy::load_or_default(&dir.path().join("lns-policy.yaml"))
-                .unwrap()
-                .connectors
-                .is_empty()
-        );
+        assert!(connected_at(dir.path()).is_empty());
     }
 }

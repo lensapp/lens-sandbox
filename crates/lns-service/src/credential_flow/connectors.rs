@@ -75,7 +75,7 @@ pub fn applied_connector_routes(ids: &[String], catalog: &[Connector]) -> Vec<Ro
         .collect()
 }
 
-/// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-policy.yaml` id which stays a tolerant skip.
+/// Definition-declared ids the effective catalog cannot arm; each refuses the launch, unlike a stale `lns-local-mixin.yaml` id which stays a tolerant skip.
 pub fn unknown_connector_ids(declared: &[String], catalog: &[Connector]) -> Vec<String> {
     let known: HashSet<&str> = catalog.iter().map(|i| i.id.as_str()).collect();
     declared
@@ -192,7 +192,7 @@ pub fn resolve_applied_with_credentials(
     let mut out = resolve_applied_connectors(&base, catalog);
     // `base` drops the supplier so its own env var cannot double-seed beside the declaration's, but the reach a connect earned is not the declaration's to withdraw.
     out.routes = applied_connector_routes(&policy.connectors, catalog);
-    let ceiling_denies = crate::artifact::policy::is_closed(policy);
+    let denies_by_default = crate::artifact::policy::is_closed(policy);
     for (credential, supplier) in supplied {
         out.providers.push(DefProvider::new(declared_provider_def(
             credential, supplier,
@@ -202,7 +202,7 @@ pub fn resolve_applied_with_credentials(
         };
         // A declaration is artifact-authored, so its supplier's route must not widen the user's lockdown — a connector connected here already carries its own.
         let connected_here = policy.connectors.contains(&integ.id);
-        if !ceiling_denies && !connected_here {
+        if !denies_by_default && !connected_here {
             out.routes
                 .extend(integ.routes.iter().map(|r| r.to_route_rule()));
         }
@@ -476,9 +476,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -499,9 +497,7 @@ mod tests {
             provider_of("some-provider", "OTHER_TOKEN", "api.some-provider.example"),
         ];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -523,9 +519,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let armed = gate_armed_by_grant(
             &applied,
             &providers,
@@ -547,9 +541,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut grants = WorkloadGrantFile::default();
         grants.upsert(GrantRecord::deny(
             "proj",
@@ -570,9 +562,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -594,9 +584,7 @@ mod tests {
             "api.some-provider.example",
         )];
         let applied: HashSet<String> = ["some-provider".to_string()].into_iter().collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(&workload, "some-provider", "SOME_TOKEN", "api.old.example");
         let armed = gate_armed_by_grant(&applied, &providers, "proj", &workload, &grants);
         assert!(
@@ -612,9 +600,7 @@ mod tests {
             "SOME_TOKEN",
             "api.some-provider.example",
         )];
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let grants = allow_grants(
             &workload,
             "some-provider",
@@ -635,9 +621,7 @@ mod tests {
             "SOME_TOKEN",
             "api.some-provider.example",
         )];
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records = boot_sign_in_grants(
             &["some-provider".to_string()],
             &providers,
@@ -666,9 +650,7 @@ mod tests {
         let declared = vec![declaration("REMAPPED_TOKEN", "api.some-oauth.example")];
         let providers =
             resolve_applied_with_credentials(&Policy::default(), &declared, &catalog).providers;
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records =
             boot_sign_in_grants(&["some-oauth".to_string()], &providers, "proj", &workload);
         assert_eq!(records.len(), 1);
@@ -696,9 +678,7 @@ mod tests {
         ];
         let run = resolve_applied_with_credentials(&Policy::default(), &declared, &catalog);
         let applied: HashSet<String> = run.providers.iter().map(|p| p.id().to_string()).collect();
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let mut grants = WorkloadGrantFile::default();
         for record in boot_sign_in_grants(
             &["some-oauth".to_string()],
@@ -717,9 +697,7 @@ mod tests {
 
     #[test]
     fn boot_sign_in_grants_skip_an_id_that_resolved_no_provider() {
-        let workload = WorkloadIdentity::Definition {
-            dir: "/proj".into(),
-        };
+        let workload = WorkloadIdentity::definition("/proj");
         let records = boot_sign_in_grants(&["some-oauth".to_string()], &[], "proj", &workload);
         assert!(
             records.is_empty(),
@@ -1336,7 +1314,7 @@ mod tests {
         assert_eq!(out.providers[0].env_var(), "PROVIDER_KEY");
     }
 
-    /// A deny-by-default directory: `is_closed` reads the http table, so the catch-all deny is what makes this policy a ceiling.
+    /// A deny-by-default directory: `is_closed` reads the http table, so the catch-all deny is what closes it.
     fn closed_policy_applying(ids: &[&str]) -> Policy {
         let mut policy = policy_applying(ids);
         policy.add_rule(lns_policy::RouteRule::deny_host("*"));

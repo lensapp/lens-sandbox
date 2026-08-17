@@ -90,15 +90,15 @@ Feature: managing running sandboxes from the CLI
     And the output contains "memMib"
 
   Scenario: inspect embeds the policy file when it is readable
-    Given the service reports run 3 with policy path "/work/lns-policy.yaml"
+    Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
     And the policy file parses with one allow rule
     When the user runs sandbox command "inspect 3"
     Then the exit code is 0
     And the output contains "egress"
-    And the output contains "/work/lns-policy.yaml"
+    And the output contains "/work/lns-local-mixin.yaml"
 
   Scenario: inspect marks an unreadable policy file instead of failing
-    Given the service reports run 3 with policy path "/work/lns-policy.yaml"
+    Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
     When the user runs sandbox command "inspect 3"
     Then the exit code is 0
     And the output contains "policy file could not be read"
