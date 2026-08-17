@@ -67,7 +67,7 @@ The `spec` fields:
 | `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
-| `filesets`     | Files shipped inside the artifact (`inline`, a `path` packed and digest-pinned at push, or a pre-published digest-pinned `ref`), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
+| `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
 
@@ -472,7 +472,7 @@ spec:
   filesets:
     - path: ./seed                # a directory in the author's project
       mountPath: /home/sandbox    # owned by the workload user (the default)
-    - ref: ghcr.io/team/settings@sha256:…   # a pre-published FileSet artifact
+    - path: ./settings            # packed into a layer of this same artifact
       mountPath: /root/.agent/settings
       owner: root                 # pinned input: the workload can't rewrite it
     - inline:                     # small text files kept in lns.yaml itself
@@ -489,25 +489,31 @@ spec:
 - **`path`** names a directory in the authoring project. A local `lns run`
   snapshots it at launch — the guest sees exactly what a consumer of the
   published artifact would see (live files are `spec.volumes`' job). At
-  `lns push`, each `path` directory is packed into a deterministic FileSet
-  artifact, uploaded alongside the sandbox, and rewritten to a digest-pinned
-  `ref` in the published config. (`spec.image` is published exactly as written —
-  `lns push` does not resolve it; pin it by digest yourself for a reproducible
-  base, as above.) A `path` is a directory beside the definition, so it cannot
-  be home-anchored: a `~/…` `path` is refused and names `hostPath` as the field
-  that reads the machine that runs the sandbox.
-- **`ref`** names a pre-published FileSet artifact, always pinned by digest. A
-  pulled sandbox's filesets are fetched and materialized at launch; `lns
-  inspect` lists every fileset (`fileset: <ref> -> <mountPath>`) so you can
-  review what a sandbox ships before running it, and the run summary
+  `lns push`, each `path` directory is packed into a deterministic layer of the
+  **same** artifact the document publishes as: the files and the declaration
+  that mounts them share one digest and are approved together. The entry
+  publishes as written, keeping its `path` and `mountPath`, and push reports the
+  digest each directory shipped under (`packed fileset ./seed -> sha256:…`).
+  A sandbox or mixin artifact carries one layer per `path` entry it declares, in
+  declaration order; a pulled document whose entry no layer carries refuses the
+  run rather than reading a directory off your machine. (`spec.image` is
+  published exactly as written — `lns push` does not resolve it; pin it by digest
+  yourself for a reproducible base, as above.) A `path` is a directory beside the
+  definition, so it cannot be home-anchored: a `~/…` `path` is refused and names
+  `hostPath` as the field that reads the machine that runs the sandbox. To share
+  one directory across several sandboxes, publish a
+  [mixin](#mixins--what-a-sandbox-layers-on) that carries it — a mixin's fileset
+  is pulled from the mixin's own artifact, at the digest the disclosure named.
+  `lns inspect` lists every fileset (`fileset: <source> -> <mountPath>`) so you
+  can review what a sandbox ships before running it, and the run summary
   discloses them as `Fileset:` lines.
 - **`inline`** maps safe relative file paths to UTF-8 text. It is useful for
   small settings such as `mcp.json` or agent configuration when the definition
   should stay self-contained. Each file is limited to 128 KiB after YAML
   parsing, an inline fileset totals at most 1 MiB across at most 256 files.
-  Inline files remain in the published sandbox config, so `lns push`
-  does not create a companion FileSet artifact for them. Inspect and run output
-  disclose the inline source, mount path, and owner, never the file contents.
+  Inline files remain in the published sandbox config, so `lns push` packs no
+  layer for them. Inspect and run output disclose the inline source, mount path,
+  and owner, never the file contents.
 - **`hostPath`** names one file on the machine that *runs* the sandbox, not on
   the author's. It is read once at launch and written to `mountPath`, so the
   guest gets a snapshot, never a live share — the file a workload edits inside
@@ -523,7 +529,7 @@ spec:
   A `hostPath` that is a symlink reads the file it points at, so a dotfile that
   stow, chezmoi, or home-manager manages works; a link that points nowhere
   counts as absent. `optional` applies to a `hostPath` entry only.
-- Each entry sets exactly one of `path`/`ref`/`inline`/`hostPath`. `inline` must
+- Each entry sets exactly one of `path`/`inline`/`hostPath`. `inline` must
   contain at least one file. Every inline key must be a relative path without empty, `.`,
   or `..` components. `mountPath` is an absolute
   guest path; duplicates — including collisions with a volume `target` — are
@@ -540,14 +546,14 @@ spec:
   fileset, as any path component in an `inline`
   fileset, or as any segment of a `hostPath`
   refuses `validate`, `run`, and `push` outright: a fileset is baked
-  into an artifact, so there is no keep/drop prompt to catch it later — real
+  into the artifact, so there is no keep/drop prompt to catch it later — real
   secrets stay outside the workload. Ship the tool's *configuration* in a
   fileset and bind its *credential* through `spec.credentials`, so the
   published artifact stays secret-free on every machine that pulls it.
 
-The trust model is pinning plus disclosure: a published sandbox whose fileset
-ref is not digest-pinned is refused, and what a sandbox ships is always
-visible in `lns inspect` before anything runs.
+The trust model is one digest plus disclosure: the files travel in the artifact
+you approved, so nothing a fileset mounts is fetched from anywhere else — and
+what a sandbox ships is always visible in `lns inspect` before anything runs.
 
 ### Mixins — what a sandbox layers on
 
@@ -918,9 +924,9 @@ lns config set run.registry ghcr.io
 ```
 
 `lns push --dry-run` does everything short of uploading — validates the
-definition, packs the filesets, builds the artifact — and prints the digests
-that would publish (`npm publish --dry-run`-style), so you can preview a
-release offline.
+definition, packs each `path` fileset into a layer, builds the artifact — and
+prints the digests that would publish, layers included
+(`npm publish --dry-run`-style), so you can preview a release offline.
 
 `lns push` also resolves each fuzzy `spec.tools` version (`node@22`,
 `node@latest`) against the tool's public version index and embeds the exact pin
@@ -956,7 +962,10 @@ lns pull ghcr.io/acme/reviewer:1.0.0     # pre-warm the cache
 lns run  ghcr.io/acme/reviewer:1.0.0     # run it
 ```
 
-`lns push` preserves `workdir` and every mount declaration in the artifact.
+One push is one upload: a sandbox or mixin artifact carries its document as the
+config blob and one layer per `path` fileset it declares, so pulling the
+reference fetches the whole thing. `lns push` preserves `workdir` and every mount
+declaration in the artifact.
 Consumers resolve relative binds against their own project directory, not the
 publisher's. Preflight pins the resolved artifact digest; after `lns pull` has
 cached that artifact and its referenced OCI content, and the service has
