@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use super::attachment::{self, DiskRole};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
@@ -473,24 +474,17 @@ unsafe fn build_config(
 
         // Vz preserves array order in setStorageDevices; upper_disk must be first (→ /dev/vda) and composefs_descriptor second (→ /dev/vdb) to match the cmdline keys.
         let upper_url = file_url(inputs.upper_disk);
-        let upper_attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
-            VZDiskImageStorageDeviceAttachment::alloc(),
-            &upper_url,
-            false,
-        )
-        .map_err(|e| anyhow!("opening upper disk image: {}", ns_err(&e)))?;
+        let upper_attach = disk_attachment(&upper_url, DiskRole::UpperRw)
+            .map_err(|e| anyhow!("opening upper disk image: {}", ns_err(&e)))?;
         let upper_block = VZVirtioBlockDeviceConfiguration::initWithAttachment(
             VZVirtioBlockDeviceConfiguration::alloc(),
             &upper_attach,
         );
 
         let descriptor_url = file_url(inputs.composefs_descriptor);
-        let descriptor_attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
-            VZDiskImageStorageDeviceAttachment::alloc(),
-            &descriptor_url,
-            true,
-        )
-        .map_err(|e| anyhow!("opening composefs descriptor: {}", ns_err(&e)))?;
+        let descriptor_attach =
+            disk_attachment(&descriptor_url, DiskRole::ComposefsDescriptorRo)
+                .map_err(|e| anyhow!("opening composefs descriptor: {}", ns_err(&e)))?;
         let descriptor_block = VZVirtioBlockDeviceConfiguration::initWithAttachment(
             VZVirtioBlockDeviceConfiguration::alloc(),
             &descriptor_attach,
@@ -502,12 +496,7 @@ unsafe fn build_config(
         ];
         for disk in crate::vm::volume_disks(inputs.volumes) {
             let url = file_url(&disk.host_image);
-            let attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
-                VZDiskImageStorageDeviceAttachment::alloc(),
-                &url,
-                false,
-            )
-            .map_err(|e| {
+            let attach = disk_attachment(&url, DiskRole::VolumeRw).map_err(|e| {
                 anyhow!(
                     "opening volume image {}: {}",
                     disk.host_image.display(),
@@ -545,6 +534,23 @@ unsafe fn install_vsock_listener(
         virtio_dev.setSocketListener_forPort(&listener, channel.port);
         listeners_for_leak.push(listener);
         delegates_for_leak.push(delegate_obj);
+    }
+}
+
+fn disk_attachment(
+    url: &NSURL,
+    role: DiskRole,
+) -> Result<Retained<VZDiskImageStorageDeviceAttachment>, Retained<NSError>> {
+    let policy = attachment::policy(role);
+    // SAFETY: url is a live file URL and the mode arguments are plain NSInteger values.
+    unsafe {
+        VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+            VZDiskImageStorageDeviceAttachment::alloc(),
+            url,
+            policy.read_only,
+            policy.caching,
+            policy.synchronization,
+        )
     }
 }
 
