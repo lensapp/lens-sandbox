@@ -598,9 +598,30 @@ lns run --mixin ./mixins/debug-tools .
 lns run --mixin ./mixins/debug-tools/lns.yaml .
 ```
 
-**Every flag goes before the reference.** Anything after it is the workload's own
-command, exactly as in `docker run` — so `lns run <ref> --mixin ./x` runs
-`--mixin ./x` inside the sandbox rather than layering a mixin on it.
+**`--` hands the rest to the workload.** An `lns` flag stays `lns`'s wherever you
+write it, so these are the same run:
+
+```bash
+lns run --mixin ./mixins/debug-tools alpine -- echo hello
+lns run alpine --mixin ./mixins/debug-tools -- echo hello
+```
+
+Without `--`, the workload's command starts at the first word `lns` does not
+claim, and every word after it belongs to the workload:
+
+```bash
+lns run alpine --mixin ./mixins/debug-tools echo hello   # command: echo hello
+lns run alpine sh -c 'echo hi'                           # command: sh -c 'echo hi'
+```
+
+A flag `lns run` does not declare belongs to the workload, so `lns run node
+--version` asks node for its version. Use `--` when you want to pass a flag
+`lns` does declare: `lns run alpine -- --mixin x`.
+
+After the reference, `lns` claims a short flag written apart from its value
+(`-e FOO=1`) or joined with `=` (`-e=FOO=1`); written against its value
+(`-eFOO=1`) it starts the workload's command instead. Before the reference every
+spelling is `lns`'s, as usual. Anything after `--` is the workload's, always.
 
 `--mixin ./dir` works on any run, published or not — you typed it on this
 machine. A **document** may not name one: `spec.mixins` in something you `lns
