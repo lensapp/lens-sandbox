@@ -112,16 +112,6 @@ fn lns_yaml_with_path_fileset(w: &mut BehaviourWorld, path: String, mount: Strin
     );
 }
 
-#[given(regex = r#"^an lns\.yaml declaring fileset ref "([^"]+)" mounted at "([^"]+)"$"#)]
-fn lns_yaml_with_ref_fileset(w: &mut BehaviourWorld, reference: String, mount: String) {
-    seed(
-        w,
-        &fileset_yaml(&format!(
-            "    - ref: {reference}\n      mountPath: {mount}\n"
-        )),
-    );
-}
-
 #[given(
     regex = r#"^an lns\.yaml declaring a hostPath fileset "([^"]+)" mounted at "([^"]+)" and optional$"#
 )]
@@ -134,12 +124,17 @@ fn lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String, mount
     );
 }
 
-#[given("an lns.yaml declaring a fileset entry with both path and ref")]
-fn lns_yaml_with_conflicting_fileset(w: &mut BehaviourWorld) {
+#[given("an lns.yaml declaring a fileset entry with no source")]
+fn lns_yaml_with_sourceless_fileset(w: &mut BehaviourWorld) {
+    seed(w, &fileset_yaml("    - mountPath: /root/.agent/skills\n"));
+}
+
+#[given("an lns.yaml declaring a fileset entry that names another artifact by ref")]
+fn lns_yaml_with_a_ref_fileset(w: &mut BehaviourWorld) {
     seed(
         w,
         &fileset_yaml(
-            "    - path: ./skills\n      ref: registry.example.test/team/skills@sha256:abc\n      mountPath: /root/.agent/skills\n",
+            "    - ref: registry.example.test/team/skills@sha256:abc\n      mountPath: /root/.agent/skills\n",
         ),
     );
 }

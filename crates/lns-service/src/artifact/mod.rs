@@ -11,7 +11,7 @@ pub mod policy;
 pub mod real;
 pub mod resources;
 
-pub use lns_artifact::spec;
+pub use lns_artifact::{merge, spec};
 
 use assembly::ResolvedSandbox;
 use spec::Kind;
@@ -101,8 +101,113 @@ pub fn authored_egress(json: &str) -> Result<lns_policy::Egress> {
     serde_json::from_str(json).context("reading the egress this run's preflight resolved")
 }
 
-/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble.
-pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> ResolvedSandbox {
+/// One packed fileset layer as the manifest that carries it declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedLayer {
+    pub digest: String,
+    pub size: u64,
+}
+
+/// The artifact one source document arrived as: the reference that names it, and the fileset layers it carries in manifest order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carrier {
+    pub reference: String,
+    pub layers: Vec<PackedLayer>,
+}
+
+/// Where one mount path's files are pulled from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedSource {
+    pub reference: String,
+    pub layer: PackedLayer,
+}
+
+/// Every packed fileset a resolution reaches, keyed by the mount path it materializes at.
+pub type PackedFilesets = std::collections::BTreeMap<String, PackedSource>;
+
+/// Read back the correlation the resolve answered with: a local run's mixins are pulled by the preflight, so the run carries their coordinates rather than resolving the graph twice.
+pub fn packed_from_the_wire(sources: &[lns_ipc::PackedFilesetSource]) -> PackedFilesets {
+    sources
+        .iter()
+        .map(|source| {
+            (
+                source.mount_path.clone(),
+                PackedSource {
+                    reference: source.reference.clone(),
+                    layer: PackedLayer {
+                        digest: source.digest.clone(),
+                        size: source.size,
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+/// §7: a sandbox or mixin artifact carries one layer per `filesets[].path` entry it declares, so a manifest carrying a different number is one no run can correlate — and guessing which entry lost its files is worse than refusing.
+pub fn refuse_uncorrelatable_layers(
+    reference: &str,
+    declared: usize,
+    layers: usize,
+) -> Result<(), String> {
+    if declared == layers {
+        return Ok(());
+    }
+    Err(format!(
+        "{reference} declares {declared} path fileset(s) but its artifact carries {layers} layer(s); an artifact carries one layer per entry, so republish it"
+    ))
+}
+
+/// Correlate each surviving `path` fileset with the layer that carries it: the i-th `path` entry a document declares owns the i-th layer of *that document's* artifact. A merged document interleaves entries from several sources, so position in the result decides nothing — the source's own digest and its own entry order do.
+pub fn correlate_packed_filesets(
+    origins: &[lns_artifact::merge::FilesetOrigin],
+    declared: &std::collections::BTreeMap<String, usize>,
+    carriers: &std::collections::BTreeMap<String, Carrier>,
+) -> Result<PackedFilesets, Vec<String>> {
+    let mut problems: Vec<String> = carriers
+        .iter()
+        .filter_map(|(label, carrier)| {
+            refuse_uncorrelatable_layers(
+                &carrier.reference,
+                declared.get(label).copied().unwrap_or_default(),
+                carrier.layers.len(),
+            )
+            .err()
+        })
+        .collect();
+    let mut packed = PackedFilesets::new();
+    for origin in origins {
+        let Some(carrier) = carriers.get(&origin.source) else {
+            continue;
+        };
+        match carrier.layers.get(origin.layer_index) {
+            Some(layer) => {
+                packed.insert(
+                    origin.mount_path.clone(),
+                    PackedSource {
+                        reference: carrier.reference.clone(),
+                        layer: layer.clone(),
+                    },
+                );
+            }
+            None => problems.push(format!(
+                "{} carries no layer for the fileset mounted at {}",
+                carrier.reference, origin.mount_path
+            )),
+        }
+    }
+    if problems.is_empty() {
+        Ok(packed)
+    } else {
+        Err(problems)
+    }
+}
+
+/// Map a flat `kind: sandbox` definition onto a resolved run: its base image plus the inline config, with no component graph to assemble. `packed` decides which `path` entries arrived as a layer of an artifact rather than as a directory on this machine.
+pub fn resolved_from_sandbox(
+    def: &lns_artifact::sandbox::Definition,
+    packed: &PackedFilesets,
+) -> ResolvedSandbox {
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
@@ -110,6 +215,7 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
             .spec
             .filesets
             .iter()
+            .filter(|fileset| !packed.contains_key(&fileset.mount_path))
             .filter_map(|fileset| {
                 fileset.path.as_ref().map(|path| assembly::LocalFileset {
                     source: path.clone(),
@@ -149,18 +255,16 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
                     })
             })
             .collect(),
-        filesets: def
+        packed_filesets: def
             .spec
             .filesets
             .iter()
             .filter_map(|fileset| {
-                fileset
-                    .reference
-                    .as_ref()
-                    .map(|reference| assembly::ResolvedFileset {
-                        name: fileset.mount_path.clone(),
-                        paths: vec![fileset.mount_path.clone()],
-                        reference: reference.clone(),
+                packed
+                    .get(&fileset.mount_path)
+                    .map(|source| assembly::PackedFileset {
+                        mount_path: fileset.mount_path.clone(),
+                        source: source.clone(),
                         owner: fileset.owner,
                     })
             })
@@ -174,35 +278,26 @@ pub fn resolved_from_sandbox(def: &lns_artifact::sandbox::Definition) -> Resolve
     }
 }
 
-/// The digest-pin trust gate for a published sandbox's filesets: a local path has no meaning off the author's machine, and a floating ref defeats pinning — both refuse the plan.
+/// The trust gate for a published sandbox's `path` filesets: every one of them arrives packed into a layer of the artifact it was approved at (§3.1.11), so an entry left reading a directory would read the consumer's own filesystem instead of the files the author shipped.
 pub fn published_fileset_problems(resolved: &ResolvedSandbox) -> Vec<String> {
-    let mut problems: Vec<String> = resolved
+    resolved
         .local_filesets
         .iter()
         .map(|local| {
             format!(
-                "published sandbox declares a local path fileset {}; publish pins filesets by digest",
+                "published sandbox declares the fileset path {} with no layer behind it; publish packs each path directory into a layer of the same artifact",
                 local.source
             )
         })
-        .collect();
-    problems.extend(
-        resolved
-            .filesets
-            .iter()
-            .filter(|fileset| !lns_artifact::spec::is_digest_pinned_image(&fileset.reference))
-            .map(|fileset| {
-                format!(
-                    "fileset ref {} is not digest-pinned; refusing to run it",
-                    fileset.reference
-                )
-            }),
-    );
-    problems
+        .collect()
 }
 
 /// Plan a published sandbox's config blob: the one place the pulled path turns a document into a run, so every guard between the two applies to a stranger's artifact as much as to a local file.
-pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<ResolvedSandbox> {
+pub fn plan_published_sandbox(
+    config_json: &[u8],
+    image_ref: &str,
+    packed: &PackedFilesets,
+) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .with_context(|| format!("parsing published sandbox {image_ref}"))?;
     if !def.spec.mixins.is_empty() {
@@ -211,7 +306,7 @@ pub fn plan_published_sandbox(config_json: &[u8], image_ref: &str) -> Result<Res
             def.spec.mixins.join(", ")
         );
     }
-    Ok(resolved_from_sandbox(&def))
+    Ok(resolved_from_sandbox(&def, packed))
 }
 
 /// Resolution is what empties this list, so a definition still carrying one never went through it and would boot without what its mixins contribute.
@@ -225,65 +320,223 @@ pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -
     )
 }
 
-/// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically.
-pub fn plan_local_sandbox(config_json: &[u8]) -> Result<ResolvedSandbox> {
+/// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically. A published mixin it layers on still brings its filesets packed, so `packed` decides which entries read a directory on this machine.
+pub fn plan_local_sandbox(config_json: &[u8], packed: &PackedFilesets) -> Result<ResolvedSandbox> {
     let def = lns_artifact::sandbox::parse(config_json)
         .context("parsing the local sandbox definition")?;
     refuse_unresolved_local_mixins(&def)?;
-    Ok(resolved_from_sandbox(&def))
+    Ok(resolved_from_sandbox(&def, packed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn plan_local_sandbox_for_tests(config_json: &[u8]) -> Result<ResolvedSandbox> {
+        plan_local_sandbox(config_json, &PackedFilesets::new())
+    }
+
+    fn plan_published_sandbox_for_tests(
+        config_json: &[u8],
+        image_ref: &str,
+    ) -> Result<ResolvedSandbox> {
+        plan_published_sandbox(config_json, image_ref, &PackedFilesets::new())
+    }
+
+    fn layer(digest: &str) -> PackedLayer {
+        PackedLayer {
+            digest: format!("sha256:{}", digest.repeat(64)),
+            size: 512,
+        }
+    }
+
+    fn carrier(reference: &str, layers: &[PackedLayer]) -> Carrier {
+        Carrier {
+            reference: reference.to_string(),
+            layers: layers.to_vec(),
+        }
+    }
+
+    fn origin(mount_path: &str, source: &str, layer_index: usize) -> merge::FilesetOrigin {
+        merge::FilesetOrigin {
+            mount_path: mount_path.to_string(),
+            source: source.to_string(),
+            layer_index,
+        }
+    }
+
     #[test]
-    fn resolved_from_sandbox_splits_path_and_ref_filesets() {
+    fn the_correlation_a_local_runs_preflight_answered_with_survives_the_wire() {
+        let packed = packed_from_the_wire(&[lns_ipc::PackedFilesetSource {
+            mount_path: "/opt/skills".into(),
+            reference: "ghcr.io/acme/skills@sha256:cafe".into(),
+            digest: layer("a").digest,
+            size: 512,
+        }]);
+        assert_eq!(
+            packed["/opt/skills"],
+            PackedSource {
+                reference: "ghcr.io/acme/skills@sha256:cafe".into(),
+                layer: layer("a"),
+            },
+            "a local run's mixins are pulled by the preflight, so the boot materializes what that resolve found rather than walking the graph again"
+        );
+    }
+
+    #[test]
+    fn a_packed_fileset_is_pulled_from_the_artifact_of_the_source_that_declared_it() {
+        let packed = correlate_packed_filesets(
+            &[
+                origin("/a", merge::ROOT_LABEL, 0),
+                origin("/b", "ghcr.io/acme/obs@sha256:cafe", 0),
+            ],
+            &[
+                (merge::ROOT_LABEL.to_string(), 1),
+                ("ghcr.io/acme/obs@sha256:cafe".to_string(), 1),
+            ]
+            .into(),
+            &[
+                (
+                    merge::ROOT_LABEL.to_string(),
+                    carrier("reg/sandbox@sha256:aa", &[layer("a")]),
+                ),
+                (
+                    "ghcr.io/acme/obs@sha256:cafe".to_string(),
+                    carrier("ghcr.io/acme/obs@sha256:cafe", &[layer("b")]),
+                ),
+            ]
+            .into(),
+        )
+        .expect("both sources carry the layer they declared");
+        assert_eq!(packed["/a"].reference, "reg/sandbox@sha256:aa");
+        assert_eq!(
+            packed["/b"].reference, "ghcr.io/acme/obs@sha256:cafe",
+            "a mixin's fileset comes out of the mixin's own artifact, which is the digest it was approved at — not out of the sandbox that layered on it"
+        );
+        assert_eq!(packed["/b"].layer, layer("b"));
+    }
+
+    #[test]
+    fn a_source_declaring_more_path_filesets_than_its_artifact_carries_refuses_the_run() {
+        let problems = correlate_packed_filesets(
+            &[origin("/a", merge::ROOT_LABEL, 0)],
+            &[(merge::ROOT_LABEL.to_string(), 2)].into(),
+            &[(
+                merge::ROOT_LABEL.to_string(),
+                carrier("reg/sandbox@sha256:aa", &[layer("a")]),
+            )]
+            .into(),
+        )
+        .expect_err("one layer per entry is the whole correlation");
+        assert_eq!(
+            problems,
+            [
+                "reg/sandbox@sha256:aa declares 2 path fileset(s) but its artifact carries 1 layer(s); an artifact carries one layer per entry, so republish it"
+                    .to_string()
+            ],
+            "guessing which entry lost its files would mount one fileset's content at another's path"
+        );
+    }
+
+    #[test]
+    fn an_entry_whose_layer_index_the_artifact_cannot_answer_refuses_the_run() {
+        let problems = correlate_packed_filesets(
+            &[origin("/a", merge::ROOT_LABEL, 1)],
+            &[(merge::ROOT_LABEL.to_string(), 1)].into(),
+            &[(
+                merge::ROOT_LABEL.to_string(),
+                carrier("reg/sandbox@sha256:aa", &[layer("a")]),
+            )]
+            .into(),
+        )
+        .expect_err("a fileset with no layer behind it has no files to mount");
+        assert!(
+            problems[0].contains("carries no layer for the fileset mounted at /a"),
+            "got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_fileset_from_a_source_that_arrived_off_this_machine_carries_no_layer() {
+        let packed = correlate_packed_filesets(
+            &[origin("/a", "/work/mixins/pg", 0)],
+            &[("/work/mixins/pg".to_string(), 1)].into(),
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("a directory mixin has no artifact to pull from");
+        assert!(
+            packed.is_empty(),
+            "a directory this machine read has its files on this machine, so nothing is fetched for it"
+        );
+    }
+
+    #[test]
+    fn resolved_from_sandbox_splits_packed_and_on_disk_path_filesets() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"ref":"reg/skills@sha256:abc","mountPath":"/b","owner":"root"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"path":"./shipped","mountPath":"/b","owner":"root"}]}}"#,
         )
         .unwrap();
-        let resolved = resolved_from_sandbox(&def);
+        let packed: PackedFilesets = [(
+            "/b".to_string(),
+            PackedSource {
+                reference: "reg/sandbox@sha256:aa".into(),
+                layer: layer("b"),
+            },
+        )]
+        .into();
+        let resolved = resolved_from_sandbox(&def, &packed);
         assert_eq!(
             resolved.local_filesets,
             [assembly::LocalFileset {
                 source: "/work/skills".into(),
                 mount_path: "/a".into(),
                 owner: lns_artifact::sandbox::FilesetOwner::Workload,
-            }]
+            }],
+            "an entry with no layer behind it is a local directory read at launch"
         );
-        assert_eq!(resolved.filesets.len(), 1);
-        assert_eq!(resolved.filesets[0].reference, "reg/skills@sha256:abc");
-        assert_eq!(resolved.filesets[0].paths, ["/b"]);
         assert_eq!(
-            resolved.filesets[0].owner,
-            lns_artifact::sandbox::FilesetOwner::Root,
+            resolved.packed_filesets,
+            [assembly::PackedFileset {
+                mount_path: "/b".into(),
+                source: packed["/b"].clone(),
+                owner: lns_artifact::sandbox::FilesetOwner::Root,
+            }],
             "a declared owner must survive resolution"
         );
     }
 
     #[test]
-    fn published_fileset_problems_refuse_paths_and_floating_refs_but_pass_pinned_refs() {
+    fn published_fileset_problems_refuse_a_path_no_layer_carries() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"ref":"reg/skills:latest","mountPath":"/b"},{"ref":"reg/settings@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"}]}}"#,
         )
         .unwrap();
-        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
-        assert_eq!(problems.len(), 2, "got: {problems:?}");
-        assert!(problems[0].contains("local path fileset ./skills"));
-        assert!(problems[1].contains("reg/skills:latest is not digest-pinned"));
+        let problems =
+            published_fileset_problems(&resolved_from_sandbox(&def, &PackedFilesets::new()));
+        assert_eq!(problems.len(), 1, "got: {problems:?}");
+        assert!(
+            problems[0].contains("the fileset path ./skills with no layer behind it"),
+            "a pulled document's path names a directory in the artifact, not on the consumer's disk — reading theirs would mount whatever happens to sit there; got: {problems:?}"
+        );
     }
 
     #[test]
-    fn published_fileset_problems_refuses_a_truncated_or_malformed_digest_ref() {
+    fn published_fileset_problems_pass_a_path_its_artifact_carries() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"ref":"reg/skills@sha256:abc","mountPath":"/a"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"}]}}"#,
         )
         .unwrap();
-        let problems = published_fileset_problems(&resolved_from_sandbox(&def));
+        let packed: PackedFilesets = [(
+            "/a".to_string(),
+            PackedSource {
+                reference: "reg/sandbox@sha256:aa".into(),
+                layer: layer("a"),
+            },
+        )]
+        .into();
         assert!(
-            !problems.is_empty(),
-            "a fileset ref with a truncated @sha256 digest is not digest-pinned and must be refused by the trust gate, not admitted by a loose contains(\"@sha256:\") check: {problems:?}"
+            published_fileset_problems(&resolved_from_sandbox(&def, &packed)).is_empty(),
+            "a path entry is the shape a published document ships (docs/sandbox-spec.md §6), so the gate must admit it"
         );
     }
 
@@ -306,7 +559,7 @@ mod tests {
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base@sha256:abc","command":"agent --serve","env":{"MODE":"research"},"egress":{"http":[{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"user":"root"}}"#,
         )
         .unwrap();
-        let resolved = resolved_from_sandbox(&def);
+        let resolved = resolved_from_sandbox(&def, &PackedFilesets::new());
         assert_eq!(resolved.base_image, "ghcr.io/team/base@sha256:abc");
         assert_eq!(resolved.command.as_deref(), Some("agent --serve"));
         assert_eq!(
@@ -318,7 +571,7 @@ mod tests {
             resolved.env.get("MODE").map(String::as_str),
             Some("research")
         );
-        assert!(resolved.filesets.is_empty());
+        assert!(resolved.packed_filesets.is_empty());
         let policy = resolved
             .policy
             .expect("a flat sandbox carries its inline policy");
@@ -340,9 +593,12 @@ mod tests {
         )
         .expect("the baseline a preflight resolved parses");
 
-        let policy = with_authored_baseline(resolved_from_sandbox(&def), &authored)
-            .policy
-            .expect("a sandbox that ships egress keeps a baseline");
+        let policy = with_authored_baseline(
+            resolved_from_sandbox(&def, &PackedFilesets::new()),
+            &authored,
+        )
+        .policy
+        .expect("a sandbox that ships egress keeps a baseline");
 
         assert_eq!(
             policy
@@ -370,8 +626,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
-                .policy,
+            with_authored_baseline(
+                resolved_from_sandbox(&def, &PackedFilesets::new()),
+                &lns_policy::Egress::default(),
+            )
+            .policy,
             None,
             "nothing but the developer decided anything here, so the file governs verbatim rather than through a merge with itself"
         );
@@ -385,8 +644,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            with_authored_baseline(resolved_from_sandbox(&def), &lns_policy::Egress::default())
-                .policy,
+            with_authored_baseline(
+                resolved_from_sandbox(&def, &PackedFilesets::new()),
+                &lns_policy::Egress::default(),
+            )
+            .policy,
             None,
             "a directory whose decisions are the only word on the network has nothing to layer them over, and inventing an empty baseline would merge the file with itself"
         );
@@ -408,7 +670,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolved_from_sandbox(&def).policy,
+            resolved_from_sandbox(&def, &PackedFilesets::new()).policy,
             None,
             "a plain definition must leave the directory overlay governing verbatim"
         );
@@ -416,7 +678,7 @@ mod tests {
 
     #[test]
     fn plan_local_sandbox_resolves_the_definition_like_a_published_one() {
-        let resolved = plan_local_sandbox(
+        let resolved = plan_local_sandbox_for_tests(
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","connectors":["some-provider"],"resources":{"cpu":2,"memory":"1Gi"}}}"#,
         )
         .unwrap();
@@ -431,7 +693,7 @@ mod tests {
 
     #[test]
     fn plan_local_sandbox_surfaces_a_broken_definition() {
-        let err = plan_local_sandbox(
+        let err = plan_local_sandbox_for_tests(
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{}}"#,
         )
         .unwrap_err();
@@ -444,7 +706,7 @@ mod tests {
     #[test]
     fn a_published_document_reaching_the_plan_unresolved_refuses_rather_than_dropping_its_mixins() {
         let pinned = format!("ghcr.io/acme/postgres-tools@sha256:{}", "c".repeat(64));
-        let err = plan_published_sandbox(
+        let err = plan_published_sandbox_for_tests(
             format!(
                 r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{{"image":"ghcr.io/team/base:1","mixins":["{pinned}"]}}}}"#
             )

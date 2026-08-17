@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+flate2 = "1"
 lns-policy = { path = "../lns-policy" }
 lns-spec = { path = "../lns-spec" }
 oci-client = "0.16"

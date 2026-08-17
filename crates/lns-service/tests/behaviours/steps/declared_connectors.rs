@@ -238,7 +238,10 @@ fn sandbox_launched(w: &mut BehaviourWorld) {
         .definition
         .clone()
         .expect("a Given step must declare the definition");
-    launch(w, plan_local_sandbox(definition.as_bytes()));
+    launch(
+        w,
+        plan_local_sandbox(definition.as_bytes(), &Default::default()),
+    );
 }
 
 #[when("the published sandbox is launched")]
@@ -254,6 +257,7 @@ fn published_sandbox_launched(w: &mut BehaviourWorld) {
         plan_published_sandbox(
             definition.as_bytes(),
             "registry.example.test/some-sandbox:1",
+            &Default::default(),
         ),
     );
 }
@@ -294,7 +298,10 @@ fn relaunch(w: &mut BehaviourWorld) {
         .definition
         .clone()
         .expect("the blocked launch kept its definition");
-    launch(w, plan_local_sandbox(definition.as_bytes()));
+    launch(
+        w,
+        plan_local_sandbox(definition.as_bytes(), &Default::default()),
+    );
 }
 
 #[given(regex = r#"^the machine catalog has an oauth connector "([^"]+)"$"#)]

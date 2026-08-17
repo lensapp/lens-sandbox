@@ -39,19 +39,18 @@ Feature: distributing a sandbox through a registry end to end
     And the output contains "bind . -> /workspace"
     And the output contains "volume e2e-cache -> /home/sandbox/.cache"
 
-  Scenario: a path fileset publishes pinned and discloses on inspect
+  Scenario: a path fileset publishes inside the sandbox artifact and discloses on inspect
     When the user pushes a sandbox declaring a path fileset in one step
     And I run lns "pull <pushed-ref>" against the service
     Then the exit code is 0
     When I run lns "inspect <pushed-ref>" against the service
     Then the exit code is 0
-    And the output contains "fileset: "
-    And the output contains "@sha256:"
+    And the output contains "fileset: ./skills"
     And the output contains "/opt/agent-skills"
 
   Scenario: an inline fileset round-trips inside the sandbox artifact
     When the user pushes a sandbox declaring a root-owned inline file with content "do-not-print" in one step
-    Then no companion FileSet artifact is uploaded
+    Then nothing but the sandbox artifact is uploaded
     When I run lns "pull <pushed-ref>" against the service
     Then the exit code is 0
     When I run lns "inspect <pushed-ref>" against the service

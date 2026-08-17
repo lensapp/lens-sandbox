@@ -126,14 +126,12 @@ pub struct SandboxSpec {
     pub ports: Vec<Port>,
 }
 
-/// Files shipped inside the artifact: a local directory packed and digest-pinned at push (path), or a pre-published FileSet (ref), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
+/// Files shipped inside the artifact: a directory beside this document packed into a layer of the same artifact at push (path), or content written in the document itself (inline), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesetEntry {
     #[serde(default)]
     pub path: Option<String>,
-    #[serde(rename = "ref", default)]
-    pub reference: Option<String>,
     #[serde(default)]
     pub inline: Option<BTreeMap<String, String>>,
     #[serde(rename = "hostPath", default)]
@@ -346,12 +344,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
 
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
     let source_count = usize::from(fileset.path.is_some())
-        + usize::from(fileset.reference.is_some())
         + usize::from(fileset.inline.is_some())
         + usize::from(fileset.host_path.is_some());
     if source_count != 1 || fileset.inline.as_ref().is_some_and(BTreeMap::is_empty) {
         bail!(
-            "fileset targeting {} must set exactly one of path, ref, inline, or hostPath",
+            "fileset targeting {} must set exactly one of path, inline, or hostPath",
             fileset.mount_path
         );
     }
@@ -364,9 +361,6 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
                 "fileset path {path:?} is packed from a directory beside this document, so it cannot be home-anchored; use hostPath to read one file from the machine that runs the sandbox"
             );
         }
-    }
-    if fileset.reference.as_ref().is_some_and(String::is_empty) {
-        bail!("fileset ref must not be empty");
     }
     if let Some(inline) = &fileset.inline {
         validate_inline_files(inline)?;
@@ -399,7 +393,7 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
 fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
     if inline.len() > MAX_INLINE_FILES {
         bail!(
-            "inline fileset has {} files, more than the {MAX_INLINE_FILES}-file limit; use a path or ref fileset",
+            "inline fileset has {} files, more than the {MAX_INLINE_FILES}-file limit; use a path fileset",
             inline.len()
         );
     }
@@ -408,14 +402,14 @@ fn validate_inline_files(inline: &BTreeMap<String, String>) -> Result<()> {
         validate_inline_path(path)?;
         if content.len() > MAX_INLINE_FILE_BYTES {
             bail!(
-                "inline file {path:?} exceeds the {MAX_INLINE_FILE_BYTES}-byte limit; use a path or ref fileset"
+                "inline file {path:?} exceeds the {MAX_INLINE_FILE_BYTES}-byte limit; use a path fileset"
             );
         }
         total_bytes += content.len();
     }
     if total_bytes > MAX_INLINE_TOTAL_BYTES {
         bail!(
-            "inline fileset totals {total_bytes} bytes, more than the {MAX_INLINE_TOTAL_BYTES}-byte limit; use a path or ref fileset"
+            "inline fileset totals {total_bytes} bytes, more than the {MAX_INLINE_TOTAL_BYTES}-byte limit; use a path fileset"
         );
     }
     Ok(())
@@ -1424,16 +1418,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_reads_path_and_ref_fileset_entries() {
+    fn parse_reads_a_path_fileset_entry() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"},{"ref":"registry.example.test/team/settings@sha256:abc","mountPath":"/root/.agent/settings"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}"#,
         ))
         .unwrap();
         assert_eq!(def.spec.filesets[0].path.as_deref(), Some("./skills"));
         assert_eq!(def.spec.filesets[0].mount_path, "/root/.agent/skills");
-        assert_eq!(
-            def.spec.filesets[1].reference.as_deref(),
-            Some("registry.example.test/team/settings@sha256:abc")
+    }
+
+    #[test]
+    fn a_fileset_naming_another_artifact_is_no_longer_a_document_anything_reads() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"ref":"registry.example.test/team/settings@sha256:abc","mountPath":"/root/.agent/settings"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("ref"),
+            "a fileset is not a separate artifact (docs/sandbox-spec.md §3.1.11), so strict decoding has to refuse the field rather than ignore it and run without those files; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_top_level_mount_key_is_refused() {
+        let err = parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","mount":{"path":"/skills"},"spec":{"image":"x:1"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("mount"),
+            "identity sits above the spec and content inside it (§2), so a mount beside the name belongs to no grammar this reads; got: {err:#}"
         );
     }
 
@@ -1455,13 +1469,12 @@ mod tests {
     fn parse_requires_exactly_one_fileset_source() {
         for entry in [
             r#"{"path":"./skills","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
-            r#"{"ref":"reg/skills@sha256:abc","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
             r#"{"inline":{},"mountPath":"/s"}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
+                format!("{err:#}").contains("exactly one of path, inline, or hostPath"),
                 "got: {err:#}"
             );
         }
@@ -1519,13 +1532,12 @@ mod tests {
     fn a_fileset_setting_both_host_path_and_path_is_refused() {
         for entry in [
             r#"{"hostPath":"~/.gitconfig","path":"./skills","mountPath":"/s"}"#,
-            r#"{"hostPath":"~/.gitconfig","ref":"reg/skills@sha256:abc","mountPath":"/s"}"#,
             r#"{"hostPath":"~/.gitconfig","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
+                format!("{err:#}").contains("exactly one of path, inline, or hostPath"),
                 "got: {err:#}"
             );
         }
@@ -1611,7 +1623,6 @@ mod tests {
     fn optional_is_refused_on_a_fileset_without_a_host_path() {
         for entry in [
             r#"{"path":"./skills","mountPath":"/s","optional":true}"#,
-            r#"{"ref":"reg/skills@sha256:abc","mountPath":"/s","optional":true}"#,
             r#"{"inline":{"settings.json":"{}"},"mountPath":"/s","optional":true}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
@@ -1689,7 +1700,7 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("settings.json"), "got: {message}");
         assert!(message.contains("131072-byte limit"), "got: {message}");
-        assert!(message.contains("path or ref fileset"), "got: {message}");
+        assert!(message.contains("path fileset"), "got: {message}");
     }
 
     #[test]
@@ -1715,7 +1726,7 @@ mod tests {
         let err = parse(&def_json(&spec.to_string())).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("1048576-byte limit"), "got: {message}");
-        assert!(message.contains("path or ref fileset"), "got: {message}");
+        assert!(message.contains("path fileset"), "got: {message}");
     }
 
     #[test]
@@ -1740,7 +1751,7 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("257 files"), "got: {message}");
         assert!(message.contains("256-file limit"), "got: {message}");
-        assert!(message.contains("path or ref fileset"), "got: {message}");
+        assert!(message.contains("path fileset"), "got: {message}");
     }
 
     #[test]
@@ -1788,18 +1799,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_a_fileset_with_both_path_and_ref_or_neither() {
-        for entry in [
-            r#"{"path":"./skills","ref":"reg/skills@sha256:abc","mountPath":"/s"}"#,
-            r#"{"mountPath":"/s"}"#,
-        ] {
-            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
-            let err = parse(&def_json(&spec)).unwrap_err();
-            assert!(
-                format!("{err:#}").contains("exactly one of path, ref, inline, or hostPath"),
-                "got: {err:#}"
-            );
-        }
+    fn parse_rejects_a_fileset_naming_no_source() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"mountPath":"/s"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exactly one of path, inline, or hostPath"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -1853,17 +1861,14 @@ mod tests {
 
     #[test]
     fn parse_rejects_an_empty_fileset_source() {
-        for entry in [
-            r#"{"path":"","mountPath":"/s"}"#,
-            r#"{"ref":"","mountPath":"/s"}"#,
-        ] {
-            let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
-            let err = parse(&def_json(&spec)).unwrap_err();
-            assert!(
-                format!("{err:#}").contains("must not be empty"),
-                "got: {err:#}"
-            );
-        }
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"path":"","mountPath":"/s"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not be empty"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

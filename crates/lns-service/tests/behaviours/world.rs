@@ -74,6 +74,8 @@ pub struct BehaviourWorld {
     pub fileset_contents: std::collections::HashMap<String, String>,
     /// The chown-manifest body the planned specs ship for lns-init, when any fileset is workload-owned.
     pub fileset_manifest: Option<String>,
+    /// How many packed layers the scenario's own artifact carries, when it is a published one.
+    pub fileset_artifact_layers: Option<usize>,
     /// Host files a hostPath scenario stages, by resolved absolute path, with the mode a probe reports.
     pub host_files: std::collections::HashMap<std::path::PathBuf, u32>,
     /// The home this scenario's machine reports; `None` means the machine has none.

@@ -40,13 +40,13 @@ pub struct BehaviourWorld {
     pub sandbox_run: SandboxRunRig,
     /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
     pub push_outcome: Option<Result<String, String>>,
-    /// FileSet artifact refs the push uploaded, in order.
-    pub pushed_filesets: Vec<String>,
+    /// The digest of each packed fileset layer the push uploaded, in declaration order.
+    pub pushed_layers: Vec<String>,
     /// The definition JSON a prepared local run would send to the service.
     pub wire_definition: Option<String>,
     /// The preflight view a pulled-run scenario stages.
     pub pulled_view: Option<lns_ipc::SandboxView>,
-    /// The definition doc the push handed to build_and_push, when it got that far.
+    /// The config blob the push uploaded, which is the document a consumer reads.
     pub pushed_doc: Option<Vec<u8>>,
     pub tool_index: std::collections::HashMap<String, String>,
     /// Exact pins the scripted index answers "not listed" for at push verification.

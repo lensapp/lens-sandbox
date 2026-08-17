@@ -55,8 +55,10 @@ pub(crate) async fn peek_and_plan(
             )
             .await
             .with_context(|| format!("resolving {image_ref}"))?;
+            let packed = packed_filesets(&resolution, Some((image_ref, &manifest)))
+                .map_err(|problems| refusal(image_ref, problems))?;
             let resolved = crate::artifact::with_authored_baseline(
-                crate::artifact::plan_published_sandbox(&resolution.document, image_ref)?,
+                crate::artifact::plan_published_sandbox(&resolution.document, image_ref, &packed)?,
                 &resolution.authored_egress,
             );
             record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
@@ -66,7 +68,7 @@ pub(crate) async fn peek_and_plan(
             disclose_effective_policy(resolved.policy.as_ref());
             let problems = crate::artifact::published_fileset_problems(&resolved);
             if !problems.is_empty() {
-                anyhow::bail!("refusing to run {image_ref}: {}", problems.join("; "));
+                return Err(refusal(image_ref, problems));
             }
             let mut materialized = materialize_filesets(&resolved).await?;
             crate::artifact::fileset::host_fileset_specs(
@@ -84,12 +86,39 @@ pub(crate) async fn peek_and_plan(
     }
 }
 
-/// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run. `authored_egress` is what the preflight resolved from every source but this directory's own, absent when the run resolved nothing to layer on.
+/// Correlate the resolved document's packed filesets with the layers that carry them: the sandbox's own artifact when the run is a published reference, plus every mixin's own artifact.
+fn packed_filesets(
+    resolution: &crate::artifact::mixin::Resolution,
+    own: Option<(&str, &oci_client::manifest::OciImageManifest)>,
+) -> Result<crate::artifact::PackedFilesets, Vec<String>> {
+    let mut carriers = resolution.carriers.clone();
+    if let Some((reference, manifest)) = own {
+        carriers.insert(
+            lns_artifact::merge::ROOT_LABEL.to_string(),
+            crate::artifact::Carrier {
+                reference: reference.to_string(),
+                layers: crate::artifact::fileset::packed_layers(manifest),
+            },
+        );
+    }
+    crate::artifact::correlate_packed_filesets(
+        &resolution.fileset_origins,
+        &resolution.declared_path_filesets,
+        &carriers,
+    )
+}
+
+fn refusal(image_ref: &str, problems: Vec<String>) -> anyhow::Error {
+    anyhow::anyhow!("refusing to run {image_ref}: {}", problems.join("; "))
+}
+
+/// Plan a local `lns.yaml` definition into a bootable workload, disclosing its shipped policy exactly like a published sandbox run. `authored_egress` is what the preflight resolved from every source but this directory's own, absent when the run resolved nothing to layer on; a published mixin it layers on still brings its filesets packed in its own artifact.
 pub(crate) async fn plan_local(
     definition_json: &str,
     authored_egress: Option<&str>,
+    packed: &crate::artifact::PackedFilesets,
 ) -> Result<SandboxPlan> {
-    let mut resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes())?;
+    let mut resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes(), packed)?;
     if let Some(authored) = authored_egress {
         resolved = crate::artifact::with_authored_baseline(
             resolved,
@@ -245,84 +274,75 @@ fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
     lns_policy::connectors::effective_connectors(&user)
 }
 
-/// Pull each resolved fileset's content layer and expand it into guest-write specs, so the sandbox's filesets land in the microVM at their mount paths.
+/// Pull each packed fileset's layer out of the artifact that carries it and expand it into guest-write specs, so the files a sandbox or mixin shipped land in the microVM at their mount paths.
 async fn materialize_filesets(
     resolved: &ResolvedSandbox,
 ) -> Result<crate::artifact::fileset::MaterializedFilesets> {
     let content_store =
         crate::content_store::ContentStore::new(crate::cache::root()?.join("content"));
     let mut out = crate::artifact::fileset::MaterializedFilesets::default();
-    for fileset in &resolved.filesets {
-        let Some(mount) = fileset.paths.first() else {
-            continue;
-        };
-        let layers = pull_fileset_layers(&fileset.reference, &content_store)
+    for fileset in &resolved.packed_filesets {
+        let layer = pull_packed_layer(&fileset.source, &content_store)
             .await
-            .with_context(|| format!("materializing fileset {}", fileset.name))?;
-        let mut specs = Vec::new();
-        let mut budget = FilesetBudget::new();
-        for layer in layers {
-            let file = std::fs::File::open(&layer)
-                .with_context(|| format!("opening fileset layer {}", layer.display()))?;
-            specs.extend(fileset_runtime_specs_with_budget(
-                mount,
-                file,
-                &content_store,
-                &mut budget,
-            )?);
-        }
-        out.absorb(fileset.owner, mount, specs);
+            .with_context(|| format!("materializing the fileset at {}", fileset.mount_path))?;
+        let file = std::fs::File::open(&layer)
+            .with_context(|| format!("opening fileset layer {}", layer.display()))?;
+        let specs = fileset_runtime_specs_with_budget(
+            &fileset.mount_path,
+            flate2::read::GzDecoder::new(file),
+            &content_store,
+            &mut FilesetBudget::new(),
+        )?;
+        out.absorb(fileset.owner, &fileset.mount_path, specs);
     }
     crate::artifact::fileset::inline_fileset_specs(&resolved.inline_filesets, &mut out);
     Ok(out)
 }
 
-async fn pull_fileset_layers(
-    reference: &str,
+async fn pull_packed_layer(
+    source: &crate::artifact::PackedSource,
     content_store: &crate::content_store::ContentStore,
-) -> Result<Vec<std::path::PathBuf>> {
-    let parsed: Reference = reference
+) -> Result<std::path::PathBuf> {
+    let parsed: Reference = source
+        .reference
         .parse()
-        .with_context(|| format!("invalid fileset reference {reference}"))?;
-    let registry = RealRegistry::for_reference(&parsed, registry_auth_for(reference));
-    pull_fileset_layers_with(&registry, &parsed, content_store).await
+        .with_context(|| format!("invalid artifact reference {}", source.reference))?;
+    let registry = RealRegistry::for_reference(&parsed, registry_auth_for(&source.reference));
+    pull_packed_layer_with(&registry, &parsed, &source.layer, content_store).await
 }
 
-/// Pull every tar content layer of a fileset, in manifest order, so a multi-layer fileset materializes all its files (later layers overlay earlier); the fileset is refused before any download unless it is a digest-pinned FileSet artifact within the byte ceiling, and a stream failure leaves no partial content staged.
-async fn pull_fileset_layers_with<R: Registry>(
+/// Pull one packed fileset layer, verified against the digest its artifact's manifest declared, so what materializes is what the approved artifact carries; a layer already in the content store is not fetched again, and a stream failure leaves no partial content staged.
+async fn pull_packed_layer_with<R: Registry>(
     registry: &R,
     parsed: &Reference,
+    layer: &crate::artifact::PackedLayer,
     content_store: &crate::content_store::ContentStore,
-) -> Result<Vec<std::path::PathBuf>> {
-    let (manifest, digest, config) = registry.pull_manifest_and_config(parsed).await?;
-    crate::image::verify_digest_pin(parsed, &digest, &parsed.to_string())?;
-    crate::artifact::fileset::validate_fileset_artifact(parsed, &manifest, &config)?;
-    crate::artifact::fileset::validate_fileset_layer_sizes(
-        &manifest,
+) -> Result<std::path::PathBuf> {
+    crate::artifact::fileset::validate_packed_layer_size(
+        layer,
         lns_artifact::build::MAX_FILESET_BYTES,
     )?;
-    let content: Vec<_> = manifest.layers.iter().collect();
-    if content.is_empty() {
-        anyhow::bail!("fileset {parsed} has no content layer");
+    if content_store.contains(&layer.digest)? {
+        return content_store.path_for(&layer.digest);
     }
-    let mut blobs = Vec::with_capacity(content.len());
-    for layer in content {
-        let expected_size = u64::try_from(layer.size)
-            .with_context(|| format!("fileset layer {} has a negative size", layer.digest))?;
-        let staged = content_store.staging_path()?;
-        if let Err(error) = registry
-            .pull_blob_to_path(parsed, layer, expected_size, &staged, &|_| {})
-            .await
-        {
-            let _ = std::fs::remove_file(&staged);
-            return Err(error);
-        }
-        let installed = content_store
-            .commit_verified(staged, &layer.digest, expected_size)
-            .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
-        blobs.push(installed.path);
+    let descriptor = oci_client::manifest::OciDescriptor {
+        media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+        digest: layer.digest.clone(),
+        size: i64::try_from(layer.size).unwrap_or(i64::MAX),
+        ..Default::default()
+    };
+    let staged = content_store.staging_path()?;
+    if let Err(error) = registry
+        .pull_blob_to_path(parsed, &descriptor, layer.size, &staged, &|_| {})
+        .await
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
     }
-    Ok(blobs)
+    let installed = content_store
+        .commit_verified(staged, &layer.digest, layer.size)
+        .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
+    Ok(installed.path)
 }
 
 /// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective connectors and shipped-policy hash; a recording failure is logged, never fatal to the launch.
@@ -400,6 +420,16 @@ pub(crate) async fn resolve_definition(
     )
     .await
     .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
+    let packed_filesets = packed_filesets(&resolution, None)
+        .map_err(|problems| anyhow::anyhow!(problems.join("; ")))?
+        .into_iter()
+        .map(|(mount_path, source)| lns_ipc::PackedFilesetSource {
+            mount_path,
+            reference: source.reference,
+            digest: source.layer.digest,
+            size: source.layer.size,
+        })
+        .collect();
     Ok(lns_ipc::Response::DefinitionResolved {
         definition: String::from_utf8(resolution.document)
             .context("the resolved definition is not utf-8")?,
@@ -408,6 +438,7 @@ pub(crate) async fn resolve_definition(
         contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
         authored_egress: serde_json::to_string(&resolution.authored_egress)
             .context("serializing the egress this run resolved")?,
+        packed_filesets,
     })
 }
 
@@ -502,17 +533,22 @@ mod tests {
     struct StreamingRegistry {
         blob: Vec<u8>,
         fail: bool,
-        manifest_digest: Option<String>,
         streamed: AtomicBool,
     }
 
     impl StreamingRegistry {
-        fn fileset(blob: Vec<u8>, fail: bool) -> Self {
+        fn layer(blob: Vec<u8>, fail: bool) -> Self {
             Self {
                 blob,
                 fail,
-                manifest_digest: None,
                 streamed: AtomicBool::new(false),
+            }
+        }
+
+        fn packed(&self) -> crate::artifact::PackedLayer {
+            crate::artifact::PackedLayer {
+                digest: format!("sha256:{}", hex::encode(Sha256::digest(&self.blob))),
+                size: self.blob.len() as u64,
             }
         }
     }
@@ -520,30 +556,11 @@ mod tests {
     impl Registry for StreamingRegistry {
         async fn pull_manifest_and_config(
             &self,
-            reference: &Reference,
+            _reference: &Reference,
         ) -> Result<(OciImageManifest, String, String)> {
-            let digest = format!("sha256:{}", hex::encode(Sha256::digest(&self.blob)));
-            Ok((
-                OciImageManifest {
-                    artifact_type: Some(lns_artifact::spec::Kind::FileSet.artifact_type()),
-                    config: OciDescriptor {
-                        media_type: lns_artifact::spec::Kind::FileSet.config_media_type(),
-                        ..Default::default()
-                    },
-                    layers: vec![OciDescriptor {
-                        media_type: "application/vnd.oci.image.layer.v1.tar".into(),
-                        digest,
-                        size: self.blob.len() as i64,
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                self.manifest_digest
-                    .clone()
-                    .or_else(|| reference.digest().map(ToOwned::to_owned))
-                    .unwrap_or_else(|| format!("sha256:{}", "b".repeat(64))),
-                r#"{"apiVersion":"lens.dev/v1alpha1","kind":"fileset","name":"files","mount":{"path":"/files"},"spec":{}}"#.into(),
-            ))
+            anyhow::bail!(
+                "a packed fileset layer is addressed by the manifest its own artifact was peeked from, so materializing one must not fetch a second manifest"
+            )
         }
 
         async fn pull_blob(
@@ -585,53 +602,93 @@ mod tests {
     }
 
     fn pinned_reference() -> Reference {
-        "registry.example.test/team/files@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "registry.example.test/team/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse()
             .unwrap()
     }
 
     #[tokio::test]
-    async fn fileset_layers_stream_to_verified_content_without_buffering_a_blob_vec() {
+    async fn a_packed_layer_streams_to_verified_content_without_buffering_a_blob_vec() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
-        let registry = StreamingRegistry::fileset(vec![7; 512 * 1024], false);
+        let registry = StreamingRegistry::layer(vec![7; 512 * 1024], false);
 
-        let paths = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
-            .await
-            .unwrap();
+        let path =
+            pull_packed_layer_with(&registry, &pinned_reference(), &registry.packed(), &store)
+                .await
+                .unwrap();
 
         assert!(registry.streamed.load(Ordering::Relaxed));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(std::fs::read(&paths[0]).unwrap(), registry.blob);
+        assert_eq!(std::fs::read(&path).unwrap(), registry.blob);
     }
 
     #[tokio::test]
-    async fn a_digest_mismatch_is_refused_before_any_fileset_layer_is_downloaded() {
+    async fn a_layer_already_in_the_content_store_is_not_fetched_again() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
-        let mut registry = StreamingRegistry::fileset(vec![7; 1024], false);
-        registry.manifest_digest = Some(format!("sha256:{}", "b".repeat(64)));
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+        let installed = store.install_from_bytes(&registry.blob).unwrap();
 
-        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
+        let path =
+            pull_packed_layer_with(&registry, &pinned_reference(), &registry.packed(), &store)
+                .await
+                .unwrap();
+
+        assert_eq!(path, installed.path);
+        assert!(
+            !registry.streamed.load(Ordering::Relaxed),
+            "one directory packs to one digest however many artifacts carry it, which is the whole point of content-addressing the layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_layer_beyond_the_byte_ceiling_is_refused_before_it_is_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+        let oversized = crate::artifact::PackedLayer {
+            size: lns_artifact::build::MAX_FILESET_BYTES + 1,
+            ..registry.packed()
+        };
+
+        let err = pull_packed_layer_with(&registry, &pinned_reference(), &oversized, &store)
             .await
             .unwrap_err();
 
-        assert!(
-            format!("{err:#}").contains("manifest digest mismatch"),
-            "got: {err:#}"
-        );
+        assert!(format!("{err:#}").contains("byte limit"), "got: {err:#}");
         assert!(!registry.streamed.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
-    async fn a_failed_fileset_stream_leaves_no_partial_content() {
+    async fn a_layer_whose_bytes_do_not_hash_to_the_declared_digest_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::content_store::ContentStore::new(dir.path());
-        let registry = StreamingRegistry::fileset(vec![7; 128 * 1024], true);
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+        let tampered = crate::artifact::PackedLayer {
+            digest: format!("sha256:{}", "b".repeat(64)),
+            ..registry.packed()
+        };
 
-        let err = pull_fileset_layers_with(&registry, &pinned_reference(), &store)
+        let err = pull_packed_layer_with(&registry, &pinned_reference(), &tampered, &store)
             .await
             .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("verifying fileset layer"),
+            "the layer digest is what ties the files to the artifact the user approved; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_layer_stream_leaves_no_partial_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 128 * 1024], true);
+
+        let err =
+            pull_packed_layer_with(&registry, &pinned_reference(), &registry.packed(), &store)
+                .await
+                .unwrap_err();
 
         assert!(format!("{err:#}").contains("registry stream failed"));
         let entries = std::fs::read_dir(dir.path().join("sha256"))

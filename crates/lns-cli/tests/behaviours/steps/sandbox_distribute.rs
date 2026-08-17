@@ -68,29 +68,24 @@ fn valid_lns_yaml_with_inline_fileset(w: &mut BehaviourWorld, mount: String) {
     );
 }
 
-#[then("a FileSet artifact is pushed alongside the sandbox")]
-fn fileset_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
-    if w.pushed_filesets
-        .iter()
-        .any(|reference| reference.contains("@sha256:"))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected a digest-addressed fileset push, saw {:?}",
-            w.pushed_filesets
-        ))
+#[then("the sandbox artifact carries the packed directory as a layer of its own")]
+fn fileset_packed_into_the_artifact(w: &mut BehaviourWorld) -> Result<(), String> {
+    match w.pushed_layers.as_slice() {
+        [digest] if digest.starts_with("sha256:") => Ok(()),
+        other => Err(format!(
+            "a fileset is not a separate artifact, so the directory has to travel as a layer of this one (docs/sandbox-spec.md §7); saw {other:?}"
+        )),
     }
 }
 
-#[then("only the sandbox artifact is pushed")]
-fn only_sandbox_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
-    if w.pushed_filesets.is_empty() && w.pushed_doc.is_some() {
+#[then("the artifact carries no packed layer")]
+fn no_packed_layer(w: &mut BehaviourWorld) -> Result<(), String> {
+    if w.pushed_layers.is_empty() && w.pushed_doc.is_some() {
         Ok(())
     } else {
         Err(format!(
-            "expected only a sandbox artifact, saw filesets {:?} and sandbox={}",
-            w.pushed_filesets,
+            "expected a config-only artifact, saw layers {:?} and a document={}",
+            w.pushed_layers,
             w.pushed_doc.is_some()
         ))
     }
@@ -102,38 +97,36 @@ fn published_config_keeps_inline(w: &mut BehaviourWorld) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_slice(doc).map_err(|error| format!("invalid pushed json: {error}"))?;
     let entry = &value["spec"]["filesets"][0];
-    if entry["inline"]["settings.json"] == "do-not-print"
-        && entry.get("path").is_none()
-        && entry.get("ref").is_none()
-    {
+    if entry["inline"]["settings.json"] == "do-not-print" && entry.get("path").is_none() {
         Ok(())
     } else {
         Err(format!("expected unchanged inline entry, got {entry}"))
     }
 }
 
-#[then("the published sandbox config carries the fileset as a digest-pinned ref, not a path")]
-fn published_config_pins_fileset(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the published sandbox config keeps the fileset path it was authored with")]
+fn published_config_keeps_the_fileset_path(w: &mut BehaviourWorld) -> Result<(), String> {
     let doc = w.pushed_doc.as_ref().ok_or("no definition was pushed")?;
     let value: serde_json::Value =
         serde_json::from_slice(doc).map_err(|e| format!("pushed doc is not json: {e}"))?;
     let entry = &value["spec"]["filesets"][0];
-    let reference = entry["ref"].as_str().unwrap_or_default();
-    if entry.get("path").is_none() && reference.contains("@sha256:") {
+    if entry["path"] == "./skills" && entry["mountPath"] == "/root/.agent/skills" {
         Ok(())
     } else {
-        Err(format!("expected a pinned ref-only entry, got: {entry}"))
+        Err(format!(
+            "the published entry keeps its path and mountPath — the content is what moved into the artifact's digest (§6); got: {entry}"
+        ))
     }
 }
 
 #[then("nothing is pushed")]
 fn nothing_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
-    if w.pushed_filesets.is_empty() && w.pushed_doc.is_none() {
+    if w.pushed_layers.is_empty() && w.pushed_doc.is_none() {
         Ok(())
     } else {
         Err(format!(
-            "expected no uploads, saw filesets {:?} and doc {:?}",
-            w.pushed_filesets,
+            "expected no uploads, saw layers {:?} and doc {:?}",
+            w.pushed_layers,
             w.pushed_doc.is_some()
         ))
     }
@@ -195,7 +188,7 @@ fn published_config_keeps_host_path(w: &mut BehaviourWorld) -> Result<(), String
     let value: serde_json::Value =
         serde_json::from_slice(doc).map_err(|error| format!("invalid pushed json: {error}"))?;
     let entry = &value["spec"]["filesets"][0];
-    if entry["hostPath"] == "~/.gitconfig" && entry.get("ref").is_none() {
+    if entry["hostPath"] == "~/.gitconfig" && entry.get("path").is_none() {
         Ok(())
     } else {
         Err(format!(

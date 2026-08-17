@@ -10,6 +10,7 @@ pub(crate) const MIXIN: &str = "ghcr.io/acme/some-mixin@sha256:c41e8b7d20a95f6c3
 pub(crate) struct Installed {
     documents: std::collections::BTreeMap<String, String>,
     pins: std::collections::BTreeMap<String, String>,
+    layers: std::collections::BTreeMap<String, Vec<lns_service::artifact::PackedLayer>>,
 }
 
 impl Installed {
@@ -17,6 +18,7 @@ impl Installed {
         Self {
             documents: rig.mixins.clone(),
             pins: rig.mixin_pins.clone(),
+            layers: rig.mixin_layers.clone(),
         }
     }
 }
@@ -41,7 +43,12 @@ impl MixinSource for Installed {
             .or_else(|| self.documents.get(&reference))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("nothing here answers for {reference}"))?;
-        Ok(FetchedMixin { pinned, document })
+        let layers = self.layers.get(&reference).cloned().unwrap_or_default();
+        Ok(FetchedMixin {
+            pinned,
+            document,
+            layers,
+        })
     }
 }
 
@@ -174,6 +181,45 @@ fn definition_declares_a_tool_and_that_mixin(w: &mut BehaviourWorld, tool: Strin
     );
 }
 
+#[given(
+    regex = r#"^a published sandbox layering on a mixin that ships a path fileset at "([^"]+)"$"#
+)]
+fn sandbox_layering_on_a_mixin_that_ships_files(w: &mut BehaviourWorld, mount: String) {
+    install(
+        w,
+        &format!(r#"{{"filesets":[{{"path":"./skills","mountPath":"{mount}"}}]}}"#),
+    );
+    definition(
+        w,
+        &format!(r#"{{"image":"ghcr.io/team/base:1","mixins":["{MIXIN}"]}}"#),
+    );
+    let rig = w.declared.get_or_insert_with(Default::default);
+    rig.mixin_layers.insert(
+        MIXIN.to_string(),
+        vec![lns_service::artifact::PackedLayer {
+            digest: format!("sha256:{}", "e".repeat(64)),
+            size: 512,
+        }],
+    );
+}
+
+#[then(regex = r#"^the run pulls "([^"]+)" from the mixin's own artifact$"#)]
+fn the_run_pulls_from_the_mixins_own_artifact(
+    w: &mut BehaviourWorld,
+    mount: String,
+) -> Result<(), String> {
+    let rig = w.declared.as_ref().ok_or("no launch happened")?;
+    if let Some(err) = &rig.error {
+        return Err(format!("the launch failed: {err}"));
+    }
+    match rig.packed_filesets.get(&mount) {
+        Some(source) if source.reference == MIXIN => Ok(()),
+        other => Err(format!(
+            "sharing a directory across sandboxes is publishing a mixin that carries it, so the layer has to come from the mixin's own digest — the one the disclosure named; got {other:?}"
+        )),
+    }
+}
+
 #[given("the sandbox definition declares a mixin nothing can resolve")]
 fn definition_declares_an_unresolvable_mixin(w: &mut BehaviourWorld) {
     definition(
@@ -198,6 +244,7 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
         local.map(|document| FetchedMixin {
             pinned: "lns-local-mixin.yaml".to_string(),
             document,
+            layers: Vec::new(),
         }),
         Locator::Local(std::path::PathBuf::from("/work")),
     )
@@ -212,15 +259,23 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
     .await
     {
         Ok(resolution) => {
+            let packed = lns_service::artifact::correlate_packed_filesets(
+                &resolution.fileset_origins,
+                &resolution.declared_path_filesets,
+                &resolution.carriers,
+            )
+            .expect("every packed fileset this scenario declares has a layer behind it");
             let rig = w.declared.get_or_insert_with(Default::default);
             rig.resolved_document =
                 Some(String::from_utf8_lossy(&resolution.document).into_owned());
             rig.resolved_mixins.clone_from(&resolution.mixins);
             rig.contributions =
                 lns_service::artifact::mixin::on_the_wire(&resolution.contributions);
+            rig.packed_filesets = packed.clone();
             lns_service::artifact::plan_published_sandbox(
                 &resolution.document,
                 "registry.example.test/some-sandbox:1",
+                &packed,
             )
             .map(|resolved| {
                 lns_service::artifact::with_authored_baseline(resolved, &resolution.authored_egress)

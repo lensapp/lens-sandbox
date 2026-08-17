@@ -22,11 +22,12 @@ impl Locator {
     }
 }
 
-/// A mixin's document and the reference that names exactly those bytes, since a user may ask for one by tag and what they approve has to name the bytes.
+/// A mixin's document and the reference that names exactly those bytes, since a user may ask for one by tag and what they approve has to name the bytes. A mixin pulled from a registry also arrives with the fileset layers its artifact carries; one read off this machine has its files on this machine, so it carries none.
 #[derive(Debug)]
 pub struct FetchedMixin {
     pub pinned: String,
     pub document: String,
+    pub layers: Vec<crate::artifact::PackedLayer>,
 }
 
 /// Where a mixin's document comes from: a registry for a reference, this machine's filesystem for a directory.
@@ -76,14 +77,16 @@ fn locate(reference: &str, home: &Locator, the_user_named_it: bool) -> Result<Lo
 /// The graph every ordering rule decides against, keyed by the identity each source resolved to, with every reference that names a source translated to the same key.
 struct Fetched {
     graph: BTreeMap<String, SandboxSpec>,
+    carriers: BTreeMap<String, crate::artifact::Carrier>,
     pinned_roots: Vec<String>,
     pinned_extra: Vec<String>,
     pinned_local: Vec<String>,
 }
 
-/// What one walk of the graph carries: the sources fetched so far, what each reference resolved to under the document that named it, and the references still to visit.
+/// What one walk of the graph carries: the sources fetched so far, the artifact each published one arrived as, what each reference resolved to under the document that named it, and the references still to visit.
 struct Walk {
     graph: BTreeMap<String, SandboxSpec>,
+    carriers: BTreeMap<String, crate::artifact::Carrier>,
     visited: BTreeMap<String, String>,
     keys: BTreeMap<(String, String), String>,
     frontier: Vec<(String, Locator)>,
@@ -99,6 +102,7 @@ async fn collect<S: MixinSource>(
 ) -> Result<Fetched> {
     let mut walk = Walk {
         graph: BTreeMap::new(),
+        carriers: BTreeMap::new(),
         visited: BTreeMap::new(),
         keys: BTreeMap::new(),
         frontier: Vec::new(),
@@ -139,6 +143,7 @@ async fn collect<S: MixinSource>(
     }
     Ok(Fetched {
         graph,
+        carriers: walk.carriers,
         pinned_roots,
         pinned_extra,
         pinned_local,
@@ -173,7 +178,16 @@ async fn visit<S: MixinSource>(
             .with_context(|| format!("reading mixin {reference}"))?;
         let child_home = match locator {
             Locator::Local(_) => Locator::Local(std::path::PathBuf::from(&key)),
-            Locator::Reference(_) => Locator::Reference(key.clone()),
+            Locator::Reference(_) => {
+                walk.carriers.insert(
+                    key.clone(),
+                    crate::artifact::Carrier {
+                        reference: key.clone(),
+                        layers: fetched.layers,
+                    },
+                );
+                Locator::Reference(key.clone())
+            }
         };
         walk.frontier.extend(
             mixin
@@ -208,6 +222,9 @@ pub async fn resolve_if_a_sandbox<S: MixinSource>(
             pinned_extra: Vec::new(),
             contributions: Vec::new(),
             authored_egress: lns_policy::Egress::default(),
+            fileset_origins: Vec::new(),
+            declared_path_filesets: BTreeMap::new(),
+            carriers: BTreeMap::new(),
         });
     }
     resolve(config_json, extra, home, source, local).await
@@ -224,6 +241,12 @@ pub struct Resolution {
     pub contributions: Vec<lns_artifact::merge::Contribution>,
     /// What every source but the directory's own decided about egress: the run folds the decisions file over this live, so an approval made mid-run applies and a rule deleted mid-run retracts.
     pub authored_egress: lns_policy::Egress,
+    /// Which source declared each surviving `path` fileset, and its index among that source's own entries.
+    pub fileset_origins: Vec<lns_artifact::merge::FilesetOrigin>,
+    /// How many `path` filesets each source declares, which is how many layers its artifact has to carry (§7).
+    pub declared_path_filesets: BTreeMap<String, usize>,
+    /// The artifact each source that arrived over the network was pulled as, so a packed fileset is addressed by the digest it was approved at.
+    pub carriers: BTreeMap<String, crate::artifact::Carrier>,
 }
 
 /// What the directory decided, as the merge reads it: the label a disclosure names it by, and everything it decided.
@@ -272,6 +295,12 @@ pub async fn resolve<S: MixinSource>(
             pinned_extra: Vec::new(),
             contributions: lns_artifact::merge::own_egress(&def.spec),
             authored_egress: def.spec.egress.clone(),
+            fileset_origins: lns_artifact::merge::own_fileset_origins(&def.spec),
+            declared_path_filesets: declared_path_filesets(&[Source {
+                label: lns_artifact::merge::ROOT_LABEL,
+                spec: &def.spec,
+            }]),
+            carriers: BTreeMap::new(),
         });
     }
     let decided = local
@@ -306,6 +335,7 @@ pub async fn resolve<S: MixinSource>(
     let document = document(&def, &merged.spec)?;
     refuse_what_no_sandbox_could_be(&document, &sources)?;
     let authored_egress = authored_egress(&sources, local.is_some());
+    let declared_path_filesets = declared_path_filesets(&sources);
     let mixins = sources
         .iter()
         .skip(1)
@@ -317,12 +347,28 @@ pub async fn resolve<S: MixinSource>(
         pinned_extra: fetched.pinned_extra,
         contributions: merged.contributions,
         authored_egress,
+        fileset_origins: merged.fileset_origins,
+        declared_path_filesets,
+        carriers: fetched.carriers,
     })
 }
 
 /// The egress every source but the directory's own decided, which is what the gate folds the live decisions file over; §8.1 puts that source last, so it is the one the fold leaves out.
 fn authored_egress(sources: &[Source], the_directory_decided: bool) -> lns_policy::Egress {
     lns_artifact::merge::egress_of(&sources[..sources.len() - usize::from(the_directory_decided)])
+}
+
+/// How many layers each source's own artifact has to carry, counted off the document rather than off the merge, so an entry another source overrode is still a layer the publisher shipped.
+fn declared_path_filesets(sources: &[Source]) -> BTreeMap<String, usize> {
+    sources
+        .iter()
+        .map(|source| {
+            (
+                source.label.to_string(),
+                lns_artifact::merge::path_filesets(source.spec).count(),
+            )
+        })
+        .collect()
 }
 
 /// Restate a merge's attribution for the wire, since lns-ipc names the document format without depending on the crate that merges it.
@@ -423,6 +469,7 @@ mod tests {
     struct Fake {
         documents: BTreeMap<String, String>,
         pins: BTreeMap<String, String>,
+        layers: BTreeMap<String, Vec<crate::artifact::PackedLayer>>,
         fetched: Mutex<Vec<String>>,
     }
 
@@ -441,12 +488,27 @@ mod tests {
                     })
                     .collect(),
                 pins: BTreeMap::new(),
+                layers: BTreeMap::new(),
                 fetched: Mutex::new(Vec::new()),
             }
         }
 
         fn pinning(mut self, reference: &str, pinned: &str) -> Self {
             self.pins.insert(reference.to_string(), pinned.to_string());
+            self
+        }
+
+        fn carrying(mut self, reference: &str, digests: &[&str]) -> Self {
+            self.layers.insert(
+                reference.to_string(),
+                digests
+                    .iter()
+                    .map(|digest| crate::artifact::PackedLayer {
+                        digest: (*digest).to_string(),
+                        size: 512,
+                    })
+                    .collect(),
+            );
             self
         }
     }
@@ -463,7 +525,11 @@ mod tests {
                 Locator::Local(path) if path.extension().is_none() => {
                     path.join("lns.yaml").display().to_string()
                 }
-                _ => self.pins.get(&reference).cloned().unwrap_or(reference),
+                _ => self
+                    .pins
+                    .get(&reference)
+                    .cloned()
+                    .unwrap_or_else(|| reference.clone()),
             };
             let document = self
                 .documents
@@ -471,7 +537,12 @@ mod tests {
                 .or_else(|| self.documents.get(&locator.key()))
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no such mixin here"))?;
-            Ok(FetchedMixin { pinned, document })
+            let layers = self.layers.get(&reference).cloned().unwrap_or_default();
+            Ok(FetchedMixin {
+                pinned,
+                document,
+                layers,
+            })
         }
     }
 
@@ -589,6 +660,115 @@ mod tests {
                 "§1.5 names every rule, mount, tool and credential, so a block that never reaches the wire is a line the disclosure cannot attribute; missing {expected:?} from {found:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_resolution_says_which_artifact_carries_each_mixins_packed_fileset() {
+        let mixin = pinned("skills");
+        let source = Fake::new(&[(
+            mixin.as_str(),
+            r#"{"filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+        )])
+        .carrying(&mixin, &["sha256:cafe"]);
+        let resolution = resolve(
+            &sandbox(&format!(
+                r#"{{"image":"x:1","filesets":[{{"path":"./own","mountPath":"/own"}}],"mixins":["{mixin}"]}}"#
+            )),
+            &[],
+            &published(),
+            &source,
+            None,
+        )
+        .await
+        .expect("a mixin that ships files resolves");
+
+        assert_eq!(
+            resolution.fileset_origins,
+            [
+                lns_artifact::merge::FilesetOrigin {
+                    mount_path: "/own".into(),
+                    source: lns_artifact::merge::ROOT_LABEL.into(),
+                    layer_index: 0
+                },
+                lns_artifact::merge::FilesetOrigin {
+                    mount_path: "/skills".into(),
+                    source: mixin.clone(),
+                    layer_index: 0
+                },
+            ],
+            "both entries are the first path entry of their own document, so a merged position would address the wrong layer"
+        );
+        assert_eq!(
+            resolution.carriers.get(&mixin),
+            Some(&crate::artifact::Carrier {
+                reference: mixin.clone(),
+                layers: vec![crate::artifact::PackedLayer {
+                    digest: "sha256:cafe".into(),
+                    size: 512
+                }]
+            }),
+            "sharing a directory across sandboxes is publishing a mixin that carries it, so the mixin's own artifact has to reach the correlation"
+        );
+        assert_eq!(
+            resolution.declared_path_filesets.get(&mixin),
+            Some(&1),
+            "how many layers a mixin's artifact must carry is counted off the mixin's own document"
+        );
+        assert!(
+            !resolution
+                .carriers
+                .contains_key(lns_artifact::merge::ROOT_LABEL),
+            "only the caller knows what the sandbox itself was pulled as, so resolution must not invent a carrier for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_mixin_contributes_a_fileset_with_no_artifact_behind_it() {
+        let source = Fake::new(&[(
+            "/work/mixins/pg",
+            r#"{"filesets":[{"path":"/work/mixins/pg/skills","mountPath":"/skills"}]}"#,
+        )]);
+        let resolution = resolve(
+            &sandbox(r#"{"image":"x:1","mixins":["./mixins/pg"]}"#),
+            &[],
+            &decided_in("/work/lns.yaml"),
+            &source,
+            None,
+        )
+        .await
+        .expect("a directory beside the definition resolves");
+        assert!(
+            resolution.carriers.is_empty(),
+            "a directory this machine read has its files on this machine, so nothing is pulled for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_that_layers_on_nothing_still_says_what_its_own_layers_are_for() {
+        let resolution = resolve(
+            &sandbox(r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#),
+            &[],
+            &published(),
+            &Fake::new(&[]),
+            None,
+        )
+        .await
+        .expect("a document with no mixins resolves to itself");
+        assert_eq!(
+            resolution.fileset_origins,
+            [lns_artifact::merge::FilesetOrigin {
+                mount_path: "/skills".into(),
+                source: lns_artifact::merge::ROOT_LABEL.into(),
+                layer_index: 0
+            }],
+            "the short-circuit path skips the merge, so it has to number the layers the same way or a plain sandbox's own files never materialize"
+        );
+        assert_eq!(
+            resolution
+                .declared_path_filesets
+                .get(lns_artifact::merge::ROOT_LABEL),
+            Some(&1)
+        );
     }
 
     #[tokio::test]
@@ -782,6 +962,7 @@ mod tests {
         let reference = pinned("a-sandbox");
         let source = Fake {
             pins: BTreeMap::new(),
+            layers: BTreeMap::new(),
             documents: BTreeMap::from([(
                 reference.clone(),
                 String::from_utf8(sandbox(r#"{"image":"x:1"}"#)).expect("utf-8 fixture"),
@@ -1137,6 +1318,7 @@ mod tests {
             Some(FetchedMixin {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"x","spec":{"image":"x:1"}}"#.to_string(),
+                layers: Vec::new(),
             }),
             decided_in("/work/lns.yaml"),
         )
@@ -1153,6 +1335,7 @@ mod tests {
             Some(FetchedMixin {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#.to_string(),
+                layers: Vec::new(),
             }),
             decided_in("/work/lns.yaml"),
         )
@@ -1172,6 +1355,7 @@ mod tests {
                 document: format!(
                     r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{spec}}}"#
                 ),
+                layers: Vec::new(),
             }),
             decided_in("/work"),
         )
@@ -1306,6 +1490,7 @@ mod tests {
             Some(FetchedMixin {
                 pinned: "lns-local-mixin.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"mixins":["./tools"]}}"#.to_string(),
+                layers: Vec::new(),
             }),
             decided_in("/decisions/lns-local-mixin.yaml"),
         )
@@ -1335,6 +1520,7 @@ mod tests {
             Some(FetchedMixin {
                 pinned: "dev.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"dev","spec":{"mixins":["./tools"]}}"#.to_string(),
+                layers: Vec::new(),
             }),
             decided_in("/decisions/lns-local-mixin.yaml"),
         )

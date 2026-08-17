@@ -214,11 +214,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: vec![lns_ipc::SandboxFileset {
-            path: None,
-            reference: Some(format!(
-                "registry.example.test/team/skills@sha256:{}",
-                "a".repeat(64)
-            )),
+            path: Some("./skills".into()),
             inline: false,
             host_path: None,
             optional: false,

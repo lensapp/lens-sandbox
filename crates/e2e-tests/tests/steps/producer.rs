@@ -129,12 +129,12 @@ async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
     let pushed = run_cli_in_dir(project, ["push".to_string(), reference.clone()], env);
     assert_eq!(
         pushed.exit_code, 0,
-        "lns push must pack the fileset and upload the pinned sandbox:\n{}\n{}",
+        "lns push must pack the fileset into a layer of the sandbox artifact and upload it:\n{}\n{}",
         pushed.stdout, pushed.stderr
     );
     assert!(
-        pushed.stdout.contains("pushed fileset"),
-        "push must report the packed fileset ref:\n{}",
+        pushed.stdout.contains("packed fileset ./skills -> sha256:"),
+        "push must report the digest the directory published under:\n{}",
         pushed.stdout
     );
     world.pushed_ref = Some(reference);
@@ -164,12 +164,12 @@ async fn push_sandbox_with_inline_fileset(world: &mut E2eWorld, content: String)
     world.result = Some(pushed);
 }
 
-#[then("no companion FileSet artifact is uploaded")]
-fn no_companion_fileset_artifact(world: &mut E2eWorld) {
+#[then("nothing but the sandbox artifact is uploaded")]
+fn nothing_but_the_sandbox_artifact(world: &mut E2eWorld) {
     let result = world.result.as_ref().expect("inline push result");
     assert!(
-        !result.stdout.contains("pushed fileset"),
-        "inline push must not publish a companion FileSet:\n{}",
+        !result.stdout.contains("packed fileset"),
+        "inline content lives in the document itself, so there is no directory to pack:\n{}",
         result.stdout
     );
     let repositories = world
@@ -179,7 +179,7 @@ fn no_companion_fileset_artifact(world: &mut E2eWorld) {
         .manifest_repositories();
     assert!(
         repositories.iter().all(|name| !name.contains("fileset")),
-        "inline push unexpectedly published a FileSet repository: {repositories:?}"
+        "a fileset is not addressable on its own, so nothing may publish one: {repositories:?}"
     );
 }
 

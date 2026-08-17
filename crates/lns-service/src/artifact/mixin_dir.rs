@@ -58,6 +58,7 @@ fn parse_document(
     Ok(FetchedMixin {
         pinned,
         document: serde_json::to_string(&parsed).context("serializing the mixin")?,
+        layers: Vec::new(),
     })
 }
 

@@ -255,28 +255,18 @@ impl author::Fs for StepFs {
 
 struct StepProducer {
     outcome: Result<String, String>,
-    docs: RefCell<Vec<Vec<u8>>>,
-    filesets: RefCell<Vec<String>>,
+    uploaded: RefCell<Vec<lns_artifact::build::BuiltArtifact>>,
 }
 
 impl distribute::Producer for StepProducer {
-    fn build_and_push<'a>(
+    fn push_built<'a>(
         &'a self,
-        doc: &'a [u8],
+        built: &'a lns_artifact::build::BuiltArtifact,
         _reference: &'a str,
-    ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
-        self.docs.borrow_mut().push(doc.to_vec());
-        let outcome = self.outcome.clone().map_err(|m| anyhow::anyhow!(m));
-        Box::pin(async move { outcome })
-    }
-
-    fn push_prebuilt<'a>(
-        &'a self,
-        _built: &'a lns_artifact::build::BuiltArtifact,
-        reference: &'a str,
     ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
-        self.filesets.borrow_mut().push(reference.to_string());
-        Box::pin(async move { Ok(()) })
+        self.uploaded.borrow_mut().push(built.clone());
+        let outcome = self.outcome.clone().map_err(|m| anyhow::anyhow!(m));
+        Box::pin(async move { outcome.map(|_| ()) })
     }
 }
 
@@ -369,8 +359,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             outcome: w.push_outcome.clone().unwrap_or(Err(
                 "the push must refuse before reaching the producer".into(),
             )),
-            docs: RefCell::new(Vec::new()),
-            filesets: RefCell::new(Vec::new()),
+            uploaded: RefCell::new(Vec::new()),
         };
         let mut out: Vec<u8> = Vec::new();
         let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
@@ -397,8 +386,18 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             }
             Err(e) => Err(e),
         };
-        w.pushed_filesets = producer.filesets.into_inner();
-        w.pushed_doc = producer.docs.into_inner().into_iter().next();
+        let uploaded = producer.uploaded.into_inner();
+        w.pushed_layers = uploaded
+            .first()
+            .map(|built| built.fileset_layers().map(|l| l.digest.clone()).collect())
+            .unwrap_or_default();
+        w.pushed_doc = uploaded.first().and_then(|built| {
+            built
+                .blobs
+                .iter()
+                .find(|blob| blob.media_type.ends_with(".config.v1+json"))
+                .map(|blob| blob.data.clone())
+        });
         w.result = Some(match result {
             Ok(exit_code) => CliRun {
                 exit_code,
