@@ -114,15 +114,8 @@ fn spawn_gtk_tray(shutdown: Arc<Shutdown>) -> std::thread::JoinHandle<()> {
     })
 }
 
-pub fn run_tray(
-    shutdown: Arc<Shutdown>,
-    ipc_handle: JoinHandle<anyhow::Result<()>>,
-    window_state: Arc<WindowState>,
-) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    let gtk_tray = spawn_gtk_tray(shutdown.clone());
-
-    let viewport = egui::ViewportBuilder::default()
+fn approval_viewport() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
         .with_title("Lens Sandbox")
         .with_position([0.0, 0.0])
         .with_visible(false)
@@ -132,10 +125,21 @@ pub fn run_tray(
         .with_always_on_top()
         .with_transparent(true)
         .with_mouse_passthrough(true)
-        .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT]);
+        // The card must never become the active window on its own; the developer keeps typing where they were.
+        .with_active(false)
+        .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
+}
+
+pub fn run_tray(
+    shutdown: Arc<Shutdown>,
+    ipc_handle: JoinHandle<anyhow::Result<()>>,
+    window_state: Arc<WindowState>,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let gtk_tray = spawn_gtk_tray(shutdown.clone());
 
     let mut native_options = eframe::NativeOptions {
-        viewport,
+        viewport: approval_viewport(),
         run_and_return: true,
         ..Default::default()
     };
@@ -373,7 +377,6 @@ impl ViewportPlacement {
                 )));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 // The frame that reveals the window saw is_visible=false, so eframe skipped ui(); kick a repaint so the now-visible window paints its cards and fits its height.
                 ctx.request_repaint();
                 self.current_height = seed;
@@ -2071,6 +2074,49 @@ fn whiten_template(mut rgba: Vec<u8>) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::approval_flow::protocol::Treatment;
+
+    fn reveal_commands() -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut placement = ViewportPlacement::new();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .monitor_size = Some(egui::vec2(1920.0, 1080.0));
+        let output = ctx.run_ui(input, |ctx| {
+            placement.sync_visibility(ctx, &[StackItem::Network(0)], 0);
+        });
+        output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .clone()
+    }
+
+    #[test]
+    fn revealing_the_approval_window_shows_it() {
+        assert!(
+            reveal_commands().contains(&egui::ViewportCommand::Visible(true)),
+            "a raised card must reveal the window"
+        );
+    }
+
+    #[test]
+    fn revealing_the_approval_window_does_not_take_keyboard_focus() {
+        let commands = reveal_commands();
+        assert!(
+            !commands.contains(&egui::ViewportCommand::Focus),
+            "the window must appear beside what the developer types in, not steal the keyboard: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn the_approval_window_never_asks_to_be_the_active_window() {
+        assert_eq!(
+            approval_viewport().active,
+            Some(false),
+            "an approval window that activates on creation steals focus from the foreground app"
+        );
+    }
 
     #[test]
     fn embedded_icon_decodes_successfully() {
