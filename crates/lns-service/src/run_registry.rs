@@ -15,7 +15,56 @@ use crate::vm::session_client::SessionInput;
 
 static NEXT_NAME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
-static ACTIVE: Mutex<Option<HashMap<String, RunHandle>>> = Mutex::new(None);
+static ACTIVE: Mutex<Option<HashMap<String, RunEntry>>> = Mutex::new(None);
+
+/// A listed run: alive with a session behind it, or stopped with only its record — restartable until removed.
+pub enum RunEntry {
+    Live(RunHandle),
+    Stopped(StoppedRun),
+}
+
+pub struct StoppedRun {
+    pub record: crate::run_record::RunRecord,
+}
+
+impl RunEntry {
+    fn name(&self) -> &str {
+        match self {
+            RunEntry::Live(h) => &h.name,
+            RunEntry::Stopped(s) => &s.record.name,
+        }
+    }
+
+    fn set_name(&mut self, name: String) {
+        match self {
+            RunEntry::Live(h) => h.name = name,
+            RunEntry::Stopped(s) => s.record.name = name,
+        }
+    }
+
+    fn as_live(&self) -> Option<&RunHandle> {
+        match self {
+            RunEntry::Live(h) => Some(h),
+            RunEntry::Stopped(_) => None,
+        }
+    }
+
+    fn as_live_mut(&mut self) -> Option<&mut RunHandle> {
+        match self {
+            RunEntry::Live(h) => Some(h),
+            RunEntry::Stopped(_) => None,
+        }
+    }
+
+    fn status(&self) -> RunStatus {
+        match self {
+            RunEntry::Live(h) => h.status.lock().map(|s| *s).unwrap_or(RunStatus::Running),
+            RunEntry::Stopped(s) => RunStatus::Exited {
+                code: s.record.exit_code.unwrap_or(-1),
+            },
+        }
+    }
+}
 
 pub struct RunHandle {
     pub cancel_tx: oneshot::Sender<i32>,
@@ -57,7 +106,32 @@ pub fn allocate_run_id() -> String {
 
 pub fn register(run_id: String, handle: RunHandle) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    g.get_or_insert_with(HashMap::new).insert(run_id, handle);
+    g.get_or_insert_with(HashMap::new)
+        .insert(run_id, RunEntry::Live(handle));
+}
+
+pub fn register_stopped(stopped: StoppedRun) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.get_or_insert_with(HashMap::new)
+        .insert(stopped.record.run_id.clone(), RunEntry::Stopped(stopped));
+}
+
+pub fn stopped_run_names() -> Vec<String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    stopped_names_in(g.as_ref())
+}
+
+fn stopped_names_in(map: Option<&HashMap<String, RunEntry>>) -> Vec<String> {
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = map
+        .values()
+        .filter(|e| is_exited(e))
+        .map(|e| e.name().to_string())
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 pub fn register_named(
@@ -72,7 +146,7 @@ pub fn register_named(
 }
 
 fn register_named_in(
-    map: &mut HashMap<String, RunHandle>,
+    map: &mut HashMap<String, RunEntry>,
     run_id: String,
     requested: Option<String>,
     mut handle: RunHandle,
@@ -86,7 +160,7 @@ fn register_named_in(
         None => unique_auto_name(map, next_name),
     };
     handle.name = name.clone();
-    map.insert(run_id, handle);
+    map.insert(run_id, RunEntry::Live(handle));
     Ok(name)
 }
 
@@ -95,10 +169,7 @@ pub fn ensure_name_available(name: &str) -> Result<(), String> {
     check_name_available(g.as_ref(), name)
 }
 
-fn check_name_available(
-    map: Option<&HashMap<String, RunHandle>>,
-    name: &str,
-) -> Result<(), String> {
+fn check_name_available(map: Option<&HashMap<String, RunEntry>>, name: &str) -> Result<(), String> {
     validate_run_name(name)?;
     match map.and_then(|m| name_holder(m, name)) {
         Some(holder) => Err(format!(
@@ -110,7 +181,7 @@ fn check_name_available(
 }
 
 fn unique_auto_name(
-    map: &HashMap<String, RunHandle>,
+    map: &HashMap<String, RunEntry>,
     next_name: &mut dyn FnMut() -> String,
 ) -> String {
     for _ in 0..run_name::pool_size() {
@@ -126,9 +197,9 @@ fn unique_auto_name(
         .expect("more distinct suffixes than names in use")
 }
 
-fn name_holder(map: &HashMap<String, RunHandle>, name: &str) -> Option<String> {
+fn name_holder(map: &HashMap<String, RunEntry>, name: &str) -> Option<String> {
     map.iter()
-        .find(|(_, h)| h.name == name)
+        .find(|(_, e)| e.name() == name)
         .map(|(id, _)| id.clone())
 }
 
@@ -137,7 +208,7 @@ pub fn resolve(handle: &str) -> Result<String, String> {
     resolve_in(g.as_ref(), handle)
 }
 
-fn resolve_in(map: Option<&HashMap<String, RunHandle>>, handle: &str) -> Result<String, String> {
+fn resolve_in(map: Option<&HashMap<String, RunEntry>>, handle: &str) -> Result<String, String> {
     if handle.is_empty() {
         return Err(format!("no such run: {handle}"));
     }
@@ -164,7 +235,7 @@ pub fn rename(handle: &str, new_name: &str) -> Result<(), String> {
 }
 
 fn rename_in(
-    map: Option<&mut HashMap<String, RunHandle>>,
+    map: Option<&mut HashMap<String, RunEntry>>,
     handle: &str,
     new_name: &str,
 ) -> Result<(), String> {
@@ -181,7 +252,7 @@ fn rename_in(
     }
     map.get_mut(&target)
         .expect("resolve_in only returns ids present in the map")
-        .name = new_name.to_string();
+        .set_name(new_name.to_string());
     Ok(())
 }
 
@@ -196,6 +267,7 @@ pub fn input_sender(run_id: &str) -> Option<mpsc::Sender<SessionInput>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         .and_then(|h| h.input_tx.clone())
 }
 
@@ -237,6 +309,7 @@ pub fn log_buffer(run_id: &str) -> Option<std::sync::Arc<crate::run_log::RunLogB
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         .map(|h| h.logs.clone())
 }
 
@@ -244,6 +317,7 @@ pub fn connector(run_id: &str) -> Option<std::sync::Arc<dyn GuestTransport>> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         .and_then(|h| h.connector.clone())
 }
 
@@ -251,13 +325,18 @@ pub fn exec_environment(run_id: &str) -> ExecEnvironment {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         .map(|h| h.exec_environment.clone())
         .unwrap_or_default()
 }
 
 pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+    if let Some(h) = g
+        .as_mut()
+        .and_then(|m| m.get_mut(run_id))
+        .and_then(|e| e.as_live_mut())
+    {
         h.connector = Some(connector);
     }
 }
@@ -269,7 +348,11 @@ pub fn set_connector_with_environment(
     exec_environment: ExecEnvironment,
 ) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+    if let Some(h) = g
+        .as_mut()
+        .and_then(|m| m.get_mut(run_id))
+        .and_then(|e| e.as_live_mut())
+    {
         h.exec_environment = exec_environment;
         h.connector = Some(connector);
     }
@@ -278,7 +361,11 @@ pub fn set_connector_with_environment(
 /// Record the VM size a sandbox run resolved to (from its resources) so `lns inspect` reports what actually booted, not the pre-resolution request.
 pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+    if let Some(h) = g
+        .as_mut()
+        .and_then(|m| m.get_mut(run_id))
+        .and_then(|e| e.as_live_mut())
+    {
         h.config.cpus = cpus;
         h.config.mem_mib = mem_mib;
     }
@@ -286,7 +373,11 @@ pub fn set_resolved_size(run_id: &str, cpus: u8, mem_mib: usize) {
 
 pub(crate) fn set_resolved_command_and_env(run_id: &str, command: &[String], env: &[String]) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_mut().and_then(|m| m.get_mut(run_id)) {
+    if let Some(h) = g
+        .as_mut()
+        .and_then(|m| m.get_mut(run_id))
+        .and_then(|e| e.as_live_mut())
+    {
         h.command = command.join(" ");
         h.config.env = env.to_vec();
     }
@@ -294,7 +385,10 @@ pub(crate) fn set_resolved_command_and_env(run_id: &str, command: &[String], env
 
 pub fn set_exit_code(run_id: &str, code: i32) {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_ref().and_then(|m| m.get(run_id))
+    if let Some(h) = g
+        .as_ref()
+        .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         && let Ok(mut s) = h.status.lock()
     {
         *s = RunStatus::Exited { code };
@@ -303,7 +397,10 @@ pub fn set_exit_code(run_id: &str, code: i32) {
 
 pub fn mark_exited_from_log(run_id: &str) {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
-    if let Some(h) = g.as_ref().and_then(|m| m.get(run_id))
+    if let Some(h) = g
+        .as_ref()
+        .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
         && let Some(code) = h.logs.exit()
         && let Ok(mut s) = h.status.lock()
     {
@@ -313,9 +410,7 @@ pub fn mark_exited_from_log(run_id: &str) {
 
 pub fn status(run_id: &str) -> Option<RunStatus> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
-    g.as_ref()
-        .and_then(|m| m.get(run_id))
-        .and_then(|h| h.status.lock().ok().map(|s| *s))
+    g.as_ref().and_then(|m| m.get(run_id)).map(|e| e.status())
 }
 
 pub fn snapshot() -> Vec<lns_ipc::RunSummary> {
@@ -323,22 +418,29 @@ pub fn snapshot() -> Vec<lns_ipc::RunSummary> {
     snapshot_from(g.as_ref())
 }
 
-fn snapshot_from(map: Option<&HashMap<String, RunHandle>>) -> Vec<lns_ipc::RunSummary> {
+fn snapshot_from(map: Option<&HashMap<String, RunEntry>>) -> Vec<lns_ipc::RunSummary> {
     let Some(map) = map else {
         return Vec::new();
     };
-    map.iter().map(|(id, h)| summary_of(id, h)).collect()
+    map.iter().map(|(id, e)| summary_of(id, e)).collect()
 }
 
-fn summary_of(id: &str, h: &RunHandle) -> lns_ipc::RunSummary {
-    let status = h.status.lock().map(|s| *s).unwrap_or(RunStatus::Running);
+fn summary_of(id: &str, e: &RunEntry) -> lns_ipc::RunSummary {
+    let (image, command, started) = match e {
+        RunEntry::Live(h) => (h.image.clone(), h.command.clone(), h.started.clone()),
+        RunEntry::Stopped(s) => (
+            s.record.image.clone(),
+            s.record.command.clone(),
+            s.record.created_at.clone(),
+        ),
+    };
     lns_ipc::RunSummary {
         id: id.to_string(),
-        name: h.name.clone(),
-        image: h.image.clone(),
-        command: h.command.clone(),
-        status,
-        started: h.started.clone(),
+        name: e.name().to_string(),
+        image,
+        command,
+        status: e.status(),
+        started,
     }
 }
 
@@ -346,18 +448,27 @@ pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_ref()
         .and_then(|m| m.get(run_id))
-        .map(|h| lns_ipc::RunDetails {
-            summary: summary_of(run_id, h),
-            config: h.config.clone(),
+        .map(|e| lns_ipc::RunDetails {
+            summary: summary_of(run_id, e),
+            config: match e {
+                RunEntry::Live(h) => h.config.clone(),
+                RunEntry::Stopped(s) => lns_ipc::RunConfig::from_run_args(&s.record.args),
+            },
         })
 }
 
 pub fn cancel(run_id: &str) -> bool {
     let removed = {
         let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-        g.as_mut().and_then(|m| m.remove(run_id))
+        let Some(map) = g.as_mut() else {
+            return false;
+        };
+        match map.get(run_id) {
+            Some(RunEntry::Live(_)) => map.remove(run_id),
+            _ => return false,
+        }
     };
-    let Some(handle) = removed else {
+    let Some(RunEntry::Live(handle)) = removed else {
         return false;
     };
     let _ = handle.cancel_tx.send(130);
@@ -374,8 +485,11 @@ pub enum DetachOutcome {
 
 pub fn request_detach(run_id: &str) -> DetachOutcome {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
-    let Some(handle) = g.as_ref().and_then(|m| m.get(run_id)) else {
+    let Some(entry) = g.as_ref().and_then(|m| m.get(run_id)) else {
         return DetachOutcome::NotFound;
+    };
+    let Some(handle) = entry.as_live() else {
+        return DetachOutcome::NotAttached;
     };
     let Some(tx) = handle.detach_tx.lock().expect("detach_tx poisoned").take() else {
         return DetachOutcome::NotAttached;
@@ -400,7 +514,7 @@ pub fn remove_if_exited(run_id: &str) -> RemoveOutcome {
 }
 
 fn remove_if_exited_from(
-    map: Option<&mut HashMap<String, RunHandle>>,
+    map: Option<&mut HashMap<String, RunEntry>>,
     run_id: &str,
 ) -> RemoveOutcome {
     let Some(map) = map else {
@@ -421,7 +535,7 @@ pub fn prune_exited() -> Vec<String> {
     prune_exited_from(g.as_mut())
 }
 
-fn prune_exited_from(map: Option<&mut HashMap<String, RunHandle>>) -> Vec<String> {
+fn prune_exited_from(map: Option<&mut HashMap<String, RunEntry>>) -> Vec<String> {
     let Some(map) = map else {
         return Vec::new();
     };
@@ -436,8 +550,8 @@ fn prune_exited_from(map: Option<&mut HashMap<String, RunHandle>>) -> Vec<String
     exited
 }
 
-fn is_exited(h: &RunHandle) -> bool {
-    matches!(h.status.lock().map(|s| *s), Ok(RunStatus::Exited { .. }))
+fn is_exited(e: &RunEntry) -> bool {
+    matches!(e.status(), RunStatus::Exited { .. })
 }
 
 /// A registered-but-idle run, for tests in this crate that need one to exist.
@@ -478,10 +592,10 @@ mod tests {
         "amber_otter".to_string()
     }
 
-    async fn named_handle(map: &mut HashMap<String, RunHandle>, id: &str, name: &str) {
+    async fn named_handle(map: &mut HashMap<String, RunEntry>, id: &str, name: &str) {
         let (mut h, _rx) = make_handle();
         h.name = name.to_string();
-        map.insert(id.to_string(), h);
+        map.insert(id.to_string(), RunEntry::Live(h));
     }
 
     #[tokio::test]
@@ -497,7 +611,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(name, "reviewer");
-        assert_eq!(map.get("aa01").unwrap().name, "reviewer");
+        assert_eq!(map.get("aa01").unwrap().name(), "reviewer");
     }
 
     #[tokio::test]
@@ -633,7 +747,7 @@ mod tests {
         named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
         rename_in(Some(&mut map), "reviewer", "auditor").unwrap();
         assert_eq!(
-            map.get("1a2b3c4d0000000000000000000000aa").unwrap().name,
+            map.get("1a2b3c4d0000000000000000000000aa").unwrap().name(),
             "auditor"
         );
         assert_eq!(
@@ -661,7 +775,7 @@ mod tests {
         let mut map = HashMap::new();
         named_handle(&mut map, "aa03", "reviewer").await;
         rename_in(Some(&mut map), "reviewer", "reviewer").unwrap();
-        assert_eq!(map.get("aa03").unwrap().name, "reviewer");
+        assert_eq!(map.get("aa03").unwrap().name(), "reviewer");
     }
 
     #[tokio::test]
@@ -1233,15 +1347,21 @@ mod tests {
         deregister(&id);
     }
 
-    fn set_status(map: &HashMap<String, RunHandle>, id: &str, status: RunStatus) {
-        *map.get(id).unwrap().status.lock().unwrap() = status;
+    fn set_status(map: &HashMap<String, RunEntry>, id: &str, status: RunStatus) {
+        *map.get(id)
+            .unwrap()
+            .as_live()
+            .unwrap()
+            .status
+            .lock()
+            .unwrap() = status;
     }
 
     #[tokio::test]
     async fn remove_if_exited_from_drops_an_exited_entry_but_refuses_a_running_one() {
         let mut map = HashMap::new();
         let (handle, _rx) = make_handle();
-        map.insert("aa01".to_string(), handle);
+        map.insert("aa01".to_string(), RunEntry::Live(handle));
 
         assert_eq!(
             remove_if_exited_from(Some(&mut map), "aa01"),
@@ -1263,7 +1383,7 @@ mod tests {
     #[test]
     fn remove_if_exited_from_reports_not_found_for_absent_id_and_empty_registry() {
         assert_eq!(remove_if_exited_from(None, "aa01"), RemoveOutcome::NotFound);
-        let mut empty: HashMap<String, RunHandle> = HashMap::new();
+        let mut empty: HashMap<String, RunEntry> = HashMap::new();
         assert_eq!(
             remove_if_exited_from(Some(&mut empty), "aa01"),
             RemoveOutcome::NotFound
@@ -1275,7 +1395,7 @@ mod tests {
         let mut map = HashMap::new();
         for id in ["aa10", "aa11", "aa12"] {
             let (handle, _rx) = make_handle();
-            map.insert(id.to_string(), handle);
+            map.insert(id.to_string(), RunEntry::Live(handle));
         }
         set_status(&map, "aa10", RunStatus::Exited { code: 0 });
         set_status(&map, "aa12", RunStatus::Exited { code: 3 });
@@ -1320,5 +1440,138 @@ mod tests {
     async fn remove_if_exited_reports_not_found_for_an_unknown_run() {
         let id = "deadbeef000000000000000000000011".to_string();
         assert_eq!(remove_if_exited(&id), RemoveOutcome::NotFound);
+    }
+
+    fn stopped_record(id: &str, name: &str) -> crate::run_record::RunRecord {
+        let mut record = crate::run_record::test_record(id);
+        record.name = name.to_string();
+        record.exit_code = Some(3);
+        record.finished_at = Some("2026-08-18T00:01:00Z".into());
+        record
+    }
+
+    #[test]
+    fn a_stopped_entry_resolves_by_name_and_id_like_a_live_one() {
+        let mut map = HashMap::new();
+        map.insert(
+            "1a2b3c4d0000000000000000000000aa".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("1a2b3c4d0000000000000000000000aa", "reviewer"),
+            }),
+        );
+        assert_eq!(
+            resolve_in(Some(&map), "reviewer"),
+            Ok("1a2b3c4d0000000000000000000000aa".to_string())
+        );
+        assert_eq!(
+            resolve_in(Some(&map), "1a2b"),
+            Ok("1a2b3c4d0000000000000000000000aa".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_entry_keeps_its_name_reserved_against_new_runs() {
+        let mut map = HashMap::new();
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa07", "reviewer"),
+            }),
+        );
+        let (h, _rx) = make_handle();
+        let err = register_named_in(
+            &mut map,
+            "aa08".into(),
+            Some("reviewer".into()),
+            h,
+            &mut (gen_amber as fn() -> String),
+        )
+        .unwrap_err();
+        assert!(err.contains("already in use by run aa07"), "got: {err}");
+    }
+
+    #[test]
+    fn a_stopped_entry_lists_as_exited_with_its_recorded_launch_facts() {
+        let mut map = HashMap::new();
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa07", "reviewer"),
+            }),
+        );
+        let rows = snapshot_from(Some(&map));
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.name, "reviewer");
+        assert_eq!(row.status, RunStatus::Exited { code: 3 });
+        assert_eq!(row.image, "registry.example.test/some-sandbox:1");
+        assert_eq!(row.command, "sh -c true");
+        assert_eq!(row.started, "2026-08-18T00:00:00Z");
+    }
+
+    #[test]
+    fn a_stopped_entry_is_removable_and_prunable() {
+        let mut map = HashMap::new();
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa07", "reviewer"),
+            }),
+        );
+        assert_eq!(
+            remove_if_exited_from(Some(&mut map), "aa07"),
+            RemoveOutcome::Removed
+        );
+        map.insert(
+            "aa08".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa08", "builder"),
+            }),
+        );
+        assert_eq!(prune_exited_from(Some(&mut map)), vec!["aa08".to_string()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_stopped_entry_has_no_session_to_cancel_detach_or_feed() {
+        let id = allocate_run_id();
+        register_stopped(StoppedRun {
+            record: stopped_record(&id, &format!("rev-{id}")),
+        });
+        assert!(!cancel(&id), "cancel of a stopped run is a no-op");
+        assert!(
+            status(&id).is_some(),
+            "a failed cancel must not remove the stopped run"
+        );
+        assert_eq!(request_detach(&id), DetachOutcome::NotAttached);
+        assert!(input_sender(&id).is_none());
+        assert!(log_buffer(&id).is_none());
+        assert!(connector(&id).is_none());
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    async fn stopped_run_names_lists_every_startable_run_sorted() {
+        let mut map = HashMap::new();
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa07", "reviewer"),
+            }),
+        );
+        let (live, _rx) = make_handle();
+        let mut live = RunEntry::Live(live);
+        live.set_name("runner".to_string());
+        map.insert("aa08".to_string(), live);
+        let (exited, _rx2) = make_handle();
+        let mut exited = RunEntry::Live(exited);
+        exited.set_name("builder".to_string());
+        map.insert("aa09".to_string(), exited);
+        set_status(&map, "aa09", RunStatus::Exited { code: 0 });
+        assert_eq!(
+            stopped_names_in(Some(&map)),
+            vec!["builder".to_string(), "reviewer".to_string()],
+            "exited runs are startable, live ones are not"
+        );
     }
 }
