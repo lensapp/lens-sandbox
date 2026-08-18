@@ -153,6 +153,13 @@ fn same_image(run_image: &str, reference: &str) -> bool {
         && (run.digest().is_some() != record.digest().is_some())
 }
 
+/// A stopped run pins its image until removal, so removal asks every listed run — the Running filter belongs to display only.
+fn pinning_holder(runs: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
+    runs.iter()
+        .find(|r| same_image(&r.image, reference))
+        .map(|r| r.id.clone())
+}
+
 fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
     active
         .iter()
@@ -248,6 +255,7 @@ pub async fn remove_with<F: Fs, C: Caches>(
     fs: &F,
     caches: &C,
     images_root: &Path,
+    pinned_layers: &HashSet<String>,
     active: &[lns_ipc::RunSummary],
     image: &str,
 ) -> Result<RemovedImage> {
@@ -256,7 +264,7 @@ pub async fn remove_with<F: Fs, C: Caches>(
     if !records.iter().any(|record| record.reference == reference) {
         bail!("no such image: {reference}");
     }
-    if let Some(run_id) = holder(active, &reference) {
+    if let Some(run_id) = pinning_holder(active, &reference) {
         bail!(
             "image {reference:?} in use by run {}",
             lns_ipc::short_run_id(&run_id)
@@ -272,7 +280,7 @@ pub async fn remove_with<F: Fs, C: Caches>(
     }
     let active_references: HashSet<String> = records
         .iter()
-        .filter(|record| holder(active, &record.reference).is_some())
+        .filter(|record| pinning_holder(active, &record.reference).is_some())
         .map(|record| record.reference.clone())
         .collect();
     let removed_references = removal_closure(&records, &reference, &active_references);
@@ -301,7 +309,8 @@ pub async fn remove_with<F: Fs, C: Caches>(
             caches.remove_manifest(&pinned)?;
         }
     }
-    let keep = layer_keep_set(surviving.into_iter());
+    let mut keep = layer_keep_set(surviving.into_iter());
+    keep.extend(pinned_layers.iter().cloned());
     let reclaimed_bytes = caches.sweep_layers(&keep)?;
     Ok(RemovedImage {
         reference,
@@ -339,12 +348,13 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
     fs: &F,
     caches: &C,
     images_root: &Path,
+    pinned_layers: &HashSet<String>,
     active: &[lns_ipc::RunSummary],
 ) -> Result<PruneReport> {
     let records = load_records(fs, images_root).await?;
     let active_roots: HashSet<String> = records
         .iter()
-        .filter(|record| holder(active, &record.reference).is_some())
+        .filter(|record| pinning_holder(active, &record.reference).is_some())
         .map(|record| record.reference.clone())
         .collect();
     let kept_references = dependency_closure(&records, &active_roots);
@@ -368,11 +378,10 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
     for pinned in removable_manifests.difference(&kept_manifests) {
         caches.remove_manifest(pinned)?;
     }
-    let mut reclaimed_bytes = caches.sweep_layers(&layer_keep_set(kept.iter()))?;
-    if !active
-        .iter()
-        .any(|run| matches!(run.status, lns_ipc::RunStatus::Running))
-    {
+    let mut keep = layer_keep_set(kept.iter());
+    keep.extend(pinned_layers.iter().cloned());
+    let mut reclaimed_bytes = caches.sweep_layers(&keep)?;
+    if active.is_empty() {
         let cache_root = images_root.parent().unwrap_or_else(|| Path::new(""));
         reclaimed_bytes += clear_runtime_cache(fs, cache_root).await?;
     }
@@ -636,10 +645,16 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
         &images_root()?,
+        &recorded_run_pins().await?,
         &crate::run_registry::snapshot(),
         image,
     )
     .await
+}
+
+async fn recorded_run_pins() -> Result<HashSet<String>> {
+    let records = crate::run_record::load_all_with(&real::RealFs, &crate::cache::root()?).await?;
+    Ok(crate::run_record::pinned_digests(&records))
 }
 
 pub async fn tag(from: &str, to: &str) -> Result<()> {
@@ -654,6 +669,7 @@ pub async fn prune() -> Result<PruneReport> {
         &real::RealFs,
         &real::RealCaches::new(&crate::cache::root()?),
         &images_root()?,
+        &recorded_run_pins().await?,
         &crate::run_registry::snapshot(),
     )
     .await?;
@@ -1049,6 +1065,88 @@ mod tests {
 
     const ROOT: &str = "/images";
 
+    fn no_pins() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    #[tokio::test]
+    async fn remove_refuses_an_image_a_stopped_run_still_needs() {
+        let sandbox = "registry.example.test/some-sandbox:1";
+        let fs = FakeFs::with_records(&[rec(sandbox, &[])]);
+        let stopped = lns_ipc::RunSummary {
+            status: lns_ipc::RunStatus::Exited { code: 0 },
+            ..running("aa07", sandbox)
+        };
+        let err = remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[stopped],
+            sandbox,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("in use by run aa07"),
+            "a stopped run pins its image until the run is removed, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_the_image_and_runtime_cache_a_stopped_run_still_needs() {
+        let sandbox = "registry.example.test/some-sandbox:1";
+        let fs = FakeFs::with_records(&[rec(sandbox, &[])]);
+        fs.put(
+            &Path::new(ROOT)
+                .parent()
+                .unwrap()
+                .join("composefs")
+                .join("d"),
+            b"descriptor",
+        );
+        let caches = FakeCaches::default();
+        let stopped = lns_ipc::RunSummary {
+            status: lns_ipc::RunStatus::Exited { code: 0 },
+            ..running("aa07", sandbox)
+        };
+        let report = prune_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[stopped])
+            .await
+            .unwrap();
+        assert!(
+            report.removed.is_empty(),
+            "a stopped run's image is not prunable: {:?}",
+            report.removed
+        );
+        assert!(
+            fs.has(
+                &Path::new(ROOT)
+                    .parent()
+                    .unwrap()
+                    .join("composefs")
+                    .join("d")
+            ),
+            "the composefs descriptors a stopped run boots from must survive prune"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_drops_a_layer_a_run_record_pins() {
+        let sandbox = "registry.example.test/some-sandbox:1";
+        let fs = FakeFs::with_records(&[rec(sandbox, &[])]);
+        let caches = FakeCaches::default();
+        let pins: HashSet<String> = ["sha256:pinned-by-a-plain-image-run".to_string()].into();
+        prune_with(&fs, &caches, Path::new(ROOT), &pins, &[])
+            .await
+            .unwrap();
+        let swept = caches.swept_with.lock().unwrap();
+        assert!(
+            swept[0].contains("sha256:pinned-by-a-plain-image-run"),
+            "recorded layer digests ride in the keep set: {:?}",
+            swept[0]
+        );
+    }
+
     fn rec(reference: &str, layers: &[(&str, u64)]) -> ImageRecord {
         ImageRecord {
             reference: reference.to_string(),
@@ -1376,7 +1474,7 @@ mod tests {
     async fn remove_rejects_an_invalid_reference_without_touching_anything() {
         let fs = FakeFs::default();
         let caches = FakeCaches::default();
-        let err = remove_with(&fs, &caches, Path::new(ROOT), &[], "###")
+        let err = remove_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[], "###")
             .await
             .unwrap_err()
             .to_string();
@@ -1387,10 +1485,17 @@ mod tests {
     #[tokio::test]
     async fn remove_of_an_unknown_image_names_its_normalized_reference() {
         let fs = FakeFs::default();
-        let err = remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], "absent")
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[],
+            "absent",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("no such image: docker.io/library/absent:latest"),
             "got: {err}"
@@ -1405,6 +1510,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[running("aa07", "some-image:1.0")],
             "some-image:1.0",
         )
@@ -1435,6 +1541,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[],
             "registry.example.test/gone:1",
         )
@@ -1474,6 +1581,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[],
             "registry.example.test/team/image:old",
         )
@@ -1499,6 +1607,7 @@ mod tests {
             &failing,
             &FakeCaches::default(),
             Path::new(ROOT),
+            &no_pins(),
             &[],
             "registry.example.test/gone:1",
         )
@@ -1518,6 +1627,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[],
             "registry.example.test/gone:1",
         )
@@ -1538,6 +1648,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[],
             "registry.example.test/gone:1",
         )
@@ -1561,6 +1672,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[running("aa03", "held:1.0")],
         )
         .await
@@ -1584,9 +1696,15 @@ mod tests {
             ..Default::default()
         };
 
-        let report = prune_with(&fs, &caches, Path::new(ROOT), &[running("aa03", sandbox)])
-            .await
-            .unwrap();
+        let report = prune_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &no_pins(),
+            &[running("aa03", sandbox)],
+        )
+        .await
+        .unwrap();
 
         assert!(report.removed.is_empty());
         assert!(fs.has(&record_path(Path::new(ROOT), base)));
@@ -1656,6 +1774,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[running("aa03", sandbox_tag)],
         )
         .await
@@ -1684,7 +1803,7 @@ mod tests {
             ..Default::default()
         };
 
-        let removed = remove_with(&fs, &caches, Path::new(ROOT), &[], sandbox)
+        let removed = remove_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[], sandbox)
             .await
             .unwrap();
 
@@ -1709,9 +1828,16 @@ mod tests {
             rec(base, &[("sha256:base-layer", 9)]),
         ]);
 
-        remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], first)
-            .await
-            .unwrap();
+        remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[],
+            first,
+        )
+        .await
+        .unwrap();
 
         assert!(fs.has(&record_path(Path::new(ROOT), second)));
         assert!(fs.has(&record_path(Path::new(ROOT), base)));
@@ -1729,6 +1855,7 @@ mod tests {
             &fs,
             &FakeCaches::default(),
             Path::new(ROOT),
+            &no_pins(),
             &[running("aa04", base)],
             sandbox,
         )
@@ -1757,10 +1884,17 @@ mod tests {
             artifact_run_record("registry.example.test/team/agent:1", "sha256:m", base, 7).unwrap();
         let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
 
-        let err = remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], base)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[],
+            base,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
 
         assert!(
             err.contains("required by cached sandbox"),
@@ -1776,10 +1910,17 @@ mod tests {
         sandbox_record.dependencies.push(base.to_string());
         let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
 
-        let err = remove_with(&fs, &FakeCaches::default(), Path::new(ROOT), &[], base)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = remove_with(
+            &fs,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[],
+            base,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
 
         assert!(err.contains("required by cached sandbox"), "got: {err}");
         assert!(fs.has(&record_path(Path::new(ROOT), base)));
@@ -1822,6 +1963,7 @@ mod tests {
             &fs,
             &caches,
             Path::new(ROOT),
+            &no_pins(),
             &[running("aa03", "registry.example.test/team/image:held")],
         )
         .await
@@ -1844,7 +1986,7 @@ mod tests {
             freed: 11,
             ..Default::default()
         };
-        let report = prune_with(&fs, &caches, Path::new(ROOT), &[])
+        let report = prune_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[])
             .await
             .unwrap();
         assert!(report.removed.is_empty());
@@ -2030,9 +2172,15 @@ mod tests {
             fail_remove: true,
             ..Default::default()
         };
-        let err = prune_with(&failing, &FakeCaches::default(), Path::new(ROOT), &[])
-            .await
-            .unwrap_err();
+        let err = prune_with(
+            &failing,
+            &FakeCaches::default(),
+            Path::new(ROOT),
+            &no_pins(),
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("remove boom"), "got: {err:#}");
     }
 
@@ -2043,7 +2191,7 @@ mod tests {
             fail_remove_manifest: true,
             ..Default::default()
         };
-        let err = prune_with(&fs, &caches, Path::new(ROOT), &[])
+        let err = prune_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[])
             .await
             .unwrap_err()
             .to_string();
