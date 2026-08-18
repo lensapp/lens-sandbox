@@ -65,6 +65,12 @@ Feature: managing cached sandboxes
     And the named volume "claude-home" still exists
 
   @todo
+  Scenario: rmi removes a cached reference
+    Given a cached sandbox not used by any run
+    When I run "lns rmi" with its reference
+    Then it is removed exactly as "lns rm <ref>" did before the rename
+
+  @todo
   Scenario: diff shows local edits and accreted grants against the pulled version
     Given the sandbox "hermes:1.4.0" was pulled and then locally edited
     When the user runs sandbox command "diff hermes:1.4.0"
