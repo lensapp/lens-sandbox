@@ -402,7 +402,10 @@ pub async fn connect(
             BindOutcome::Completed(decision) => bind_message(&args.id, decision),
         }
     };
-    let path = policy_path(args.policy.as_deref(), cwd);
+    let path = policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    );
     connect_project(grants_path, &project_key(&path), &args.id)?;
     writeln!(writer, "{closing}")?;
     // Binding the value cannot lift a workload's decline, so say what will: otherwise the connect reports success and the workload goes on being refused with nothing on screen explaining it.
@@ -448,7 +451,10 @@ pub fn disconnect(
     grants_path: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let path = policy_path(args.policy.as_deref(), cwd);
+    let path = policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    );
     let project = project_key(&path);
     let cleared = disconnect_project(grants_path, &project, &args.id)?
         .ok_or_else(|| anyhow::anyhow!("{:?} is not connected in {project}", args.id))?;
@@ -507,7 +513,10 @@ fn grants(
     let file = store
         .load()
         .with_context(|| format!("reading grants from {}", grants_path.display()))?;
-    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let project = project_key(&policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    ));
     let rows: Vec<&GrantRecord> = if args.all {
         file.grants.iter().collect()
     } else {
@@ -573,7 +582,10 @@ fn revoke(
     grants_path: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let project = project_key(&policy_path(args.policy.as_deref(), cwd));
+    let project = project_key(&policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    ));
     let cleared = clear_project_grants(grants_path, &project, &args.id)?;
     if cleared == 0 {
         bail!(

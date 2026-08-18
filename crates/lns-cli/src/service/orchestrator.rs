@@ -284,8 +284,10 @@ pub async fn run_image(
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
+    let project_dir = target.project_dir().unwrap_or(&cwd).to_path_buf();
+    let site = crate::run::summary::DecisionsSite::for_run(&cwd, Some(&project_dir));
     // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
-    let decisions = crate::run::summary::policy_path(args.policy.as_deref(), &cwd);
+    let decisions = crate::run::summary::policy_path(args.policy.as_deref(), site);
     let mut authored_egress = None;
     // A mixin the preflight pulled brings its filesets packed in its own artifact, and the merged document alone cannot say which.
     let mut packed_filesets = Vec::new();
@@ -388,10 +390,10 @@ pub async fn run_image(
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
     let resolved_policy = if quiet {
-        let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), &cwd)?;
+        let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), site)?;
         path
     } else {
-        print_run_summary(&args, size, &cwd, &mut std::io::stderr())?
+        print_run_summary(&args, size, site, &mut std::io::stderr())?
     };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);

@@ -140,7 +140,7 @@ fn run_resolve(world: &mut BehaviourWorld, flags: &str, interactive: bool) {
                 lns_cli::run::summary::resolved_size(Default::default(), &args),
                 &Policy::default(),
                 Path::new("./lns-local-mixin.yaml"),
-                &PolicySource::FoundInCwd,
+                &PolicySource::Found,
             );
             text.push_str(&format_bind_dispositions(resolved));
             text

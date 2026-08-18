@@ -2,8 +2,9 @@ Feature: selecting the sandbox definition file
   `./lns.yaml` is the sandbox — one directory is one sandbox. A path-shaped
   reference naming a `.yaml` file, or the explicit `-f/--file` selector, is
   the override that operates on a different definition file: the file's
-  directory roots its relative binds and filesets, compose-style, while the
-  policy still comes from where you run.
+  directory is the project, so it roots the relative binds and filesets,
+  compose-style, and holds the decisions the run resolves. A `--policy` path is
+  the developer's own, so that one roots where they typed it.
 
   Scenario: a path-shaped reference naming a yaml file runs that file's definition
     Given a sandbox definition file "lns.dev.yaml" in the current directory
@@ -56,3 +57,15 @@ Feature: selecting the sandbox definition file
     Then the command fails with an exit code other than 0
     And the output contains "no sandbox definition at"
     And the output contains "lns.dev.yaml"
+
+  Scenario: a definition in another directory is governed by that directory's decisions
+    Given a sandbox definition file "/other/lns.dev.yaml" declaring a relative bind and fileset
+    When the user runs "lns run /other/lns.dev.yaml"
+    Then the exit code is 0
+    And the run reads its decisions from "/other/lns-local-mixin.yaml"
+
+  Scenario: a --policy path still roots where the user typed it
+    Given a sandbox definition file "/other/lns.dev.yaml" declaring a relative bind and fileset
+    When the user runs "lns run --policy team.yaml /other/lns.dev.yaml"
+    Then the exit code is 0
+    And the run reads its decisions from "/work/team.yaml"

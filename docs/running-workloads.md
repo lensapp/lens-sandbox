@@ -101,9 +101,9 @@ lns run [OPTIONS] [REF] [-- COMMAND...]
 or a **path to a local definition**. Omit it to run the `./lns.yaml` in the current
 directory; `.`, `lns.yaml`, and `./lns.yaml` mean the same thing, a relative or
 absolute path runs another directory's definition, and a path-shaped `.yaml`/`.yml`
-file names the definition itself. Either way the definition's relative binds and
-filesets root at its own directory, compose-style, while the policy still comes
-from where you run:
+file names the definition itself. Either way the definition's directory is the
+project: it roots the relative binds and filesets, compose-style, and holds the
+decisions the run resolves:
 
 ```bash
 lns run                                  # run ./lns.yaml in this directory
@@ -114,11 +114,15 @@ lns run ./lns.dev.yaml                   # run a definition file by name
 lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
-You run `lns run` from a project directory; that's where Lens Sandbox looks for the
-`lns-local-mixin.yaml` that governs the run. To expose your actual host files to the
-workload, bind-mount a directory with `-v /host/path:/guest/path` (see
-[Host bind mounts](#host-bind-mounts)); for scratch space that persists across runs,
-attach a named volume instead.
+One directory is one project, and the definition you run names which: the
+`lns-local-mixin.yaml` that governs a run sits beside the `lns.yaml` being run, so
+`lns run ../other-project` reads and writes that project's decisions rather than
+yours. A published reference has no directory of its own, so a run of one is
+governed by the directory you start it in.
+
+To expose your actual host files to the workload, bind-mount a directory with
+`-v /host/path:/guest/path` (see [Host bind mounts](#host-bind-mounts)); for
+scratch space that persists across runs, attach a named volume instead.
 
 ### Running a definition vs. a reference
 
@@ -155,8 +159,8 @@ lns push -f lns.dev.yaml ghcr.io/acme/agent-dev:1.0.0
 lns inspect -f lns.dev.yaml              # render it, offline
 ```
 
-The selected file's directory roots its relative binds and filesets, exactly as
-a path-shaped `REF` does, and the policy still comes from where you run. On
+The selected file's directory is the project, exactly as a path-shaped `REF`
+makes it: it roots the relative binds and filesets and holds the decisions. On
 `lns run` the selector is exclusive with `REF`; `lns run ./lns.dev.yaml` is the
 equivalent path spelling.
 

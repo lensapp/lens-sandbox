@@ -24,12 +24,12 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Then the Policy block shows the file path
     And what happens to a destination no rule names
     And a one-line rule summary: "3 allow, 1 deny, anything else asks"
-    And the provenance line: "source: found in this directory"
+    And the provenance line: "source: found in the project directory"
 
   Scenario: Auto-created policy is called out in the source line
     Given no `lns-local-mixin.yaml` exists in the working directory
     When the run starts
-    Then the Policy block source line reads "auto-created (no policy in this directory)"
+    Then the Policy block source line reads "auto-created (no policy in the project directory)"
     And a destination no rule names is "ask"ed
 
   Scenario: Explicit --policy is called out in the source line

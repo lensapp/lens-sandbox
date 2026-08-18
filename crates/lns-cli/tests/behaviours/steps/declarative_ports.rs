@@ -91,7 +91,7 @@ fn summarize(world: &mut BehaviourWorld, defaults: &Defaults, flags: &str, local
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
+        lns_cli::run::summary::DecisionsSite::one_directory(&cwd),
         &mut buf,
     )
     .expect("print_run_summary");

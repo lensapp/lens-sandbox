@@ -7,9 +7,10 @@ three things: **allow** it, **deny** it at the boundary, or — when no rule mat
 
 ## The policy file
 
-Policy lives in a human-readable YAML file. By default that's `lns-local-mixin.yaml` in
-the directory you run from; the first `lns run` in a directory without one creates
-it:
+Policy lives in a human-readable YAML file. By default that's
+`lns-local-mixin.yaml` beside the definition being run — the directory you run
+from, unless you name a definition in another one — and the first `lns run` in a
+directory without one creates it:
 
 ```yaml
 apiVersion: lns.run/v1
@@ -218,7 +219,8 @@ section before using it.
 
 You can hand-edit the YAML, but `lns policy` edits it for you and keeps it
 well-formed. All subcommands default to `lns-local-mixin.yaml` in the current directory;
-pass `--policy <path>` to target another file.
+pass `--policy <path>` to target another file, including the one governing a
+definition you run from elsewhere.
 
 ### Add an allow or deny rule
 

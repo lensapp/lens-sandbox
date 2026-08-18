@@ -203,6 +203,10 @@ fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: 
     w.sandbox_run.verify_sandbox = Some(target.verify_sandbox());
     w.sandbox_run.definition = target.definition_json();
     w.sandbox_run.project_dir = target.project_dir().map(Path::to_path_buf);
+    w.sandbox_run.decisions = Some(lns_cli::run::summary::policy_path(
+        args.policy.as_deref(),
+        lns_cli::run::summary::DecisionsSite::for_run(cwd, target.project_dir()),
+    ));
     if let Some(policy) = args.policy.as_deref() {
         w.summary_output = format_summary(
             &args,

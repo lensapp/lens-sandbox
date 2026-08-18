@@ -86,8 +86,9 @@ local definition** — `.`, `lns.yaml`, `./lns.yaml`, a relative/absolute path t
 a directory holding one, or a path-shaped `.yaml`/`.yml` file naming the
 definition itself (`./lns.dev.yaml`); omit it to run the `./lns.yaml` in the
 current directory, or select another file with `-f`/`--file` (exclusive with
-`REF`). A path-named definition's relative binds and filesets root at its own
-directory, compose-style; the policy still comes from where you run. A
+`REF`). A path-named definition's directory is the project: it roots the relative binds
+and filesets, compose-style, and holds the `lns-local-mixin.yaml` the run
+resolves. A
 `COMMAND` after the reference overrides the sandbox base image's default command
 (`lns run ghcr.io/acme/agent:1 echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
 separator is still accepted. A command with no `REF` (`lns run -- echo hi`) runs
@@ -97,10 +98,10 @@ the `./lns.yaml` definition with its command overridden.
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
 | `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`, `-m 38Gi` — the same sizes `spec.resources.memory` accepts, all binary, rounded up to a whole MiB); falls back to the `run.mem` config default. |
-| `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory roots the definition's relative binds and filesets. Cannot be combined with `REF`. |
+| `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory is the project, so it roots the definition's relative binds and filesets and holds the decisions file. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
-| `--policy <PATH>`            | `lns-local-mixin.yaml`| Policy file; auto-created with no rules if absent.                      |
+| `--policy <PATH>`            | the project's `lns-local-mixin.yaml`| Policy file; auto-created with no rules if absent. A relative path roots where you typed it, not at the project. |
 | `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Takes a reference or a directory. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`, and a directory shows its absolute path. |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
