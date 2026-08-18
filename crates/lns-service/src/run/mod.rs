@@ -884,6 +884,46 @@ mod tests {
 mod launch_mode_tests {
     use super::*;
 
+    struct EmptyFs;
+    impl crate::image_store::Fs for EmptyFs {
+        async fn read_dir(&self, _: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, _: &std::path::Path, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopRemover;
+    impl RemoveDir for NoopRemover {
+        fn remove_dir_all(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recordless_exit_warns_and_still_concludes() {
+        conclude_run(
+            &EmptyFs,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            "ghost-run-id-00000000000000000000",
+            RunEnd {
+                code: 0,
+                auto_remove: false,
+                finished_at: "t".into(),
+            },
+            |_| panic!("nothing to remove without --rm"),
+        )
+        .await;
+    }
+
     #[test]
     fn a_fresh_launch_accepts_any_descriptor() {
         assert!(verify_pinned_descriptor(&LaunchMode::Fresh, "sha256:anything").is_ok());

@@ -70,17 +70,17 @@ where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
     H: StartHost,
 {
-    let Ok(run_id) = crate::run_registry::resolve(run) else {
+    let Ok((run_id, status)) = crate::run_registry::resolve_status(run) else {
         let _ = write_error(stream, no_startable_run(run)).await;
         return Ok(());
     };
-    match crate::run_registry::status(&run_id) {
-        Some(lns_ipc::RunStatus::Running) => {
+    match status {
+        lns_ipc::RunStatus::Running => {
             let frame = encode_frame(&Response::RunStarted { run_id })?;
             stream.write_all(&frame).await?;
             Ok(())
         }
-        Some(lns_ipc::RunStatus::Exited { .. }) => {
+        lns_ipc::RunStatus::Exited { .. } => {
             let record = match host.record(&run_id).await {
                 Ok(record) => record,
                 Err(e) => {
@@ -93,10 +93,6 @@ where
                 return Ok(());
             }
             host.serve(stream, record, options).await
-        }
-        None => {
-            let _ = write_error(stream, no_startable_run(run)).await;
-            Ok(())
         }
     }
 }
@@ -661,19 +657,46 @@ where
         Ok(id) => id,
         Err(message) => return Response::Error { message },
     };
+    remove_resolved_run_with(
+        &id,
+        run,
+        force,
+        remover,
+        cache_root,
+        send_signal,
+        note_removed,
+    )
+    .await
+}
+
+async fn remove_resolved_run_with<R, F, Fut, N>(
+    id: &str,
+    run: &str,
+    force: bool,
+    remover: &R,
+    cache_root: &std::path::Path,
+    send_signal: F,
+    note_removed: N,
+) -> Response
+where
+    R: crate::run::RemoveDir,
+    F: Fn(String, lns_ipc::SignalKind) -> Fut,
+    Fut: std::future::Future<Output = Response>,
+    N: Fn(&str, bool),
+{
     if force
         && let Response::Error { message } =
-            stop_run_with(&id, std::time::Duration::ZERO, KILL_GRACE, |sig| {
-                send_signal(id.clone(), sig)
+            stop_run_with(id, std::time::Duration::ZERO, KILL_GRACE, |sig| {
+                send_signal(id.to_string(), sig)
             })
             .await
     {
         return Response::Error { message };
     }
-    match crate::run_registry::remove_if_exited(&id) {
+    match crate::run_registry::remove_if_exited(id) {
         crate::run_registry::RemoveOutcome::Removed => {
-            note_removed(&id, force);
-            crate::run::reclaim_run_dir(remover, cache_root, &id);
+            note_removed(id, force);
+            crate::run::reclaim_run_dir(remover, cache_root, id);
             Response::Acknowledged
         }
         crate::run_registry::RemoveOutcome::Running => Response::Error {
@@ -2554,6 +2577,19 @@ mod tests {
         }
     }
 
+    fn kill_acknowledged(id: String, _sig: lns_ipc::SignalKind) -> std::future::Ready<Response> {
+        crate::run_registry::set_exit_code(&id, 137);
+        std::future::ready(Response::Acknowledged)
+    }
+
+    fn signal_refused(_id: String, _sig: lns_ipc::SignalKind) -> std::future::Ready<Response> {
+        std::future::ready(Response::Error {
+            message: "the session is gone".into(),
+        })
+    }
+
+    fn note_nothing(_id: &str, _forced: bool) {}
+
     #[tokio::test]
     async fn remove_run_with_reports_no_such_run_for_an_unknown_handle() {
         let resp = remove_run_with(
@@ -2561,14 +2597,175 @@ mod tests {
             false,
             &NoopRemover,
             std::path::Path::new("/cache"),
-            |_, _| async { Response::Acknowledged },
-            |_, _| {},
+            kill_acknowledged,
+            note_nothing,
         )
         .await;
         assert!(
             matches!(&resp, Response::Error { message } if message.contains("no such run")),
             "got {resp:?}"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn removing_an_exited_run_reclaims_and_notes_it() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        crate::run_registry::set_exit_code(&id, 0);
+        let resp = remove_run_with(
+            &id,
+            false,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            kill_acknowledged,
+            note_nothing,
+        )
+        .await;
+        assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
+        assert!(crate::run_registry::status(&id).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_forced_removal_kills_then_removes_in_one_step() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let resp = remove_run_with(
+            &id,
+            true,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            kill_acknowledged,
+            note_nothing,
+        )
+        .await;
+        assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
+        assert!(crate::run_registry::status(&id).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_forced_removal_whose_kill_fails_changes_nothing() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let resp = remove_run_with(
+            &id,
+            true,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            signal_refused,
+            note_nothing,
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("the session is gone")),
+            "got {resp:?}"
+        );
+        assert!(crate::run_registry::status(&id).is_some());
+        crate::run_registry::deregister(&id);
+    }
+
+    #[tokio::test]
+    async fn removing_a_run_that_vanished_after_resolution_reports_it() {
+        let resp = remove_resolved_run_with(
+            "ffffffffffffffffffffffffffffffff",
+            "ghost",
+            false,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            kill_acknowledged,
+            note_nothing,
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no run with id")),
+            "got {resp:?}"
+        );
+    }
+
+    struct ScriptedRunsDir(Vec<std::path::PathBuf>);
+    impl crate::image_store::Fs for ScriptedRunsDir {
+        async fn read_dir(
+            &self,
+            _dir: &std::path::Path,
+        ) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Ok(self.0.clone())
+        }
+        async fn read(&self, _p: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, _p: &std::path::Path, _b: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _p: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_skips_a_runs_dir_entry_with_no_readable_name() {
+        let fs = ScriptedRunsDir(vec![std::path::PathBuf::from("/")]);
+        let resp = prune_runs_with(&fs, &NoopRemover, std::path::Path::new("/cache"), |_| {}).await;
+        assert!(
+            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            "an unreadable entry is skipped, never swept blind: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs, env)]
+    async fn the_request_wrappers_audit_what_they_remove() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _c = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", d.path().join("data"));
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        crate::run_registry::set_exit_code(&id, 0);
+        let resp = remove_run_request(&id, false).await;
+        assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
+        let audit = crate::audit::audit_path(&id).unwrap();
+        let content = std::fs::read_to_string(&audit).unwrap();
+        assert!(content.contains("run_removed"), "{content}");
+
+        let id2 = crate::run_registry::allocate_run_id();
+        let (handle2, _rx2) = crate::run_registry::test_handle();
+        crate::run_registry::register(id2.clone(), handle2);
+        crate::run_registry::set_exit_code(&id2, 0);
+        let resp = prune_runs_request().await;
+        assert!(
+            matches!(&resp, Response::RunsPruned { removed } if removed.contains(&id2)),
+            "got {resp:?}"
+        );
+        let content = std::fs::read_to_string(crate::audit::audit_path(&id2).unwrap()).unwrap();
+        assert!(content.contains("runs_pruned"), "{content}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs, env)]
+    async fn an_unwritable_audit_trail_warns_but_never_blocks_removal() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", file.path());
+        let _c = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", file.path().join("cache"));
+        let _x = crate::test_env::EnvVarGuard::set("XDG_DATA_HOME", file.path().join("data"));
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        crate::run_registry::set_exit_code(&id, 0);
+        let resp = remove_run_request(&id, false).await;
+        assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
+
+        let id2 = crate::run_registry::allocate_run_id();
+        let (handle2, _rx2) = crate::run_registry::test_handle();
+        crate::run_registry::register(id2.clone(), handle2);
+        crate::run_registry::set_exit_code(&id2, 0);
+        let resp = prune_runs_request().await;
+        assert!(matches!(resp, Response::RunsPruned { .. }), "got {resp:?}");
     }
 
     #[tokio::test]
