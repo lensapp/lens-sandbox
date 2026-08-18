@@ -1024,6 +1024,102 @@ mod tests {
         assert_eq!(pump.await.unwrap().unwrap(), PumpOutcome::ExitFrame);
     }
 
+    struct ExecPumpStream {
+        read_error: bool,
+    }
+
+    impl tokio::io::AsyncRead for ExecPumpStream {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.read_error {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "read reset",
+                )))
+            } else {
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ExecPumpStream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "write closed",
+            )))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_pump_surfaces_a_read_error() {
+        let mut stream = ExecPumpStream { read_error: true };
+        let (_frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+
+        let outcome = pump_exec_responses(&mut stream, &mut frame_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, PumpOutcome::WriteFailed("read reset".to_string()));
+    }
+
+    #[tokio::test]
+    async fn exec_pump_stops_when_the_guest_frame_channel_closes() {
+        let (_client, mut service) = tokio::io::duplex(64);
+        let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+        drop(frame_tx);
+
+        let outcome = pump_exec_responses(&mut service, &mut frame_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, PumpOutcome::ChannelClosed);
+    }
+
+    #[tokio::test]
+    async fn exec_pump_surfaces_a_write_error() {
+        let mut stream = ExecPumpStream { read_error: false };
+        let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+        frame_tx
+            .send(WireFrame::Stdout(b"exec-out".to_vec()))
+            .await
+            .unwrap();
+
+        let outcome = pump_exec_responses(&mut stream, &mut frame_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            PumpOutcome::WriteFailed("write closed".to_string())
+        );
+        assert!(
+            stream.flush().await.is_ok() && stream.shutdown().await.is_ok(),
+            "teardown after a surfaced write failure must not mask it with a second error"
+        );
+    }
+
     #[tokio::test]
     async fn pump_cancel_writes_run_exit_even_when_frame_channel_is_full() {
         let mut sink: Vec<u8> = Vec::new();
