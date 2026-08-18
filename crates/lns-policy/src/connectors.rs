@@ -224,15 +224,7 @@ impl Catalog {
     pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
         let yaml = serde_yaml::to_string(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("yaml.tmp");
-        fs::write(&tmp, yaml)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::secure_file::write_yaml_document_atomic(path, yaml.as_bytes())
     }
 }
 
@@ -1265,6 +1257,28 @@ mod tests {
         assert!(path.exists());
         assert!(!path.with_extension("yaml.tmp").exists());
         assert_eq!(Catalog::load_or_default(&path).unwrap(), c);
+    }
+
+    #[test]
+    fn save_atomic_does_not_follow_a_symlink_planted_at_the_tmp_path() {
+        // This catalog declares where a credential is injected, so a write redirected out of it is a write of whatever the symlink names.
+        let dir = tempfile::TempDir::new().unwrap();
+        let victim = dir.path().join("victim");
+        let victim_contents = b"victim-data-must-survive";
+        fs::write(&victim, victim_contents).unwrap();
+        let path = dir.path().join(".lns-connectors.yaml");
+        std::os::unix::fs::symlink(&victim, path.with_extension("yaml.tmp")).unwrap();
+
+        let _ = Catalog {
+            connectors: vec![sample_connector()],
+        }
+        .save_atomic(&path);
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_contents,
+            "a symlink at the tmp path must not redirect the catalog write"
+        );
     }
 
     #[test]
