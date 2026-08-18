@@ -217,19 +217,13 @@ mod assembling_progress_tests {
     use super::*;
     use lns_ipc::{Response, WireFrame};
 
-    fn run_progress_frames(frames: Vec<WireFrame>) -> Vec<(String, String, u64, u64)> {
-        frames
-            .into_iter()
-            .filter_map(|f| match f {
-                WireFrame::Json(Response::RunProgress {
-                    verb,
-                    message,
-                    current,
-                    total,
-                }) => Some((verb, message, current, total)),
-                _ => None,
-            })
-            .collect()
+    fn assembling_frame(current: u64, total: u64) -> WireFrame {
+        WireFrame::Json(Response::RunProgress {
+            verb: "Assembling".to_string(),
+            message: "rootfs".to_string(),
+            current,
+            total,
+        })
     }
 
     #[test]
@@ -238,10 +232,7 @@ mod assembling_progress_tests {
             let sink = assembling_progress(tracing::Span::current());
             sink(3072, 8192);
         });
-        assert_eq!(
-            run_progress_frames(frames),
-            vec![("Assembling".to_string(), "rootfs".to_string(), 3072, 8192)]
-        );
+        assert_eq!(frames, vec![assembling_frame(3072, 8192)]);
     }
 
     #[test]
@@ -253,10 +244,7 @@ mod assembling_progress_tests {
                 s.spawn(move || tracing::dispatcher::with_default(&dispatch, || sink(0, 8192)));
             });
         });
-        assert_eq!(
-            run_progress_frames(frames),
-            vec![("Assembling".to_string(), "rootfs".to_string(), 0, 8192)]
-        );
+        assert_eq!(frames, vec![assembling_frame(0, 8192)]);
     }
 }
 
