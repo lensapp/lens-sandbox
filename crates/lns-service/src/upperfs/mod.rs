@@ -61,7 +61,7 @@ mod tests {
         std::fs::create_dir_all(&existing).unwrap();
         std::fs::write(existing.join("upper.img"), b"a stopped run's data").unwrap();
         let path = provision_image(root.path(), "aa07", [0; 16], 0, |_, _| {
-            panic!("a preserved writable layer must never be reformatted")
+            panic!("reformatted")
         })
         .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"a stopped run's data");

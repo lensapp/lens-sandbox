@@ -2443,6 +2443,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_surfaces_a_runs_sweep_refusal_and_an_unrelated_answer() {
+        let svc = CannedService::with_prune_runs(
+            Response::Pong,
+            Response::Error {
+                message: "runs dir unreadable".into(),
+            },
+        );
+        let mut out = Vec::new();
+        let err = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("runs dir unreadable"));
+
+        let svc = CannedService::with_prune_runs(Response::Pong, Response::Pong);
+        let mut out = Vec::new();
+        let err = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn prune_requires_force_before_touching_the_cache() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
