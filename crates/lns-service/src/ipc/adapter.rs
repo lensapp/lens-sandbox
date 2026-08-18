@@ -150,12 +150,87 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, *args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
+        Request::StartRun { run } => handle_start(stream, run).await,
         Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
         Request::BeginConnectorSignIn { id } => handle_connector_sign_in(stream, id).await,
         Request::BindConnectorCredential { id } => handle_credential_bind(stream, id).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
+    }
+}
+
+async fn handle_start(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
+    super::start_stopped_run(&mut stream, &run, &RealStartHost).await
+}
+
+struct RealStartHost;
+
+impl super::StartHost for RealStartHost {
+    async fn record(&self, run_id: &str) -> anyhow::Result<crate::run_record::RunRecord> {
+        let root = crate::cache::root()?;
+        let bytes = tokio::fs::read(crate::run_record::record_path(&root, run_id))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("run {run_id}'s state is damaged: its run record is missing")
+            })?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            anyhow::anyhow!("run {run_id}'s state is damaged: its run record does not parse")
+        })
+    }
+
+    async fn preflight(&self, record: &crate::run_record::RunRecord) -> anyhow::Result<()> {
+        let upper = crate::cache::run_dir(&crate::cache::root()?, &record.run_id).join("upper.img");
+        match tokio::fs::metadata(&upper).await {
+            Ok(m) if m.len() > 0 => {}
+            _ => anyhow::bail!(
+                "run {}'s state is damaged: its writable layer is missing from {}",
+                record.name,
+                upper.display()
+            ),
+        }
+        for volume in &record.args.volumes {
+            if let Some(holder) = crate::volume_store::global().holder(&volume.name) {
+                anyhow::bail!(
+                    "volume {:?} is held by run {}; stop or remove it first",
+                    volume.name,
+                    lns_ipc::short_run_id(&holder)
+                );
+            }
+        }
+        for bind in &record.args.binds {
+            if tokio::fs::metadata(&bind.host_source).await.is_err() {
+                anyhow::bail!(
+                    "bind source {} no longer exists on the host",
+                    bind.host_source
+                );
+            }
+        }
+        for port in &record.args.published_ports {
+            if tokio::net::TcpListener::bind((port.host_ip, port.host_port))
+                .await
+                .is_err()
+            {
+                anyhow::bail!("host port {} is already in use", port.host_port);
+            }
+        }
+        Ok(())
+    }
+
+    async fn serve<W>(
+        &self,
+        stream: &mut W,
+        record: crate::run_record::RunRecord,
+    ) -> anyhow::Result<()>
+    where
+        W: AsyncWriteExt + Unpin + Send,
+    {
+        let _ = write_error(
+            stream,
+            format!("run {} cannot be restarted yet", record.name),
+        )
+        .await;
+        Ok(())
     }
 }
 

@@ -56,6 +56,7 @@ async fn remove_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
         run_one_shot(
             &Request::RemoveRun {
                 run: run_id.to_string(),
+                force: false,
             },
             world.started_at(),
         )
@@ -73,6 +74,7 @@ async fn remove_registered_run(world: &mut BehaviourWorld) {
         run_one_shot(
             &Request::RemoveRun {
                 run: run_id.to_string(),
+                force: false,
             },
             world.started_at(),
         )
