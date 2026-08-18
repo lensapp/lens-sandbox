@@ -97,7 +97,6 @@ pub struct BehaviourWorld {
     pub naming_first_name: Option<String>,
     /// Refusal message from the last registration / rename in a naming scenario.
     pub naming_error: Option<String>,
-
     /// What a run-start scenario's host refuses with; `None` means it refuses nothing.
     pub start_refusal: Option<String>,
     /// Frames the run-start exchange wrote to its client.
@@ -110,6 +109,34 @@ pub struct BehaviourWorld {
     pub start_never_finishes: bool,
     /// Whether the run-start exchange returned rather than pending forever.
     pub start_returned: bool,
+    pub exec: ExecRoutingRig,
+}
+
+#[derive(Debug, Default)]
+pub struct ExecRoutingRig {
+    pub run_id: Option<String>,
+    pub primary_rx:
+        Option<tokio::sync::mpsc::Receiver<lns_service::vm::session_client::SessionInput>>,
+    pub first_rx:
+        Option<tokio::sync::mpsc::Receiver<lns_service::vm::session_client::SessionInput>>,
+    pub second_rx:
+        Option<tokio::sync::mpsc::Receiver<lns_service::vm::session_client::SessionInput>>,
+    pub first_target: Option<lns_ipc::SessionTarget>,
+    pub second_target: Option<lns_ipc::SessionTarget>,
+    pub first_event: Option<lns_service::vm::session_client::SessionInput>,
+    pub response: Option<Response>,
+    pub stdout_returned: bool,
+    pub stderr_returned: bool,
+    pub exit_status_returned: bool,
+    pub logs_unchanged: bool,
+}
+
+impl Drop for ExecRoutingRig {
+    fn drop(&mut self) {
+        if let Some(run_id) = &self.run_id {
+            lns_service::run_registry::deregister(run_id);
+        }
+    }
 }
 
 impl BehaviourWorld {

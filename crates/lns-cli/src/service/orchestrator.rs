@@ -578,14 +578,13 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     };
     let detach_chord = args.detach_keys.0.clone();
 
-    let request = Request::ExecImage(ExecImageArgs {
-        run: target_run,
-        argv: args.cmd,
-        env: Vec::new(),
+    let request = Request::ExecImage(build_exec_request(
+        target_run,
+        args.cmd,
         tty,
         stdin,
         initial_winsize,
-    });
+    ));
     let frame = encode_frame(&request).context("encoding ExecImage request")?;
     stream
         .write_all(&frame)
@@ -610,6 +609,23 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         StdinForwarding::of(stdin),
     )
     .await
+}
+
+pub fn build_exec_request(
+    run: String,
+    argv: Vec<String>,
+    tty: bool,
+    stdin: bool,
+    initial_winsize: Option<(u16, u16)>,
+) -> ExecImageArgs {
+    ExecImageArgs {
+        run,
+        argv,
+        env: Vec::new(),
+        tty,
+        stdin,
+        initial_winsize,
+    }
 }
 
 fn decode_exec_started(bytes: &[u8]) -> Result<lns_ipc::SessionTarget> {

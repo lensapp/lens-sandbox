@@ -2,7 +2,6 @@ Feature: interactive exec sessions from the CLI
   `lns exec` keeps explicit stdin and PTY flags while accepting
   commands without a `--` separator and surfacing inactive-run failures.
 
-  @todo
   Scenario: exec remains non-interactive by default
     Given an active run named "reviewer"
     When the user runs "lns exec reviewer echo hello"
@@ -11,7 +10,6 @@ Feature: interactive exec sessions from the CLI
     And host stdin is not forwarded
     And no PTY is allocated
 
-  @todo
   Scenario: interactive mode forwards piped input without a PTY
     Given an active run named "reviewer"
     And "hello" is available on host stdin
@@ -20,14 +18,12 @@ Feature: interactive exec sessions from the CLI
     And no PTY is allocated
     And the output contains "hello"
 
-  @todo
   Scenario: TTY mode allocates a PTY without forwarding host stdin
     Given an active run named "reviewer"
     When the user runs "lns exec -t reviewer sh"
     Then the exec command has a PTY
     And host stdin is not forwarded
 
-  @todo
   Scenario: interactive TTY mode supports terminal applications
     Given an active run named "reviewer"
     When the user runs "lns exec -it reviewer sh"
@@ -43,7 +39,6 @@ Feature: interactive exec sessions from the CLI
     And the output contains "--tty"
     And the output contains "--detach-keys"
 
-  @todo
   Scenario: exec requires an active run
     Given no active run is named "ghost"
     When the user runs "lns exec -it ghost sh"
