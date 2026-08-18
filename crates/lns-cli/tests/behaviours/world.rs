@@ -59,6 +59,7 @@ pub struct BehaviourWorld {
     pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
     pub decisions: LocalDecisionsRig,
     pub web_login: WebLoginRig,
+    pub host_paths: HostPathRig,
 }
 
 /// Scripted web-flow outcome for `lns login`, plus what the fake verifier was asked; `outcome: None` means the flow panics if consulted.
@@ -66,6 +67,43 @@ pub struct BehaviourWorld {
 pub struct WebLoginRig {
     pub outcome: Option<lns_cli::login::WebLoginOutcome>,
     pub verifier_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+}
+
+/// Drives `decide_host_paths`: what the artifact declares, what this machine already recorded, and what the developer answers.
+#[derive(Debug)]
+pub struct HostPathRig {
+    pub reference: Option<String>,
+    pub filesets: Vec<lns_cli::run::summary::FilesetSummary>,
+    pub recorded: lns_policy::host_path_decisions::HostPathDecisionFile,
+    pub answer: Option<String>,
+    pub interactive: bool,
+    pub assume_yes: bool,
+    pub load_fails: bool,
+    pub prompt: String,
+    pub denied: Vec<String>,
+    pub refusal: Option<String>,
+    pub saves: usize,
+    pub persisted: lns_policy::host_path_decisions::HostPathDecisionFile,
+}
+
+/// A terminal is the normal case, so a scenario opts out of one rather than into it.
+impl Default for HostPathRig {
+    fn default() -> Self {
+        Self {
+            reference: None,
+            filesets: Vec::new(),
+            recorded: Default::default(),
+            answer: None,
+            interactive: true,
+            assume_yes: false,
+            load_fails: false,
+            prompt: String::new(),
+            denied: Vec::new(),
+            refusal: None,
+            saves: 0,
+            persisted: Default::default(),
+        }
+    }
 }
 
 /// What the service answered when a run resolved this directory's decisions: the sources the merge reached, and which of them decided each entry.

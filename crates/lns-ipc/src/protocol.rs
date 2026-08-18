@@ -616,6 +616,9 @@ pub struct RunImageArgs {
     /// Which artifact carries each of the merged definition's packed filesets, as the resolve answered; a published reference is peeked at boot and needs none of this.
     #[serde(default)]
     pub packed_filesets: Vec<PackedFilesetSource>,
+    /// The `hostPath` sources this machine refused a pulled sandbox, so the guest is seeded from the files the developer granted and no others.
+    #[serde(default)]
+    pub denied_host_paths: Vec<String>,
 }
 
 /// One packed fileset's coordinates: the mount path it lands at, the digest-pinned artifact whose layer carries it, and that layer.
@@ -962,6 +965,7 @@ mod tests {
             definition_dir: None,
             authored_egress: None,
             packed_filesets: Vec::new(),
+            denied_host_paths: Vec::new(),
         }));
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1017,6 +1021,7 @@ mod tests {
                 digest: format!("sha256:{}", "c".repeat(64)),
                 size: 4096,
             }],
+            denied_host_paths: Vec::new(),
         };
         let frame = crate::encode_frame(&args).unwrap();
         let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1158,6 +1163,7 @@ mod tests {
             definition_dir: Some("/work/proj".into()),
             authored_egress: Some(r#"{"http":[],"tcp":[]}"#.into()),
             packed_filesets: Vec::new(),
+            denied_host_paths: Vec::new(),
         }
     }
 

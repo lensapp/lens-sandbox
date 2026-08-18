@@ -400,13 +400,20 @@ pub fn fileset_view_owner_display(owner: lns_ipc::SandboxFilesetOwner) -> &'stat
     }
 }
 
-/// One disclosed fileset. `from_host` separates a file read off the machine running the sandbox from the files the document itself ships.
+/// One disclosed fileset. `host_path` separates a file read off the machine running the sandbox from the files the document itself ships, and carries the path a pulled sandbox must be granted before it is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesetSummary {
     pub source: String,
     pub mount_path: String,
     pub owner: String,
-    pub from_host: bool,
+    pub host_path: Option<String>,
+    pub optional: bool,
+}
+
+impl FilesetSummary {
+    pub fn from_host(&self) -> bool {
+        self.host_path.is_some()
+    }
 }
 
 /// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
@@ -417,7 +424,8 @@ pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<FilesetSu
             source: fileset_view_source_display(fileset),
             mount_path: fileset.mount_path.clone(),
             owner: fileset_view_owner_display(fileset.owner).to_string(),
-            from_host: fileset.host_path.is_some(),
+            host_path: fileset.host_path.clone(),
+            optional: fileset.optional,
         })
         .collect()
 }
@@ -683,7 +691,8 @@ mod tests {
                 source: "inline".to_string(),
                 mount_path: "/etc/agent".to_string(),
                 owner: "root".to_string(),
-                from_host: false,
+                host_path: None,
+                optional: false,
             }]
         );
     }

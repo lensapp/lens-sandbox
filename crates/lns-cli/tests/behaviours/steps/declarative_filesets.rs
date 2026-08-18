@@ -71,7 +71,8 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
                 source: fileset_source_display(fileset),
                 mount_path: fileset.mount_path.clone(),
                 owner: lns_cli::run::summary::fileset_owner_display(fileset.owner).to_string(),
-                from_host: fileset.host_path.is_some(),
+                host_path: fileset.host_path.clone(),
+                optional: fileset.optional,
             })
             .collect();
     }

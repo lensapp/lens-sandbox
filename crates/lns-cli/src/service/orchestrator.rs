@@ -365,7 +365,8 @@ pub async fn run_image(
                 source: crate::run::summary::fileset_source_display(fileset),
                 mount_path: fileset.mount_path.clone(),
                 owner: crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
-                from_host: fileset.host_path.is_some(),
+                host_path: fileset.host_path.clone(),
+                optional: fileset.optional,
             })
             .collect(),
         (_, Some(published)) => published.filesets.clone(),
@@ -398,6 +399,7 @@ pub async fn run_image(
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
+    let mut denied_host_paths = Vec::new();
     if published.is_some() {
         let (declared_volumes, declared_binds) = crate::run::pull_confirm::artifact_declared_mounts(
             &args.mounts,
@@ -420,6 +422,21 @@ pub async fn run_image(
             &mut input,
             &mut std::io::stderr(),
         )?;
+        let origin = crate::run::host_path_consent::DocumentOrigin::Pulled {
+            reference: reference.clone(),
+        };
+        denied_host_paths = crate::run::host_path_consent::decide_host_paths(
+            &origin,
+            &args.filesets,
+            &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
+                lns_policy::host_path_decisions::default_host_path_decisions_path(),
+            ),
+            args.assume_yes,
+            interactive,
+            &mut input,
+            &mut std::io::stderr(),
+        )?
+        .denied;
     }
     let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
     if !quiet {
@@ -482,6 +499,7 @@ pub async fn run_image(
             .map(|p| p.to_string_lossy().into_owned()),
         authored_egress,
         packed_filesets,
+        denied_host_paths,
     }));
     let frame = encode_frame(&request).context("encoding RunImage request")?;
     stream
@@ -1344,7 +1362,8 @@ mod tests {
                 source: "./skills".to_string(),
                 mount_path: "/root/.agent/skills".to_string(),
                 owner: "workload".to_string(),
-                from_host: false,
+                host_path: None,
+                optional: false,
             }]
         );
         assert_eq!(
