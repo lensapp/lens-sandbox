@@ -95,7 +95,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
 fn primary_target(run_id: impl Into<String>) -> lns_ipc::SessionTarget {
     lns_ipc::SessionTarget::Primary {
         run_id: run_id.into(),
@@ -519,7 +518,7 @@ async fn wait_for_exit(run_id: &str, timeout: std::time::Duration) -> bool {
 
 async fn handle_session_control(request: &Request) -> Response {
     match request {
-        Request::SessionDetach { target } => handle_session_detach(target),
+        Request::SessionDetach { target } => handle_session_detach(target).await,
         Request::SessionStdin { target, bytes } => {
             forward_target_input(
                 target,
@@ -543,18 +542,34 @@ async fn handle_session_control(request: &Request) -> Response {
     }
 }
 
-fn handle_session_detach(target: &lns_ipc::SessionTarget) -> Response {
-    let lns_ipc::SessionTarget::Primary { run_id } = target else {
-        return missing_exec_session(target);
-    };
-    match crate::run_registry::request_detach(run_id) {
-        crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
-        crate::run_registry::DetachOutcome::NotAttached => Response::Error {
-            message: format!("run {run_id} is not attached"),
-        },
-        crate::run_registry::DetachOutcome::NotFound => Response::Error {
-            message: format!("no active run with id {run_id}"),
-        },
+async fn handle_session_detach(target: &lns_ipc::SessionTarget) -> Response {
+    match target {
+        lns_ipc::SessionTarget::Primary { run_id } => {
+            match crate::run_registry::request_detach(run_id) {
+                crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
+                crate::run_registry::DetachOutcome::NotAttached => Response::Error {
+                    message: format!("run {run_id} is not attached"),
+                },
+                crate::run_registry::DetachOutcome::NotFound => Response::Error {
+                    message: format!("no active run with id {run_id}"),
+                },
+            }
+        }
+        lns_ipc::SessionTarget::Exec { run_id, session_id } => {
+            let Some(tx) = crate::run_registry::session_input_sender(target) else {
+                return missing_exec_session(run_id, session_id);
+            };
+            let sent = tx
+                .send(crate::vm::session_client::SessionInput::Detach)
+                .await;
+            crate::run_registry::deregister_exec_session(run_id, session_id);
+            match sent {
+                Ok(()) => Response::DetachAccepted,
+                Err(e) => Response::Error {
+                    message: format!("detaching exec session {session_id} in run {run_id}: {e}"),
+                },
+            }
+        }
     }
 }
 
@@ -563,18 +578,37 @@ async fn forward_target_input(
     input: Option<crate::vm::session_client::SessionInput>,
     kind: &'static str,
 ) -> Response {
-    match target {
-        lns_ipc::SessionTarget::Primary { run_id } => {
-            forward_session_input(run_id, input, kind).await
-        }
-        lns_ipc::SessionTarget::Exec { .. } => missing_exec_session(target),
+    let Some(input) = input else {
+        return Response::Error {
+            message: format!("{kind} not supported on this build"),
+        };
+    };
+    let Some(tx) = crate::run_registry::session_input_sender(target) else {
+        return missing_session(target);
+    };
+    match tx.send(input).await {
+        Ok(()) => Response::Acknowledged,
+        Err(e) => Response::Error {
+            message: format!(
+                "forwarding {kind} to session in run {} failed: {e}",
+                target.run_id()
+            ),
+        },
     }
 }
 
-fn missing_exec_session(target: &lns_ipc::SessionTarget) -> Response {
-    let lns_ipc::SessionTarget::Exec { run_id, session_id } = target else {
-        unreachable!("missing_exec_session only accepts exec targets")
-    };
+fn missing_session(target: &lns_ipc::SessionTarget) -> Response {
+    match target {
+        lns_ipc::SessionTarget::Primary { run_id } => Response::Error {
+            message: format!("no active session for run {run_id}"),
+        },
+        lns_ipc::SessionTarget::Exec { run_id, session_id } => {
+            missing_exec_session(run_id, session_id)
+        }
+    }
+}
+
+fn missing_exec_session(run_id: &str, session_id: &str) -> Response {
     Response::Error {
         message: format!("no active exec session {session_id} for run {run_id}"),
     }
@@ -585,22 +619,7 @@ async fn forward_session_input(
     input: Option<crate::vm::session_client::SessionInput>,
     kind: &'static str,
 ) -> Response {
-    let Some(input) = input else {
-        return Response::Error {
-            message: format!("{kind} not supported on this build"),
-        };
-    };
-    let Some(tx) = crate::run_registry::input_sender(run_id) else {
-        return Response::Error {
-            message: format!("no active session for run {run_id}"),
-        };
-    };
-    match tx.send(input).await {
-        Ok(()) => Response::Acknowledged,
-        Err(e) => Response::Error {
-            message: format!("forwarding {kind} to run {run_id} failed: {e}"),
-        },
-    }
+    forward_target_input(&primary_target(run_id.to_string()), input, kind).await
 }
 
 fn session_input_from_stdin(bytes: Vec<u8>) -> Option<crate::vm::session_client::SessionInput> {
@@ -1100,6 +1119,7 @@ mod tests {
                 detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: Some(input_tx),
+                exec_sessions: Default::default(),
                 connector: None,
                 name: String::new(),
                 image: String::new(),
@@ -1294,6 +1314,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_request_routes_stdin_to_the_named_exec_session_only() {
+        use crate::vm::session_client::SessionInput;
+
+        let run_id = crate::run_registry::allocate_run_id();
+        let (mut handle, _cancel_rx) = crate::run_registry::test_handle();
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        handle.input_tx = Some(primary_tx);
+        crate::run_registry::register(run_id.clone(), handle);
+        let (exec_tx, mut exec_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        assert!(crate::run_registry::register_exec_session(
+            &run_id,
+            "exec-1".to_string(),
+            exec_tx,
+        ));
+
+        let response = handle_request(
+            &Request::SessionStdin {
+                target: lns_ipc::SessionTarget::Exec {
+                    run_id: run_id.clone(),
+                    session_id: "exec-1".to_string(),
+                },
+                bytes: b"exec only".to_vec(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(response, Response::Acknowledged);
+        assert!(matches!(
+            exec_rx.recv().await,
+            Some(SessionInput::StdinBytes(bytes)) if bytes == b"exec only"
+        ));
+        assert!(primary_rx.try_recv().is_err());
+
+        crate::run_registry::deregister(&run_id);
+    }
+
+    #[tokio::test]
+    async fn handle_request_detaches_only_the_named_exec_session() {
+        use crate::vm::session_client::SessionInput;
+
+        let run_id = crate::run_registry::allocate_run_id();
+        let (mut handle, _cancel_rx) = crate::run_registry::test_handle();
+        let (primary_tx, _primary_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        handle.input_tx = Some(primary_tx);
+        crate::run_registry::register(run_id.clone(), handle);
+        let (exec_tx, mut exec_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        assert!(crate::run_registry::register_exec_session(
+            &run_id,
+            "exec-1".to_string(),
+            exec_tx,
+        ));
+        let target = lns_ipc::SessionTarget::Exec {
+            run_id: run_id.clone(),
+            session_id: "exec-1".to_string(),
+        };
+
+        let response = handle_request(
+            &Request::SessionDetach {
+                target: target.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(response, Response::DetachAccepted);
+        assert!(exec_rx.recv().await.is_some());
+        assert!(crate::run_registry::session_input_sender(&target).is_none());
+        assert!(
+            crate::run_registry::session_input_sender(&lns_ipc::SessionTarget::Primary {
+                run_id: run_id.clone(),
+            })
+            .is_some()
+        );
+
+        crate::run_registry::deregister(&run_id);
+    }
+
+    #[tokio::test]
+    async fn handle_request_rejects_an_unknown_exec_session_target() {
+        let target = lns_ipc::SessionTarget::Exec {
+            run_id: "missing-run".to_string(),
+            session_id: "missing-exec".to_string(),
+        };
+        for request in [
+            Request::SessionStdin {
+                target: target.clone(),
+                bytes: b"ignored".to_vec(),
+            },
+            Request::SessionDetach {
+                target: target.clone(),
+            },
+        ] {
+            let response = handle_request(&request, Instant::now()).await;
+            assert!(matches!(
+                response,
+                Response::Error { message }
+                    if message.contains("missing-exec") && message.contains("missing-run")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn detaching_an_exec_with_a_closed_input_channel_cleans_up_and_reports_the_failure() {
+        use crate::vm::session_client::SessionInput;
+
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel_rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(run_id.clone(), handle);
+        let (exec_tx, exec_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        drop(exec_rx);
+        assert!(crate::run_registry::register_exec_session(
+            &run_id,
+            "exec-1".to_string(),
+            exec_tx,
+        ));
+        let target = lns_ipc::SessionTarget::Exec {
+            run_id: run_id.clone(),
+            session_id: "exec-1".to_string(),
+        };
+
+        let response = handle_request(
+            &Request::SessionDetach {
+                target: target.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            Response::Error { message } if message.contains("detaching exec session exec-1")
+        ));
+        assert!(crate::run_registry::session_input_sender(&target).is_none());
+
+        crate::run_registry::deregister(&run_id);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "handle_session_control only accepts session control requests")]
+    async fn session_control_dispatch_rejects_a_non_session_request() {
+        handle_session_control(&Request::Ping).await;
+    }
+
+    #[tokio::test]
     async fn handle_request_run_resize_for_unregistered_run_returns_error() {
         let response = handle_request(
             &Request::SessionResize {
@@ -1460,6 +1625,7 @@ mod tests {
             detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: None,
+            exec_sessions: Default::default(),
             connector: None,
             name: String::new(),
             image: "test-image".into(),
@@ -1495,6 +1661,7 @@ mod tests {
             detach_tx: Mutex::new(Some(detach_tx)),
             task,
             input_tx: None,
+            exec_sessions: Default::default(),
             connector: None,
             name: String::new(),
             image: "detach-test".into(),
@@ -1551,6 +1718,7 @@ mod tests {
             detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: Some(input_tx),
+            exec_sessions: Default::default(),
             connector: None,
             name: String::new(),
             image: "closed-channel-test".into(),
@@ -1640,6 +1808,7 @@ mod tests {
                 detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: None,
+                exec_sessions: Default::default(),
                 connector: None,
                 name: "reviewer".into(),
                 image: "stop-test".into(),
@@ -1988,6 +2157,7 @@ mod tests {
                 detach_tx: std::sync::Mutex::new(None),
                 task,
                 input_tx: Some(input_tx),
+                exec_sessions: Default::default(),
                 connector: None,
                 name: String::new(),
                 image: String::new(),

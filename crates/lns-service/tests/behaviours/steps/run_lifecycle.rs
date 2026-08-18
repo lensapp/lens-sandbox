@@ -18,6 +18,7 @@ pub fn fresh_handle(
         detach_tx: std::sync::Mutex::new(None),
         task,
         input_tx: None,
+        exec_sessions: Default::default(),
         connector: None,
         name: String::new(),
         image: image.into(),

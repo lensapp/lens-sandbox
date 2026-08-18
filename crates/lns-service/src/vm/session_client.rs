@@ -75,6 +75,7 @@ pub enum SessionInput {
     StdinBytes(Vec<u8>),
     Resize { rows: u16, cols: u16 },
     Signal(SignalKind),
+    Detach,
 }
 
 pub struct SessionParams {
@@ -94,6 +95,7 @@ pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
         SessionInput::StdinBytes(bytes) => ClientFrame::StdinBytes(bytes),
         SessionInput::Resize { rows, cols } => ClientFrame::Resize(Winsize { rows, cols }),
         SessionInput::Signal(kind) => ClientFrame::Signal(kind),
+        SessionInput::Detach => ClientFrame::Detach,
     }
 }
 
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(resize, ClientFrame::Resize(Winsize { rows: 10, cols: 20 }));
         let signal = input_to_frame(SessionInput::Signal(SignalKind::Int));
         assert_eq!(signal, ClientFrame::Signal(SignalKind::Int));
+        assert_eq!(input_to_frame(SessionInput::Detach), ClientFrame::Detach);
     }
 
     #[tokio::test]
