@@ -501,12 +501,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         } => login_response(crate::image::verify_login(registry, username, secret).await),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
-        Request::RemoveRun { run, force } => remove_run_request(run, *force).await,
+        Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
         Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
             Ok(()) => Response::Acknowledged,
             Err(message) => Response::Error { message },
         },
-        Request::PruneRuns => prune_runs_request().await,
+        Request::PruneRuns => image_response(prune_runs_request().await),
         Request::StartRun { .. } => {
             unreachable!(
                 "Request::StartRun must be dispatched via handle_start, not handle_request"
@@ -583,59 +583,44 @@ fn inspect_resolved(id: &str) -> Response {
     }
 }
 
-async fn remove_run_request(run: &str, force: bool) -> Response {
-    match crate::cache::root() {
-        Ok(root) => {
-            remove_run_with(
-                run,
-                force,
-                &crate::run::RealRemoveDir,
-                &root,
-                |id, sig| async move {
-                    forward_session_input(&id, session_input_from_signal(sig), "RemoveRun").await
-                },
-                |id, forced| {
-                    if let Err(e) = crate::audit::record_run_removed(
-                        id,
-                        forced,
-                        false,
-                        &crate::oauth::RealClock,
-                    ) {
-                        crate::log::warn!("run removal not audited: {e:#}");
-                    }
-                },
-            )
-            .await
-        }
-        Err(e) => Response::Error {
-            message: format!("{e:#}"),
+async fn remove_run_request(run: &str, force: bool) -> anyhow::Result<Response> {
+    let root = crate::cache::root()?;
+    Ok(remove_run_with(
+        run,
+        force,
+        &crate::run::RealRemoveDir,
+        &root,
+        |id, sig| async move {
+            forward_session_input(&id, session_input_from_signal(sig), "RemoveRun").await
         },
-    }
+        |id, forced| {
+            if let Err(e) =
+                crate::audit::record_run_removed(id, forced, false, &crate::oauth::RealClock)
+            {
+                crate::log::warn!("run removal not audited: {e:#}");
+            }
+        },
+    )
+    .await)
 }
 
-async fn prune_runs_request() -> Response {
-    match crate::cache::root() {
-        Ok(root) => {
-            prune_runs_with(
-                &crate::image_store::RealFs,
-                &crate::run::RealRemoveDir,
-                &root,
-                |removed| {
-                    for id in removed {
-                        if let Err(e) =
-                            crate::audit::record_runs_pruned(id, removed, &crate::oauth::RealClock)
-                        {
-                            crate::log::warn!("run prune not audited: {e:#}");
-                        }
-                    }
-                },
-            )
-            .await
-        }
-        Err(e) => Response::Error {
-            message: format!("{e:#}"),
+async fn prune_runs_request() -> anyhow::Result<Response> {
+    let root = crate::cache::root()?;
+    Ok(prune_runs_with(
+        &crate::image_store::RealFs,
+        &crate::run::RealRemoveDir,
+        &root,
+        |removed| {
+            for id in removed {
+                if let Err(e) =
+                    crate::audit::record_runs_pruned(id, removed, &crate::oauth::RealClock)
+                {
+                    crate::log::warn!("run prune not audited: {e:#}");
+                }
+            }
         },
-    }
+    )
+    .await)
 }
 
 /// Serve one `RemoveRun`: an exited run's registry entry and run dir go together; a running one is refused unless forced, and force is a stop first, not a shortcut around one.
@@ -2732,7 +2717,7 @@ mod tests {
         let (handle, _rx) = crate::run_registry::test_handle();
         crate::run_registry::register(id.clone(), handle);
         crate::run_registry::set_exit_code(&id, 0);
-        let resp = remove_run_request(&id, false).await;
+        let resp = image_response(remove_run_request(&id, false).await);
         assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
         let audit = crate::audit::audit_path(&id).unwrap();
         let content = std::fs::read_to_string(&audit).unwrap();
@@ -2742,7 +2727,7 @@ mod tests {
         let (handle2, _rx2) = crate::run_registry::test_handle();
         crate::run_registry::register(id2.clone(), handle2);
         crate::run_registry::set_exit_code(&id2, 0);
-        let resp = prune_runs_request().await;
+        let resp = image_response(prune_runs_request().await);
         assert!(
             matches!(&resp, Response::RunsPruned { removed } if removed.contains(&id2)),
             "got {resp:?}"
@@ -2760,7 +2745,7 @@ mod tests {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
         crate::run_registry::register(id.clone(), handle);
-        let resp = remove_run_request(&id, true).await;
+        let resp = image_response(remove_run_request(&id, true).await);
         assert!(
             matches!(&resp, Response::Error { message } if message.contains("no session")
                 || message.contains("input") || !message.is_empty()),
@@ -2776,9 +2761,9 @@ mod tests {
         let _h = crate::test_env::EnvVarGuard::unset("HOME");
         let _c = crate::test_env::EnvVarGuard::unset("XDG_CACHE_HOME");
         // dirs resolves a home from passwd on macOS, so only Linux reaches the rootless arm — both answers are answers.
-        let resp = remove_run_request("nosuch", false).await;
+        let resp = image_response(remove_run_request("nosuch", false).await);
         assert!(matches!(resp, Response::Error { .. }), "got {resp:?}");
-        let resp = prune_runs_request().await;
+        let resp = image_response(prune_runs_request().await);
         assert!(
             matches!(resp, Response::Error { .. } | Response::RunsPruned { .. }),
             "got {resp:?}"
@@ -2796,14 +2781,14 @@ mod tests {
         let (handle, _rx) = crate::run_registry::test_handle();
         crate::run_registry::register(id.clone(), handle);
         crate::run_registry::set_exit_code(&id, 0);
-        let resp = remove_run_request(&id, false).await;
+        let resp = image_response(remove_run_request(&id, false).await);
         assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
 
         let id2 = crate::run_registry::allocate_run_id();
         let (handle2, _rx2) = crate::run_registry::test_handle();
         crate::run_registry::register(id2.clone(), handle2);
         crate::run_registry::set_exit_code(&id2, 0);
-        let resp = prune_runs_request().await;
+        let resp = image_response(prune_runs_request().await);
         assert!(matches!(resp, Response::RunsPruned { .. }), "got {resp:?}");
     }
 
