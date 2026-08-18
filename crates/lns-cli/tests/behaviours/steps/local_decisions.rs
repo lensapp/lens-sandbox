@@ -78,7 +78,7 @@ fn compose_the_summary(w: &mut BehaviourWorld) {
         resolved_size(Default::default(), &args),
         &Policy::default(),
         Path::new("./lns-local-mixin.yaml"),
-        &PolicySource::FoundInCwd,
+        &PolicySource::Found,
     );
 }
 

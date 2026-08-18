@@ -385,7 +385,10 @@ fn add<R: Placeable>(
     cwd: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let path = policy_path(args.policy.as_deref(), cwd);
+    let path = policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    );
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let announced = R::WORDS.announced;
@@ -586,7 +589,10 @@ fn placement_note<R: Placeable>(shadowing: &R, rule: &R) -> String {
 }
 
 fn list_rules(args: &PolicyScopeArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
-    let path = policy_path(args.policy.as_deref(), cwd);
+    let path = policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    );
     let policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let rows: Vec<RuleRow> = policy
@@ -654,7 +660,10 @@ impl crate::output::TableRow for RuleRow {
 }
 
 fn remove_rule(args: &PolicyRemoveArgs, cwd: &Path, writer: &mut impl Write) -> Result<i32> {
-    let path = policy_path(args.policy.as_deref(), cwd);
+    let path = policy_path(
+        args.policy.as_deref(),
+        crate::run::summary::DecisionsSite::one_directory(cwd),
+    );
     let mut policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let before = policy.network.egress.http.len() + policy.network.egress.tcp.len();

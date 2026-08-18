@@ -99,11 +99,12 @@ lns run
     file: /Users/you/dev/my-app/lns-local-mixin.yaml
     unmatched destinations: ask
     rules: none defined; anything else asks
-    source: auto-created (no policy in this directory)
+    source: auto-created (no policy in the project directory)
 ```
 
 You run Lens Sandbox from a project directory — that's where it looks for
-`lns-local-mixin.yaml`, creating an empty one the first time. To
+`lns-local-mixin.yaml`, creating an empty one the first time. Run a definition in
+another directory and it reads that project's file instead. To
 give the workload your actual project files, bind-mount the directory with
 `-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
 portable definition use a declarative bind with `source: .`; for scratch

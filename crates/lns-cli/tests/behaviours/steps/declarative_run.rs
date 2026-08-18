@@ -147,7 +147,7 @@ fn compose_summary(world: &mut BehaviourWorld, defaults: Defaults, flags: &str) 
             size,
             &lns_policy::Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &lns_cli::run::summary::PolicySource::FoundInCwd,
+            &lns_cli::run::summary::PolicySource::Found,
         ),
         ..Default::default()
     });

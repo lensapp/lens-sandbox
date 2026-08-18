@@ -10,30 +10,57 @@ use crate::cli::RunArgs;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySource {
     Explicit(PathBuf),
-    FoundInCwd,
+    Found,
     AutoCreated,
 }
 
 const DEFAULT_POLICY_FILENAME: &str = "lns-local-mixin.yaml";
 
-pub fn policy_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
-    match explicit {
-        Some(p) if p.is_absolute() => p.to_path_buf(),
-        Some(p) => cwd.join(p),
-        None => cwd.join(DEFAULT_POLICY_FILENAME),
+/// The two directories a decisions file can root at, which are the same one until a definition somewhere else is run: the default file belongs to the project (§8.1), while a path the developer typed roots where they typed it, as a `--mixin` does (§3.3.1).
+#[derive(Debug, Clone, Copy)]
+pub struct DecisionsSite<'a> {
+    pub typed_in: &'a Path,
+    pub project: &'a Path,
+}
+
+impl<'a> DecisionsSite<'a> {
+    pub fn one_directory(dir: &'a Path) -> Self {
+        Self {
+            typed_in: dir,
+            project: dir,
+        }
+    }
+
+    /// A run's site: a local definition's own directory is the project, and a published reference has none of its own, so the directory the run was started in is.
+    pub fn for_run(typed_in: &'a Path, project: Option<&'a Path>) -> Self {
+        Self {
+            typed_in,
+            project: project.unwrap_or(typed_in),
+        }
     }
 }
 
-pub fn resolve_policy(explicit: Option<&Path>, cwd: &Path) -> Result<(PathBuf, PolicySource)> {
+pub fn policy_path(explicit: Option<&Path>, site: DecisionsSite<'_>) -> PathBuf {
+    match explicit {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => site.typed_in.join(p),
+        None => site.project.join(DEFAULT_POLICY_FILENAME),
+    }
+}
+
+pub fn resolve_policy(
+    explicit: Option<&Path>,
+    site: DecisionsSite<'_>,
+) -> Result<(PathBuf, PolicySource)> {
     if let Some(p) = explicit {
         return Ok((
-            policy_path(Some(p), cwd),
+            policy_path(Some(p), site),
             PolicySource::Explicit(p.to_path_buf()),
         ));
     }
-    let path = policy_path(None, cwd);
+    let path = policy_path(None, site);
     match std::fs::metadata(&path) {
-        Ok(md) if md.is_file() => Ok((path, PolicySource::FoundInCwd)),
+        Ok(md) if md.is_file() => Ok((path, PolicySource::Found)),
         Ok(_) => anyhow::bail!(
             "{} exists but is not a regular file; remove it or pass `--policy <path>`",
             path.display()
@@ -100,10 +127,10 @@ pub fn drop_overridden_mounts(args: &mut RunArgs, overridden: &[String]) {
 pub fn print_run_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
-    cwd: &Path,
+    site: DecisionsSite<'_>,
     writer: &mut impl io::Write,
 ) -> Result<PathBuf> {
-    let (path, source) = resolve_policy(args.policy.as_deref(), cwd)?;
+    let (path, source) = resolve_policy(args.policy.as_deref(), site)?;
     let policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let body = format_summary(args, size, &policy, &path, &source);
@@ -482,8 +509,10 @@ fn tally(verdicts: impl Iterator<Item = Verdict>) -> (u32, u32) {
 
 fn source_line(source: &PolicySource) -> String {
     match source {
-        PolicySource::FoundInCwd => "found in this directory".to_string(),
-        PolicySource::AutoCreated => "auto-created (no policy in this directory)".to_string(),
+        PolicySource::Found => "found in the project directory".to_string(),
+        PolicySource::AutoCreated => {
+            "auto-created (no policy in the project directory)".to_string()
+        }
         PolicySource::Explicit(p) => format!("--policy {}", p.display()),
     }
 }
@@ -557,7 +586,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         )
     }
 
@@ -747,7 +776,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Mixins:    ghcr.io/acme/postgres-tools@sha256:c41e8b7d"),
@@ -757,7 +786,7 @@ mod tests {
             &run_args(Some("prism")),
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(!authored.contains("Mixins:"), "got: {authored}");
     }
@@ -805,7 +834,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("node@22  [from ghcr.io/acme/obs@sha256:cccccccccccc…, replaced node@20 from the sandbox]"),
@@ -838,7 +867,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains(
@@ -877,7 +906,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("\n             proxy.vendor.example  [from the sandbox]\n"),
@@ -898,7 +927,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Volume:    scratch \u{2192} /scratch\n"),
@@ -929,7 +958,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Volume:    mine \u{2192} /scratch\n"),
@@ -962,7 +991,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains(
@@ -999,7 +1028,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("[from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
@@ -1032,7 +1061,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         let first = s
             .lines()
@@ -1066,7 +1095,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("some/dir@sha256:a\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{2026}"),
@@ -1082,7 +1111,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Tools:     node@22\n"), "got: {s}");
         assert!(
@@ -1111,7 +1140,7 @@ mod tests {
             &args,
             &closed,
             Path::new("./lns-policy.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
 
         assert!(
@@ -1134,7 +1163,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Tools:     node@22.11.0, python@3.12.6"),
@@ -1190,7 +1219,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/home/dev/my-app/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Image:"), "missing Image line: {s}");
         assert!(s.contains("Resources:"), "missing Resources line: {s}");
@@ -1217,7 +1246,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Volume:    prism-data → /data"),
@@ -1243,7 +1272,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Bind:      /Users/me/proj → /work (read-write)"),
@@ -1265,7 +1294,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("Bind:      /Users/me/cfg → /cfg (read-only)"),
@@ -1307,7 +1336,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Workdir:   /app"), "missing workdir line: {s}");
     }
@@ -1318,7 +1347,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(!s.contains("Workdir:"), "no workdir line expected: {s}");
     }
@@ -1329,7 +1358,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(!s.contains("Volume:"), "no volume line expected: {s}");
     }
@@ -1341,7 +1370,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("ubuntu (resolving…)"), "no placeholder: {s}");
     }
@@ -1353,7 +1382,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("./lns.yaml (resolving…)"), "got: {s}");
         assert!(
@@ -1370,7 +1399,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("lns.dev.yaml (resolving…)"), "got: {s}");
         assert!(!s.contains("./lns.yaml"), "got: {s}");
@@ -1382,7 +1411,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("1 vCPU · 512 MiB"), "resources line wrong: {s}");
     }
@@ -1402,7 +1431,7 @@ mod tests {
             },
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
     }
@@ -1417,7 +1446,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Flags:     -i -t"), "flags line wrong: {s}");
     }
@@ -1432,7 +1461,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Flags:     -d"), "flags line wrong: {s}");
     }
@@ -1445,7 +1474,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Flags:     -i -t --rm"), "flags line wrong: {s}");
     }
@@ -1460,7 +1489,7 @@ mod tests {
             &args,
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("Flags:     (none)"), "flags line wrong: {s}");
     }
@@ -1476,7 +1505,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("unmatched destinations: denied by the catch-all rule"),
@@ -1496,7 +1525,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("file: ./lns-local-mixin.yaml"));
         assert!(
@@ -1522,7 +1551,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("1 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
@@ -1542,7 +1571,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("0 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
@@ -1556,7 +1585,7 @@ mod tests {
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(
             s.contains("rules: none defined; anything else asks"),
@@ -1573,31 +1602,31 @@ mod tests {
             &run_args(Some("ubuntu")),
             &policy,
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
         assert!(s.contains("1 allow, 1 deny, anything else asks"));
     }
 
     #[test]
-    fn source_line_for_found_in_cwd_reads_found_in_this_directory() {
+    fn source_line_for_a_found_file_names_the_project_directory() {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::FoundInCwd,
+            &PolicySource::Found,
         );
-        assert!(s.contains("source: found in this directory"));
+        assert!(s.contains("source: found in the project directory"));
     }
 
     #[test]
-    fn source_line_for_auto_created_calls_out_no_policy_in_directory() {
+    fn source_line_for_auto_created_calls_out_no_policy_in_the_project_directory() {
         let s = summary_of(
             &run_args(Some("ubuntu")),
             &Policy::default(),
             Path::new("./lns-local-mixin.yaml"),
             &PolicySource::AutoCreated,
         );
-        assert!(s.contains("source: auto-created (no policy in this directory)"));
+        assert!(s.contains("source: auto-created (no policy in the project directory)"));
     }
 
     #[test]
@@ -1615,17 +1644,24 @@ mod tests {
     fn resolve_policy_explicit_passthrough_does_not_touch_disk() {
         let dir = tempfile::TempDir::new().unwrap();
         let explicit = dir.path().join("absent-but-named.yaml");
-        let (resolved, source) = resolve_policy(Some(&explicit), dir.path()).unwrap();
+        let (resolved, source) =
+            resolve_policy(Some(&explicit), DecisionsSite::one_directory(dir.path())).unwrap();
         assert_eq!(resolved, explicit);
         assert_eq!(source, PolicySource::Explicit(explicit));
         assert!(!dir.path().join(DEFAULT_POLICY_FILENAME).exists());
     }
 
     #[test]
-    fn resolve_policy_makes_relative_explicit_paths_absolute_against_cwd() {
+    fn resolve_policy_roots_a_relative_explicit_path_where_the_developer_typed_it() {
+        // A path the developer typed is theirs, as a --mixin is (§3.3.1), so it roots where they stood and not at the project a definition somewhere else names.
         let dir = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
         let relative = Path::new("team-policy.yaml");
-        let (resolved, source) = resolve_policy(Some(relative), dir.path()).unwrap();
+        let site = DecisionsSite {
+            typed_in: dir.path(),
+            project: project.path(),
+        };
+        let (resolved, source) = resolve_policy(Some(relative), site).unwrap();
         assert_eq!(
             resolved,
             dir.path().join("team-policy.yaml"),
@@ -1639,19 +1675,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_policy_finds_existing_default_file_in_cwd() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let preexisting = dir.path().join(DEFAULT_POLICY_FILENAME);
+    fn resolve_policy_finds_the_default_file_of_the_project_rather_than_of_the_cwd() {
+        // One directory is one project (§8.1), so the run reads the decisions beside the definition it runs, wherever the developer started it.
+        let cwd = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        let preexisting = project.path().join(DEFAULT_POLICY_FILENAME);
         Policy::default().save_atomic(&preexisting).unwrap();
-        let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
+        let site = DecisionsSite {
+            typed_in: cwd.path(),
+            project: project.path(),
+        };
+        let (resolved, source) = resolve_policy(None, site).unwrap();
         assert_eq!(resolved, preexisting);
-        assert_eq!(source, PolicySource::FoundInCwd);
+        assert_eq!(source, PolicySource::Found);
+        assert!(!cwd.path().join(DEFAULT_POLICY_FILENAME).exists());
     }
 
     #[test]
     fn resolve_policy_auto_creates_default_file_when_missing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (resolved, source) = resolve_policy(None, dir.path()).unwrap();
+        let (resolved, source) =
+            resolve_policy(None, DecisionsSite::one_directory(dir.path())).unwrap();
         assert_eq!(resolved, dir.path().join(DEFAULT_POLICY_FILENAME));
         assert_eq!(source, PolicySource::AutoCreated);
         let body = std::fs::read_to_string(&resolved).unwrap();
@@ -1672,7 +1716,8 @@ mod tests {
     fn resolve_policy_errors_when_default_path_is_a_directory() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(DEFAULT_POLICY_FILENAME)).unwrap();
-        let err = resolve_policy(None, dir.path()).expect_err("must reject non-file");
+        let err = resolve_policy(None, DecisionsSite::one_directory(dir.path()))
+            .expect_err("must reject non-file");
         assert!(format!("{err:#}").contains("not a regular file"));
     }
 
@@ -1684,7 +1729,7 @@ mod tests {
         let path = print_run_summary(
             &args,
             resolved_size(Default::default(), &args),
-            dir.path(),
+            DecisionsSite::one_directory(dir.path()),
             &mut buf,
         )
         .unwrap();

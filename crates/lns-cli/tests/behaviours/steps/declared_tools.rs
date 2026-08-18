@@ -151,7 +151,7 @@ fn run_summary_discloses_tools(w: &mut BehaviourWorld) -> Result<(), String> {
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
+        lns_cli::run::summary::DecisionsSite::one_directory(&cwd),
         &mut buf,
     )
     .map_err(|e| format!("{e:#}"))?;

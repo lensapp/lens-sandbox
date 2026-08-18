@@ -77,7 +77,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory, auto-created with no rules if absent."
+        help = "Policy file path; defaults to `lns-local-mixin.yaml` beside the definition being run, auto-created with no rules if absent. A relative path roots where you typed it."
     )]
     pub policy: Option<PathBuf>,
 
