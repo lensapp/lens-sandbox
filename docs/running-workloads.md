@@ -533,6 +533,13 @@ spec:
   A `hostPath` that is a symlink reads the file it points at, so a dotfile that
   stow, chezmoi, or home-manager manages works; a link that points nowhere
   counts as absent. `optional` applies to a `hostPath` entry only.
+  A **pulled** sandbox does not read a host file just because it declares one:
+  the run asks you the first time, and records the answer in
+  `~/.lns-host-path-decisions.json` against the artifact's repository and that
+  path. A new version of the same sandbox does not ask again, a different
+  sandbox does, and `--yes` answers only where you have not already. Say no and
+  an `optional` entry is skipped while a required one refuses the run. Your own
+  `lns.yaml` is your own consent, so a local run never asks.
 - Each entry sets exactly one of `path`/`inline`/`hostPath`. `inline` must
   contain at least one file. Every inline key must be a relative path without empty, `.`,
   or `..` components. `mountPath` is an absolute
