@@ -72,13 +72,18 @@ sees the resolved document, in full, before anything boots
 The same holds for `spec.ports`: a declared port is published, whether the
 sandbox came from a registry or from the directory in front of you.
 
-Two things stay outside a document's reach, because no declaration can supply
+Three things stay outside a document's reach, because no declaration can supply
 them:
 
 - **A destination nothing decides.** An entry decides its match; a destination no
   entry covers is asked about at first use, so silence is never an allow.
 - **A secret.** `spec.credentials` names the variable and the domains a value may
   travel to, and nothing more. The value is bound per machine.
+- **A file on the machine that runs it.** A `filesets[].hostPath`
+  ([§3.1.11](#3111-filesets)) names one, and a pulled document only names it —
+  whether the file is read is decided per machine, on the same terms as a
+  destination. A document in the developer's own directory is their own consent
+  and is never asked about.
 
 A `connector` is the one kind that grants nothing even after it arrives.
 Installing it cannot arm it — that takes a sign-in
@@ -285,7 +290,7 @@ tool, mount target, or port repeats.
 | [`tools`](#318-tools) | optional | Portable `name@version` toolchain declarations. |
 | [`mixins`](#319-mixins) | optional | Mixin references merged into this sandbox at startup. |
 | [`volumes`](#3110-volumes) | optional | Named volumes and host binds. |
-| [`filesets`](#3111-filesets) | optional | Files shipped inside the artifact. |
+| [`filesets`](#3111-filesets) | optional | Files shipped inside the artifact, or read off the running machine. |
 | [`ports`](#3112-ports) | optional | Container ports the sandbox serves. |
 
 #### 3.1.1 `image`
@@ -520,6 +525,7 @@ volumes:
 | `target` | string | REQUIRED. Absolute guest mount path. |
 | `readOnly` | bool | optional. Default `false`. |
 | `exclude` | list<string> | optional. Bind only. Subpaths of `source` the guest MUST NOT see. |
+| `optional` | bool | optional. Default `false`. Bind only. A `source` the running machine does not have is skipped instead of refusing the run. |
 
 The three legal shapes:
 
@@ -553,6 +559,16 @@ A developer who wants to mask something the author did not name puts a bind with
 their own `exclude` in the [local mixin](#8-the-local-mixin). It is last in the
 merge, so a pulled document cannot undo it.
 
+**`optional` — a source not every machine has.** A published sandbox names host
+paths that exist on the author's machine and not on every consumer's. `optional:
+true` says the mount is a convenience, not a requirement: the run skips it and
+continues. The default is `false`, so a missing source refuses the run and the
+developer learns why.
+
+`optional` applies to a **bind only**. A named volume is created on demand, so it
+is never absent, and setting `optional` on one is an error. The same field
+appears on a [`hostPath` fileset](#3111-filesets) and means the same thing.
+
 `target` rules, shared with [`filesets`](#3111-filesets):
 
 - MUST be absolute, MUST NOT contain a `..` segment, MUST NOT contain control
@@ -563,7 +579,8 @@ merge, so a pulled document cannot undo it.
 
 #### 3.1.11 `filesets`
 
-Files the document ships and the guest mounts.
+Files the guest mounts: shipped by the document, or read off the machine that
+runs it.
 
 ```yaml
 filesets:
@@ -573,25 +590,53 @@ filesets:
   - path: ./skills
     mountPath: /home/agent/.agent/skills
     owner: root
+  - hostPath: ~/.gitconfig
+    mountPath: /home/agent/.gitconfig
+    optional: true
 ```
 
 | Field | Type | Rules |
 |---|---|---|
 | `path` | string | Conditional. A directory beside this document, packed at publish. Non-empty. |
 | `inline` | map<string,string> | Conditional. Relative path → file content. MUST NOT be empty. |
-| `mountPath` | string | REQUIRED. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). |
+| `hostPath` | string | Conditional. One file on the machine that runs the document. See the rules below. |
+| `mountPath` | string | REQUIRED. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). A `hostPath` mounts one file, so its `mountPath` MUST NOT end in `/`. |
 | `owner` | string | optional. `workload` (default) or `root`. |
+| `optional` | bool | optional. Default `false`. `hostPath` only. A file the running machine does not have is skipped instead of refusing the run. |
 
-**Exactly one** of `path` or `inline` MUST be set. Neither or both is an error.
+**Exactly one** of `path`, `inline`, or `hostPath` MUST be set. None or more than
+one is an error. `optional` on a `path` or `inline` fileset is an error too:
+those always ship.
 
-A fileset is **not a separate artifact**. `inline` content lives in this
-document, and a `path` directory is packed into a layer of the same artifact this
-document configures, so the files and the declaration that mounts them share one
-digest and are approved together. To share one directory across several
-sandboxes, publish a [mixin](#33-kind-mixin) that carries it.
+A `path` or `inline` fileset is **not a separate artifact**. `inline` content
+lives in this document, and a `path` directory is packed into a layer of the same
+artifact this document configures, so the files and the declaration that mounts
+them share one digest and are approved together. To share one directory across
+several sandboxes, publish a [mixin](#33-kind-mixin) that carries it.
 
 `owner: workload` lets the workload rewrite its own seeded state.
 `owner: root` pins inputs the workload MUST NOT touch.
+
+**`hostPath` — seeding the guest from the machine.** An agent wants the
+developer's `~/.gitconfig`, and the alternative to naming it is a bind of the
+whole home directory, which is worse. A `hostPath` is the narrow form: one file,
+**snapshotted at launch** and never packed, so the guest gets a copy. With
+`owner: workload` the workload may rewrite that copy, and the host file does not
+change. This is what separates it from a bind ([§3.1.10](#3110-volumes)), which
+is live and two-way.
+
+`hostPath` rules, all enforced offline:
+
+| Rule | Detail |
+|---|---|
+| Anchored | MUST start with `/` or `~/`. `~/` is the running developer's home. Another user's home (`~alice/`) is refused — a document does not choose whose files it reads. |
+| Contained | MUST NOT contain a `..` segment. |
+| Literal | MUST be free of whitespace, quotes, and control characters. |
+| Not secret-shaped | The same name check as an inline path, below. A `hostPath` file is copied whole, so its name is the only guard it has. |
+| One file | It names a file, not a directory, so `mountPath` MUST NOT end in `/`. |
+
+A home-anchored `path` is refused and points here: `path` packs a directory
+beside the document at publish, and the publisher's home is not the consumer's.
 
 Inline limits, all enforced offline:
 
@@ -606,13 +651,28 @@ An inline path MUST be a safe relative path: non-empty, no leading `/`, no
 empty, `.`, or `..` segment, and no control characters.
 
 **Secret-shaped names are refused.** Real secrets stay outside the workload, so
-a path segment naming one fails the document. The check covers
+a path segment naming one fails the document — in a `path` directory, in an
+`inline` key, and in a `hostPath`. The check covers
 names starting with `.env` or `credentials.`, names ending in `.pem`, `.key`,
 `.ppk`, or `.keystore`, and the exact names `.npmrc`, `.netrc`,
 `.git-credentials`, `.pgpass`, `.pypirc`, `.yarnrc.yml`, `auth.json`,
 `credentials`, the SSH key names (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`),
 and the credential directories `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`,
 `.oci`, `.docker`.
+
+**A pulled `hostPath` is a per-machine decision.** A `hostPath` makes what a
+document mounts depend on the machine running it, so an artifact from a registry
+MUST NOT read one on the strength of its own declaration. On the first run that
+would read it, the developer is asked, and the answer is recorded per machine —
+keyed by the artifact's repository and the host path, so a version bump does not
+ask again and a different sandbox does not inherit the answer. A declined
+`hostPath` skips the fileset when it is `optional` and refuses the run when it is
+not. A document loaded from the developer's own directory is their own consent
+and is never asked about.
+
+The decision is per machine, so it lives beside the other per-machine state and
+not in the [local mixin](#8-the-local-mixin): the local mixin is a rule the
+directory keeps, and this is a risk accepted by one developer on one computer.
 
 #### 3.1.12 `ports`
 
@@ -1097,9 +1157,12 @@ Offline validation (`lns sandbox validate`, and every load path including
 - **volumes**: each `target` is a legal mount path outside `/.lens`; the
   `type`/`source`/`name` combination is one of the three legal shapes; volume
   names use the allowed charset; no duplicate `target`; `exclude` appears only on a
-  bind and every entry is a relative path with no empty, `.`, or `..` segment.
-- **filesets**: exactly one of `path` or `inline`; inline paths and limits hold; no
-  secret-shaped name; `mountPath` unique across volumes and filesets.
+  bind and every entry is a relative path with no empty, `.`, or `..` segment;
+  `optional` appears only on a bind.
+- **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
+  limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
+  literal, and mounts one file; `optional` appears only on a `hostPath`;
+  `mountPath` unique across volumes and filesets.
 - **ports**: `container` and `host` in range and each unique.
 - **Connector**: at least one method; each method carries the block its
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
@@ -1108,7 +1171,7 @@ Offline validation (`lns sandbox validate`, and every load path including
   entry in a document's `mixins` is a local path or a digest-pinned OCI
   reference, and a document that publishes carries no local path.
 
-Offline validation checks one document in isolation. Four checks cannot run
+Offline validation checks one document in isolation. Five checks cannot run
 there, because they depend on state no document carries — they run at launch:
 
 | Check | Depends on |
@@ -1116,6 +1179,7 @@ there, because they depend on state no document carries — they run at launch:
 | Whether a declared credential has a value bound ([§3.1.7](#317-credentials)) | Per-machine credential values. |
 | Whether a sign-in is held ([§3.2.2](#322-seeding-arming-and-domain-ownership)) | Per-machine credential values. |
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
+| Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | The resolved source list in [§3.3.2](#332-merge-rules) | The mixin graph — its depth, its cycles, and which source wins each setting — is only known once each mixin, and each mixin it declares, is pulled. |
 
 The last one is why a merge collision refuses the **run** rather than the
@@ -1135,7 +1199,7 @@ runs exactly what the author tested:
 
 Each transform pins something that means one thing on the author's machine and
 another on the consumer's: a directory that exists only beside the author's file,
-and a version that moves next week. Two surfaces stay unresolved, on purpose:
+and a version that moves next week. Three surfaces stay unresolved, on purpose:
 
 - **`mixins[]` publishes as written.** Resolution is a startup concern
   ([§1.5](#15-one-disclosure)), and the reference is already digest-pinned, so
@@ -1146,6 +1210,9 @@ and a version that moves next week. Two surfaces stay unresolved, on purpose:
   machine.
 - **A `%` share stays a share.** It resolves against the consumer's host, which
   is the entire point of writing one ([§3.1.5](#315-resources)).
+- **A `hostPath` stays a `hostPath`.** There is nothing to pack: it names a file
+  on whichever machine runs the document, and the consumer decides whether it is
+  read ([§3.1.11](#3111-filesets)).
 
 `workdir`, every mount declaration, and every other field publish unchanged.
 
