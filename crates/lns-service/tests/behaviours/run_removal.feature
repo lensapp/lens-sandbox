@@ -1,4 +1,3 @@
-@todo
 Feature: lns rm — remove a run
   Removing a stopped run deletes its run dir atomically — record and
   writable layer — releasing its name reservation and layer pins. A
