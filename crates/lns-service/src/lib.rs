@@ -33,6 +33,7 @@ pub mod relay;
 pub mod run;
 pub mod run_log;
 pub mod run_name;
+pub mod run_record;
 pub mod run_registry;
 pub mod runtime_layer;
 pub mod shutdown;

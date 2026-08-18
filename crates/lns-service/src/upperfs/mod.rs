@@ -23,7 +23,7 @@ fn provision_image(
     size_bytes: u64,
     write: impl FnOnce(&Plan, &std::path::Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let run_dir = root.join("runs").join(run_id);
+    let run_dir = crate::cache::run_dir(root, run_id);
     std::fs::create_dir_all(&run_dir)?;
     let path = run_dir.join("upper.img");
     let plan = Plan::new(size_bytes, uuid, "lns-upper", mkfs_time)?;
