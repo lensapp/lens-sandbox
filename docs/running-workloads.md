@@ -1051,15 +1051,15 @@ reviewer` and `lns stop 7` are equivalent. `exec` is also reachable as the bare
 
 ### Exec — another command inside a run
 
-`lns exec 7 ls /workspace` runs one command in a second session, like
-`docker exec`. The run id is shown by `lns run -d` and `lns ps`. `--detach-keys`
+`lns exec 7 ls /workspace` runs one command in a second session. The run id is
+shown by `lns run -d` and `lns ps`. `--detach-keys`
 works as it does for `lns run`; detaching from an exec session closes only that
 session — the run and any other sessions keep going.
 
-Exec follows Docker's explicit terminal flags: without flags stdin is closed and
-no PTY is allocated; `-i` forwards stdin, `-t` allocates a PTY, and `-it` does
-both. For an interactive shell use `lns exec -it 7 sh`. A `--` command separator
-is accepted but optional.
+Exec uses explicit terminal flags: without flags stdin is closed and no PTY is
+allocated; `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. For an
+interactive shell use `lns exec -it 7 sh`. A `--` command separator is accepted
+but optional.
 
 An exec **joins the run it names**, so a diagnostic command sees the same sandbox
 the workload does: the run's resolved environment (base image `ENV`, `spec.env`,

@@ -176,7 +176,7 @@ interchangeable everywhere a run is addressed.
 | `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
 | `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
 | `ls`       | —              | List cached sandboxes (pulled or built) in the local store. Alias: `list`. |
-| `exec`     | `lns exec`     | Run another command against a running run (`docker exec`-style). Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
+| `exec`     | `lns exec`     | Run another command against a running run. Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
 | `kill`     | `lns kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
