@@ -36,8 +36,17 @@ struct BudgetState {
 }
 
 impl AuditBudget {
+    #[cfg(test)]
     pub(super) fn with_defaults() -> Self {
         Self::new(MAX_AUDIT_EVENTS_PER_RUN, MAX_AUDIT_BYTES_PER_RUN)
+    }
+
+    /// A restarted run appends to the audit file it already wrote, so its budget resumes where the last boot left off instead of resetting.
+    pub(super) fn seeded(events_spent: u64, bytes_spent: u64) -> Self {
+        Self::new(
+            (u64::from(MAX_AUDIT_EVENTS_PER_RUN)).saturating_sub(events_spent) as u32,
+            (MAX_AUDIT_BYTES_PER_RUN as u64).saturating_sub(bytes_spent) as usize,
+        )
     }
 
     fn new(events_remaining: u32, bytes_remaining: usize) -> Self {
@@ -1460,5 +1469,25 @@ mod tests {
     #[tokio::test]
     async fn supersede_connection_without_a_prior_connection_is_a_noop() {
         supersede_connection(None, None).await;
+    }
+}
+
+#[cfg(test)]
+mod budget_seeding_tests {
+    use super::AuditBudget;
+
+    #[test]
+    fn a_seeded_budget_resumes_where_the_last_boot_left_off() {
+        let budget = AuditBudget::seeded(u64::from(super::MAX_AUDIT_EVENTS_PER_RUN) - 1, 0);
+        assert!(budget.try_charge(1), "one event left");
+        assert!(!budget.try_charge(1), "the ledger spans boots");
+    }
+
+    #[test]
+    fn a_budget_already_exhausted_on_disk_charges_nothing() {
+        let over_events = AuditBudget::seeded(u64::from(super::MAX_AUDIT_EVENTS_PER_RUN) + 5, 0);
+        assert!(!over_events.try_charge(1));
+        let over_bytes = AuditBudget::seeded(0, (super::MAX_AUDIT_BYTES_PER_RUN as u64) + 5);
+        assert!(!over_bytes.try_charge(1));
     }
 }

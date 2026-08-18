@@ -39,7 +39,12 @@ pub(super) async fn accept_loop(
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut conn_shutdown: Option<oneshot::Sender<()>> = None;
     let mut pending: Vec<HostFrame> = Vec::new();
-    let budget = AuditBudget::with_defaults();
+    let budget = AuditBudget::seeded(
+        crate::audit::read_anchor(&crate::audit::anchor_path_for(&audit))
+            .map(|a| a.line_count)
+            .unwrap_or(0),
+        std::fs::metadata(&audit).map(|m| m.len()).unwrap_or(0),
+    );
     loop {
         tokio::select! {
             biased;

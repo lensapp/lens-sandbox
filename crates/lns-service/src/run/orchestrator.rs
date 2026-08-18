@@ -77,14 +77,23 @@ pub async fn handle(
     microvm: String,
     args: RunImageArgs,
     prepared: PreparedRun,
+    mode: super::LaunchMode,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) {
     let auto_remove = args.auto_remove;
     let finished_run_id = run_id.clone();
-    let result = orchestrate(run_id, microvm, args, prepared, frame_tx.clone(), input_rx)
-        .instrument(tracing::Span::current())
-        .await;
+    let result = orchestrate(
+        run_id,
+        microvm,
+        args,
+        prepared,
+        mode,
+        frame_tx.clone(),
+        input_rx,
+    )
+    .instrument(tracing::Span::current())
+    .await;
     let code = emit_completion(&frame_tx, result).await;
     match crate::cache::root() {
         Ok(cache_dir) => {
@@ -128,6 +137,7 @@ async fn orchestrate(
     microvm: String,
     args: RunImageArgs,
     prepared: PreparedRun,
+    mode: super::LaunchMode,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) -> Result<i32> {
@@ -149,6 +159,9 @@ async fn orchestrate(
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
     let mut run_scratch =
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
+    if matches!(mode, super::LaunchMode::Restart { .. }) {
+        run_scratch.keep();
+    }
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
     // A local definition plans directly; a published sandbox reference boots what it resolved to; a plain image passes through unchanged.
@@ -434,6 +447,7 @@ async fn orchestrate(
         sha256 = %descriptor.descriptor_sha256,
         "composefs descriptor materialised",
     );
+    super::verify_pinned_descriptor(&mode, &descriptor.descriptor_sha256)?;
     let recorded_descriptor_sha = descriptor.descriptor_sha256.clone();
     let record_args = args.clone();
 
