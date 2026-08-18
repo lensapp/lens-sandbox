@@ -272,6 +272,7 @@ impl ImageRig {
             &self.fs,
             &self.caches,
             &self.images_root,
+            &std::collections::HashSet::new(),
             &self.active,
             reference,
         )
@@ -293,7 +294,14 @@ impl ImageRig {
     }
 
     pub async fn prune(&mut self) {
-        match image_store::prune_with(&self.fs, &self.caches, &self.images_root, &self.active).await
+        match image_store::prune_with(
+            &self.fs,
+            &self.caches,
+            &self.images_root,
+            &std::collections::HashSet::new(),
+            &self.active,
+        )
+        .await
         {
             Ok(report) => {
                 self.last_prune = Some(report);

@@ -51,6 +51,13 @@ pub async fn mark_exited_with<F: Fs>(
     save_with(fs, cache_root, &record).await
 }
 
+pub fn pinned_digests(records: &[RunRecord]) -> std::collections::HashSet<String> {
+    records
+        .iter()
+        .flat_map(|r| r.layer_digests.iter().cloned())
+        .collect()
+}
+
 pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<Vec<RunRecord>> {
     let entries = match fs.read_dir(&cache_root.join("runs")).await {
         Ok(entries) => entries,
@@ -195,6 +202,22 @@ mod tests {
             finished_at: Some("2026-08-18T00:01:00Z".into()),
             exit_code: Some(0),
         }
+    }
+
+    #[test]
+    fn pinned_digests_collects_every_layer_a_recorded_run_boots_from() {
+        let mut a = sample_record("aa01");
+        a.layer_digests = vec!["sha256:one".into(), "sha256:shared".into()];
+        let mut b = sample_record("bb02");
+        b.layer_digests = vec!["sha256:shared".into(), "sha256:two".into()];
+        let pins = pinned_digests(&[a, b]);
+        assert_eq!(
+            pins,
+            ["sha256:one", "sha256:shared", "sha256:two"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
     }
 
     #[tokio::test]
