@@ -104,6 +104,7 @@ pub(crate) fn validate_open_session(frame: &ClientFrame) -> Result<(), SessionEr
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LoopAction {
     WriteStdin(Vec<u8>),
+    CloseStdin,
     Resize(Winsize),
     Signal(i32),
     Detach,
@@ -113,6 +114,7 @@ pub(crate) enum LoopAction {
 pub(crate) fn dispatch_frame(frame: ClientFrame) -> LoopAction {
     match frame {
         ClientFrame::StdinBytes(bytes) => LoopAction::WriteStdin(bytes),
+        ClientFrame::StdinClose => LoopAction::CloseStdin,
         ClientFrame::Resize(ws) => LoopAction::Resize(ws),
         ClientFrame::Signal(kind) => LoopAction::Signal(kind.as_libc()),
         ClientFrame::Detach => LoopAction::Detach,
@@ -256,6 +258,10 @@ mod tests {
         assert_eq!(
             dispatch_frame(ClientFrame::StdinBytes(b"x".to_vec())),
             LoopAction::WriteStdin(b"x".to_vec())
+        );
+        assert_eq!(
+            dispatch_frame(ClientFrame::StdinClose),
+            LoopAction::CloseStdin
         );
         assert_eq!(
             dispatch_frame(ClientFrame::Resize(Winsize { rows: 1, cols: 2 })),

@@ -18,7 +18,7 @@ use super::{
     PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
     pump_responses, write_error,
 };
-use super::{build_session_params, validate_exec};
+use super::{build_session_params, register_exec_input, validate_exec};
 
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -696,18 +696,29 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
         }
     };
 
-    let started_frame = encode_frame(&Response::RunStarted {
-        run_id: target_run_id.clone(),
-    })
-    .context("encoding RunStarted frame")?;
-    if let Err(e) = stream.write_all(&started_frame).await {
-        // SAFETY: fd was just taken from the only owner; we drop it here.
-        unsafe { libc::close(fd) };
-        return Err(anyhow::Error::from(e).context("writing exec RunStarted frame"));
-    }
-
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
+    let session_id = match register_exec_input(&target_run_id, input_tx) {
+        Ok(id) => id,
+        Err(message) => {
+            // SAFETY: fd was just taken from the only owner; we drop it here.
+            unsafe { libc::close(fd) };
+            let _ = write_error(&mut stream, message).await;
+            return Ok(());
+        }
+    };
+
+    let started_frame = encode_frame(&Response::ExecStarted {
+        run_id: target_run_id.clone(),
+        session_id: session_id.clone(),
+    })
+    .context("encoding ExecStarted frame")?;
+    if let Err(e) = stream.write_all(&started_frame).await {
+        crate::run_registry::deregister_exec_session(&target_run_id, &session_id);
+        // SAFETY: fd was just taken from the only owner; we drop it here.
+        unsafe { libc::close(fd) };
+        return Err(anyhow::Error::from(e).context("writing exec ExecStarted frame"));
+    }
 
     let params = build_session_params(args, &target_run_id);
 
@@ -738,8 +749,6 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
             .await;
     });
 
-    let input_keepalive = input_tx;
-
     drop(frame_tx);
 
     let (_dead_cancel_tx, dead_cancel_rx) = oneshot::channel::<i32>();
@@ -751,7 +760,7 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
         log::debug!(error = %e, "exec stream write failed; tearing session down");
     }
 
-    drop(input_keepalive);
+    crate::run_registry::deregister_exec_session(&target_run_id, &session_id);
     session_task.abort();
     let _ = session_task.await;
     Ok(())

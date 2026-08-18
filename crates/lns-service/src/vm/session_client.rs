@@ -73,6 +73,7 @@ impl CaptureBuffers {
 #[derive(Debug)]
 pub enum SessionInput {
     StdinBytes(Vec<u8>),
+    StdinClose,
     Resize { rows: u16, cols: u16 },
     Signal(SignalKind),
     Detach,
@@ -93,6 +94,7 @@ pub struct SessionParams {
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
     match input {
         SessionInput::StdinBytes(bytes) => ClientFrame::StdinBytes(bytes),
+        SessionInput::StdinClose => ClientFrame::StdinClose,
         SessionInput::Resize { rows, cols } => ClientFrame::Resize(Winsize { rows, cols }),
         SessionInput::Signal(kind) => ClientFrame::Signal(kind),
         SessionInput::Detach => ClientFrame::Detach,
@@ -210,6 +212,10 @@ mod tests {
     fn input_to_frame_maps_each_variant() {
         let stdin = input_to_frame(SessionInput::StdinBytes(b"x".to_vec()));
         assert_eq!(stdin, ClientFrame::StdinBytes(b"x".to_vec()));
+        assert_eq!(
+            input_to_frame(SessionInput::StdinClose),
+            ClientFrame::StdinClose
+        );
         let resize = input_to_frame(SessionInput::Resize { rows: 10, cols: 20 });
         assert_eq!(resize, ClientFrame::Resize(Winsize { rows: 10, cols: 20 }));
         let signal = input_to_frame(SessionInput::Signal(SignalKind::Int));

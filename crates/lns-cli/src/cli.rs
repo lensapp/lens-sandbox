@@ -311,8 +311,7 @@ pub struct ExecArgs {
         require_equals = true,
         default_value_t = false,
         default_missing_value = "true",
-        value_parser = refuse_exec_session,
-        hide = true
+        help = "Keep stdin open and forward host stdin to the exec command."
     )]
     pub interactive: bool,
 
@@ -324,8 +323,7 @@ pub struct ExecArgs {
         require_equals = true,
         default_value_t = false,
         default_missing_value = "true",
-        value_parser = refuse_exec_session,
-        hide = true
+        help = "Allocate a PTY for the exec command."
     )]
     pub tty: bool,
 
@@ -347,7 +345,7 @@ pub struct ExecArgs {
 
     #[arg(
         last = true,
-        help = "Command to exec in the running workload. Everything after `--`."
+        help = "Command to exec in the running workload; `--` is optional."
     )]
     pub cmd: Vec<String>,
 }
@@ -504,18 +502,6 @@ fn user_spec_uid(spec: &str) -> Option<u32> {
         .map_or(spec, |(user, _)| user)
         .parse::<u32>()
         .ok()
-}
-
-fn refuse_exec_session(s: &str) -> Result<bool, String> {
-    match s {
-        "false" => Ok(false),
-        _ => Err(
-            "an interactive exec is not yet supported: input routing for exec sessions \
-                  awaits an IPC discriminator. Drop -i/-t and pass the command after `--`; \
-                  `lns attach` reaches the run's own terminal"
-                .to_string(),
-        ),
-    }
 }
 
 pub(crate) fn parse_mem_arg(s: &str) -> Result<usize, String> {
@@ -831,21 +817,14 @@ mod tests {
     }
 
     #[test]
-    fn exec_refuses_a_session_it_cannot_route_input_to() {
-        for flag in ["-i", "-t", "--interactive=true", "--tty=true"] {
-            let err = parse_exec(&[flag, "demo", "--", "sh"])
-                .err()
-                .unwrap_or_else(|| panic!("{flag} must be refused at parse time"));
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "flag {flag}: {err}"
-            );
-            assert!(
-                err.to_string().contains("not yet supported"),
-                "flag {flag}: {err}"
-            );
-        }
+    fn exec_accepts_explicit_interactive_and_tty_modes() {
+        let interactive = parse_exec(&["-i", "demo", "--", "sh"]).expect("-i parses");
+        assert!(interactive.interactive);
+        assert!(!interactive.tty);
+
+        let tty = parse_exec(&["-t", "demo", "--", "sh"]).expect("-t parses");
+        assert!(!tty.interactive);
+        assert!(tty.tty);
     }
 
     #[test]

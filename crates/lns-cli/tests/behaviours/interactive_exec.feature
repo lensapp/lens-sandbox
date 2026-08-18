@@ -36,7 +36,6 @@ Feature: interactive exec sessions from the CLI
     And raw-mode terminal programs can run
     And terminal output is displayed live
 
-  @todo
   Scenario: exec help exposes its terminal controls
     When the user runs "lns exec --help"
     Then the exit code is 0

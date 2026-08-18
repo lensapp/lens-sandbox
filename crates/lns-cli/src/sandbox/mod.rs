@@ -47,9 +47,7 @@ pub enum SandboxCommand {
     Ls(LsArgs),
     #[command(about = "Run a sandbox in a microVM (the top-level `lns run`).")]
     Run(Box<RunArgs>),
-    #[command(
-        about = "Run one non-interactive command against a running run (`docker exec`-style); use `lns attach` for its terminal."
-    )]
+    #[command(about = "Run another command against a running run (`docker exec`-style).")]
     Exec(ExecArgs),
     #[command(about = "Send a signal to a running run (`docker kill`-style).")]
     Kill(KillArgs),
