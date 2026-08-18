@@ -30,6 +30,73 @@ pub trait RunHost {
         W: AsyncWriteExt + Unpin + Send;
 }
 
+/// What restarting a stopped run needs from the service: its record, the conflicts it fails closed on, and the boot itself.
+pub trait StartHost {
+    fn record(
+        &self,
+        run_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<crate::run_record::RunRecord>> + Send;
+
+    fn preflight(
+        &self,
+        record: &crate::run_record::RunRecord,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    fn serve<W>(
+        &self,
+        stream: &mut W,
+        record: crate::run_record::RunRecord,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
+    where
+        W: AsyncWriteExt + Unpin + Send;
+}
+
+/// Serve one `StartRun` exchange. A running run answers `RunStarted` unchanged; a stopped run fails closed on any conflict before anything boots, so a refusal leaves its stopped state untouched.
+pub async fn start_stopped_run<S, H>(stream: &mut S, run: &str, host: &H) -> anyhow::Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+    H: StartHost,
+{
+    let Ok(run_id) = crate::run_registry::resolve(run) else {
+        let _ = write_error(stream, no_startable_run(run)).await;
+        return Ok(());
+    };
+    match crate::run_registry::status(&run_id) {
+        Some(lns_ipc::RunStatus::Running) => {
+            let frame = encode_frame(&Response::RunStarted { run_id })?;
+            stream.write_all(&frame).await?;
+            Ok(())
+        }
+        Some(lns_ipc::RunStatus::Exited { .. }) => {
+            let record = match host.record(&run_id).await {
+                Ok(record) => record,
+                Err(e) => {
+                    let _ = write_error(stream, format!("{e:#}")).await;
+                    return Ok(());
+                }
+            };
+            if let Err(e) = host.preflight(&record).await {
+                let _ = write_error(stream, format!("{e:#}")).await;
+                return Ok(());
+            }
+            host.serve(stream, record).await
+        }
+        None => {
+            let _ = write_error(stream, no_startable_run(run)).await;
+            Ok(())
+        }
+    }
+}
+
+fn no_startable_run(run: &str) -> String {
+    let stopped = crate::run_registry::stopped_run_names();
+    if stopped.is_empty() {
+        format!("no such run: {run}; there are no stopped runs")
+    } else {
+        format!("no such run: {run}; stopped runs: {}", stopped.join(", "))
+    }
+}
+
 /// Serve one `RunImage` exchange. A run that cannot start is answered with an error and never reaches [`RunHost::serve`], which is what registers it and names it — so a refusal costs no run id, no run name and no `RunStarted` (§3.3.2, §3.1.11).
 pub async fn start_run<S, H>(
     stream: &mut S,
@@ -425,7 +492,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         } => login_response(crate::image::verify_login(registry, username, secret).await),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
-        Request::RemoveRun { run } => remove_run_request(run),
+        Request::RemoveRun { run, force: _ } => remove_run_request(run),
         Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
             Ok(()) => Response::Acknowledged,
             Err(message) => Response::Error { message },
@@ -433,6 +500,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::PruneRuns => Response::RunsPruned {
             removed: crate::run_registry::prune_exited(),
         },
+        Request::StartRun { .. } => {
+            unreachable!(
+                "Request::StartRun must be dispatched via handle_start, not handle_request"
+            )
+        }
         Request::RunLogs { .. } => {
             unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
         }
@@ -1847,6 +1919,7 @@ mod tests {
             },
             Request::RemoveRun {
                 run: "ghost".into(),
+                force: false,
             },
         ] {
             match handle_request(&req, Instant::now()).await {
@@ -2138,6 +2211,97 @@ mod tests {
             Instant::now(),
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Request::StartRun must be dispatched via handle_start")]
+    async fn start_run_via_handle_request_panics() {
+        let _ = handle_request(&Request::StartRun { run: "1".into() }, Instant::now()).await;
+    }
+
+    struct ScriptedStartHost {
+        record: Option<crate::run_record::RunRecord>,
+        served: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl StartHost for ScriptedStartHost {
+        async fn record(&self, run_id: &str) -> anyhow::Result<crate::run_record::RunRecord> {
+            self.record
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("run {run_id}'s state is damaged"))
+        }
+
+        async fn preflight(&self, _record: &crate::run_record::RunRecord) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn serve<W>(
+            &self,
+            _stream: &mut W,
+            _record: crate::run_record::RunRecord,
+        ) -> anyhow::Result<()>
+        where
+            W: AsyncWriteExt + Unpin + Send,
+        {
+            self.served.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn drive_start_stopped(host: &ScriptedStartHost, handle: &str) -> Vec<Response> {
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        start_stopped_run(&mut server, handle, host)
+            .await
+            .expect("a refusal is an answer, not a transport failure");
+        drop(server);
+        let mut frames = Vec::new();
+        while let Ok(bytes) = lns_ipc::read_frame_bytes_async(&mut client).await {
+            if let Ok(response) = lns_ipc::decode_frame::<Response, _>(&mut bytes.as_slice()) {
+                frames.push(response);
+            }
+        }
+        frames
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn starting_a_stopped_run_whose_record_is_gone_answers_the_damage() {
+        let record = crate::run_record::test_record(&crate::run_registry::allocate_run_id());
+        let id = record.run_id.clone();
+        crate::run_registry::register_stopped(crate::run_registry::StoppedRun { record });
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = ScriptedStartHost {
+            record: None,
+            served: served.clone(),
+        };
+        let frames = drive_start_stopped(&host, &id).await;
+        crate::run_registry::deregister(&id);
+        assert!(
+            matches!(&frames[0], Response::Error { message } if message.contains("state is damaged")),
+            "got {frames:?}"
+        );
+        assert!(!served.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn starting_a_stopped_run_nothing_refuses_reaches_the_boot() {
+        let record = crate::run_record::test_record(&crate::run_registry::allocate_run_id());
+        let id = record.run_id.clone();
+        crate::run_registry::register_stopped(crate::run_registry::StoppedRun {
+            record: record.clone(),
+        });
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = ScriptedStartHost {
+            record: Some(record),
+            served: served.clone(),
+        };
+        let frames = drive_start_stopped(&host, &id).await;
+        crate::run_registry::deregister(&id);
+        assert!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            "a stopped run nothing refuses has to reach the boot; got {frames:?}"
+        );
     }
 
     #[tokio::test]
