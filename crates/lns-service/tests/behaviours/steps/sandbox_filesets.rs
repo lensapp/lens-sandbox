@@ -367,6 +367,7 @@ fn plan_host_files(world: &mut BehaviourWorld) {
     match lns_service::artifact::fileset::host_fileset_specs(
         &probe,
         &resolved.host_filesets,
+        &[],
         &mut materialized,
     ) {
         Ok(()) => {

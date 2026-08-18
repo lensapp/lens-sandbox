@@ -81,6 +81,7 @@ fn args_named(name: &str) -> RunImageArgs {
         definition_dir: None,
         authored_egress: None,
         packed_filesets: Vec::new(),
+        denied_host_paths: Vec::new(),
     }
 }
 

@@ -101,7 +101,7 @@ fn disclosure(effects: &PulledEffects) -> String {
         } else {
             "read"
         };
-        let provenance = if fileset.from_host {
+        let provenance = if fileset.from_host() {
             "a file read from this machine at launch, which the workload can"
         } else {
             "author-published files the workload can"
@@ -154,7 +154,8 @@ mod tests {
             source: source.into(),
             mount_path: mount_path.into(),
             owner: owner.into(),
-            from_host: false,
+            host_path: None,
+            optional: false,
         }
     }
 

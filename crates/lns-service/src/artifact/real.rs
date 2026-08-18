@@ -78,6 +78,7 @@ pub(crate) async fn plan_resolved(
     resolved: ResolvedForRun,
     run_id: &str,
     microvm: &str,
+    denied_host_paths: &[String],
 ) -> Result<SandboxPlan> {
     let ResolvedForRun {
         reference,
@@ -97,6 +98,7 @@ pub(crate) async fn plan_resolved(
     crate::artifact::fileset::host_fileset_specs(
         &RealSnapshotDir,
         &resolved.host_filesets,
+        denied_host_paths,
         &mut materialized,
     )?;
     let fileset_specs = materialized.into_specs();
@@ -155,6 +157,7 @@ pub(crate) async fn plan_local(
     crate::artifact::fileset::host_fileset_specs(
         &RealSnapshotDir,
         &resolved.host_filesets,
+        &[],
         &mut materialized,
     )?;
     Ok(SandboxPlan {

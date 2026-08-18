@@ -146,9 +146,15 @@ async fn orchestrate(
             )
             .await?,
         ),
-        PreparedDocument::Published(resolved) => {
-            Some(crate::artifact::real::plan_resolved(*resolved, &run_id, &microvm).await?)
-        }
+        PreparedDocument::Published(resolved) => Some(
+            crate::artifact::real::plan_resolved(
+                *resolved,
+                &run_id,
+                &microvm,
+                &args.denied_host_paths,
+            )
+            .await?,
+        ),
         PreparedDocument::Imageless => None,
     };
     let mut signed_in = Vec::new();

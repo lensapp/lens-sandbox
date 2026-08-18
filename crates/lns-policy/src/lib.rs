@@ -11,6 +11,7 @@ pub mod credentials;
 mod env_subst;
 pub mod grants;
 pub mod host_bind_decisions;
+pub mod host_path_decisions;
 pub mod matching;
 pub mod providers;
 pub mod registry_auth;

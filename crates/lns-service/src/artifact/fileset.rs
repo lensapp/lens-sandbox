@@ -138,13 +138,22 @@ pub trait HostFileProbe {
     fn stat(&self, path: &Path) -> std::io::Result<Option<HostFileFacts>>;
 }
 
-/// Snapshot each declared host file into one guest-write spec at its mountPath, so a definition can seed the guest from the machine that runs it; an absent path refuses the plan unless the author marked it optional.
+/// Snapshot each declared host file into one guest-write spec at its mountPath, so a definition can seed the guest from the machine that runs it; an absent path refuses the plan unless the author marked it optional, and a path this machine refused a pulled sandbox is never read at all.
 pub fn host_fileset_specs<P: HostFileProbe + ?Sized>(
     probe: &P,
     hosts: &[HostFileset],
+    denied: &[String],
     out: &mut MaterializedFilesets,
 ) -> Result<()> {
     for host in hosts {
+        if denied.iter().any(|source| source == &host.source) {
+            crate::log::info!(
+                "fileset",
+                "skipping hostPath {} — this machine did not grant it to this sandbox",
+                host.source
+            );
+            continue;
+        }
         let resolved = resolve_host_source(probe, &host.source)?;
         let facts = probe
             .stat(&resolved)
@@ -716,6 +725,53 @@ mod tests {
     }
 
     #[test]
+    fn a_denied_host_file_is_never_read() {
+        let mut out = MaterializedFilesets::default();
+        host_fileset_specs(
+            &StagedHost::present(),
+            &[host(
+                "~/.gitconfig",
+                "/home/agent/.gitconfig",
+                FilesetOwner::Workload,
+                false,
+            )],
+            &["~/.gitconfig".to_string()],
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            out.into_specs().is_empty(),
+            "a path this machine refused the sandbox must reach the guest by no route, and a required one must not refuse the run either — the CLI already settled that"
+        );
+    }
+
+    #[test]
+    fn denying_one_host_file_leaves_the_others_readable() {
+        let mut out = MaterializedFilesets::default();
+        host_fileset_specs(
+            &StagedHost::present(),
+            &[
+                host(
+                    "~/.gitconfig",
+                    "/home/agent/.gitconfig",
+                    FilesetOwner::Root,
+                    false,
+                ),
+                host("~/.vimrc", "/home/agent/.vimrc", FilesetOwner::Root, false),
+            ],
+            &["~/.gitconfig".to_string()],
+            &mut out,
+        )
+        .unwrap();
+        let mounted: Vec<String> = out
+            .into_specs()
+            .iter()
+            .map(|spec| spec.guest_path.clone())
+            .collect();
+        assert_eq!(mounted, ["/home/agent/.vimrc"]);
+    }
+
+    #[test]
     fn a_workload_owned_host_file_joins_the_chown_manifest() {
         let mut out = MaterializedFilesets::default();
         host_fileset_specs(
@@ -726,6 +782,7 @@ mod tests {
                 FilesetOwner::Workload,
                 false,
             )],
+            &[],
             &mut out,
         )
         .unwrap();
@@ -755,6 +812,7 @@ mod tests {
                 FilesetOwner::Root,
                 false,
             )],
+            &[],
             &mut out,
         )
         .unwrap();
@@ -783,6 +841,7 @@ mod tests {
                 FilesetOwner::Workload,
                 false,
             )],
+            &[],
             &mut out,
         )
         .unwrap();
@@ -800,6 +859,7 @@ mod tests {
                 ..StagedHost::present()
             },
             &[host("/etc", "/etc/gitconfig", FilesetOwner::Root, true)],
+            &[],
             &mut MaterializedFilesets::default(),
         )
         .unwrap_err();
@@ -822,6 +882,7 @@ mod tests {
                 FilesetOwner::Workload,
                 true,
             )],
+            &[],
             &mut MaterializedFilesets::default(),
         )
         .unwrap_err();
@@ -847,6 +908,7 @@ mod tests {
                     FilesetOwner::Workload,
                     true,
                 )],
+                &[],
                 &mut out,
             )
             .unwrap();
@@ -881,6 +943,7 @@ mod tests {
                 FilesetOwner::Workload,
                 true,
             )],
+            &[],
             &mut MaterializedFilesets::default(),
         )
         .unwrap_err();
@@ -903,6 +966,7 @@ mod tests {
                 FilesetOwner::Workload,
                 false,
             )],
+            &[],
             &mut MaterializedFilesets::default(),
         )
         .unwrap_err();

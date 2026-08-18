@@ -1,6 +1,7 @@
 pub mod declarative;
 pub mod env_file;
 pub mod host_bind;
+pub mod host_path_consent;
 pub mod progress;
 pub mod pull_confirm;
 pub mod summary;
