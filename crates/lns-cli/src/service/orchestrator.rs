@@ -593,22 +593,50 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     }
 
     let socket = super::socket_path()?;
-    let mut stream = UnixStream::connect(&socket)
+    let stream = UnixStream::connect(&socket)
         .await
         .with_context(|| format!("connecting to {}", socket.display()))?;
 
-    let target_run = args.run;
-    let tty = args.tty;
-    let stdin = args.interactive;
-    let initial_winsize = if tty {
+    let initial_winsize = if args.tty {
         crate::raw_mode::host_winsize()
     } else {
         None
     };
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    exec_image_on_stream(
+        stream,
+        Some(socket),
+        args,
+        initial_winsize,
+        std::io::stdout().is_terminal(),
+        &mut stdout,
+        &mut stderr,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // explicit stream/writer/terminal seam so the exec handshake and session loop are host-testable over in-memory duplexes
+pub async fn exec_image_on_stream<S, O, E>(
+    mut stream: S,
+    aux_socket: Option<PathBuf>,
+    args: ExecArgs,
+    initial_winsize: Option<(u16, u16)>,
+    stdout_is_terminal: bool,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<i32>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
+{
+    let tty = args.tty;
+    let stdin = args.interactive;
     let detach_chord = args.detach_keys.0.clone();
 
     let request = Request::ExecImage(build_exec_request(
-        target_run,
+        args.run,
         args.cmd,
         tty,
         stdin,
@@ -626,14 +654,17 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     let target = decode_exec_started(&bytes)?;
     crate::log::debug!(run_id = %target.run_id(), "exec session opened");
 
-    drive_targeted_session(
+    drive_targeted_session_with_writers(
         stream,
-        Some(socket),
+        aux_socket,
         target,
         tty,
+        stdout_is_terminal,
         detach_chord,
         DetachBehaviour::CloseSession,
         CancelBehaviour::SignalSession,
+        stdout,
+        stderr,
         args.quiet,
         StdinForwarding::of(stdin),
     )
