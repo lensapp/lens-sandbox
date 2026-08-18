@@ -1,0 +1,4 @@
+network:
+  egress:
+    http: []
+  defaultVerdict: ask

@@ -1,0 +1,4 @@
+network:
+  allowedRoutes: []
+  defaultVerdict: ask
+  defaultTransport: direct

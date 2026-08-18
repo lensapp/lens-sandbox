@@ -696,33 +696,12 @@ where
 
     let abort = run_task.abort_handle();
     let runtime_cache_registration = crate::image_store::lock_runtime_cache_shared().await;
-<<<<<<< HEAD
-    let registered = crate::run_registry::register_named(
-        run_id.clone(),
-        requested_name,
-        crate::run_registry::RunHandle {
-            cancel_tx,
-            detach_tx: std::sync::Mutex::new(Some(detach_tx)),
-            task: run_task,
-            input_tx: Some(input_tx),
-            exec_sessions: Default::default(),
-            connector: None,
-            name: String::new(),
-            image: image_label,
-            command: command_label,
-            started: started_label,
-            status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
-            logs,
-            config,
-            exec_environment: Default::default(),
-        },
-    );
-=======
     let handle = crate::run_registry::RunHandle {
         cancel_tx,
         detach_tx: std::sync::Mutex::new(Some(detach_tx)),
         task: run_task,
         input_tx: Some(input_tx),
+        exec_sessions: Default::default(),
         connector: None,
         name: String::new(),
         image: image_label,
@@ -741,7 +720,6 @@ where
             crate::run_registry::transition_to_live(&run_id, handle)
         }
     };
->>>>>>> 3b823138 (feat: boot a stopped run back onto its preserved writable layer)
     drop(runtime_cache_registration);
     match registered {
         Ok(microvm) => {
