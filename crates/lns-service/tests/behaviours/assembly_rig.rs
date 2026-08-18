@@ -10,6 +10,7 @@ pub struct AssemblyRig {
     pub layers: Vec<Vec<u8>>,
     pub events: Arc<Mutex<Vec<(u64, u64)>>>,
     pub built: Option<BuiltDescriptor>,
+    pub rebuilt: Option<BuiltDescriptor>,
 }
 
 impl AssemblyRig {
@@ -24,6 +25,7 @@ impl AssemblyRig {
             layers,
             events: Arc::new(Mutex::new(Vec::new())),
             built: None,
+            rebuilt: None,
         }
     }
 

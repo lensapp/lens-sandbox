@@ -12,7 +12,6 @@ Feature: rootfs assembly reports determinate progress
     And the sink observes 3072 of 8192 bytes after the first layer
     And the sink observes 8192 of 8192 bytes after the last layer
 
-  @todo
   Scenario: A cached descriptor is served without any assembly progress
     Given an image whose descriptor was already assembled
     When the same rootfs is requested again with a recording progress sink
