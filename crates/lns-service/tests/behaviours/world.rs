@@ -129,6 +129,11 @@ pub struct BehaviourWorld {
     pub startrun_status_after: Option<lns_ipc::RunStatus>,
     /// The volume holder's short run id, for the held-volume refusal.
     pub startrun_volume_holder: Option<String>,
+    /// The record the scenario registered its stopped run with.
+    pub startrun_record: Option<lns_service::run_record::RunRecord>,
+    /// The record the scripted boot received.
+    pub startrun_booted:
+        std::sync::Arc<std::sync::Mutex<Option<lns_service::run_record::RunRecord>>>,
     /// Held from a StartRun scenario's first Given to the end of its When: these scenarios share fixed names and the global stopped-run listing, so they must not interleave.
     pub startrun_serial: Option<tokio::sync::OwnedMutexGuard<()>>,
 }

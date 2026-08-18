@@ -128,6 +128,22 @@ fn rebuild_in(map: &mut HashMap<String, RunEntry>, records: Vec<crate::run_recor
     }
 }
 
+/// Replace a startable entry with the live handle booting over its preserved state; the name carries over.
+pub fn transition_to_live(run_id: &str, mut handle: RunHandle) -> Result<String, String> {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    let map = g.get_or_insert_with(HashMap::new);
+    match map.get(run_id) {
+        Some(entry) if is_exited(entry) => {
+            handle.name = entry.name().to_string();
+            let name = handle.name.clone();
+            map.insert(run_id.to_string(), RunEntry::Live(handle));
+            Ok(name)
+        }
+        Some(_) => Err(format!("run {run_id} is already running")),
+        None => Err(format!("no such run: {run_id}")),
+    }
+}
+
 pub fn stopped_run_names() -> Vec<String> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     stopped_names_in(g.as_ref())
@@ -1560,6 +1576,55 @@ mod tests {
         assert!(log_buffer(&id).is_none());
         assert!(connector(&id).is_none());
         deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn transition_to_live_boots_a_stopped_entry_under_its_reserved_name() {
+        let id = allocate_run_id();
+        register_stopped(StoppedRun {
+            record: stopped_record(&id, &format!("rev-{id}")),
+        });
+        let (h, _rx) = make_handle();
+        let name = transition_to_live(&id, h).unwrap();
+        assert_eq!(name, format!("rev-{id}"));
+        assert_eq!(status(&id), Some(RunStatus::Running));
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn transition_to_live_replaces_a_run_that_exited_in_this_session() {
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        set_exit_code(&id, 0);
+        let (fresh, _rx2) = make_handle();
+        let name = transition_to_live(&id, fresh).unwrap();
+        assert_eq!(name, format!("rev-{id}"));
+        assert_eq!(status(&id), Some(RunStatus::Running));
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn transition_to_live_refuses_a_running_run_and_an_unknown_one() {
+        let id = allocate_run_id();
+        let (h, _rx) = make_handle();
+        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        let (fresh, _rx2) = make_handle();
+        assert!(
+            transition_to_live(&id, fresh)
+                .unwrap_err()
+                .contains("already running")
+        );
+        deregister(&id);
+        let (fresh2, _rx3) = make_handle();
+        assert!(
+            transition_to_live(&id, fresh2)
+                .unwrap_err()
+                .contains("no such run")
+        );
     }
 
     #[test]

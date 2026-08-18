@@ -26,6 +26,10 @@ fn provision_image(
     let run_dir = crate::cache::run_dir(root, run_id);
     std::fs::create_dir_all(&run_dir)?;
     let path = run_dir.join("upper.img");
+    // A stopped sandbox keeps its writable layer, so starting it again finds this file and must not reformat it.
+    if path.exists() {
+        return Ok(path);
+    }
     let plan = Plan::new(size_bytes, uuid, "lns-upper", mkfs_time)?;
     write(&plan, &path)?;
     Ok(path)
@@ -70,6 +74,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(sized.get(), 40 << 30);
+    }
+
+    #[test]
+    fn provision_image_keeps_an_existing_writable_layer_untouched() {
+        let root = tempfile::TempDir::new().unwrap();
+        let existing = root.path().join("runs").join("aa07");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("upper.img"), b"a stopped sandbox's data").unwrap();
+        let path = provision_image(
+            root.path(),
+            "aa07",
+            [0; 16],
+            0,
+            DEFAULT_SIZE_BYTES,
+            |_, _| panic!("a preserved writable layer must never be reformatted"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a stopped sandbox's data");
     }
 
     #[test]
