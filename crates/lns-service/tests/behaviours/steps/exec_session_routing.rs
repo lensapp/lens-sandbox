@@ -161,8 +161,9 @@ async fn first_exec_disconnects(world: &mut BehaviourWorld) {
         unreachable!()
     };
     let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
+    let probe = TerminationProbe(Some(terminated_tx));
     let session_task = tokio::spawn(async move {
-        let _probe = TerminationProbe(Some(terminated_tx));
+        let _probe = probe;
         std::future::pending::<()>().await
     });
     let (client, mut server) = tokio::io::duplex(64);
