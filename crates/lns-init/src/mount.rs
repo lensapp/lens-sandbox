@@ -36,8 +36,10 @@ const DEV_FD_LINKS: &[(&str, &str)] = &[
 ];
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
+const TMP: &str = "/tmp";
 const RUN_TMPFS_OPTS: &str = "mode=0755,size=64m";
 const RUN_LOCK_TMPFS_OPTS: &str = "mode=1777,size=4m";
+const TMP_TMPFS_OPTS: &str = "mode=1777";
 const UNPRIV_PORT_START_SYSCTL: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -670,6 +672,17 @@ fn mount_run_tmpfs(
         "tmpfs",
         MountFlags::none().nosuid().nodev().noexec(),
         Some(RUN_LOCK_TMPFS_OPTS),
+    )?;
+    // /tmp is boot-scoped by decision: a restarted run finds it empty, so scratch never leaks into the preserved writable layer.
+    let tmp = format!("{newroot}{TMP}");
+    do_mkdir(sys, &tmp, 0o1777)?;
+    do_mount(
+        sys,
+        "tmpfs",
+        &tmp,
+        "tmpfs",
+        MountFlags::none().nosuid().nodev(),
+        Some(TMP_TMPFS_OPTS),
     )
 }
 
@@ -2824,6 +2837,37 @@ mod tests {
             .unwrap();
         assert!(overlay < vol_mount, "volume mounts after the overlay root");
         assert!(vol_mount < chroot, "volume mounts before the pivot/chroot");
+    }
+
+    #[test]
+    fn boot_mounts_tmp_as_a_boot_scoped_tmpfs() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let (flags, data) = sys
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount {
+                    target,
+                    fstype,
+                    flags,
+                    data,
+                    ..
+                } if target == "/newroot/tmp" && fstype == "tmpfs" => Some((flags, data)),
+                _ => None,
+            })
+            .expect("/tmp is mounted as tmpfs so a restart finds it empty");
+        assert_eq!(flags, MountFlags::none().nosuid().nodev());
+        assert!(
+            data.expect("/tmp tmpfs carries options").contains("mode=1777"),
+            "/tmp must stay world-writable with the sticky bit"
+        );
     }
 
     #[test]
