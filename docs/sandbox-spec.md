@@ -28,8 +28,8 @@ used as described in RFC 2119.
 
 ## 1. Overview
 
-A **kit** is one YAML document with an `apiVersion`, a `kind`, a `name`, and a
-`spec`, published as one OCI artifact. Three kinds exist:
+An **artifact** is one YAML document with an `apiVersion`, a `kind`, a `name`,
+and a `spec`, published as one OCI artifact. Three artifact kinds exist:
 
 | Kind | Purpose |
 |---|---|
@@ -37,19 +37,19 @@ A **kit** is one YAML document with an `apiVersion`, a `kind`, a `name`, and a
 | **`connector`** | How a credential for a service is obtained and injected: its credentials, the egress that reaches it, and a real sign-in. |
 | **`mixin`** | A capability layered onto a sandbox: tools, filesets, egress, credentials. |
 
-[Chapter 3](#3-kits) specifies each in full.
+[Chapter 3](#3-artifact-kinds) specifies each in full.
 
 ### 1.1 One distribution mechanism
 
-Every kit is published and consumed the same way: **one document, one OCI
+Every artifact is published and consumed the same way: **one document, one OCI
 artifact, addressed by reference and pinned by digest** ([§7](#7-distribution)).
 
-The uniformity is what makes kits composable. A sandbox reference, a connector
-reference, and a mixin reference are the same kind of thing to a reader, to
-`lns pull`, and to an approval — each independently versioned, each auditable at
-its digest, each fixable by publishing a new one.
+The uniformity is what makes artifacts composable. A sandbox reference, a
+connector reference, and a mixin reference are the same kind of thing to a
+reader, to `lns pull`, and to an approval — each independently versioned, each
+auditable at its digest, each fixable by publishing a new one.
 
-`lns run` boots a sandbox. `lns push` publishes any kit. `lns pull` and
+`lns run` boots a sandbox. `lns push` publishes any artifact. `lns pull` and
 `lns run <reference>` consume the published form. The same document is both the
 authoring surface and the wire format.
 
@@ -63,10 +63,10 @@ network.
 
 ### 1.3 Disclosure before boot
 
-A run does what its kit says. `spec.egress` is **enforced as written** — an entry
-that allows a destination allows it, and a mixin that narrows one narrows it. The
-safeguard is not that a document is advisory; it is that the developer sees the
-resolved document, in full, before anything boots
+A run does what its artifact says. `spec.egress` is **enforced as written** — an
+entry that allows a destination allows it, and a mixin that narrows one narrows
+it. The safeguard is not that a document is advisory; it is that the developer
+sees the resolved document, in full, before anything boots
 ([§1.5](#15-one-disclosure)).
 
 The same holds for `spec.ports`: a declared port is published, whether the
@@ -132,7 +132,7 @@ them. See [§3.3](#33-kind-mixin).
 
 ## 2. Common top-level fields
 
-Every kit sets these, whatever its kind.
+Every artifact sets these, whatever its kind.
 
 ```yaml
 apiVersion: lns.run/v1      # REQUIRED. Exactly this string.
@@ -148,33 +148,30 @@ spec: { … }                 # REQUIRED. Shape depends on kind.
 | `name` | string | REQUIRED. A DNS label: lowercase alphanumeric and `-`, 1–63 characters, first and last character alphanumeric. For a `connector` this is the connector id. |
 | `spec` | map | REQUIRED. Identity sits above it and content inside it, so a block added later can never collide with a key that names the document. |
 
-**A kit carries no version of its own.** The reference it was pushed to is the
-release — `ghcr.io/acme/reviewer:1.4.0`, and the digest under it — so a `version`
-field would be a second answer to the same question, free to disagree with the tag
-it shipped under. Nothing in this document reads one: resolution, approval, and
-merging all key on the digest. See [§7](#7-distribution).
+**An artifact carries no version of its own.** The reference it was pushed to is
+the release — `ghcr.io/acme/reviewer:1.4.0`, and the digest under it — so a
+`version` field would be a second answer to the same question, free to disagree
+with the tag it shipped under. Nothing in this document reads one: resolution,
+approval, and merging all key on the digest. See [§7](#7-distribution).
 
 The same name pattern applies to every identifier in every document: connector
 ids, tool names, and mixin names.
 
-**One API group.** Every kit is `lns.run/v1`, and the three kinds are all of them
-— so one reader, and one grammar, covers everything a machine pulls or a developer
-writes.
+**One API group.** Every artifact is `lns.run/v1`, and the three kinds are all of
+them — so one reader, and one grammar, covers everything a machine pulls or a
+developer writes.
 
-[Chapter 3](#3-kits) specifies the three kinds.
+[Chapter 3](#3-artifact-kinds) specifies the three kinds.
 [Chapter 4](#4-shared-definitions) defines the two `spec` shapes they share.
 
 ---
 
-## 3. Kits
+## 3. Artifact kinds
 
-A **kit** is one published document of one kind. The three kinds are the three
-things a user assembles a run from, and the term names what they have in common:
-each is authored, published, versioned, and approved the same way
+An **artifact** is one published document of one kind. The three kinds are the
+three things a user assembles a run from, and the term names what they have in
+common: each is authored, published, versioned, and approved the same way
 ([§1.1](#11-one-distribution-mechanism)).
-
-> The name is provisional. It is the term Docker uses for the same idea, kept
-> here until we pick our own.
 
 | Kind | Whose document it is | How it enters a run |
 |---|---|---|
@@ -186,8 +183,8 @@ The middle column is the distinction to keep in view. A `sandbox` and a `mixin`
 travel **with the workload** — an author writes them, and a consumer approves what
 they say. A `connector` belongs to **the machine**: the user installs it, and no
 sandbox can name one ([§1.4](#14-credentials-and-what-a-connector-adds)). All
-three are kits because they are published and pinned alike, not because the same
-person writes them.
+three are artifacts because they are published and pinned alike, not because the
+same person writes them.
 
 ### 3.1 `kind: sandbox`
 
@@ -1250,8 +1247,8 @@ spec:
   Anything a `sandbox` or a `mixin` already declares stays in that document, where
   its author can see it.
 - **Local, and never published.** The one exception to
-  [§1.1](#11-one-distribution-mechanism): every other kit is an artifact addressed
-  by digest, and this one is a working file on disk.
+  [§1.1](#11-one-distribution-mechanism): every other artifact is addressed by
+  digest, and this one is a working file on disk.
 - **Last in the merge.** It is the developer's own, so it sits after every other
   source in [§3.3.2](#332-merge-rules) — including a `--mixin`. Nothing they pulled
   can overrule what they decided, and that includes what this file itself pulls: a
@@ -1271,7 +1268,7 @@ decision a developer can open, correct, and diff — and one they can **commit**
 a project's agreed destinations are reviewable in a pull request instead of
 rediscovered by each developer alone. A bespoke policy format would need its own
 parser, its own documentation, and its own answer to every question
-[§3](#3-kits) already answers.
+[§3](#3-artifact-kinds) already answers.
 
 It also stops the file being egress-only. If a decision ever needs to record
 something other than a destination, the blocks are already defined.
@@ -1289,7 +1286,7 @@ Its `name` is the file's own stem, because nobody is present to choose one.
 
 A connector grant does not live here. A connector is installed **per machine**
 ([§7.1](#71-connectors)), while consenting to use one is **per project** — and
-neither is something a mixin can say, because no kit names a connector
+neither is something a mixin can say, because no artifact names a connector
 ([§1.4](#14-credentials-and-what-a-connector-adds)).
 
 So it lives in the per-workload grant store the machine already keeps, keyed by
