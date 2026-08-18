@@ -387,6 +387,7 @@ pub fn on_the_wire(
             },
             key: c.key.clone(),
             source: c.source.clone(),
+            note: c.note.clone(),
             displaced: c
                 .displaced
                 .iter()
@@ -632,7 +633,7 @@ mod tests {
             r#"{"image":"x:1","mixins":["obs"]}"#,
             &[(
                 "obs",
-                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow"}]}}"#,
+                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow","description":"approved during a run"}]}}"#,
             )],
         );
         let refs: Vec<(&str, &str)> = documents
@@ -660,6 +661,15 @@ mod tests {
                 "§1.5 names every rule, mount, tool and credential, so a block that never reaches the wire is a line the disclosure cannot attribute; missing {expected:?} from {found:?}"
             );
         }
+        let noted = wire
+            .iter()
+            .find(|c| c.key == "allow api.some-provider.example")
+            .expect("the egress entry reaches the wire");
+        assert_eq!(
+            noted.note.as_deref(),
+            Some("approved during a run"),
+            "an entry that explains itself has to keep saying so across the wire, or the disclosure loses the explanation"
+        );
     }
 
     #[tokio::test]

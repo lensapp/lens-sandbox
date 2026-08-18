@@ -17,6 +17,7 @@ fn resolution(w: &mut BehaviourWorld, sources: &[&str], entries: &[(&str, &str)]
             block: lns_ipc::ContributionBlock::Egress,
             key: (*key).to_string(),
             source: (*source).to_string(),
+            note: None,
             displaced: Vec::new(),
         })
         .collect();
@@ -34,9 +35,31 @@ fn the_directory_allows_what_the_sandbox_denies(w: &mut BehaviourWorld, host: St
     );
 }
 
+#[given(regex = r#"^the sandbox denies "([^"]+)" and this directory allowed it during a run$"#)]
+fn the_directory_allowed_it_during_a_run(w: &mut BehaviourWorld, host: String) {
+    the_directory_allows_what_the_sandbox_denies(w, host.clone());
+    let approved = format!("allow {host}");
+    for entry in w
+        .decisions
+        .contributions
+        .iter_mut()
+        .filter(|c| c.key == approved)
+    {
+        entry.note = Some("approved during a run".to_string());
+    }
+}
+
 #[given(regex = r#"^the sandbox denies "([^"]+)" and this directory decided nothing$"#)]
 fn the_directory_decided_nothing(w: &mut BehaviourWorld, host: String) {
     resolution(w, &[], &[(&format!("deny {host}"), "the sandbox")]);
+}
+
+#[given(regex = r#"^the sandbox denies "([^"]+)" with a note and this directory decided nothing$"#)]
+fn the_sandbox_explains_what_it_denies(w: &mut BehaviourWorld, host: String) {
+    the_directory_decided_nothing(w, host);
+    for entry in w.decisions.contributions.iter_mut() {
+        entry.note = Some("the vendor mirrors the API here".to_string());
+    }
 }
 
 #[when("the run summary is composed before boot")]

@@ -347,6 +347,8 @@ pub struct SourceContribution {
     pub block: ContributionBlock,
     pub key: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub displaced: Vec<DisplacedEntry>,
 }

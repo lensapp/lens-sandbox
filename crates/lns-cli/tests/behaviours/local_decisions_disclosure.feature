@@ -21,3 +21,14 @@ Feature: the disclosure names what this directory decided
     When the run summary is composed before boot
     Then the run summary lists "Rules:     deny docs.some-vendor.example"
     And the run summary does not contain "[from"
+
+  Scenario: a rule that says why it is in the file says so before boot too
+    Given the sandbox denies "docs.some-vendor.example" and this directory allowed it during a run
+    When the run summary is composed before boot
+    Then the run summary lists "allow docs.some-vendor.example  [from lns-local-mixin.yaml]  approved during a run"
+
+  Scenario: a rule the sandbox explains says so even where there is no source to name
+    Given the sandbox denies "docs.some-vendor.example" with a note and this directory decided nothing
+    When the run summary is composed before boot
+    Then the run summary lists "deny docs.some-vendor.example  the vendor mirrors the API here"
+    And the run summary does not contain "[from"
