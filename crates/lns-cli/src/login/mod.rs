@@ -175,7 +175,7 @@ async fn login(
     store
         .save(&file)
         .with_context(|| format!("writing {}", auth_path.display()))?;
-    writeln!(out, "Logged in to {registry} as {username}.")?;
+    writeln!(out, "You are now logged in to {registry} as {username}.")?;
     Ok(0)
 }
 
@@ -245,11 +245,11 @@ async fn web_credentials(
     let outcome = web
         .login(registry, out)
         .await
-        .with_context(|| format!("starting web-based login to {registry}; {FLAG_FALLBACK}"))?;
+        .with_context(|| format!("starting browser login to {registry}; {FLAG_FALLBACK}"))?;
     match outcome {
         WebLoginOutcome::Completed { username, secret } => Ok((username, secret)),
         WebLoginOutcome::Unsupported => {
-            bail!("{registry} does not offer web-based login; {FLAG_FALLBACK}")
+            bail!("{registry} does not support browser login; {FLAG_FALLBACK}")
         }
         WebLoginOutcome::Denied => bail!("login to {registry} was denied in the browser"),
         WebLoginOutcome::Expired => {
@@ -257,7 +257,7 @@ async fn web_credentials(
                 "the confirmation code expired before the login was approved; run `lns login` again"
             )
         }
-        WebLoginOutcome::Failed(reason) => bail!("web-based login to {registry} failed: {reason}"),
+        WebLoginOutcome::Failed(reason) => bail!("browser login to {registry} failed: {reason}"),
     }
 }
 
@@ -402,7 +402,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("Logged in to ghcr.io as octocat"),
+                .contains("You are now logged in to ghcr.io as octocat"),
         );
     }
 
@@ -807,7 +807,7 @@ mod tests {
         let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
         let err = format!("{:#}", result.unwrap_err());
         assert!(
-            err.contains("web-based login to hub.lns.run failed: registry answered 500"),
+            err.contains("browser login to hub.lns.run failed: registry answered 500"),
             "got: {err}"
         );
     }
@@ -822,7 +822,7 @@ mod tests {
         let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
         let err = format!("{:#}", result.unwrap_err());
         assert!(
-            err.contains("starting web-based login to hub.lns.run")
+            err.contains("starting browser login to hub.lns.run")
                 && err.contains("--password-stdin")
                 && err.contains("connection refused"),
             "got: {err}"
