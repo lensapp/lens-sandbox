@@ -2834,7 +2834,8 @@ mod tests {
             .expect("/tmp is mounted as tmpfs so a restart finds it empty");
         assert_eq!(flags, MountFlags::none().nosuid().nodev());
         assert!(
-            data.expect("/tmp tmpfs carries options").contains("mode=1777"),
+            data.expect("/tmp tmpfs carries options")
+                .contains("mode=1777"),
             "/tmp must stay world-writable with the sticky bit"
         );
     }
