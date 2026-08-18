@@ -1,4 +1,5 @@
 mod real;
+pub(crate) use real::RealFs;
 mod traits;
 
 pub use traits::{Caches, Fs, RuntimeCacheEntryKind, RuntimeCacheFs, RuntimeCacheMetadata};

@@ -6,7 +6,7 @@ use super::traits::{Caches, Fs, RuntimeCacheEntryKind, RuntimeCacheFs, RuntimeCa
 use crate::image::manifest_cache::ManifestCache;
 use crate::oci_layer_cache::LayerCache;
 
-pub(super) struct RealFs;
+pub(crate) struct RealFs;
 
 pub(super) fn runtime_cache_kind(
     is_dir: bool,
