@@ -97,23 +97,18 @@ pub async fn handle(
     let code = emit_completion(&frame_tx, result).await;
     match crate::cache::root() {
         Ok(cache_dir) => {
-            if let Err(e) = crate::run_record::mark_exited_with(
+            super::conclude_run(
                 &crate::image_store::RealFs,
+                &super::RealRemoveDir,
                 &cache_dir,
                 &finished_run_id,
                 code,
+                auto_remove,
                 crate::time_fmt::rfc3339_now(),
             )
-            .await
-            {
-                log::warn!("run record not updated at exit: {e:#}");
-            }
+            .await;
         }
         Err(e) => log::warn!("run record not updated at exit: {e:#}"),
-    }
-    if auto_remove {
-        crate::run_registry::set_exit_code(&finished_run_id, code);
-        let _ = crate::run_registry::remove_if_exited(&finished_run_id);
     }
 }
 

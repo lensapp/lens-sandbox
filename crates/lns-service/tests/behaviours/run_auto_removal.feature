@@ -1,4 +1,3 @@
-@todo
 Feature: lns run --rm — auto-remove on exit
   --rm opts a run out of persistence: its state is removed when it ends.
   Nothing defaults to it — without --rm every run persists as a stopped
