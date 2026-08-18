@@ -327,6 +327,13 @@ mod tests {
         }
     }
 
+    #[test]
+    #[should_panic(expected = "must never consult the web flow")]
+    fn the_no_web_login_guard_panics_when_consulted() {
+        let mut out = Vec::new();
+        drop(NoWebLogin.login("hub.lns.run", &mut out));
+    }
+
     struct FakeWebLogin {
         outcome: Result<WebLoginOutcome, String>,
     }
