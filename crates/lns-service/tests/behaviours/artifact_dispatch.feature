@@ -22,7 +22,7 @@ Feature: run dispatches on the pulled artifact type
     Then the run is refused because the artifact type is unsupported
     And the refusal names the unsupported type "application/vnd.unknown.thing"
 
-  Scenario: A mixin is a kit a sandbox references, never one a run launches
+  Scenario: A mixin is an artifact a sandbox references, never one a run launches
     Given a pulled reference whose manifest is a mixin artifact
     When the run resolves the reference for launch
     Then the run is refused because the artifact is not directly runnable

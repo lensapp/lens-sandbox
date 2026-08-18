@@ -262,7 +262,7 @@ mod tests {
             assert_eq!(
                 Kind::from_kind_str(retired),
                 None,
-                "docs/sandbox-spec.md §7: nothing but a kit is addressable on its own"
+                "docs/sandbox-spec.md §7: nothing but an artifact is addressable on its own"
             );
             assert_eq!(
                 Kind::from_artifact_type(&format!("application/vnd.lens.{retired}.v1+json")),

@@ -60,13 +60,13 @@ fn pinned_reference(reference: &str, digest: &str) -> Result<String> {
 }
 
 pub fn artifact_record_for(
-    artifact: &crate::image::PulledArtifact,
+    sandbox: &crate::image::PulledSandbox,
     base_image: &PulledImage,
     pulled_unix_secs: u64,
 ) -> ImageRecord {
     ImageRecord {
-        reference: artifact.reference.whole(),
-        digest: artifact.digest.clone(),
+        reference: sandbox.reference.whole(),
+        digest: sandbox.digest.clone(),
         dependencies: vec![base_image.reference.whole()],
         layers: Vec::new(),
         pulled_unix_secs,
@@ -552,19 +552,19 @@ async fn finish_pull_with<F: Fs>(
 
 pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
     let layer_cache = crate::oci_layer_cache::LayerCache::new(crate::cache::root()?.join("layers"));
-    let artifact = match crate::image::pull_kit(image).await? {
-        crate::image::PulledKit::Sandbox(artifact) => artifact,
-        crate::image::PulledKit::Mixin(mixin) => {
+    let sandbox = match crate::image::pull_artifact(image).await? {
+        crate::image::PulledArtifact::Sandbox(sandbox) => sandbox,
+        crate::image::PulledArtifact::Mixin(mixin) => {
             verify_consented_digest(image, expected_digest, &mixin.digest)?;
             return pull_mixin_graph(image, mixin).await;
         }
     };
-    verify_consented_digest(image, expected_digest, &artifact.digest)?;
+    verify_consented_digest(image, expected_digest, &sandbox.digest)?;
     let shared = lock_shared().await;
-    let base_image = crate::image::pull_dependency(&artifact.base_image, &layer_cache)
+    let base_image = crate::image::pull_dependency(&sandbox.base_image, &layer_cache)
         .await
-        .with_context(|| format!("fetching the sandbox's base image {}", artifact.base_image))?;
-    let record = artifact_record_for(&artifact, &base_image, now_unix_secs());
+        .with_context(|| format!("fetching the sandbox's base image {}", sandbox.base_image))?;
+    let record = artifact_record_for(&sandbox, &base_image, now_unix_secs());
     let (image_info, warnings) = finish_pull_with(
         &real::RealFs,
         &images_root()?,
@@ -572,7 +572,7 @@ pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
         &crate::run_registry::snapshot(),
         image,
         shared,
-        crate::tools::real::pre_provision_for_pull(&artifact, &base_image),
+        crate::tools::real::pre_provision_for_pull(&sandbox, &base_image),
     )
     .await?;
     Ok(PullOutcome::Sandbox {
@@ -1171,7 +1171,7 @@ mod tests {
     #[test]
     fn artifact_record_for_normalizes_the_reference_and_links_its_base_image() {
         let base_reference = format!("registry.example.test/base@sha256:{}", "a".repeat(64));
-        let artifact = crate::image::PulledArtifact {
+        let sandbox = crate::image::PulledSandbox {
             reference: "some-sandbox:1.0".parse().unwrap(),
             digest: "sha256:manifest".into(),
             base_image: base_reference.clone(),
@@ -1190,7 +1190,7 @@ mod tests {
             artifact_type: None,
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
-        let record = artifact_record_for(&artifact, &base_image, 42);
+        let record = artifact_record_for(&sandbox, &base_image, 42);
         assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
         assert_eq!(record.digest, "sha256:manifest");
         assert_eq!(record.pulled_unix_secs, 42);

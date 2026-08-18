@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn a_mixin_publishes_under_its_own_artifact_type() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"tools":["node@22"]}}"#;
-        let built = build(doc).expect("a mixin is a kit, published like any other");
+        let built = build(doc).expect("a mixin is an artifact, published like any other");
         assert_eq!(built.artifact_type, "application/vnd.lens.mixin.v1+json");
         let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
         assert_eq!(

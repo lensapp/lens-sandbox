@@ -91,14 +91,14 @@ pub async fn ensure_for_run(
 
 /// A pulled sandbox keeps the documented offline-start promise only if its (push-pinned) tools are provisioned while we're online; no run exists yet, so like the image fetch itself this is disclosed in the pull output rather than a run chain.
 pub async fn pre_provision_for_pull(
-    artifact: &crate::image::PulledArtifact,
+    sandbox: &crate::image::PulledSandbox,
     base_image: &crate::image::PulledImage,
 ) -> Result<(), ProvisionError> {
-    if artifact.tools.is_empty() {
+    if sandbox.tools.is_empty() {
         return Ok(());
     }
     let _runtime_cache = crate::image_store::lock_runtime_cache_shared().await;
-    let requests = lns_artifact::tools::parse_all(&artifact.tools)
+    let requests = lns_artifact::tools::parse_all(&sandbox.tools)
         .map_err(|e| ProvisionError::Engine(format!("{e:#}")))?;
     super::registry::refuse_unknown_tools(&requests)?;
     let layers: Vec<&[u8]> = base_image
@@ -111,11 +111,11 @@ pub async fn pre_provision_for_pull(
         libc: super::libc::detect_libc_off_runtime(&base_image.layer_digests, &layers)
             .map_err(|e| ProvisionError::Engine(format!("reading the base image: {e:#}")))?,
     };
-    super::registry::refuse_libc_unsupported(&requests, &target, &artifact.base_image)?;
+    super::registry::refuse_libc_unsupported(&requests, &target, &sandbox.base_image)?;
     let content_store = crate::content_store::ContentStore::new(cache_dir()?.join("content"));
     let scratch_id = format!(
         "pull-{}",
-        artifact
+        sandbox
             .digest
             .trim_start_matches("sha256:")
             .get(..12)

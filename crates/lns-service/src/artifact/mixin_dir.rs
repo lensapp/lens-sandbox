@@ -7,7 +7,7 @@ use crate::artifact::mixin::FetchedMixin;
 /// The document a directory means, the same one `lns run ./dir` reads.
 const DOCUMENT: &str = "lns.yaml";
 
-/// Reads a mixin document off this machine, so the walk can merge a local kit without owning any filesystem access itself.
+/// Reads a mixin document off this machine, so the walk can merge a local artifact without owning any filesystem access itself.
 pub trait MixinDir: Send + Sync {
     fn read(&self, path: &Path) -> std::io::Result<String>;
     fn is_dir(&self, path: &Path) -> bool;
