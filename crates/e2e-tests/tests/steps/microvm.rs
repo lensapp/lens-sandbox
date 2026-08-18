@@ -1461,6 +1461,17 @@ fn logs_top_level(world: &mut E2eWorld, needle: String) -> Result<(), String> {
     logs_until(world, &["logs"], &needle)
 }
 
+#[when("the user prints that run's logs")]
+fn logs_top_level_once(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    world.result = Some(run_cli_with_timeout(
+        vec!["logs".to_string(), id],
+        socket_env(world),
+        STREAM_VERB_TIMEOUT,
+    ));
+    Ok(())
+}
+
 #[when(
     regex = r#"^the user prints that run's logs via the sandbox namespace until they contain "([^"]+)"$"#
 )]
