@@ -11,8 +11,13 @@ use crate::command::{CommandSpec, subcommand};
 use crate::connector::LocalBoxFuture;
 
 mod real;
+mod web;
 
 pub use real::RealRegistryVerifier;
+pub use web::{
+    BrowserOpener, DeviceAuthClient, DeviceAuthorization, DeviceStart, RealDeviceAuthClient,
+    TokenPoll, WebLogin,
+};
 
 #[derive(clap::Args)]
 pub struct LoginArgs {
@@ -68,6 +73,25 @@ pub trait RegistryVerifier {
     ) -> LocalBoxFuture<'a, Result<LoginOutcome>>;
 }
 
+/// The terminal result of driving a browser-based device login against a registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebLoginOutcome {
+    Completed { username: String, secret: String },
+    Unsupported,
+    Denied,
+    Expired,
+    Failed(String),
+}
+
+/// Runs a browser-based device login against a registry, rendering progress to `out`.
+pub trait WebLoginFlow {
+    fn login<'a>(
+        &'a self,
+        registry: &'a str,
+        out: &'a mut dyn Write,
+    ) -> LocalBoxFuture<'a, Result<WebLoginOutcome>>;
+}
+
 pub fn augment_login(app: clap::Command) -> clap::Command {
     app.subcommand(subcommand::<LoginArgs>("login").about(
         "Log in to an OCI registry so `lns run` and `lns pull` can fetch its private images.",
@@ -101,13 +125,14 @@ pub async fn run(
     default_registry: &str,
     auth_path: &Path,
     verifier: &dyn RegistryVerifier,
+    web: &dyn WebLoginFlow,
     input: &mut dyn std::io::BufRead,
     out: &mut impl Write,
 ) -> Result<i32> {
     if args.list {
         return list(auth_path, out);
     }
-    login(args, default_registry, auth_path, verifier, input, out).await
+    login(args, default_registry, auth_path, verifier, web, input, out).await
 }
 
 fn target_registry(positional: Option<&str>, default_registry: &str) -> Result<String> {
@@ -121,15 +146,12 @@ async fn login(
     default_registry: &str,
     auth_path: &Path,
     verifier: &dyn RegistryVerifier,
+    web: &dyn WebLoginFlow,
     input: &mut dyn std::io::BufRead,
     out: &mut impl Write,
 ) -> Result<i32> {
     let registry = target_registry(args.registry.as_deref(), default_registry)?;
-    let username = args
-        .username
-        .clone()
-        .ok_or_else(|| anyhow!("a username is required; pass --username/-u"))?;
-    let secret = resolve_secret(args, input)?;
+    let (username, secret) = resolve_credentials(args, &registry, web, input, out).await?;
 
     match verifier.verify(&registry, &username, &secret).await? {
         LoginOutcome::ServiceUnavailable => bail!(
@@ -195,6 +217,50 @@ fn list(auth_path: &Path, out: &mut impl Write) -> Result<i32> {
     Ok(0)
 }
 
+async fn resolve_credentials(
+    args: &LoginArgs,
+    registry: &str,
+    web: &dyn WebLoginFlow,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<(String, String)> {
+    if args.username.is_none() && args.password.is_none() && !args.password_stdin {
+        return web_credentials(registry, web, out).await;
+    }
+    let username = args
+        .username
+        .clone()
+        .ok_or_else(|| anyhow!("a username is required; pass --username/-u"))?;
+    let secret = resolve_secret(args, input)?;
+    Ok((username, secret))
+}
+
+const FLAG_FALLBACK: &str = "pass --username/-u and --password-stdin (recommended) or --password";
+
+async fn web_credentials(
+    registry: &str,
+    web: &dyn WebLoginFlow,
+    out: &mut dyn Write,
+) -> Result<(String, String)> {
+    let outcome = web
+        .login(registry, out)
+        .await
+        .with_context(|| format!("starting web-based login to {registry}; {FLAG_FALLBACK}"))?;
+    match outcome {
+        WebLoginOutcome::Completed { username, secret } => Ok((username, secret)),
+        WebLoginOutcome::Unsupported => {
+            bail!("{registry} does not offer web-based login; {FLAG_FALLBACK}")
+        }
+        WebLoginOutcome::Denied => bail!("login to {registry} was denied in the browser"),
+        WebLoginOutcome::Expired => {
+            bail!(
+                "the confirmation code expired before the login was approved; run `lns login` again"
+            )
+        }
+        WebLoginOutcome::Failed(reason) => bail!("web-based login to {registry} failed: {reason}"),
+    }
+}
+
 fn resolve_secret(args: &LoginArgs, input: &mut dyn std::io::BufRead) -> Result<String> {
     if args.password_stdin {
         let mut buf = String::new();
@@ -250,6 +316,35 @@ mod tests {
         }
     }
 
+    struct NoWebLogin;
+    impl WebLoginFlow for NoWebLogin {
+        fn login<'a>(
+            &'a self,
+            _registry: &'a str,
+            _out: &'a mut dyn Write,
+        ) -> LocalBoxFuture<'a, Result<WebLoginOutcome>> {
+            panic!("a flag-driven login must never consult the web flow");
+        }
+    }
+
+    struct FakeWebLogin {
+        outcome: Result<WebLoginOutcome, String>,
+    }
+    impl WebLoginFlow for FakeWebLogin {
+        fn login<'a>(
+            &'a self,
+            _registry: &'a str,
+            _out: &'a mut dyn Write,
+        ) -> LocalBoxFuture<'a, Result<WebLoginOutcome>> {
+            let outcome = self.outcome.clone();
+            Box::pin(async move { outcome.map_err(|e| anyhow!(e)) })
+        }
+    }
+
+    fn flagless_args(registry: Option<&str>) -> LoginArgs {
+        login_args(registry, None, None)
+    }
+
     fn login_args(
         registry: Option<&str>,
         username: Option<&str>,
@@ -286,6 +381,7 @@ mod tests {
             "docker.io",
             &path,
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -315,6 +411,7 @@ mod tests {
             "docker.io",
             &path,
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -337,6 +434,7 @@ mod tests {
             "ghcr.io",
             &path,
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -354,9 +452,17 @@ mod tests {
         args.password_stdin = true;
         let mut input: &[u8] = b"piped-secret\n";
         let mut out = Vec::new();
-        login(&args, "docker.io", &path, &verifier, &mut input, &mut out)
-            .await
-            .unwrap();
+        login(
+            &args,
+            "registry.example.test",
+            &path,
+            &verifier,
+            &NoWebLogin,
+            &mut input,
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert_eq!(loaded(&path).get("ghcr.io").unwrap().secret, "piped-secret");
     }
 
@@ -371,6 +477,7 @@ mod tests {
             "docker.io",
             &store_at(&dir),
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -390,6 +497,7 @@ mod tests {
             "docker.io",
             &store_at(&dir),
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -414,6 +522,7 @@ mod tests {
             "docker.io",
             &path,
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -437,6 +546,7 @@ mod tests {
             "docker.io",
             &store_at(&dir),
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -461,6 +571,7 @@ mod tests {
                 "docker.io",
                 &path,
                 &verifier,
+                &NoWebLogin,
                 &mut input,
                 &mut sink,
             )
@@ -471,9 +582,17 @@ mod tests {
         args.list = true;
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
-        let code = run(&args, "docker.io", &path, &verifier, &mut input, &mut out)
-            .await
-            .unwrap();
+        let code = run(
+            &args,
+            "registry.example.test",
+            &path,
+            &verifier,
+            &NoWebLogin,
+            &mut input,
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(
@@ -498,6 +617,7 @@ mod tests {
             "docker.io",
             &path,
             &verifier,
+            &NoWebLogin,
             &mut input,
             &mut out,
         )
@@ -604,6 +724,105 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("must not be empty")
+        );
+    }
+
+    async fn flagless_login(
+        web: &dyn WebLoginFlow,
+        verifier: &FakeVerifier,
+        path: &Path,
+    ) -> (Result<i32>, String) {
+        let mut input: &[u8] = b"";
+        let mut out = Vec::new();
+        let result = login(
+            &flagless_args(Some("hub.lns.run")),
+            "hub.lns.run",
+            path,
+            verifier,
+            web,
+            &mut input,
+            &mut out,
+        )
+        .await;
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    #[tokio::test]
+    async fn web_issued_credential_still_goes_through_the_verifier_and_a_rejection_is_not_stored() {
+        let dir = TempDir::new().unwrap();
+        let path = store_at(&dir);
+        let verifier = FakeVerifier::returning(LoginOutcome::Rejected("401 unauthorized".into()));
+        let web = FakeWebLogin {
+            outcome: Ok(WebLoginOutcome::Completed {
+                username: "webuser".into(),
+                secret: "some-web-token".into(),
+            }),
+        };
+        let (result, _) = flagless_login(&web, &verifier, &path).await;
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("401 unauthorized"));
+        assert_eq!(
+            verifier.calls.lock().unwrap()[0],
+            (
+                "hub.lns.run".into(),
+                "webuser".into(),
+                "some-web-token".into()
+            )
+        );
+        assert!(
+            loaded(&path).is_empty(),
+            "a rejected web credential must not be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_login_reports_when_the_service_is_unavailable_after_completion() {
+        let dir = TempDir::new().unwrap();
+        let verifier = FakeVerifier::returning(LoginOutcome::ServiceUnavailable);
+        let web = FakeWebLogin {
+            outcome: Ok(WebLoginOutcome::Completed {
+                username: "webuser".into(),
+                secret: "some-web-token".into(),
+            }),
+        };
+        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("service must be running"));
+    }
+
+    #[tokio::test]
+    async fn web_login_failure_reason_is_surfaced() {
+        let dir = TempDir::new().unwrap();
+        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let web = FakeWebLogin {
+            outcome: Ok(WebLoginOutcome::Failed("registry answered 500".into())),
+        };
+        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("web-based login to hub.lns.run failed: registry answered 500"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_login_transport_error_points_at_the_flag_fallback() {
+        let dir = TempDir::new().unwrap();
+        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let web = FakeWebLogin {
+            outcome: Err("connection refused".into()),
+        };
+        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("starting web-based login to hub.lns.run")
+                && err.contains("--password-stdin")
+                && err.contains("connection refused"),
+            "got: {err}"
+        );
+        assert!(
+            verifier.calls.lock().unwrap().is_empty(),
+            "nothing to verify when the flow never started"
         );
     }
 

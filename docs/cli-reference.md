@@ -213,14 +213,22 @@ its images. Credentials are verified against the registry before they are saved
 at once.
 
 ```bash
+lns login
 echo "$TOKEN" | lns login -u <USERNAME> --password-stdin <REGISTRY>
 lns login --list
 lns logout <REGISTRY>
 ```
 
+A plain `lns login` — no credential flags — uses web-based login on registries
+that offer it (the Lens hub does): it prints a one-time confirmation code, opens
+your browser to the registry's authorize page, and waits for you to approve the
+login there; the registry then issues a fresh token for your account, which is
+verified and stored like any other credential. Registries without web-based
+login (such as `ghcr.io`) still take the flag-driven forms below.
+
 | Form                                  | Meaning                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
-| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `hub.lns.run`). Pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `-p`/`--password`. |
+| `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `hub.lns.run`). With no credential flags, runs the web-based login; pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `-p`/`--password` to log in with an existing token. |
 | `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
 | `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
 
