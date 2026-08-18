@@ -159,6 +159,7 @@ async fn run_provisioner(
                         layers: &layers,
                         runtime_layer: runtime_layer.as_ref(),
                     },
+                    &|_, _| {},
                 )
             })
             .await
