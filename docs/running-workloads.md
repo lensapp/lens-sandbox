@@ -944,7 +944,7 @@ resolve; it notes when declared tools mean the published digest may differ from
 the preview.
 
 Pushing needs a stored login with **push access** for the registry — sign in once
-with `lns login`; on registries that offer web-based login (the Lens hub does), a
+with `lns login`; on registries that offer browser login (the Lens hub does), a
 plain `lns login` opens your browser and issues the token for you. For `ghcr.io`
 that's a GitHub token with the `write:packages`
 scope, pushed to a repository path you own; the GitHub CLI mints one directly:

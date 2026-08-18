@@ -43,7 +43,7 @@ impl RegistryVerifier for RecordingVerifier {
     }
 }
 
-/// Stands in for the browser device flow: renders the banner a real flow would and returns the scripted outcome; panics if a flag-driven path consults it.
+/// Stands in for the browser device flow: renders the code prompt a real flow would and returns the scripted outcome; panics if a flag-driven path consults it.
 struct FakeWebLoginFlow {
     outcome: Option<WebLoginOutcome>,
 }
@@ -59,9 +59,8 @@ impl WebLoginFlow for FakeWebLoginFlow {
             .expect("the web flow must not be consulted on a flag-driven path");
         Box::pin(async move {
             if !matches!(outcome, WebLoginOutcome::Unsupported) {
-                writeln!(out, "USING WEB-BASED LOGIN")?;
                 writeln!(out, "Your one-time confirmation code is: SOME-CODE")?;
-                writeln!(out, "Waiting for authentication in the browser…")?;
+                writeln!(out, "Waiting for you to approve the login in the browser…")?;
             }
             Ok(outcome)
         })

@@ -58,8 +58,6 @@ impl<C: DeviceAuthClient, B: BrowserOpener> WebLogin<C, B> {
     }
 
     fn present(&self, auth: &DeviceAuthorization, out: &mut dyn Write) -> Result<()> {
-        writeln!(out, "USING WEB-BASED LOGIN")?;
-        writeln!(out, "To log in with a token instead, {FLAG_FALLBACK}.")?;
         writeln!(
             out,
             "Your one-time confirmation code is: {}",
@@ -68,17 +66,18 @@ impl<C: DeviceAuthClient, B: BrowserOpener> WebLogin<C, B> {
         if self.browser.open(&auth.verification_uri_complete) {
             writeln!(
                 out,
-                "Opening your browser to {} — enter the code there if it didn't open.",
+                "Opening {} in your browser. Enter the code there.",
                 auth.verification_uri
             )?;
         } else {
             writeln!(
                 out,
-                "Could not open a browser; visit {} and enter the code.",
+                "Could not open a browser. Go to {} and enter the code.",
                 auth.verification_uri
             )?;
         }
-        writeln!(out, "Waiting for authentication in the browser…")?;
+        writeln!(out, "Waiting for you to approve the login in the browser…")?;
+        writeln!(out, "To log in with a token instead, {FLAG_FALLBACK}.")?;
         Ok(())
     }
 
@@ -199,7 +198,7 @@ impl DeviceAuthClient for RealDeviceAuthClient {
                     let body: ErrorBody = parse(&bytes, &url)?;
                     let detail = body.error_description.unwrap_or(body.error);
                     bail!(
-                        "web-based login is not available right now: {detail}; retry shortly, or {FLAG_FALLBACK}"
+                        "browser login is not available right now: {detail}; retry shortly, or {FLAG_FALLBACK}"
                     )
                 }
                 200 => Ok(DeviceStart::Started(parse(&bytes, &url)?)),
@@ -340,20 +339,24 @@ mod tests {
                 secret: "some-web-token".into()
             }
         );
-        assert!(out.contains("USING WEB-BASED LOGIN"), "got: {out}");
-        assert!(out.contains("--password-stdin"), "fallback hint: {out}");
+        assert!(
+            out.ends_with(
+                "To log in with a token instead, pass --username/-u and --password-stdin (recommended) or --password.\n"
+            ),
+            "the token fallback hint is offered last: {out}"
+        );
         assert!(
             out.contains("Your one-time confirmation code is: WXYZ-1234"),
             "got: {out}"
         );
         assert!(
             out.contains(
-                "Opening your browser to https://registry.example.test/cli/authorize — enter the code there if it didn't open."
+                "Opening https://registry.example.test/cli/authorize in your browser. Enter the code there."
             ),
             "got: {out}"
         );
         assert!(
-            out.contains("Waiting for authentication in the browser…"),
+            out.contains("Waiting for you to approve the login in the browser…"),
             "got: {out}"
         );
         assert_eq!(
@@ -455,7 +458,7 @@ mod tests {
         result.unwrap();
         assert!(
             out.contains(
-                "Could not open a browser; visit https://registry.example.test/cli/authorize and enter the code."
+                "Could not open a browser. Go to https://registry.example.test/cli/authorize and enter the code."
             ),
             "got: {out}"
         );
