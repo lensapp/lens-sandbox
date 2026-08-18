@@ -330,8 +330,8 @@ async fn orchestrate(
     let descriptor = match cached_descriptor {
         Some(hit) => hit,
         None => {
-            log::progress("Assembling", "rootfs", 0, 0);
             let descriptor_cs = content_store.clone();
+            let run_span = tracing::Span::current();
             tokio::task::spawn_blocking(move || {
                 descriptor_builder.build(
                     &descriptor_cs,
@@ -340,7 +340,7 @@ async fn orchestrate(
                         layers: &layers,
                         runtime_layer: runtime_layer.as_ref(),
                     },
-                    &|_, _| {},
+                    &super::assembling_progress(run_span),
                 )
             })
             .await

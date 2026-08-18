@@ -8,6 +8,13 @@ mod scratch;
 mod shutdown;
 pub use orchestrator::handle;
 
+/// The rootfs-assembly progress sink: `span` is the run span captured before `spawn_blocking`, since the blocking thread has no ambient span for the frame forwarder to find the run's channel through.
+fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
+    move |current, total| {
+        span.in_scope(|| crate::log::progress("Assembling", "rootfs", current, total));
+    }
+}
+
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
         Ok(code) => {
@@ -202,6 +209,54 @@ pub(super) fn workload_identity(
         anyhow::bail!(
             "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference, and if `lns` was upgraded while this service kept running, restart it (`lns service stop` then `lns service start`) so the two match"
         )
+    }
+}
+
+#[cfg(test)]
+mod assembling_progress_tests {
+    use super::*;
+    use lns_ipc::{Response, WireFrame};
+
+    fn run_progress_frames(frames: Vec<WireFrame>) -> Vec<(String, String, u64, u64)> {
+        frames
+            .into_iter()
+            .filter_map(|f| match f {
+                WireFrame::Json(Response::RunProgress {
+                    verb,
+                    message,
+                    current,
+                    total,
+                }) => Some((verb, message, current, total)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_sink_forwards_an_assembling_run_progress_frame() {
+        let frames = crate::log::testing::capture_run_frames(|| {
+            let sink = assembling_progress(tracing::Span::current());
+            sink(3072, 8192);
+        });
+        assert_eq!(
+            run_progress_frames(frames),
+            vec![("Assembling".to_string(), "rootfs".to_string(), 3072, 8192)]
+        );
+    }
+
+    #[test]
+    fn the_sink_forwards_from_a_blocking_thread_outside_the_run_task() {
+        let frames = crate::log::testing::capture_run_frames(|| {
+            let sink = assembling_progress(tracing::Span::current());
+            let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+            std::thread::scope(|s| {
+                s.spawn(move || tracing::dispatcher::with_default(&dispatch, || sink(0, 8192)));
+            });
+        });
+        assert_eq!(
+            run_progress_frames(frames),
+            vec![("Assembling".to_string(), "rootfs".to_string(), 0, 8192)]
+        );
     }
 }
 
