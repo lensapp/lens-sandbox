@@ -93,6 +93,7 @@ async fn drive_remove(w: &mut BehaviourWorld, handle: &str, force: bool) {
                 run_registry::set_exit_code(&id, 137);
                 Response::Acknowledged
             },
+            |_, _| {},
         )
         .await,
     );
@@ -287,9 +288,12 @@ async fn a_run_whose_workload_exits(w: &mut BehaviourWorld, rm_flag: String) {
         &fake,
         Path::new(CACHE_ROOT),
         &id,
-        0,
-        auto_remove,
-        "2026-08-18T00:03:00Z".into(),
+        lns_service::run::RunEnd {
+            code: 0,
+            auto_remove,
+            finished_at: "2026-08-18T00:03:00Z".into(),
+        },
+        |_| {},
     )
     .await;
     w.startrun_status_after = run_registry::status(&id);
@@ -361,7 +365,8 @@ async fn i_run_prune(w: &mut BehaviourWorld) {
         fs.run_dirs = vec![Path::new(CACHE_ROOT).join("runs").join(orphan)];
     }
     let fake = remover(w);
-    w.response = Some(lns_service::ipc::prune_runs_with(&fs, &fake, Path::new(CACHE_ROOT)).await);
+    w.response =
+        Some(lns_service::ipc::prune_runs_with(&fs, &fake, Path::new(CACHE_ROOT), |_| {}).await);
     w.startrun_status_after = w
         .startrun_target
         .as_ref()

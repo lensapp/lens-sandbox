@@ -250,6 +250,87 @@ pub fn record_run_launched(
     )
 }
 
+pub fn record_run_exited_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    exit_code: i32,
+    killed: bool,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
+    )
+}
+
+pub fn record_run_exited(
+    run_id: &str,
+    microvm: &str,
+    exit_code: i32,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_run_exited_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        exit_code,
+        exit_code == 137,
+    )
+}
+
+pub fn record_run_restarted_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    image: &str,
+) -> Result<()> {
+    append_ocsf_at(path, crate::ocsf_audit::workload_restart_event(cx, image))
+}
+
+pub fn record_run_restarted(
+    run_id: &str,
+    microvm: &str,
+    image: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_run_restarted_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        image,
+    )
+}
+
+pub fn record_run_removed_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    forced: bool,
+    auto: bool,
+) -> Result<()> {
+    append_ocsf_at(path, crate::ocsf_audit::run_removed_event(cx, forced, auto))
+}
+
+pub fn record_run_removed(run_id: &str, forced: bool, auto: bool, clock: &dyn Clock) -> Result<()> {
+    record_run_removed_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, run_id, clock),
+        forced,
+        auto,
+    )
+}
+
+pub fn record_runs_pruned_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    removed: &[String],
+) -> Result<()> {
+    append_ocsf_at(path, crate::ocsf_audit::runs_pruned_event(cx, removed))
+}
+
+pub fn record_runs_pruned(run_id: &str, removed: &[String], clock: &dyn Clock) -> Result<()> {
+    record_runs_pruned_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, run_id, clock),
+        removed,
+    )
+}
+
 pub fn record_sandbox_run_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
@@ -736,6 +817,30 @@ mod tests {
             .rfind(|l| !l.is_empty())
             .unwrap();
         assert_eq!(anchor.head_hash, lns_ipc::line_hash(last));
+    }
+
+    #[test]
+    fn a_runs_lifecycle_events_extend_one_verifiable_chain_across_a_restart() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_run_launched_at(&path, &cx(), "alpine:latest").unwrap();
+        record_run_exited_at(&path, &cx(), 0, false).unwrap();
+        record_run_restarted_at(&path, &cx(), "alpine:latest").unwrap();
+        record_run_removed_at(&path, &cx(), false, false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 4, "launch, exit, restart, removal");
+        for pair in lines.windows(2) {
+            let next: serde_json::Value = serde_json::from_str(pair[1]).unwrap();
+            assert_eq!(
+                next["prev_hash"],
+                serde_json::Value::String(lns_ipc::line_hash(pair[0].as_bytes())),
+                "the restart continues the chain the stop left"
+            );
+        }
+        let anchor = read_anchor(&anchor_path_for(&path)).unwrap();
+        assert_eq!(anchor.line_count, 4);
+        assert_eq!(anchor.head_hash, lns_ipc::line_hash(lines[3].as_bytes()));
     }
 
     #[tokio::test]

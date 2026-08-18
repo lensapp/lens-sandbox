@@ -9,26 +9,33 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
+/// How a run ended: the code its workload left, whether --rm takes its state, and when.
+pub struct RunEnd {
+    pub code: i32,
+    pub auto_remove: bool,
+    pub finished_at: String,
+}
+
 /// Everything a run's end owes the world: its record gets the exit stamped, and a --rm run takes its state with it.
-pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir>(
+pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir, N: Fn(&str)>(
     fs: &F,
     remover: &R,
     cache_root: &std::path::Path,
     run_id: &str,
-    code: i32,
-    auto_remove: bool,
-    finished_at: String,
+    end: RunEnd,
+    note_removed: N,
 ) {
     if let Err(e) =
-        crate::run_record::mark_exited_with(fs, cache_root, run_id, code, finished_at).await
+        crate::run_record::mark_exited_with(fs, cache_root, run_id, end.code, end.finished_at).await
     {
         crate::log::warn!("run record not updated at exit: {e:#}");
     }
-    if auto_remove {
-        crate::run_registry::set_exit_code(run_id, code);
+    if end.auto_remove {
+        crate::run_registry::set_exit_code(run_id, end.code);
         if crate::run_registry::remove_if_exited(run_id)
             == crate::run_registry::RemoveOutcome::Removed
         {
+            note_removed(run_id);
             reclaim_run_dir(remover, cache_root, run_id);
         }
     }

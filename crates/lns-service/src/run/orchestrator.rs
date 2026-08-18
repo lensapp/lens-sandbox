@@ -83,6 +83,7 @@ pub async fn handle(
 ) {
     let auto_remove = args.auto_remove;
     let finished_run_id = run_id.clone();
+    let microvm_label = microvm.clone();
     let result = orchestrate(
         run_id,
         microvm,
@@ -95,6 +96,14 @@ pub async fn handle(
     .instrument(tracing::Span::current())
     .await;
     let code = emit_completion(&frame_tx, result).await;
+    if let Err(e) = crate::audit::record_run_exited(
+        &finished_run_id,
+        &microvm_label,
+        code,
+        &crate::oauth::RealClock,
+    ) {
+        log::warn!("run exit not audited: {e:#}");
+    }
     match crate::cache::root() {
         Ok(cache_dir) => {
             super::conclude_run(
@@ -102,9 +111,18 @@ pub async fn handle(
                 &super::RealRemoveDir,
                 &cache_dir,
                 &finished_run_id,
-                code,
-                auto_remove,
-                crate::time_fmt::rfc3339_now(),
+                super::RunEnd {
+                    code,
+                    auto_remove,
+                    finished_at: crate::time_fmt::rfc3339_now(),
+                },
+                |id| {
+                    if let Err(e) =
+                        crate::audit::record_run_removed(id, false, true, &crate::oauth::RealClock)
+                    {
+                        log::warn!("run removal not audited: {e:#}");
+                    }
+                },
             )
             .await;
         }
@@ -315,12 +333,20 @@ async fn orchestrate(
     let upper_disk_path = upper_res?;
     let (volume_attachments, volume_leases) = volumes_res?;
     log::debug!(path = %upper_disk_path.display(), "upper disk provisioned");
-    crate::audit::record_run_launched(
-        &run_id,
-        &microvm,
-        args.image.as_deref().unwrap_or("<imageless>"),
-        &crate::oauth::RealClock,
-    )?;
+    match &mode {
+        super::LaunchMode::Fresh => crate::audit::record_run_launched(
+            &run_id,
+            &microvm,
+            args.image.as_deref().unwrap_or("<imageless>"),
+            &crate::oauth::RealClock,
+        )?,
+        super::LaunchMode::Restart { .. } => crate::audit::record_run_restarted(
+            &run_id,
+            &microvm,
+            args.image.as_deref().unwrap_or("<imageless>"),
+            &crate::oauth::RealClock,
+        )?,
+    }
     for vol in &args.volumes {
         crate::audit::record_volume_attached(
             &run_id,

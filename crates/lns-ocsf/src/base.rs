@@ -24,6 +24,8 @@ pub mod activity {
     pub const LOGON: u16 = 1;
     pub const FINDING_CREATE: u16 = 1;
     pub const PROCESS_LAUNCH: u16 = 1;
+    pub const PROCESS_TERMINATE: u16 = 2;
+    pub const FILE_DELETE: u16 = 4;
     pub const FILE_CREATE: u16 = 1;
     pub const FILE_MOUNT: u16 = 12;
 }
