@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::approval_rig::ApprovalRig;
 use crate::artifact_rig::ArtifactRig;
+use crate::assembly_rig::AssemblyRig;
 use crate::bind_rig::BindRig;
 use crate::credential_rig::CredentialRig;
 use crate::declared_rig::DeclaredRig;
@@ -58,6 +59,8 @@ pub struct BehaviourWorld {
     pub image: Option<ImageRig>,
 
     pub artifact: Option<ArtifactRig>,
+
+    pub assembly: Option<AssemblyRig>,
 
     pub policy: Option<PolicyRig>,
 

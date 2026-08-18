@@ -28,11 +28,17 @@ pub const fn type_bits(t: libc::mode_t) -> u32 {
 pub fn build_filesystem_from_layer_bytes(
     content_store: &ContentStore,
     layers: &[Vec<u8>],
+    progress: &dyn Fn(u64, u64),
 ) -> Result<FileSystem<Sha256Digest>> {
+    let total: u64 = layers.iter().map(|l| l.len() as u64).sum();
+    progress(0, total);
     let mut fs = FileSystem::<Sha256Digest>::new(root_stat());
+    let mut applied: u64 = 0;
     for (idx, layer_bytes) in layers.iter().enumerate() {
         apply_layer_bytes(&mut fs, content_store, layer_bytes, Limits::PRODUCTION)
             .with_context(|| format!("applying layer {idx}"))?;
+        applied += layer_bytes.len() as u64;
+        progress(applied, total);
     }
     Ok(fs)
 }
@@ -566,7 +572,7 @@ mod tests {
             write_dir_entry(b, "etc/", 0o755);
             write_file_entry(b, "etc/hostname", 0o644, b"sandbox\n");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         let leaf_id = etc.leaf_id(OsStr::new("hostname")).unwrap();
         assert!(matches!(
@@ -590,7 +596,7 @@ mod tests {
         let layer2 = build_tar(|b| {
             write_file_entry(b, "etc/version", 0o644, b"v2\n");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         let leaf_id = etc.leaf_id(OsStr::new("version")).unwrap();
         assert!(matches!(
@@ -612,7 +618,7 @@ mod tests {
             write_file_entry(b, "etc/secret", 0o600, b"hush");
         });
         let layer2 = build_tar(|b| write_whiteout(b, "etc/.wh.secret"));
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("secret")).is_err());
     }
@@ -629,7 +635,7 @@ mod tests {
             write_file_entry(b, "etc/version", 0o644, b"newer");
             write_whiteout(b, "etc/.wh.version");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         let leaf_id = etc.leaf_id(OsStr::new("version")).unwrap();
         assert!(matches!(
@@ -651,7 +657,7 @@ mod tests {
             write_whiteout(b, "var/.wh..wh..opq");
             write_file_entry(b, "var/c", 0o644, b"c");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let var = fs.root.get_directory_mut(OsStr::new("var")).unwrap();
         assert!(var.leaf_id(OsStr::new("a")).is_err());
         assert!(var.leaf_id(OsStr::new("b")).is_err());
@@ -670,7 +676,7 @@ mod tests {
             write_file_entry(b, "var/new", 0o644, b"new");
             write_whiteout(b, "var/.wh..wh..opq");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let var = fs.root.get_directory_mut(OsStr::new("var")).unwrap();
         assert!(var.leaf_id(OsStr::new("old")).is_err());
         assert!(var.leaf_id(OsStr::new("new")).is_ok());
@@ -684,7 +690,7 @@ mod tests {
             write_dir_entry(b, "bin/", 0o755);
             write_symlink_entry(b, "bin/sh", "busybox");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let bin = fs.root.get_directory_mut(OsStr::new("bin")).unwrap();
         let leaf_id = bin.leaf_id(OsStr::new("sh")).unwrap();
         let content = &fs.leaves[leaf_id.0].content;
@@ -704,7 +710,7 @@ mod tests {
         let tar = build_tar(|b| {
             write_file_entry(b, "deep/nested/file", 0o644, b"x");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let nested = fs
             .root
             .get_directory_mut(OsStr::new("deep"))
@@ -721,7 +727,7 @@ mod tests {
         let tar = build_tar(|b| {
             write_file_entry(b, "./etc/hostname", 0o644, b"sandbox");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
     }
@@ -816,7 +822,7 @@ mod tests {
         let gzipped = gz.finish().unwrap();
         let d = tempdir();
         let s = store(&d);
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[gzipped]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[gzipped], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
     }
@@ -834,7 +840,7 @@ mod tests {
         let d = tempdir();
         let s = store(&d);
         let layer = build_tar(|b| write_whiteout(b, "etc/.wh."));
-        let err = build_filesystem_from_layer_bytes(&s, &[layer]).unwrap_err();
+        let err = build_filesystem_from_layer_bytes(&s, &[layer], &|_, _| {}).unwrap_err();
         assert!(format!("{err:#}").contains("whiteout path has no target"));
     }
 
@@ -845,7 +851,7 @@ mod tests {
         let tar = build_tar(|b| {
             write_typed_entry(b, "dev/myfifo", EntryType::Fifo);
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let dev = fs.root.get_directory_mut(OsStr::new("dev")).unwrap();
         let leaf_id = dev.leaf_id(OsStr::new("myfifo")).unwrap();
         let leaf = &fs.leaves[leaf_id.0];
@@ -869,7 +875,7 @@ mod tests {
             write_file_entry(b, "etc/hostname", 0o644, b"sandbox");
             write_typed_entry(b, "etc/host", EntryType::Link);
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
         assert!(
@@ -887,7 +893,7 @@ mod tests {
             write_typed_entry(b, "dev/null", EntryType::Char);
             write_typed_entry(b, "dev/sda", EntryType::Block);
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let dev = fs.root.get_directory_mut(OsStr::new("dev")).unwrap();
         assert!(
             dev.leaf_id(OsStr::new("null")).is_err(),
@@ -907,7 +913,7 @@ mod tests {
             write_dir_entry(b, "./", 0o755);
             write_file_entry(b, "etc/hostname", 0o644, b"sandbox");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
     }
@@ -920,7 +926,7 @@ mod tests {
             write_typed_entry(b, "globalmeta", EntryType::XGlobalHeader);
             write_file_entry(b, "etc/hostname", 0o644, b"sandbox");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
         assert!(
@@ -940,7 +946,7 @@ mod tests {
         let layer2 = build_tar(|b| {
             write_dir_entry(b, "etc/", 0o755);
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(
             etc.leaf_id(OsStr::new("keep")).is_ok(),
@@ -957,7 +963,7 @@ mod tests {
             write_dir_entry(b, "etc/", 0o755);
             write_file_entry(b, "etc/hostname", 0o644, b"sandbox");
         });
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let etc = fs.root.get_directory_mut(OsStr::new("etc")).unwrap();
         assert!(etc.leaf_id(OsStr::new("hostname")).is_ok());
     }
@@ -968,7 +974,7 @@ mod tests {
         let s = store(&d);
         let layer1 = build_tar(|b| write_file_entry(b, "a", 0o644, b"identical"));
         let layer2 = build_tar(|b| write_file_entry(b, "b", 0o644, b"identical"));
-        let _fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2]).unwrap();
+        let _fs = build_filesystem_from_layer_bytes(&s, &[layer1, layer2], &|_, _| {}).unwrap();
         let count = std::fs::read_dir(d.path().join("content").join("sha256"))
             .unwrap()
             .count();
@@ -985,7 +991,7 @@ mod tests {
         std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let tar = build_tar(|b| write_file_entry(b, "etc/hostname", 0o644, b"sandbox\n"));
-        let err = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap_err();
+        let err = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap_err();
 
         std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
@@ -1000,7 +1006,7 @@ mod tests {
         let s = store(&d);
         let big = vec![0xabu8; (MAX_BUFFERED_FILE_BYTES + 1) as usize];
         let tar = build_tar(|b| write_file_entry(b, "opt/model.bin", 0o644, &big));
-        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap();
+        let mut fs = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap();
         let opt = fs.root.get_directory_mut(OsStr::new("opt")).unwrap();
         let leaf_id = opt.leaf_id(OsStr::new("model.bin")).unwrap();
         assert!(
@@ -1030,7 +1036,7 @@ mod tests {
 
         let big = vec![0x7eu8; (MAX_BUFFERED_FILE_BYTES + 1) as usize];
         let tar = build_tar(|b| write_file_entry(b, "opt/model.bin", 0o644, &big));
-        let err = build_filesystem_from_layer_bytes(&s, &[tar]).unwrap_err();
+        let err = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap_err();
 
         std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(

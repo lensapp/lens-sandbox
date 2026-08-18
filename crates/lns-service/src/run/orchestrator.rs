@@ -340,6 +340,7 @@ async fn orchestrate(
                         layers: &layers,
                         runtime_layer: runtime_layer.as_ref(),
                     },
+                    &|_, _| {},
                 )
             })
             .await
