@@ -1,11 +1,99 @@
 use std::time::Instant;
 
-use lns_ipc::{Request, Response, StatusInfo, WireFrame, encode_wire_frame};
-use tokio::io::AsyncWriteExt;
+use lns_ipc::{Request, Response, StatusInfo, WireFrame, encode_frame, encode_wire_frame};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod adapter;
 pub use adapter::run_server;
+
+/// What a run start needs from the service: the refusals a run can be turned away for before it exists, then everything it does once it will start.
+pub trait RunHost {
+    type Prepared: Send;
+
+    fn prepare(
+        &self,
+        run_id: &str,
+        args: &lns_ipc::RunImageArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<Self::Prepared>> + Send;
+
+    fn serve<W>(
+        &self,
+        stream: &mut W,
+        run_id: String,
+        args: lns_ipc::RunImageArgs,
+        prepared: Self::Prepared,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
+    where
+        W: AsyncWriteExt + Unpin + Send;
+}
+
+/// Serve one `RunImage` exchange. A run that cannot start is answered with an error and never reaches [`RunHost::serve`], which is what registers it and names it — so a refusal costs no run id, no run name and no `RunStarted` (§3.3.2, §3.1.11).
+pub async fn start_run<S, H>(
+    stream: &mut S,
+    args: lns_ipc::RunImageArgs,
+    host: &H,
+) -> anyhow::Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+    H: RunHost,
+{
+    if let Some(name) = &args.name
+        && let Err(message) = crate::run_registry::ensure_name_available(name)
+    {
+        let _ = write_error(stream, message).await;
+        return Ok(());
+    }
+    // Allocated rather than registered: the id names the attempt for this task alone until serve puts it in the registry.
+    let run_id = crate::run_registry::allocate_run_id();
+    let Some(prepared) = prepare_while_the_client_waits(stream, host, &run_id, &args).await else {
+        return Ok(());
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            let _ = write_error(stream, format!("{e:#}")).await;
+            return Ok(());
+        }
+    };
+    host.serve(stream, run_id, args, prepared).await
+}
+
+/// Prepare a run only for as long as its client is still there to be answered: preparing can reach the network, and a run with no registry entry has nothing to cancel, so a client that leaves has to take the work and the host ports it bound with it. `None` means it left.
+async fn prepare_while_the_client_waits<S, H>(
+    stream: &mut S,
+    host: &H,
+    run_id: &str,
+    args: &lns_ipc::RunImageArgs,
+) -> Option<anyhow::Result<H::Prepared>>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+    H: RunHost,
+{
+    let prepare = host.prepare(run_id, args);
+    tokio::pin!(prepare);
+    loop {
+        let mut idle = [0u8; 1];
+        tokio::select! {
+            biased;
+            prepared = &mut prepare => return Some(prepared),
+            read = stream.read(&mut idle) => match read {
+                // The client sends nothing between its request and its run id, so anything readable here is the client going away.
+                Ok(0) | Err(_) => return None,
+                Ok(_) => continue,
+            },
+        }
+    }
+}
+
+pub(super) async fn write_error<W>(stream: &mut W, message: String) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let frame = encode_frame(&Response::Error { message })?;
+    stream.write_all(&frame).await?;
+    Ok(())
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PumpOutcome {

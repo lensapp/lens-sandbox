@@ -11,19 +11,22 @@ use oci_client::Reference;
 pub(crate) struct SandboxPlan {
     pub workload: AssembledWorkload,
     pub fileset_specs: Vec<RuntimeFileSpec>,
-    /// The resolved manifest digest of a published sandbox reference, pinning its per-workload grant identity; `None` for a local definition (which keys by directory).
-    pub digest: Option<String>,
 }
 
-/// Peek a run reference's manifest and, when it is a published sandbox, resolve + assemble it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
-pub(crate) async fn peek_and_plan(
+/// What a published run reference resolves to: everything its manifest, its pins and the merge decide, with nothing recorded, nothing disclosed and nothing written — so the answer is known before a run is registered.
+pub(crate) struct ResolvedForRun {
+    reference: String,
+    pub(crate) digest: String,
+    resolved: crate::artifact::assembly::ResolvedSandbox,
+}
+
+/// Peek a run reference's manifest and, when it is a published sandbox, resolve it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
+pub(crate) async fn resolve_for_run(
     image_ref: &str,
     verify_sandbox: bool,
     mixins: &[String],
-    run_id: &str,
-    microvm: &str,
     decisions: Option<&std::path::Path>,
-) -> Result<Option<SandboxPlan>> {
+) -> Result<Option<ResolvedForRun>> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -61,29 +64,46 @@ pub(crate) async fn peek_and_plan(
                 crate::artifact::plan_published_sandbox(&resolution.document, image_ref, &packed)?,
                 &resolution.authored_egress,
             );
-            record_sandbox_run(run_id, microvm, image_ref, &digest, &resolved);
-            crate::image_store::record_artifact_run(image_ref, &digest, &resolved.base_image)
-                .await
-                .with_context(|| format!("recording the sandbox index for {image_ref}"))?;
-            disclose_effective_policy(resolved.policy.as_ref());
-            let problems = crate::artifact::published_fileset_problems(&resolved);
-            if !problems.is_empty() {
-                return Err(refusal(image_ref, problems));
-            }
-            let mut materialized = materialize_filesets(&resolved).await?;
-            crate::artifact::fileset::host_fileset_specs(
-                &RealSnapshotDir,
-                &resolved.host_filesets,
-                &mut materialized,
-            )?;
-            let fileset_specs = materialized.into_specs();
-            Ok(Some(SandboxPlan {
-                workload: assembly::assemble(&resolved),
-                fileset_specs,
-                digest: Some(digest),
+            Ok(Some(ResolvedForRun {
+                reference: image_ref.to_string(),
+                digest,
+                resolved,
             }))
         }
     }
+}
+
+/// Turn what a reference resolved to into a bootable plan: the run it is recorded against, the policy it discloses, and the filesets it materializes all belong to a run that has started.
+pub(crate) async fn plan_resolved(
+    resolved: ResolvedForRun,
+    run_id: &str,
+    microvm: &str,
+) -> Result<SandboxPlan> {
+    let ResolvedForRun {
+        reference,
+        digest,
+        resolved,
+    } = resolved;
+    record_sandbox_run(run_id, microvm, &reference, &digest, &resolved);
+    crate::image_store::record_artifact_run(&reference, &digest, &resolved.base_image)
+        .await
+        .with_context(|| format!("recording the sandbox index for {reference}"))?;
+    disclose_effective_policy(resolved.policy.as_ref());
+    let problems = crate::artifact::published_fileset_problems(&resolved);
+    if !problems.is_empty() {
+        return Err(refusal(&reference, problems));
+    }
+    let mut materialized = materialize_filesets(&resolved).await?;
+    crate::artifact::fileset::host_fileset_specs(
+        &RealSnapshotDir,
+        &resolved.host_filesets,
+        &mut materialized,
+    )?;
+    let fileset_specs = materialized.into_specs();
+    Ok(SandboxPlan {
+        workload: assembly::assemble(&resolved),
+        fileset_specs,
+    })
 }
 
 /// Correlate the resolved document's packed filesets with the layers that carry them: the sandbox's own artifact when the run is a published reference, plus every mixin's own artifact.
@@ -140,7 +160,6 @@ pub(crate) async fn plan_local(
     Ok(SandboxPlan {
         workload: assembly::assemble(&resolved),
         fileset_specs: materialized.into_specs(),
-        digest: None,
     })
 }
 

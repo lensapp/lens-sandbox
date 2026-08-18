@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Sender;
 mod orchestrator;
 mod scratch;
 mod shutdown;
-pub use orchestrator::handle;
+pub use orchestrator::{PreparedRun, handle, prepare};
 
 /// The rootfs-assembly progress sink: `span` is the run span captured before `spawn_blocking`, since the blocking thread has no ambient span for the frame forwarder to find the run's channel through.
 fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {

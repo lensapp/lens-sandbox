@@ -97,6 +97,19 @@ pub struct BehaviourWorld {
     pub naming_first_name: Option<String>,
     /// Refusal message from the last registration / rename in a naming scenario.
     pub naming_error: Option<String>,
+
+    /// What a run-start scenario's host refuses with; `None` means it refuses nothing.
+    pub start_refusal: Option<String>,
+    /// Frames the run-start exchange wrote to its client.
+    pub start_frames: Vec<Response>,
+    /// Whether the run-start exchange reached the step that registers the run.
+    pub start_served: bool,
+    /// The name the run-start scenario asked for.
+    pub start_name: Option<String>,
+    /// Whether the run-start scenario's host never finishes preparing.
+    pub start_never_finishes: bool,
+    /// Whether the run-start exchange returned rather than pending forever.
+    pub start_returned: bool,
 }
 
 impl BehaviourWorld {
