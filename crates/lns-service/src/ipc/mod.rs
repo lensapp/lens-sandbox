@@ -598,6 +598,16 @@ async fn remove_run_request(run: &str, force: bool) -> Response {
                 |id, sig| async move {
                     forward_session_input(&id, session_input_from_signal(sig), "RemoveRun").await
                 },
+                |id, forced| {
+                    if let Err(e) = crate::audit::record_run_removed(
+                        id,
+                        forced,
+                        false,
+                        &crate::oauth::RealClock,
+                    ) {
+                        crate::log::warn!("run removal not audited: {e:#}");
+                    }
+                },
             )
             .await
         }
@@ -614,6 +624,15 @@ async fn prune_runs_request() -> Response {
                 &crate::image_store::RealFs,
                 &crate::run::RealRemoveDir,
                 &root,
+                |removed| {
+                    for id in removed {
+                        if let Err(e) =
+                            crate::audit::record_runs_pruned(id, removed, &crate::oauth::RealClock)
+                        {
+                            crate::log::warn!("run prune not audited: {e:#}");
+                        }
+                    }
+                },
             )
             .await
         }
@@ -624,17 +643,19 @@ async fn prune_runs_request() -> Response {
 }
 
 /// Serve one `RemoveRun`: an exited run's registry entry and run dir go together; a running one is refused unless forced, and force is a stop first, not a shortcut around one.
-pub async fn remove_run_with<R, F, Fut>(
+pub async fn remove_run_with<R, F, Fut, N>(
     run: &str,
     force: bool,
     remover: &R,
     cache_root: &std::path::Path,
     send_signal: F,
+    note_removed: N,
 ) -> Response
 where
     R: crate::run::RemoveDir,
     F: Fn(String, lns_ipc::SignalKind) -> Fut,
     Fut: std::future::Future<Output = Response>,
+    N: Fn(&str, bool),
 {
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
@@ -651,6 +672,7 @@ where
     }
     match crate::run_registry::remove_if_exited(&id) {
         crate::run_registry::RemoveOutcome::Removed => {
+            note_removed(&id, force);
             crate::run::reclaim_run_dir(remover, cache_root, &id);
             Response::Acknowledged
         }
@@ -666,10 +688,16 @@ where
 }
 
 /// Sweep every stopped run and every orphan run dir — the one command that takes a machine back to clean.
-pub async fn prune_runs_with<F, R>(fs: &F, remover: &R, cache_root: &std::path::Path) -> Response
+pub async fn prune_runs_with<F, R, N>(
+    fs: &F,
+    remover: &R,
+    cache_root: &std::path::Path,
+    note_pruned: N,
+) -> Response
 where
     F: crate::image_store::Fs,
     R: crate::run::RemoveDir,
+    N: Fn(&[String]),
 {
     let mut removed = crate::run_registry::prune_exited();
     for id in &removed {
@@ -689,6 +717,9 @@ where
                 removed.push(id.to_string());
             }
         }
+    }
+    if !removed.is_empty() {
+        note_pruned(&removed);
     }
     Response::RunsPruned { removed }
 }
@@ -2531,6 +2562,7 @@ mod tests {
             &NoopRemover,
             std::path::Path::new("/cache"),
             |_, _| async { Response::Acknowledged },
+            |_, _| {},
         )
         .await;
         assert!(
