@@ -53,7 +53,7 @@ impl LeaseRegistry {
             .remove(name);
     }
 
-    fn holder(&self, name: &str) -> Option<String> {
+    pub fn holder(&self, name: &str) -> Option<String> {
         self.active
             .lock()
             .expect("lease registry poisoned")

@@ -20,6 +20,7 @@ pub mod run_as_env;
 pub mod run_lifecycle;
 pub mod run_naming;
 pub mod run_start_refusal;
+pub mod run_start_stopped;
 pub mod run_user;
 pub mod sandbox_filesets;
 pub mod volume_management;

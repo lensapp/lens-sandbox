@@ -37,6 +37,9 @@ pub enum Request {
         signal: SignalKind,
     },
     ListRuns,
+    StartRun {
+        run: String,
+    },
     StopRun {
         run: String,
         timeout_secs: u64,
@@ -56,6 +59,7 @@ pub enum Request {
     },
     RemoveRun {
         run: String,
+        force: bool,
     },
     RenameRun {
         run: String,
@@ -1286,7 +1290,20 @@ mod tests {
 
     #[test]
     fn remove_run_survives_a_request_round_trip() {
-        let req = Request::RemoveRun { run: "7".into() };
+        let req = Request::RemoveRun {
+            run: "7".into(),
+            force: true,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn start_run_survives_a_request_round_trip() {
+        let req = Request::StartRun {
+            run: "reviewer".into(),
+        };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, req);
