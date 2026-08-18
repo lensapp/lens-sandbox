@@ -1497,6 +1497,113 @@ fn run_command_sandbox_namespace(world: &mut E2eWorld, cmd_line: String) {
     run_lns_microvm_as(world, &["sandbox", "run"], tail);
 }
 
+const EXEC_SETTLE_DEADLINE: Duration = Duration::from_secs(60);
+
+fn exec_until(world: &mut E2eWorld, cmd_line: &str, needle: &str) -> Result<(), String> {
+    let id = last_run(world)?;
+    let deadline = Instant::now() + EXEC_SETTLE_DEADLINE;
+    loop {
+        let mut args: Vec<String> = vec![
+            "exec".into(),
+            "-i=false".into(),
+            "-t=false".into(),
+            id.clone(),
+            "--".into(),
+        ];
+        args.extend(split_args(cmd_line));
+        let result = run_cli_with_timeout(args, socket_env(world), STREAM_VERB_TIMEOUT);
+        let settled = result.exit_code == 0 && result.stdout.contains(needle);
+        world.result = Some(result);
+        if settled || Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+#[given("a run in which a file was written outside any mount")]
+fn a_run_with_a_marker_outside_any_mount(world: &mut E2eWorld) -> Result<(), String> {
+    crate::steps::service::start_service(world);
+    run_microvm(
+        world,
+        vec!["-d".into()],
+        "/bin/sh -c 'echo preserved-across-restart > /marker; echo booted; /.lens/guest-tools/bin/busybox sleep 300'",
+    );
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
+    logs_until(world, &["logs"], "booted")
+}
+
+#[given("the run was stopped")]
+fn the_run_was_stopped(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    let result = world.run_with_service_env(&["stop", &id]);
+    if result.exit_code != 0 {
+        return Err(format!("the run has to stop before it can start: {result:?}"));
+    }
+    world.result = Some(result);
+    Ok(())
+}
+
+#[given("a stopped run whose workload had written to /tmp")]
+fn a_stopped_run_that_wrote_tmp(world: &mut E2eWorld) -> Result<(), String> {
+    crate::steps::service::start_service(world);
+    run_microvm(
+        world,
+        vec!["-d".into()],
+        "/bin/sh -c 'echo boot >> /entrylog; /.lens/guest-tools/bin/busybox touch /tmp/leftover; echo booted; /.lens/guest-tools/bin/busybox sleep 300'",
+    );
+    if let Some(id) = world.last_run_id.clone() {
+        world.detached_runs.push(id);
+    }
+    logs_until(world, &["logs"], "booted")?;
+    the_run_was_stopped(world)
+}
+
+#[when("I start it")]
+fn i_start_it(world: &mut E2eWorld) -> Result<(), String> {
+    let id = last_run(world)?;
+    world.result = Some(world.run_with_service_env(&["start", &id]));
+    Ok(())
+}
+
+#[then("the file is present with its contents")]
+fn the_file_is_present(world: &mut E2eWorld) -> Result<(), String> {
+    exec_until(world, "/bin/sh -c 'cat /marker'", "preserved-across-restart")?;
+    let result = world.result.as_ref().expect("exec ran");
+    if result.stdout.contains("preserved-across-restart") {
+        Ok(())
+    } else {
+        Err(format!(
+            "the writable layer is the whole point of start: {result:?}"
+        ))
+    }
+}
+
+#[then("the workload's entrypoint runs again from the start")]
+fn the_entrypoint_ran_again(world: &mut E2eWorld) -> Result<(), String> {
+    exec_until(world, "/bin/sh -c 'cat /entrylog'", "boot\nboot")?;
+    let result = world.result.as_ref().expect("exec ran");
+    if result.stdout.matches("boot").count() >= 2 {
+        Ok(())
+    } else {
+        Err(format!("the record replays the entrypoint: {result:?}"))
+    }
+}
+
+#[then("/tmp is empty")]
+fn tmp_is_empty(world: &mut E2eWorld) -> Result<(), String> {
+    exec_until(world, "/bin/sh -c 'ls -A /tmp; echo listed'", "listed")?;
+    let result = world.result.as_ref().expect("exec ran");
+    if result.stdout.contains("leftover") {
+        return Err(format!(
+            "/tmp is boot-scoped; the old boot's scratch leaked through: {result:?}"
+        ));
+    }
+    Ok(())
+}
+
 #[when("the user stops that run")]
 fn stop_that_run(world: &mut E2eWorld) -> Result<(), String> {
     let id = last_run(world)?;

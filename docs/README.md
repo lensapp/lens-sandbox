@@ -17,9 +17,10 @@ You drive everything through one binary: the `lns` CLI.
 ## Guides
 
 - **[Running workloads](running-workloads.md)** — `lns run`, `lns ps`,
-  `lns exec`, `lns stop`: define a sandbox with `./lns.yaml`, run it or a
-  published reference, resources, environment variables, volumes, published
-  ports, interactive vs. detached sessions.
+  `lns exec`, `lns stop`, `lns start`, `lns rm`: define a sandbox with
+  `./lns.yaml`, run it or a published reference, resources, environment
+  variables, volumes, published ports, interactive vs. detached sessions,
+  and the stopped-run lifecycle.
 - **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
   manifest, seed config, network allowlist, and credential wiring.
 - **[Policy and approvals](policy.md)** — the `lns-local-mixin.yaml` file, being asked

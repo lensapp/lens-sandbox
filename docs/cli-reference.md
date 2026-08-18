@@ -64,10 +64,12 @@ Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
 | `lns ps`                   | `lns sandbox ps`                  |
 | `lns kill <RUN>`           | `lns sandbox kill <RUN>`          |
 | `lns stop <RUN>`           | `lns sandbox stop <RUN>`          |
+| `lns start <RUN>`          | `lns sandbox start <RUN>`         |
 | `lns logs <RUN>`           | `lns sandbox logs <RUN>`          |
 | `lns attach <RUN>`         | `lns sandbox attach <RUN>`        |
 | `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET> [--mixin <REF>]`    |
-| `lns rm <REF>`             | `lns sandbox rm <REF>`            |
+| `lns rm <RUN>`             | `lns sandbox rm <RUN>`            |
+| `lns rmi <REF>`            | `lns sandbox rmi <REF>`           |
 
 The lns-native verbs `validate`, `ls`, and `prune` live under `lns sandbox`
 with no top-level shortcut. `lns exec` also works as an unlisted shorthand for
@@ -112,7 +114,7 @@ the `./lns.yaml` definition with its command overridden.
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
 | `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
-| `--rm`                       | `false`          | Remove the run record once the workload exits (Docker-style `--rm`).    |
+| `--rm`                       | `false`          | Remove the run's state — record and writable layer — the moment the workload exits (Docker-style `--rm`). Without it every run persists as a stopped run, restartable with `lns start` until `lns rm`. |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
 | `-u`, `--user <USER[:GROUP]>`|                  | Run-as user or uid inside the sandbox. Alias for `--sandbox-user` / `--sandbox-uid`; a numeric segment is used as the uid. Outranks the definition's `spec.user`, which outranks the image's `USER`. `HOME` and `USER` follow that user's guest passwd entry unless the definition's `env:` or a `-e` declares them, which wins; an image's `ENV HOME` does not. |
 | `--sandbox-user <NAME>`      | image `USER`     | Username the workload runs as inside the guest (the unprivileged `sandbox` user when the image sets none). |
@@ -149,12 +151,16 @@ lns sandbox ls
 lns sandbox exec [OPTIONS] <RUN> [-- COMMAND...]
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
+lns sandbox start [-a [-i]] <RUN>
 lns sandbox logs [-f] <RUN>
 lns sandbox attach <RUN> [--detach-keys <CHORD>]
 lns sandbox inspect <TARGET> [--mixin <REF>]
 
+# runs that ended
+lns sandbox rm [-f] <RUN>
+
 # cache
-lns sandbox rm <REF>
+lns sandbox rmi <REF>
 lns sandbox prune [-f]
 ```
 
@@ -173,12 +179,14 @@ interchangeable everywhere a run is addressed.
 | `ls`       | —              | List cached sandboxes (pulled or built) in the local store. Alias: `list`. |
 | `exec`     | `lns exec`     | Run one non-interactive command against a running run (`docker exec`-style). `--detach-keys` and `-q` work as for `lns run`. `-i`/`-t` are refused: an exec session has no way to route your keystrokes to itself yet, so use `lns attach` to reach the run's own terminal. |
 | `kill`     | `lns kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
-| `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
+| `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. The run stays listed as **stopped** — restartable with `lns start` until you `lns rm` it. |
+| `start`    | `lns start`    | Start a stopped run again on its preserved writable layer. The launch configuration replays verbatim from the run's record — image (digest-pinned), command, env, mounts, ports, resources, run-as — while network policy and credentials re-resolve live, exactly as a fresh boot would. Detached by default: prints the handle and returns. `-a` attaches output and adopts the workload's exit code; `-i` (with `-a`) forwards stdin. A conflict — a taken host port, a volume another run holds, a missing bind source, a damaged writable layer — fails the start closed with an error naming it, and the run stays stopped, untouched. Starting a running run succeeds and changes nothing. An unknown handle lists the stopped runs that exist. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
 | `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local definition's effective form, offline. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <mountPath>`), connectors, declared tools (`tool: node@22.11.0`), the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. |
-| `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
-| `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Requires `-f`/`--force` — there is no interactive prompt. |
+| `rm`       | `lns rm`       | Remove a stopped run: its record and writable layer go together, its name frees up, and the image it pinned becomes removable. Refuses a running run — stop it first, or `-f` kills and removes in one step. **Breaking change**: `lns rm` used to remove cached sandboxes; that moved to `lns rmi`. |
+| `rmi`      | `lns rmi`      | Remove a cached sandbox and free its now-unreferenced layers; refuses one a listed run still boots from. |
+| `prune`    | —              | Remove every stopped run (and any orphaned run dir), then every cached sandbox not held by a running one and, when none is live, the provisioned tool cache. Requires `-f`/`--force` — there is no interactive prompt. |
 
 The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
