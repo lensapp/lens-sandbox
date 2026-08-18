@@ -60,6 +60,14 @@ pub struct BehaviourWorld {
     pub decisions: LocalDecisionsRig,
     pub web_login: WebLoginRig,
     pub host_paths: HostPathRig,
+    pub exec: ExecCliRig,
+}
+
+#[derive(Debug, Default)]
+pub struct ExecCliRig {
+    pub active: bool,
+    pub stdin: Option<String>,
+    pub request: Option<lns_ipc::ExecImageArgs>,
 }
 
 /// Scripted web-flow outcome for `lns login`, plus what the fake verifier was asked; `outcome: None` means the flow panics if consulted.

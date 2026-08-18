@@ -23,7 +23,7 @@ const NOT_RUNNING_MESSAGE: &str =
 
 mod orchestrator;
 pub use orchestrator::{
-    DetachBehaviour, PrePhaseOutcome, PrePhaseStep, StdinForwarding, dispatch,
+    DetachBehaviour, PrePhaseOutcome, PrePhaseStep, StdinForwarding, build_exec_request, dispatch,
     drive_attached_session_with_writers, drive_pre_phase, exec_command, exec_image, launch_run,
     pre_phase_step, render_started_run, render_status_line, require_running, run_command,
     run_image,

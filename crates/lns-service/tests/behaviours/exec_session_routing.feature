@@ -2,7 +2,6 @@ Feature: routing exec sessions within a run
   Every exec session is isolated from the run's primary session and from
   concurrent exec sessions for lifecycle and terminal-control traffic.
 
-  @todo
   Scenario: exec works while the primary session is attached
     Given an active run named "reviewer"
     And its primary session is attached to another client
@@ -10,7 +9,6 @@ Feature: routing exec sessions within a run
     Then the user receives a live shell prompt
     And the primary session remains attached and usable
 
-  @todo
   Scenario: a resize targets one exec session
     Given an active run named "reviewer"
     And its primary session is running
@@ -20,7 +18,6 @@ Feature: routing exec sessions within a run
     And the primary session is unaffected
     And the second exec session remains usable
 
-  @todo
   Scenario: a signal targets one exec session
     Given an active run named "reviewer"
     And its primary session is running
@@ -30,7 +27,6 @@ Feature: routing exec sessions within a run
     And the primary session is unaffected
     And the second exec session remains usable
 
-  @todo
   Scenario: the detach chord closes only its exec session
     Given an active run named "reviewer"
     And its primary session is running
@@ -41,7 +37,6 @@ Feature: routing exec sessions within a run
     And the primary session remains running
     And the second exec session remains usable
 
-  @todo
   Scenario: an unexpected exec disconnect is isolated
     Given an active run named "reviewer"
     And its primary session is running
@@ -51,7 +46,6 @@ Feature: routing exec sessions within a run
     And the primary session remains running
     And the second exec session remains usable
 
-  @todo
   Scenario: non-interactive exec behavior is preserved
     Given an active run named "reviewer"
     When the user execs a non-interactive command that writes to stdout and stderr

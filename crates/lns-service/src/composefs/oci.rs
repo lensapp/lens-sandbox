@@ -694,13 +694,10 @@ mod tests {
         let bin = fs.root.get_directory_mut(OsStr::new("bin")).unwrap();
         let leaf_id = bin.leaf_id(OsStr::new("sh")).unwrap();
         let content = &fs.leaves[leaf_id.0].content;
-        assert!(
-            matches!(content, LeafContent::Symlink(_)),
-            "expected Symlink leaf, got {content:?}"
-        );
-        if let LeafContent::Symlink(target) = content {
-            assert_eq!(&**target, OsStr::new("busybox"));
-        }
+        let LeafContent::Symlink(target) = content else {
+            panic!("expected Symlink leaf, got {content:?}")
+        };
+        assert_eq!(&**target, OsStr::new("busybox"));
     }
 
     #[test]

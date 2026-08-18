@@ -9,7 +9,7 @@
 #      `hi` on its own line.
 #   2. Ctrl+C inside the shell does NOT detach. The guest kernel's
 #      TTY line discipline echoes `^C` and the shell reprompts.
-#   3. The Docker-style chord (`Ctrl+P` `Ctrl+Q`) detaches: `lns`
+#   3. The default chord (`Ctrl+P` `Ctrl+Q`) detaches: `lns`
 #      returns 0 and the run keeps executing in the background. No
 #      SIGHUP is sent to the workload (an earlier revision sent
 #      SIGHUP and reported 129 — terminate-and-exit, not detach).
@@ -36,6 +36,7 @@ if {![file executable $wrapper]} {
 
 # A plain image REF is refused, so author a throwaway sandbox definition over the e2e suite's rate-limit-safe alpine mirror.
 set project [exec mktemp -d]
+set run_name "interactive-smoke-[pid]"
 set def [open "$project/lns.yaml" w]
 puts $def "apiVersion: lns.run/v1"
 puts $def "kind: sandbox"
@@ -44,7 +45,7 @@ puts $def "spec:"
 puts $def "  image: public.ecr.aws/docker/library/alpine:3.20"
 close $def
 
-spawn $wrapper run --name detach-smoke $project -- sh
+spawn $wrapper run --name $run_name $project -- sh
 
 # --- (1) shell comes up and echoes a command ------------------------------
 
@@ -55,9 +56,12 @@ expect {
     }
     -re {[/~] [#$] }
 }
+expect -exact "\033\[6n"
+send "\033\[1;1R"
+after 250
 
 set timeout 15
-send "echo hi\r"
+send "echo hi\n"
 expect {
     timeout {
         puts "\nFAIL: `echo hi` produced no output on its own line"
@@ -109,11 +113,11 @@ if {$os_error_flag != 0} {
     puts "\nFAIL: OS error after chord, errno $value"
     exit 1
 }
-# Docker-style detach: the chord makes the CLI return 0 and leaves the
+# Detaching makes the CLI return 0 and leaves the
 # run executing in the background. No SIGHUP is sent to the workload —
 # a regression to terminate-and-exit would surface here as 129.
 if {$value != 0} {
-    puts "\nFAIL: expected exit 0 after docker-style detach, got $value"
+    puts "\nFAIL: expected exit 0 after detach, got $value"
     exit 1
 }
 
@@ -126,11 +130,94 @@ expect {
         puts "\nFAIL: `lns ps` did not list the detached run"
         exit 1
     }
-    "detach-smoke"
+    $run_name
 }
 catch wait
 
-spawn $wrapper sandbox attach detach-smoke
+# --- (5) concurrent interactive exec sessions stay isolated -------------
+
+spawn $wrapper exec -it $run_name sh
+set exec_one $spawn_id
+expect -i $exec_one {
+    timeout {
+        puts "\nFAIL: first exec did not present a shell prompt"
+        exit 1
+    }
+    -re {[/~] [#$] }
+}
+expect -i $exec_one -exact "\033\[6n"
+send -i $exec_one "\033\[1;1R"
+after 250
+
+send -i $exec_one "echo exec-one\n"
+expect -i $exec_one {
+    timeout {
+        puts "\nFAIL: first exec did not accept terminal input"
+        exit 1
+    }
+    -re "\nexec-one\r"
+}
+expect -i $exec_one -re {[/~] [#$] }
+
+send -i $exec_one "\x03"
+expect -i $exec_one {
+    timeout {
+        puts "\nFAIL: Ctrl+C did not reach the first exec PTY"
+        exit 1
+    }
+    -exact "^C"
+}
+expect -i $exec_one -re {[/~] [#$] }
+
+spawn $wrapper exec -it $run_name sh
+set exec_two $spawn_id
+expect -i $exec_two {
+    timeout {
+        puts "\nFAIL: second exec did not present a shell prompt"
+        exit 1
+    }
+    -re {[/~] [#$] }
+}
+expect -i $exec_two -exact "\033\[6n"
+send -i $exec_two "\033\[1;1R"
+after 250
+
+send -i $exec_one "\x10\x11"
+expect -i $exec_one eof
+set exec_one_wait [wait -i $exec_one]
+if {[lindex $exec_one_wait 3] != 0} {
+    puts "\nFAIL: first exec detach did not return 0"
+    exit 1
+}
+
+send -i $exec_two "echo exec-two-alive\n"
+expect -i $exec_two {
+    timeout {
+        puts "\nFAIL: detaching the first exec disrupted the second"
+        exit 1
+    }
+    -re "\nexec-two-alive\r"
+}
+expect -i $exec_two -re {[/~] [#$] }
+send -i $exec_two "\x10\x11"
+expect -i $exec_two eof
+set exec_two_wait [wait -i $exec_two]
+if {[lindex $exec_two_wait 3] != 0} {
+    puts "\nFAIL: second exec detach did not return 0"
+    exit 1
+}
+
+spawn $wrapper ps
+expect {
+    timeout {
+        puts "\nFAIL: exec detach stopped the primary run"
+        exit 1
+    }
+    $run_name
+}
+catch wait
+
+spawn $wrapper sandbox attach $run_name
 # Attach follows from the tail (no history replay), so an idle shell shows nothing until a keystroke provokes a fresh prompt.
 send "\r"
 expect {
@@ -140,7 +227,7 @@ expect {
     }
     -re {[/~] [#$] }
 }
-send "echo rejoined\r"
+send "echo rejoined\n"
 expect {
     timeout {
         puts "\nFAIL: re-attached shell produced no output"
@@ -153,9 +240,21 @@ send "\x10\x11"
 expect eof
 catch wait
 
-spawn $wrapper sandbox kill detach-smoke
+spawn $wrapper sandbox stop $run_name --timeout 1
 expect eof
-catch wait
+set stop_wait [wait]
+if {[lindex $stop_wait 3] != 0} {
+    puts "\nFAIL: stopping the smoke run failed"
+    exit 1
+}
 
-puts "\nPASS: interactive shell behaviors all green (docker-style detach + re-attach confirmed)"
+spawn $wrapper sandbox rm $run_name
+expect eof
+set rm_wait [wait]
+if {[lindex $rm_wait 3] != 0} {
+    puts "\nFAIL: removing the stopped smoke run failed"
+    exit 1
+}
+
+puts "\nPASS: primary and concurrent exec terminal behaviors all green"
 exit 0
