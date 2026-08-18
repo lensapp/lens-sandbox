@@ -1537,18 +1537,30 @@ fn exec_until(world: &mut E2eWorld, cmd_line: &str, needle: &str) -> Result<(), 
     }
 }
 
+fn logs_prove(world: &mut E2eWorld, needle: &str) -> Result<(), String> {
+    logs_until(world, &["logs"], needle)?;
+    let result = world.result.as_ref().expect("logs ran");
+    if result.stdout.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the fixture write never landed (no {needle:?} in logs): {result:?}"
+        ))
+    }
+}
+
 #[given("a run in which a file was written outside any mount")]
 fn a_run_with_a_marker_outside_any_mount(world: &mut E2eWorld) -> Result<(), String> {
     crate::steps::service::start_service(world);
     run_microvm(
         world,
         vec!["-d".into()],
-        "/bin/sh -c 'echo preserved-across-restart > /marker; echo booted; /.lens/guest-tools/bin/busybox sleep 300'",
+        "/bin/sh -c 'echo preserved-across-restart > /home/sandbox/marker && echo wrote:$(cat /home/sandbox/marker); /.lens/guest-tools/bin/busybox sleep 300'",
     );
     if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
-    logs_until(world, &["logs"], "booted")
+    logs_prove(world, "wrote:preserved-across-restart")
 }
 
 #[given("the run was stopped")]
@@ -1556,7 +1568,9 @@ fn the_run_was_stopped(world: &mut E2eWorld) -> Result<(), String> {
     let id = last_run(world)?;
     let result = world.run_with_service_env(&["stop", &id]);
     if result.exit_code != 0 {
-        return Err(format!("the run has to stop before it can start: {result:?}"));
+        return Err(format!(
+            "the run has to stop before it can start: {result:?}"
+        ));
     }
     world.result = Some(result);
     Ok(())
@@ -1568,12 +1582,12 @@ fn a_stopped_run_that_wrote_tmp(world: &mut E2eWorld) -> Result<(), String> {
     run_microvm(
         world,
         vec!["-d".into()],
-        "/bin/sh -c 'echo boot >> /entrylog; /.lens/guest-tools/bin/busybox touch /tmp/leftover; echo booted; /.lens/guest-tools/bin/busybox sleep 300'",
+        "/bin/sh -c 'test -f /home/sandbox/entrylog || /.lens/guest-tools/bin/busybox touch /tmp/leftover; echo boot >> /home/sandbox/entrylog && echo staged:$(/.lens/guest-tools/bin/busybox wc -l < /home/sandbox/entrylog); /.lens/guest-tools/bin/busybox sleep 300'",
     );
     if let Some(id) = world.last_run_id.clone() {
         world.detached_runs.push(id);
     }
-    logs_until(world, &["logs"], "booted")?;
+    logs_prove(world, "staged:")?;
     the_run_was_stopped(world)
 }
 
@@ -1586,7 +1600,11 @@ fn i_start_it(world: &mut E2eWorld) -> Result<(), String> {
 
 #[then("the file is present with its contents")]
 fn the_file_is_present(world: &mut E2eWorld) -> Result<(), String> {
-    exec_until(world, "/bin/sh -c 'cat /marker'", "preserved-across-restart")?;
+    exec_until(
+        world,
+        "/bin/sh -c 'cat /home/sandbox/marker'",
+        "preserved-across-restart",
+    )?;
     let result = world.result.as_ref().expect("exec ran");
     if result.stdout.contains("preserved-across-restart") {
         Ok(())
@@ -1599,7 +1617,11 @@ fn the_file_is_present(world: &mut E2eWorld) -> Result<(), String> {
 
 #[then("the workload's entrypoint runs again from the start")]
 fn the_entrypoint_ran_again(world: &mut E2eWorld) -> Result<(), String> {
-    exec_until(world, "/bin/sh -c 'cat /entrylog'", "boot\nboot")?;
+    exec_until(
+        world,
+        "/bin/sh -c 'cat /home/sandbox/entrylog'",
+        "boot\nboot",
+    )?;
     let result = world.result.as_ref().expect("exec ran");
     if result.stdout.matches("boot").count() >= 2 {
         Ok(())
