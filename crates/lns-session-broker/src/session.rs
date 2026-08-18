@@ -34,7 +34,7 @@ pub(crate) struct WorkloadSpec {
 const ROOT_UID: u32 = 0;
 
 /// What the broker owes a forked workload before `execvp`; `Inherit` keeps the broker's root and full capabilities.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Confinement {
     Inherit,
     CapsOnly,
@@ -109,6 +109,14 @@ pub(crate) enum LoopAction {
     Signal(i32),
     Detach,
     Stop,
+}
+
+/// A confined session exists only for its host client, so a vanished stream hangs its child up; the inherited primary outlives any one connection.
+pub(crate) fn eof_action(confinement: &Confinement) -> LoopAction {
+    match confinement {
+        Confinement::Inherit => LoopAction::Stop,
+        Confinement::CapsOnly | Confinement::Setuid { .. } => LoopAction::Detach,
+    }
 }
 
 pub(crate) fn dispatch_frame(frame: ClientFrame) -> LoopAction {
@@ -251,6 +259,23 @@ mod tests {
     fn validate_open_session_rejects_a_non_opener() {
         let err = validate_open_session(&ClientFrame::Detach).unwrap_err();
         assert!(matches!(&err, SessionError::Protocol(s) if s.contains("expected OpenSession")));
+    }
+
+    #[test]
+    fn host_eof_hangs_up_a_confined_sessions_child() {
+        assert_eq!(eof_action(&Confinement::CapsOnly), LoopAction::Detach);
+        assert_eq!(
+            eof_action(&Confinement::Setuid {
+                uid: 1000,
+                gid: 1000
+            }),
+            LoopAction::Detach
+        );
+    }
+
+    #[test]
+    fn host_eof_leaves_an_inherited_sessions_workload_running() {
+        assert_eq!(eof_action(&Confinement::Inherit), LoopAction::Stop);
     }
 
     #[test]
