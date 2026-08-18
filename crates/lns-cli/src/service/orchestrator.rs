@@ -2210,7 +2210,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(code, 0, "a docker-style detach returns 0 at once");
+        assert_eq!(code, 0, "detaching returns 0 at once");
         assert!(
             captured.is_empty(),
             "LeaveRunning must leave the run running, not drain its output"
@@ -2560,7 +2560,7 @@ mod tests {
                 target: primary_target("9".to_string()),
                 bytes: vec![b'p']
             }],
-            "a docker-style detach flushes pending input but never signals the workload"
+            "detaching flushes pending input but never signals the workload"
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());

@@ -1,5 +1,5 @@
 Feature: interactive exec sessions from the CLI
-  `lns exec` keeps Docker-style explicit stdin and PTY flags while accepting
+  `lns exec` keeps explicit stdin and PTY flags while accepting
   commands without a `--` separator and surfacing inactive-run failures.
 
   @todo
