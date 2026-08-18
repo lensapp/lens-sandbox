@@ -186,32 +186,25 @@ fn write_block(
     let heading = format!("  {label}:");
     let pad = COLUMN.saturating_sub(heading.len()).max(1);
     let value_column = heading.len() + pad;
-    writeln!(
-        s,
-        "{heading}{:pad$}{}{}",
-        "",
-        first.key,
-        if attributed {
-            attribution_of(first)
-        } else {
-            String::new()
-        }
-    )
-    .unwrap();
+    writeln!(s, "{heading}{:pad$}{}", "", entry_line(first, attributed)).unwrap();
     for entry in rest {
-        writeln!(
-            s,
-            "{:value_column$}{}{}",
-            "",
-            entry.key,
-            if attributed {
-                attribution_of(entry)
-            } else {
-                String::new()
-            }
-        )
-        .unwrap();
+        writeln!(s, "{:value_column$}{}", "", entry_line(entry, attributed)).unwrap();
     }
+}
+
+/// One entry as the disclosure reads it: what it decided, the source that decided it, and whatever the entry says about itself.
+fn entry_line(entry: &lns_ipc::SourceContribution, attributed: bool) -> String {
+    let attribution = if attributed {
+        attribution_of(entry)
+    } else {
+        String::new()
+    };
+    let note = entry
+        .note
+        .as_deref()
+        .map(|note| format!("  {note}"))
+        .unwrap_or_default();
+    format!("{}{attribution}{note}", entry.key)
 }
 
 pub fn format_summary(
@@ -779,6 +772,7 @@ mod tests {
             block,
             key: key.to_string(),
             source: source.to_string(),
+            note: None,
             displaced: displaced
                 .iter()
                 .map(|(source, summary)| lns_ipc::DisplacedEntry {
@@ -1106,6 +1100,7 @@ mod tests {
                 block: lns_ipc::ContributionBlock::Egress,
                 key: key.into(),
                 source: "the sandbox".into(),
+                note: None,
                 displaced: Vec::new(),
             })
             .collect();

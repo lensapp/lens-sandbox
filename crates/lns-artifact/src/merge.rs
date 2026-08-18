@@ -33,6 +33,8 @@ pub struct Contribution {
     pub block: Block,
     pub key: String,
     pub source: String,
+    /// What the entry says about itself, when it says anything (§4.2), so the disclosure explains an entry the way its own document does.
+    pub note: Option<String>,
     pub displaced: Vec<Displaced>,
 }
 
@@ -233,6 +235,7 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
             contributions.push(egress_contribution(
                 rule.verdict,
                 &rule.match_pattern,
+                rule.description.as_deref(),
                 source.label,
             ));
         }
@@ -240,6 +243,7 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
             contributions.push(egress_contribution(
                 rule.verdict,
                 &rule.match_pattern,
+                rule.description.as_deref(),
                 source.label,
             ));
         }
@@ -285,22 +289,30 @@ pub fn path_filesets(spec: &SandboxSpec) -> impl Iterator<Item = (usize, &Filese
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
 pub fn own_egress(spec: &SandboxSpec) -> Vec<Contribution> {
-    let http = spec.egress.http.iter();
-    let tcp = spec
-        .egress
-        .tcp
-        .iter()
-        .map(|rule| (rule.verdict, &rule.match_pattern));
-    http.map(|rule| (rule.verdict, &rule.match_pattern))
-        .chain(tcp)
-        .map(|(verdict, pattern)| egress_contribution(verdict, pattern, ROOT_LABEL))
-        .collect()
+    let http = spec.egress.http.iter().map(|rule| {
+        egress_contribution(
+            rule.verdict,
+            &rule.match_pattern,
+            rule.description.as_deref(),
+            ROOT_LABEL,
+        )
+    });
+    let tcp = spec.egress.tcp.iter().map(|rule| {
+        egress_contribution(
+            rule.verdict,
+            &rule.match_pattern,
+            rule.description.as_deref(),
+            ROOT_LABEL,
+        )
+    });
+    http.chain(tcp).collect()
 }
 
 /// A rule is its verdict and its pattern together, because the verdict is the half that decides and two sources may disagree about one destination.
 fn egress_contribution(
     verdict: lns_policy::Verdict,
     match_pattern: &str,
+    note: Option<&str>,
     source: &str,
 ) -> Contribution {
     let verdict = match verdict {
@@ -311,6 +323,7 @@ fn egress_contribution(
         block: Block::Egress,
         key: format!("{verdict} {match_pattern}"),
         source: source.to_string(),
+        note: note.map(str::to_string),
         displaced: Vec::new(),
     }
 }
@@ -416,6 +429,7 @@ impl<T> Won<T> {
             block,
             key: self.key.clone(),
             source: self.source.clone(),
+            note: None,
             displaced: self.displaced.clone(),
         }
     }
@@ -829,6 +843,43 @@ mod tests {
         assert_eq!(
             found.source, "obs",
             "a credential the sandbox never asked for is exactly what a reader has to be able to trace to its mixin"
+        );
+    }
+
+    const EXPLAINED_EGRESS: &str = r#"{"egress":{"http":[{"match":"api.base.example","verdict":"allow","description":"approved during a run"}],"tcp":[{"match":"db.base.example:5432","verdict":"allow","description":"the project database"}]}}"#;
+
+    #[test]
+    fn an_egress_entry_carries_what_its_own_rule_says_about_itself() {
+        // §4.2 shows a description wherever the entry is explained, and the disclosure before boot is where a reader meets the entry.
+        let owned = sources(&[(ROOT_LABEL, EXPLAINED_EGRESS)]);
+        let noted = |key: &str| {
+            contribution(&owned, Block::Egress, key)
+                .note
+                .unwrap_or_default()
+        };
+        assert_eq!(noted("allow api.base.example"), "approved during a run");
+        assert_eq!(noted("allow db.base.example:5432"), "the project database");
+    }
+
+    #[test]
+    fn a_document_that_layers_on_nothing_still_carries_what_its_rules_explain() {
+        // The uncomposed run reports through own_egress rather than the merge, so an explanation dropped here is one no reader of that run ever sees.
+        let explained: Vec<(String, Option<String>)> = own_egress(&spec(EXPLAINED_EGRESS))
+            .into_iter()
+            .map(|c| (c.key, c.note))
+            .collect();
+        assert_eq!(
+            explained,
+            [
+                (
+                    "allow api.base.example".to_string(),
+                    Some("approved during a run".to_string())
+                ),
+                (
+                    "allow db.base.example:5432".to_string(),
+                    Some("the project database".to_string())
+                ),
+            ]
         );
     }
 

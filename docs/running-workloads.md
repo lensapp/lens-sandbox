@@ -650,7 +650,7 @@ produced, which an uncomposed run has no second author to attribute:
   Mixins:    /work/mixins/debug-tools, lns-local-mixin.yaml
   Volume:    cache → /home/agent/.cache  [from /work/mixins/debug-tools]
   Tools:     node@22  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…, replaced node@20 from the sandbox]
-  Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]
+  Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]  approved during a run
              allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
              deny docs.vendor.example  [from the sandbox]
   Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
@@ -661,6 +661,10 @@ named too — and because it is the last one, its rules read first: the `allow`
 above is what the gate reaches, and the `deny` it overruled is still listed under
 it. A run in a directory that decided nothing prints what it always has: one
 author, nothing to attribute.
+
+An entry that says anything about itself says it here too, after the source that
+decided it: the note an approval writes, or the one you gave a rule yourself with
+`lns policy allow --description`.
 
 `lns inspect <REF> --mixin <REF>` shows the same composition without starting a
 run.
