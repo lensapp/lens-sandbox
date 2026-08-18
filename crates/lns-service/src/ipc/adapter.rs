@@ -150,7 +150,9 @@ async fn handle_connection(
     match request {
         Request::RunImage(args) => handle_run(stream, *args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
-        Request::StartRun { run } => handle_start(stream, run).await,
+        Request::StartRun { run, attach, stdin } => {
+            handle_start(stream, run, super::StartOptions { attach, stdin }).await
+        }
         Request::RunLogs { run, follow } => handle_logs(stream, run, follow).await,
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
@@ -160,8 +162,12 @@ async fn handle_connection(
     }
 }
 
-async fn handle_start(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
-    super::start_stopped_run(&mut stream, &run, &RealStartHost).await
+async fn handle_start(
+    mut stream: UnixStream,
+    run: String,
+    options: super::StartOptions,
+) -> anyhow::Result<()> {
+    super::start_stopped_run(&mut stream, &run, &RealStartHost, options).await
 }
 
 struct RealStartHost;
@@ -221,12 +227,15 @@ impl super::StartHost for RealStartHost {
         &self,
         stream: &mut S,
         record: crate::run_record::RunRecord,
+        options: super::StartOptions,
     ) -> anyhow::Result<()>
     where
         S: tokio::io::AsyncReadExt + AsyncWriteExt + Unpin + Send,
     {
         let run_id = record.run_id.clone();
-        let args = record.args.clone();
+        let mut args = record.args.clone();
+        args.detached = !options.attach;
+        args.stdin = options.attach && options.stdin;
         let mode = crate::run::LaunchMode::Restart {
             pinned_descriptor_sha256: record.descriptor_sha256.clone(),
         };
