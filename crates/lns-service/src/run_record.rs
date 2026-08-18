@@ -204,6 +204,20 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn the_fake_fs_honours_remove_file_for_its_consumers() {
+        let fs = FakeFs::empty();
+        fs.stash(PathBuf::from("/cache/runs/aa01/record.json"), b"x".to_vec());
+        fs.remove_file(Path::new("/cache/runs/aa01/record.json"))
+            .await
+            .unwrap();
+        assert!(
+            fs.remove_file(Path::new("/cache/runs/aa01/record.json"))
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn pinned_digests_collects_every_layer_a_recorded_run_boots_from() {
         let mut a = sample_record("aa01");

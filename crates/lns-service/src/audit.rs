@@ -544,6 +544,19 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
+    fn record_run_exited_and_restarted_write_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        record_run_exited("aa137", "calm-finch", 137, &CLOCK).unwrap();
+        record_run_restarted("aa137", "calm-finch", "alpine:latest", &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa137").unwrap()).unwrap();
+        assert!(content.contains("\"lns_killed\":true"), "{content}");
+        assert!(content.contains("\"lns_kind\":\"restart\""), "{content}");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
     fn record_sandbox_run_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());

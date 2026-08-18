@@ -176,6 +176,15 @@ mod tests {
     }
 
     #[test]
+    fn remove_stale_surfaces_a_socket_it_cannot_unlink() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = super::SocketLayout::for_run_dir(d.path());
+        std::fs::create_dir(&layout.vsock).unwrap();
+        std::fs::write(layout.vsock.join("occupant"), b"x").unwrap();
+        assert!(layout.remove_stale().is_err());
+    }
+
+    #[test]
     fn remove_stale_on_a_clean_run_dir_is_a_no_op() {
         let d = tempfile::TempDir::new().unwrap();
         let layout = super::SocketLayout::for_run_dir(d.path());

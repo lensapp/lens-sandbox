@@ -236,6 +236,18 @@ pub fn resolve(handle: &str) -> Result<String, String> {
     resolve_in(g.as_ref(), handle)
 }
 
+/// Resolve a handle and read its status under one lock, so the answer can never name a run that vanished in between.
+pub fn resolve_status(handle: &str) -> Result<(String, RunStatus), String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    let id = resolve_in(g.as_ref(), handle)?;
+    let status = g
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .map(|e| e.status())
+        .expect("resolve_in only returns ids present in the map");
+    Ok((id, status))
+}
+
 fn resolve_in(map: Option<&HashMap<String, RunEntry>>, handle: &str) -> Result<String, String> {
     if handle.is_empty() {
         return Err(format!("no such run: {handle}"));
@@ -488,15 +500,16 @@ pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
 pub fn cancel(run_id: &str) -> bool {
     let removed = {
         let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-        let Some(map) = g.as_mut() else {
-            return false;
-        };
-        match map.get(run_id) {
-            Some(RunEntry::Live(_)) => map.remove(run_id),
-            _ => return false,
-        }
+        g.as_mut().and_then(|map| match map.remove(run_id) {
+            Some(RunEntry::Live(handle)) => Some(handle),
+            Some(stopped) => {
+                map.insert(run_id.to_string(), stopped);
+                None
+            }
+            None => None,
+        })
     };
-    let Some(RunEntry::Live(handle)) = removed else {
+    let Some(handle) = removed else {
         return false;
     };
     let _ = handle.cancel_tx.send(130);
@@ -1625,6 +1638,85 @@ mod tests {
                 .unwrap_err()
                 .contains("no such run")
         );
+    }
+
+    #[test]
+    fn stopped_names_in_an_uninitialised_registry_is_empty() {
+        assert!(stopped_names_in(None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_can_be_renamed_and_inspected_but_not_mutated_live() {
+        let mut map = HashMap::new();
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun {
+                record: stopped_record("aa07", "reviewer"),
+            }),
+        );
+        rename_in(Some(&mut map), "reviewer", "auditor").unwrap();
+        assert_eq!(map.get("aa07").unwrap().name(), "auditor");
+        assert!(map.get_mut("aa07").unwrap().as_live_mut().is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn inspect_of_a_stopped_run_reports_its_recorded_launch_config() {
+        let id = allocate_run_id();
+        let mut record = stopped_record(&id, &format!("rev-{id}"));
+        record.args.cpus = 7;
+        register_stopped(StoppedRun { record });
+        let details = inspect(&id).expect("a stopped run is inspectable");
+        assert_eq!(details.config.cpus, 7);
+        assert_eq!(details.summary.status, RunStatus::Exited { code: 3 });
+        set_connector_with_environment(
+            &id,
+            std::sync::Arc::new(StubTransport),
+            exec_environment_fixture(),
+        );
+        assert!(
+            connector(&id).is_none(),
+            "a stopped run has no live handle to hang a connector on"
+        );
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn resolve_status_answers_handle_and_state_in_one_step() {
+        let id = allocate_run_id();
+        register_stopped(StoppedRun {
+            record: stopped_record(&id, &format!("rev-{id}")),
+        });
+        let (resolved, status) = resolve_status(&format!("rev-{id}")).unwrap();
+        assert_eq!(resolved, id);
+        assert_eq!(status, RunStatus::Exited { code: 3 });
+        deregister(&id);
+        assert!(resolve_status(&id).unwrap_err().contains("no such run"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn rebuild_from_records_populates_the_live_registry() {
+        let id = allocate_run_id();
+        rebuild_from_records(vec![stopped_record(&id, &format!("rev-{id}"))]);
+        assert_eq!(resolve(&format!("rev-{id}")), Ok(id.clone()));
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn cancel_of_a_stopped_run_is_a_no_op_that_keeps_the_entry() {
+        let id = allocate_run_id();
+        register_stopped(StoppedRun {
+            record: stopped_record(&id, &format!("rev-{id}")),
+        });
+        assert!(!cancel(&id));
+        assert!(
+            status(&id).is_some(),
+            "cancel must not remove a stopped run"
+        );
+        deregister(&id);
     }
 
     #[test]
