@@ -1120,6 +1120,39 @@ mod tests {
         assert_eq!(outcome, PumpOutcome::ChannelClosed);
     }
 
+    struct TerminationProbe(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for TerminationProbe {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_failure_still_tears_the_exec_session_down() {
+        let mut stream = ExecPumpStream { read_error: false };
+        let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+        frame_tx
+            .send(WireFrame::Stdout(b"exec-out".to_vec()))
+            .await
+            .unwrap();
+        let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
+        let session_task = tokio::spawn(async move {
+            let _probe = TerminationProbe(Some(terminated_tx));
+            std::future::pending::<()>().await
+        });
+
+        drive_exec_stream(&mut stream, "run-w", "exec-w", session_task, &mut frame_rx)
+            .await
+            .unwrap();
+
+        terminated_rx
+            .await
+            .expect("a failed client write must still cancel the guest session task");
+    }
+
     #[tokio::test]
     async fn exec_pump_surfaces_a_write_error() {
         let mut stream = ExecPumpStream { read_error: false };
