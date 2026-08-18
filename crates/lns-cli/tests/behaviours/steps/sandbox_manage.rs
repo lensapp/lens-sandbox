@@ -27,6 +27,23 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
     });
 }
 
+#[given(regex = r#"^the daemon refuses to remove the running run "([^"]+)"$"#)]
+fn daemon_refuses_running_removal(w: &mut BehaviourWorld, name: String) {
+    w.sandbox.response = Some(Response::Error {
+        message: format!(
+            "run {name} is still running; stop it first with `lns stop {name}` or force with `lns rm -f {name}`"
+        ),
+    });
+}
+
+#[given("a cached sandbox not used by any run")]
+fn a_cached_sandbox_not_used(w: &mut BehaviourWorld) {
+    w.sandbox.remove_image_response = Some(Response::ImageRemoved {
+        reference: "registry.example.test/idle-sandbox:1".into(),
+        reclaimed_bytes: 1024,
+    });
+}
+
 #[given(regex = r#"^the reference "([^"]+)" resolves to a cached sandbox$"#)]
 fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.response = Some(Response::Error {
@@ -157,4 +174,27 @@ fn reports_one_cached_sandbox(w: &mut BehaviourWorld, reference: String) {
             in_use_by: None,
         }],
     });
+}
+
+#[cucumber::when(regex = r#"^I run "lns rmi" with its reference$"#)]
+async fn i_run_lns_rmi(w: &mut BehaviourWorld) {
+    crate::steps::sandbox_cli::drive_sandbox_command(w, "rmi registry.example.test/idle-sandbox:1")
+        .await;
+}
+
+#[then(regex = r#"^it is removed exactly as "lns rm <ref>" did before the rename$"#)]
+fn removed_as_rm_did(w: &mut BehaviourWorld) -> Result<(), String> {
+    let run = w.result.as_ref().ok_or("no invocation ran")?;
+    if run.exit_code == 0
+        && run
+            .output
+            .contains("removed registry.example.test/idle-sandbox:1")
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "the rename moved the verb, not the behaviour; got exit {} output {:?}",
+            run.exit_code, run.output
+        ))
+    }
 }

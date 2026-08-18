@@ -55,6 +55,8 @@ pub enum SandboxCommand {
     Kill(KillArgs),
     #[command(about = "Stop a run gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
     Stop(SandboxStopArgs),
+    #[command(about = "Start a stopped run again on its preserved writable layer.")]
+    Start(SandboxStartArgs),
     #[command(about = "Print a run's captured output; `-f` streams until the run exits.")]
     Logs(SandboxLogsArgs),
     #[command(about = "Re-attach to a running run's output (detach chord to leave again).")]
@@ -64,11 +66,13 @@ pub enum SandboxCommand {
     )]
     Inspect(SandboxInspectArgs),
     #[command(
-        about = "Remove a cached sandbox and free its now-unreferenced layers; refuses a running one."
+        about = "Remove a stopped run — its record and writable layer; `-f` forces a running one."
     )]
     Rm(SandboxRmArgs),
+    #[command(about = "Remove a cached sandbox and free its now-unreferenced layers.")]
+    Rmi(SandboxRmiArgs),
     #[command(
-        about = "Remove every cached sandbox not held by a running one and reclaim the provisioned tool cache when no sandbox is live."
+        about = "Remove every stopped run, every cached sandbox not held by a running one, and reclaim the provisioned tool cache when no sandbox is live."
     )]
     Prune(SandboxPruneArgs),
 }
@@ -221,11 +225,48 @@ pub struct SandboxInspectArgs {
 
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
-    #[arg(
-        value_name = "REF",
-        help = "Cached sandbox reference (or a running sandbox's id/name, which is refused)."
-    )]
+    #[arg(value_name = "RUN", help = "Stopped run id or name to remove.")]
     pub run: String,
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Force: kill a running run, then remove it."
+    )]
+    pub force: bool,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxRmiArgs {
+    #[arg(value_name = "REF", help = "Cached sandbox reference to remove.")]
+    pub reference: String,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxStartArgs {
+    #[arg(value_name = "RUN", help = "Stopped run id or name to start again.")]
+    pub run: String,
+    #[arg(
+        short = 'a',
+        long,
+        default_value_t = false,
+        help = "Attach to the run's output and adopt its exit code."
+    )]
+    pub attach: bool,
+    #[arg(
+        short = 'i',
+        long,
+        default_value_t = false,
+        help = "With -a: forward stdin to the run."
+    )]
+    pub interactive: bool,
+    #[arg(
+        long,
+        default_value = "ctrl-p,ctrl-q",
+        value_parser = parse_detach_keys_arg,
+        help = "With -a: detach chord; on match the CLI detaches, leaving the run running."
+    )]
+    pub detach_keys: DetachChord,
 }
 
 #[derive(clap::Args)]
@@ -261,7 +302,7 @@ pub fn augment(app: clap::Command) -> clap::Command {
 fn verb_owns_terminal(sub: &clap::ArgMatches) -> bool {
     matches!(
         sub.subcommand_name(),
-        Some("run" | "exec" | "logs" | "attach")
+        Some("run" | "exec" | "logs" | "attach" | "start")
     )
 }
 
@@ -352,7 +393,24 @@ shortcut_spec!(
     SandboxRmArgs,
     "rm",
     real::run_rm,
-    "Remove a sandbox (shortcut for `lns sandbox rm`)."
+    "Remove a stopped run (shortcut for `lns sandbox rm`)."
+);
+shortcut_spec!(
+    augment_rmi,
+    RMI_SPEC,
+    SandboxRmiArgs,
+    "rmi",
+    real::run_rmi,
+    "Remove a cached sandbox (shortcut for `lns sandbox rmi`)."
+);
+shortcut_spec!(
+    augment_start,
+    START_SPEC,
+    SandboxStartArgs,
+    "start",
+    real::run_start,
+    "Start a stopped run again (shortcut for `lns sandbox start`).",
+    crate::command::always_owns_terminal
 );
 shortcut_spec!(
     augment_inspect,
@@ -450,6 +508,7 @@ where
         SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
+        SandboxCommand::Start(args) => start(svc, args, term, out, stdout, stderr).await,
         SandboxCommand::Inspect(args) => {
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
@@ -459,6 +518,7 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
+        SandboxCommand::Rmi(args) => remove_cached(svc, &args.reference, out).await,
         SandboxCommand::Prune(args) => prune(svc, args, out).await,
     }
 }
@@ -779,50 +839,61 @@ async fn rm<W: std::io::Write>(
     out: &mut W,
 ) -> Result<i32> {
     match svc
-        .one_shot(Request::InspectRun {
+        .one_shot(Request::RemoveRun {
             run: args.run.clone(),
+            force: args.force,
         })
         .await?
     {
-        Response::RunInspect { details }
-            if matches!(details.summary.status, lns_ipc::RunStatus::Running) =>
-        {
-            bail!(
-                "{} is a running sandbox; stop it first with `lns stop {}`",
-                args.run,
-                args.run
-            )
-        }
-        // An exited run is a spent record.
-        Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
-        // A reference the service knows no run for is a cached sandbox; any other error is a real failure, not a miss.
-        Response::Error { message } if is_unknown_run(&message) => {
-            remove_cached(svc, &args.run, out).await
+        Response::Acknowledged => {
+            writeln!(out, "removed run {}", args.run)?;
+            Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
 
-async fn remove_run<W: std::io::Write>(
-    svc: &impl SandboxService,
-    run: &str,
+async fn start<S, W, O, E>(
+    svc: &S,
+    args: &SandboxStartArgs,
+    term: TermInfo,
     out: &mut W,
-) -> Result<i32> {
-    match svc
-        .one_shot(Request::RemoveRun {
-            run: run.to_string(),
-            force: false,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<i32>
+where
+    S: SandboxService,
+    W: std::io::Write,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
+{
+    let mut stream = svc
+        .open_stream(Request::StartRun {
+            run: args.run.clone(),
+            attach: args.attach,
+            stdin: args.interactive,
         })
-        .await?
-    {
-        Response::Acknowledged => {
-            writeln!(out, "removed run {run}")?;
-            Ok(0)
-        }
-        Response::Error { message } => bail!("daemon error: {message}"),
-        other => bail!("unexpected response from daemon: {other:?}"),
+        .await?;
+    let run_id = expect_run_started(&mut stream).await?;
+    if !args.attach {
+        writeln!(out, "{}", run_label(&args.run))?;
+        return Ok(0);
     }
+    crate::service::drive_attached_session_with_writers(
+        stream,
+        svc.aux_socket(),
+        run_id,
+        term.stdin_is_tty,
+        term.stdout_is_terminal,
+        args.detach_keys.0.clone(),
+        crate::service::DetachBehaviour::LeaveRunning,
+        stdout,
+        stderr,
+        false,
+        crate::service::StdinForwarding::of(args.interactive),
+    )
+    .await
 }
 
 async fn remove_cached<W: std::io::Write>(
@@ -860,8 +931,18 @@ async fn prune<W: std::io::Write>(
 ) -> Result<i32> {
     if !args.force {
         bail!(
-            "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
+            "this removes every stopped run, every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
         );
+    }
+    match svc.one_shot(Request::PruneRuns).await? {
+        Response::RunsPruned { mut removed } => {
+            removed.sort_unstable();
+            for run in &removed {
+                writeln!(out, "removed run {run}")?;
+            }
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
     }
     match svc.one_shot(Request::PruneImages).await? {
         Response::ImagesPruned {
@@ -1273,6 +1354,7 @@ mod tests {
         inspect_image_response: Option<Response>,
         remove_image_response: Option<Response>,
         remove_run_response: Option<Response>,
+        prune_runs_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -1285,8 +1367,16 @@ mod tests {
                 inspect_image_response: None,
                 remove_image_response: None,
                 remove_run_response: None,
+                prune_runs_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_prune_runs(response: Response, prune_runs: Response) -> Self {
+            Self {
+                prune_runs_response: Some(prune_runs),
+                ..Self::new(response)
             }
         }
 
@@ -1300,20 +1390,6 @@ mod tests {
         fn with_inspect_image(run_response: Response, image_response: Response) -> Self {
             Self {
                 inspect_image_response: Some(image_response),
-                ..Self::new(run_response)
-            }
-        }
-
-        fn with_remove_image(run_response: Response, remove_response: Response) -> Self {
-            Self {
-                remove_image_response: Some(remove_response),
-                ..Self::new(run_response)
-            }
-        }
-
-        fn with_remove_run(run_response: Response, remove_response: Response) -> Self {
-            Self {
-                remove_run_response: Some(remove_response),
                 ..Self::new(run_response)
             }
         }
@@ -1389,6 +1465,13 @@ mod tests {
                     .remove_run_response
                     .clone()
                     .unwrap_or_else(|| self.response.clone()),
+                Request::PruneRuns => {
+                    self.prune_runs_response
+                        .clone()
+                        .unwrap_or(Response::RunsPruned {
+                            removed: Vec::new(),
+                        })
+                }
                 _ => self.response.clone(),
             };
             self.requests.lock().unwrap().push(request);
@@ -2206,105 +2289,15 @@ mod tests {
         );
     }
 
-    fn running_inspect(status: lns_ipc::RunStatus) -> Response {
-        Response::RunInspect {
-            details: Box::new(RunDetails {
-                summary: lns_ipc::RunSummary {
-                    id: "1a2b3c4d0000000000000000000000aa".into(),
-                    name: "reviewer".into(),
-                    image: "some-image".into(),
-                    command: String::new(),
-                    status,
-                    started: "2026-01-01T00:00:00Z".into(),
-                },
-                config: lns_ipc::RunConfig::default(),
-            }),
-        }
-    }
-
     #[tokio::test]
-    async fn rm_refuses_a_running_sandbox_naming_stop() {
-        let svc = CannedService::new(running_inspect(lns_ipc::RunStatus::Running));
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("running"), "got: {err:#}");
-        assert!(format!("{err:#}").contains("lns stop"), "got: {err:#}");
-    }
-
-    #[tokio::test]
-    async fn rm_removes_a_cached_sandbox_and_reports_freed_layers() {
-        let svc = CannedService::with_remove_image(
-            Response::Error {
-                message: "no such run: hermes:1.4.0".into(),
-            },
-            Response::ImageRemoved {
-                reference: "hermes:1.4.0".into(),
-                reclaimed_bytes: 3 * 1024 * 1024,
-            },
-        );
-        let mut out = Vec::new();
-        let code = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "hermes:1.4.0".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, 0);
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("removed hermes:1.4.0"), "got: {text}");
-        assert!(text.contains("freed 3.0 MiB"), "got: {text}");
-    }
-
-    #[tokio::test]
-    async fn rm_surfaces_a_non_not_found_inspect_error_without_touching_the_cache() {
-        let svc = CannedService::new(Response::Error {
-            message: "daemon busy".into(),
-        });
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("daemon busy"),
-            "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
-        );
-        let requests = svc.requests.lock().unwrap();
-        assert!(
-            !requests
-                .iter()
-                .any(|r| matches!(r, Request::RemoveImage { .. })),
-            "a genuine error must not fall through to the cached-remove path: {requests:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rm_of_an_exited_run_removes_the_spent_run_record() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Acknowledged,
-        );
+    async fn rm_removes_a_run_and_echoes_its_handle() {
+        let svc = CannedService::new(Response::Acknowledged);
         let mut out = Vec::new();
         let code = rm(
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                force: false,
             },
             &mut out,
         )
@@ -2315,109 +2308,138 @@ mod tests {
             String::from_utf8(out)
                 .unwrap()
                 .contains("removed run reviewer"),
-            "an exited run must be dropped via RemoveRun"
         );
         let requests = svc.requests.lock().unwrap();
         assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, Request::RemoveRun { .. })),
-            "rm of an exited run must issue RemoveRun, not RemoveImage: {requests:?}"
+            matches!(
+                requests.as_slice(),
+                [Request::RemoveRun { run, force: false }] if run == "reviewer"
+            ),
+            "rm owns run removal alone — no inspect preflight, no image fallback: {requests:?}"
         );
     }
 
     #[tokio::test]
-    async fn rm_of_an_exited_run_surfaces_the_daemon_error() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Error {
-                message: "run vanished mid-remove".into(),
+    async fn rm_force_asks_the_service_to_kill_first() {
+        let svc = CannedService::new(Response::Acknowledged);
+        let mut out = Vec::new();
+        rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+                force: true,
             },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [Request::RemoveRun { force: true, .. }]
+            ),
+            "-f rides in the request; the service owns the kill: {requests:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn rm_surfaces_the_daemon_refusal_verbatim() {
+        let svc = CannedService::new(Response::Error {
+            message: "run reviewer is still running; stop it first with `lns stop reviewer` or force with `lns rm -f reviewer`".into(),
+        });
         let mut out = Vec::new();
         let err = rm(
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                force: false,
             },
             &mut out,
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("run vanished mid-remove"));
+        assert!(format!("{err:#}").contains("still running"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("-f"), "got: {err:#}");
     }
 
     #[tokio::test]
-    async fn rm_of_an_exited_run_rejects_an_unrelated_remove_response() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Pong,
-        );
+    async fn rmi_removes_a_cached_sandbox_and_reports_freed_layers() {
+        let svc = CannedService::new(Response::ImageRemoved {
+            reference: "hermes:1.4.0".into(),
+            reclaimed_bytes: 3 * 1024 * 1024,
+        });
         let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rm_rejects_an_unrelated_inspect_response() {
-        let svc = CannedService::new(Response::Pong);
-        let mut out = Vec::new();
-        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rm_of_a_cached_sandbox_surfaces_the_daemon_error() {
-        let svc = CannedService::with_remove_image(
-            Response::Error {
-                message: "no such run: ghcr.io/team/x:1".into(),
-            },
-            Response::Error {
-                message: "no such image: ghcr.io/team/x:1".into(),
-            },
-        );
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "ghcr.io/team/x:1".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("no such image"));
+        let code = remove_cached(&svc, "hermes:1.4.0", &mut out).await.unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("removed hermes:1.4.0"), "got: {text}");
+        assert!(text.contains("freed 3.0 MiB"), "got: {text}");
     }
 
     #[tokio::test]
     async fn rm_rejects_an_unrelated_remove_response() {
-        let svc = CannedService::with_remove_image(
-            Response::Error {
-                message: "no such run: reviewer".into(),
-            },
-            Response::Pong,
-        );
+        let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
         let err = rm(
             &svc,
             &SandboxRmArgs {
                 run: "reviewer".into(),
+                force: false,
             },
             &mut out,
         )
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn rmi_surfaces_the_daemon_error() {
+        let svc = CannedService::new(Response::Error {
+            message: "no such image: ghcr.io/team/x:1".into(),
+        });
+        let mut out = Vec::new();
+        let err = remove_cached(&svc, "ghcr.io/team/x:1", &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no such image"));
+    }
+
+    #[tokio::test]
+    async fn rmi_rejects_an_unrelated_remove_response() {
+        let svc = CannedService::new(Response::Pong);
+        let mut out = Vec::new();
+        let err = remove_cached(&svc, "reviewer", &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn prune_sweeps_stopped_runs_before_the_image_cache() {
+        let svc = CannedService::with_prune_runs(
+            Response::ImagesPruned {
+                removed: Vec::new(),
+                reclaimed_bytes: 0,
+            },
+            Response::RunsPruned {
+                removed: vec!["bb02".into(), "aa01".into()],
+            },
+        );
+        let mut out = Vec::new();
+        prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("removed run aa01"), "got: {text}");
+        assert!(text.contains("removed run bb02"), "got: {text}");
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [Request::PruneRuns, Request::PruneImages]
+            ),
+            "runs sweep first, so their pins release before the image sweep: {requests:?}"
+        );
     }
 
     #[tokio::test]

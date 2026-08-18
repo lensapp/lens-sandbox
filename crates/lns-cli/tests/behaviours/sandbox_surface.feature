@@ -70,7 +70,9 @@ Feature: the sandbox is the one noun, on a two-tier surface
       | ps      |             |
       | stop    | 3           |
       | kill    | 3           |
-      | rm      | some-ref    |
+      | rm      | some-run    |
+      | rmi     | some-ref    |
+      | start   | some-run    |
       | inspect | some-ref    |
 
   @todo

@@ -29,7 +29,11 @@ fn split_args(cmd_line: &str) -> Vec<String> {
 }
 
 #[when(regex = r#"^I run "([^"]*)"$"#)]
-fn i_run(world: &mut BehaviourWorld, cmd_line: String) {
+async fn i_run(world: &mut BehaviourWorld, cmd_line: String) {
+    if let Some(rest) = cmd_line.strip_prefix("lns start ") {
+        crate::steps::sandbox_cli::drive_sandbox_command(world, &format!("start {rest}")).await;
+        return;
+    }
     let parsed = split_args(&cmd_line);
     let args: Vec<&str> = parsed.iter().map(String::as_str).collect();
     world.result = Some(run_lns(&args));

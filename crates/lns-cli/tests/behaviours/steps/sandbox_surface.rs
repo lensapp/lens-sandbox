@@ -13,6 +13,8 @@ fn decode_shortcut(argv: &[String]) -> SandboxCommand {
         "stop" => SandboxCommand::Stop(parse_args(argv).expect("stop argv parses")),
         "kill" => SandboxCommand::Kill(parse_args(argv).expect("kill argv parses")),
         "rm" => SandboxCommand::Rm(parse_args(argv).expect("rm argv parses")),
+        "rmi" => SandboxCommand::Rmi(parse_args(argv).expect("rmi argv parses")),
+        "start" => SandboxCommand::Start(parse_args(argv).expect("start argv parses")),
         "inspect" => SandboxCommand::Inspect(parse_args(argv).expect("inspect argv parses")),
         other => panic!("verb {other} is not part of the shortcut outline"),
     }

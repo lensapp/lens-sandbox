@@ -88,6 +88,20 @@ pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'
     })
 }
 
+pub fn run_rmi<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxRmiArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Rmi(args), ctx.input).await
+    })
+}
+
+pub fn run_start<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxStartArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Start(args), ctx.input).await
+    })
+}
+
 pub fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let mut args = super::SandboxInspectArgs::from_arg_matches(matches)?;

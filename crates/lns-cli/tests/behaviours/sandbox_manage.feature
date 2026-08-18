@@ -1,8 +1,8 @@
 Feature: managing cached sandboxes
   A sandbox is either cached or running. The manage verbs list, inspect,
-  remove, prune, and diff cached sandboxes. Sandbox GC owns only the
-  reconstructible cache (artifacts + base-image layers + composefs/content)
-  and never touches a named volume.
+  and diff sandboxes; rmi removes a cached one and rm removes a run.
+  Sandbox GC owns only the reconstructible cache (artifacts + base-image
+  layers + composefs/content) and never touches a named volume.
 
   Scenario: ls lists cached sandboxes
     Given the service reports one cached sandbox "hermes:1.4.0"
@@ -29,15 +29,16 @@ Feature: managing cached sandboxes
     And the output contains "kind: sandbox"
     And the output contains "image"
 
-  Scenario: rm refuses a running sandbox
-    Given the reference "reviewer" resolves to a running sandbox
+  Scenario: rm surfaces the daemon's refusal of a running run
+    Given the daemon refuses to remove the running run "reviewer"
     When the user runs sandbox command "rm reviewer"
     Then the command fails with an exit code other than 0
     And the output contains "running"
+    And the output contains "-f"
 
-  Scenario: rm removes a cached sandbox and frees its now-unreferenced layers
+  Scenario: rmi removes a cached sandbox and frees its now-unreferenced layers
     Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers
-    When the user runs sandbox command "rm hermes:1.4.0"
+    When the user runs sandbox command "rmi hermes:1.4.0"
     Then the exit code is 0
     And the output contains "removed"
     And the output reports reclaimed base-image layers
@@ -64,7 +65,6 @@ Feature: managing cached sandboxes
     Then the exit code is 0
     And the named volume "claude-home" still exists
 
-  @todo
   Scenario: rmi removes a cached reference
     Given a cached sandbox not used by any run
     When I run "lns rmi" with its reference

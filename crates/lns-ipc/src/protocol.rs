@@ -39,6 +39,8 @@ pub enum Request {
     ListRuns,
     StartRun {
         run: String,
+        attach: bool,
+        stdin: bool,
     },
     StopRun {
         run: String,
@@ -1303,6 +1305,8 @@ mod tests {
     fn start_run_survives_a_request_round_trip() {
         let req = Request::StartRun {
             run: "reviewer".into(),
+            attach: true,
+            stdin: true,
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

@@ -1,4 +1,3 @@
-@todo
 Feature: lns start — restart a stopped run from the CLI
   `lns start <RUN>` is the top-level shortcut for `lns sandbox start`.
   Detached by default: it prints the run's handle and exits; -a attaches

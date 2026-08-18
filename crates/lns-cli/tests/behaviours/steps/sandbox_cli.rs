@@ -45,6 +45,13 @@ impl SandboxService for FakeSandboxService {
                 .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
+            Request::PruneRuns => self
+                .response
+                .clone()
+                .filter(|r| matches!(r, Response::RunsPruned { .. }))
+                .or(Some(Response::RunsPruned {
+                    removed: Vec::new(),
+                })),
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);

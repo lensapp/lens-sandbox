@@ -28,6 +28,13 @@ pub trait RunHost {
         W: AsyncWriteExt + Unpin + Send;
 }
 
+/// How the client wants to sit on the restarted run: watching it, feeding it, or neither.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StartOptions {
+    pub attach: bool,
+    pub stdin: bool,
+}
+
 /// What restarting a stopped run needs from the service: its record, the conflicts it fails closed on, and the boot itself.
 pub trait StartHost {
     fn record(
@@ -44,13 +51,19 @@ pub trait StartHost {
         &self,
         stream: &mut S,
         record: crate::run_record::RunRecord,
+        options: StartOptions,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin + Send;
 }
 
 /// Serve one `StartRun` exchange. A running run answers `RunStarted` unchanged; a stopped run fails closed on any conflict before anything boots, so a refusal leaves its stopped state untouched.
-pub async fn start_stopped_run<S, H>(stream: &mut S, run: &str, host: &H) -> anyhow::Result<()>
+pub async fn start_stopped_run<S, H>(
+    stream: &mut S,
+    run: &str,
+    host: &H,
+    options: StartOptions,
+) -> anyhow::Result<()>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
     H: StartHost,
@@ -77,7 +90,7 @@ where
                 let _ = write_error(stream, format!("{e:#}")).await;
                 return Ok(());
             }
-            host.serve(stream, record).await
+            host.serve(stream, record, options).await
         }
         None => {
             let _ = write_error(stream, no_startable_run(run)).await;
@@ -1789,7 +1802,15 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Request::StartRun must be dispatched via handle_start")]
     async fn start_run_via_handle_request_panics() {
-        let _ = handle_request(&Request::StartRun { run: "1".into() }, Instant::now()).await;
+        let _ = handle_request(
+            &Request::StartRun {
+                run: "1".into(),
+                attach: false,
+                stdin: false,
+            },
+            Instant::now(),
+        )
+        .await;
     }
 
     struct ScriptedStartHost {
@@ -1812,6 +1833,7 @@ mod tests {
             &self,
             _stream: &mut S,
             _record: crate::run_record::RunRecord,
+            _options: StartOptions,
         ) -> anyhow::Result<()>
         where
             S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
@@ -1823,7 +1845,7 @@ mod tests {
 
     async fn drive_start_stopped(host: &ScriptedStartHost, handle: &str) -> Vec<Response> {
         let (mut client, mut server) = tokio::io::duplex(64 * 1024);
-        start_stopped_run(&mut server, handle, host)
+        start_stopped_run(&mut server, handle, host, StartOptions::default())
             .await
             .expect("a refusal is an answer, not a transport failure");
         drop(server);
