@@ -155,14 +155,6 @@ fn first_exec_disconnects(world: &mut BehaviourWorld) {
     ));
 }
 
-#[when("the user execs a non-interactive command that writes to stdout and stderr")]
-fn user_execs_noninteractive(world: &mut BehaviourWorld) {
-    world.exec.stdout_returned = true;
-    world.exec.stderr_returned = true;
-    world.exec.exit_status_returned = true;
-    world.exec.logs_unchanged = true;
-}
-
 #[then("the user receives a live shell prompt")]
 fn live_shell_prompt(world: &mut BehaviourWorld) {
     assert!(world.exec.first_target.is_some());
@@ -271,19 +263,4 @@ fn first_exec_cancelled(world: &mut BehaviourWorld) {
         )
         .is_none()
     );
-}
-
-#[then("both output streams are returned")]
-fn output_streams_returned(world: &mut BehaviourWorld) {
-    assert!(world.exec.stdout_returned && world.exec.stderr_returned);
-}
-
-#[then("the CLI returns the command's exit status")]
-fn cli_returns_exit_status(world: &mut BehaviourWorld) {
-    assert!(world.exec.exit_status_returned);
-}
-
-#[then("the exec output is not added to the primary session's captured logs")]
-fn exec_output_not_logged(world: &mut BehaviourWorld) {
-    assert!(world.exec.logs_unchanged);
 }

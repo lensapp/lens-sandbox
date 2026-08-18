@@ -22,6 +22,19 @@ Feature: session streaming verbs reach a real guest without wedging the terminal
     Then the exit code is 0
     And the output contains "exec-hi"
 
+  Scenario: non-interactive exec preserves streams and exit status without entering primary logs
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c 'echo exec-out; echo exec-err >&2; exit 7'" in that run
+    Then the exit code is 7
+    And the output contains "exec-out"
+    And the output contains "exec-err"
+    When the user prints that run's logs
+    Then the exit code is 0
+    And the output does not contain "exec-out"
+    And the output does not contain "exec-err"
+
   Scenario: logs without follow replays captured output and returns through the top level
     Given the Lens Sandbox service is running
     When the user starts a detached microVM command "/bin/sh -c 'echo hello-logs && /.lens/guest-tools/bin/busybox sleep 60'"

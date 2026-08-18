@@ -45,10 +45,3 @@ Feature: routing exec sessions within a run
     Then only the first exec session is cancelled
     And the primary session remains running
     And the second exec session remains usable
-
-  Scenario: non-interactive exec behavior is preserved
-    Given an active run named "reviewer"
-    When the user execs a non-interactive command that writes to stdout and stderr
-    Then both output streams are returned
-    And the CLI returns the command's exit status
-    And the exec output is not added to the primary session's captured logs

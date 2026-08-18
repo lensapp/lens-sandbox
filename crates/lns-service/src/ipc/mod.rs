@@ -185,6 +185,42 @@ where
     }
 }
 
+pub(super) async fn pump_exec_responses<S>(
+    stream: &mut S,
+    frame_rx: &mut mpsc::Receiver<WireFrame>,
+) -> anyhow::Result<PumpOutcome>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let mut unexpected = [0u8; 1];
+    loop {
+        tokio::select! {
+            biased;
+            read = reader.read(&mut unexpected) => match read {
+                Ok(0) => return Ok(PumpOutcome::ChannelClosed),
+                Ok(_) => return Ok(PumpOutcome::WriteFailed(
+                    "unexpected bytes on the exec response stream".to_string(),
+                )),
+                Err(e) => return Ok(PumpOutcome::WriteFailed(e.to_string())),
+            },
+            maybe = frame_rx.recv() => {
+                let Some(wire) = maybe else {
+                    return Ok(PumpOutcome::ChannelClosed);
+                };
+                let is_exit = matches!(wire, WireFrame::Json(Response::RunExit { .. }));
+                let frame = encode_wire_frame(&wire)?;
+                if let Err(e) = writer.write_all(&frame).await {
+                    return Ok(PumpOutcome::WriteFailed(e.to_string()));
+                }
+                if is_exit {
+                    return Ok(PumpOutcome::ExitFrame);
+                }
+            }
+        }
+    }
+}
+
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
     match request {
         Request::Ping => Response::Pong,
@@ -925,6 +961,67 @@ mod tests {
             matches!(outcome, PumpOutcome::WriteFailed(_)),
             "expected WriteFailed, got {outcome:?}",
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exec_pump_detects_a_silent_client_disconnect() {
+        let (client, mut service) = tokio::io::duplex(64);
+        let (_frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+        drop(client);
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pump_exec_responses(&mut service, &mut frame_rx),
+        )
+        .await
+        .expect("a silent exec disconnect should be detected")
+        .unwrap();
+
+        assert_eq!(outcome, PumpOutcome::ChannelClosed);
+    }
+
+    #[tokio::test]
+    async fn exec_pump_rejects_unexpected_client_bytes() {
+        let (mut client, mut service) = tokio::io::duplex(64);
+        let (_frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(1);
+        client.write_all(b"x").await.unwrap();
+
+        let outcome = pump_exec_responses(&mut service, &mut frame_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            PumpOutcome::WriteFailed("unexpected bytes on the exec response stream".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_pump_forwards_output_and_stops_after_exit() {
+        let (mut client, mut service) = tokio::io::duplex(4096);
+        let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(2);
+        frame_tx
+            .send(WireFrame::Stdout(b"exec-out".to_vec()))
+            .await
+            .unwrap();
+        frame_tx
+            .send(WireFrame::Json(Response::RunExit { code: 7 }))
+            .await
+            .unwrap();
+        let pump =
+            tokio::spawn(async move { pump_exec_responses(&mut service, &mut frame_rx).await });
+
+        let stdout = lns_ipc::read_frame_bytes_async(&mut client).await.unwrap();
+        assert_eq!(
+            lns_ipc::decode_wire_frame_from_bytes(&stdout).unwrap(),
+            WireFrame::Stdout(b"exec-out".to_vec())
+        );
+        let exit = lns_ipc::read_frame_bytes_async(&mut client).await.unwrap();
+        assert_eq!(
+            lns_ipc::decode_wire_frame_from_bytes(&exit).unwrap(),
+            WireFrame::Json(Response::RunExit { code: 7 })
+        );
+        assert_eq!(pump.await.unwrap().unwrap(), PumpOutcome::ExitFrame);
     }
 
     #[tokio::test]
