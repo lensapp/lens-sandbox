@@ -1,3 +1,4 @@
+use crate::runner::run_lns;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 
@@ -21,8 +22,13 @@ fn no_active_run_named(_world: &mut BehaviourWorld, _name: String) {
 }
 
 #[when(regex = r#"^the user runs \"(lns exec(?: [^\"]*)?)\"$"#)]
-fn user_runs(_world: &mut BehaviourWorld, _command: String) {
-    pending()
+fn user_runs(world: &mut BehaviourWorld, command: String) {
+    let args: Vec<&str> = command
+        .strip_prefix("lns ")
+        .expect("interactive exec scenarios invoke lns")
+        .split_whitespace()
+        .collect();
+    world.result = Some(run_lns(&args));
 }
 
 #[then("host stdin is not forwarded")]

@@ -560,7 +560,7 @@ pub async fn run_image(
 
 pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     if args.cmd.is_empty() {
-        anyhow::bail!("lns exec requires a command after `--`");
+        anyhow::bail!("lns exec requires a command");
     }
 
     let socket = super::socket_path()?;
@@ -569,7 +569,7 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
         .with_context(|| format!("connecting to {}", socket.display()))?;
 
     let target_run = args.run;
-    let tty = args.tty && crate::raw_mode::stdin_is_tty();
+    let tty = args.tty;
     let stdin = args.interactive;
     let initial_winsize = if tty {
         crate::raw_mode::host_winsize()
@@ -595,24 +595,31 @@ pub async fn exec_image(args: ExecArgs) -> Result<i32> {
     let bytes = read_frame_bytes_async(&mut stream)
         .await
         .context("reading RunStarted frame")?;
-    let run_id = match decode_frame(&mut &bytes[..]).context("decoding RunStarted")? {
-        Response::RunStarted { run_id } => run_id,
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
-        other => anyhow::bail!("expected RunStarted, got {other:?}"),
-    };
-    crate::log::debug!(run_id = %run_id, "exec session opened");
+    let target = decode_exec_started(&bytes)?;
+    crate::log::debug!(run_id = %target.run_id(), "exec session opened");
 
-    drive_attached_session(
+    drive_targeted_session(
         stream,
         Some(socket),
-        run_id,
+        target,
         tty,
         detach_chord,
-        DetachBehaviour::SignalAndDrain,
+        DetachBehaviour::CloseSession,
+        CancelBehaviour::SignalSession,
         args.quiet,
         StdinForwarding::of(stdin),
     )
     .await
+}
+
+fn decode_exec_started(bytes: &[u8]) -> Result<lns_ipc::SessionTarget> {
+    match decode_frame(&mut &bytes[..]).context("decoding ExecStarted")? {
+        Response::ExecStarted { run_id, session_id } => {
+            Ok(lns_ipc::SessionTarget::Exec { run_id, session_id })
+        }
+        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        other => anyhow::bail!("expected ExecStarted, got {other:?}"),
+    }
 }
 
 /// Whether host stdin reaches the session's workload; a session opened without `-i` still watches for the detach chord but hands the run nothing.
@@ -635,8 +642,15 @@ impl StdinForwarding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetachBehaviour {
     SignalAndDrain,
+    CloseSession,
     LeaveRunning,
     DetachRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelBehaviour {
+    CancelRun,
+    SignalSession,
 }
 
 #[allow(clippy::too_many_arguments)] // one session-shape argument per wire field; the writer seam lives in the _with_writers twin
@@ -653,16 +667,46 @@ pub(crate) async fn drive_attached_session<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
-    let mut stdout = tokio::io::stdout();
-    let mut stderr = tokio::io::stderr();
-    drive_attached_session_with_writers(
+    drive_targeted_session(
         stream,
         aux_socket,
-        run_id,
+        primary_target(run_id),
+        tty,
+        detach_chord,
+        detach,
+        CancelBehaviour::CancelRun,
+        quiet,
+        stdin,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_targeted_session<S>(
+    stream: S,
+    aux_socket: Option<PathBuf>,
+    target: lns_ipc::SessionTarget,
+    tty: bool,
+    detach_chord: Vec<u8>,
+    detach: DetachBehaviour,
+    cancel: CancelBehaviour,
+    quiet: bool,
+    stdin: StdinForwarding,
+) -> Result<i32>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    drive_targeted_session_with_writers(
+        stream,
+        aux_socket,
+        target,
         tty,
         std::io::stdout().is_terminal(),
         detach_chord,
         detach,
+        cancel,
         &mut stdout,
         &mut stderr,
         quiet,
@@ -673,13 +717,50 @@ where
 
 #[allow(clippy::too_many_arguments)] // explicit stream/writer/terminal seam so the attached-session loop is host-testable over in-memory duplexes
 pub async fn drive_attached_session_with_writers<S, O, E>(
-    mut stream: S,
+    stream: S,
     aux_socket: Option<PathBuf>,
     run_id: String,
     tty: bool,
     stdout_is_terminal: bool,
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
+    stdout: &mut O,
+    stderr: &mut E,
+    quiet: bool,
+    stdin: StdinForwarding,
+) -> Result<i32>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
+{
+    drive_targeted_session_with_writers(
+        stream,
+        aux_socket,
+        primary_target(run_id),
+        tty,
+        stdout_is_terminal,
+        detach_chord,
+        detach,
+        CancelBehaviour::CancelRun,
+        stdout,
+        stderr,
+        quiet,
+        stdin,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_targeted_session_with_writers<S, O, E>(
+    mut stream: S,
+    aux_socket: Option<PathBuf>,
+    target: lns_ipc::SessionTarget,
+    tty: bool,
+    stdout_is_terminal: bool,
+    detach_chord: Vec<u8>,
+    detach: DetachBehaviour,
+    cancel: CancelBehaviour,
     stdout: &mut O,
     stderr: &mut E,
     quiet: bool,
@@ -700,27 +781,43 @@ where
 
     let (cancel_task, winsize_task, stdin_task) = match aux_socket {
         Some(socket) => {
-            let cancel_client = real_client()?;
-            let cancel_run_id = run_id.clone();
-            let cancel = tokio::spawn(async move {
+            let cancel_target = target.clone();
+            let cancel_socket = socket.clone();
+            let cancel_task = tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
-                cancel_client.cancel_run(cancel_run_id).await;
+                match cancel {
+                    CancelBehaviour::CancelRun => {
+                        if let Ok(client) = real_client() {
+                            client.cancel_run(cancel_target.run_id().to_string()).await;
+                        }
+                    }
+                    CancelBehaviour::SignalSession => {
+                        let _ = send_one_shot(
+                            &cancel_socket,
+                            &Request::SessionSignal {
+                                target: cancel_target,
+                                signal: SignalKind::Int,
+                            },
+                        )
+                        .await;
+                    }
+                }
             });
-            let winsize_run_id = run_id.clone();
+            let winsize_target = target.clone();
             let winsize = tty.then(|| {
                 let s = socket.clone();
-                tokio::spawn(async move { run_winsize_forwarder(s, winsize_run_id).await })
+                tokio::spawn(async move { run_winsize_forwarder(s, winsize_target).await })
             });
             let pump_chord = detach_chord;
             let pump_early_exit = early_exit_tx.clone();
             let stdin_task = tokio::spawn(async move {
-                let r = run_stdin_pump(socket, run_id, pump_chord, detach, stdin).await;
+                let r = run_stdin_pump(socket, target, pump_chord, detach, stdin).await;
                 if matches!(&r, Ok(true)) {
                     let _ = pump_early_exit.send(());
                 }
                 r
             });
-            (Some(cancel), winsize, Some(stdin_task))
+            (Some(cancel_task), winsize, Some(stdin_task))
         }
         None => (None, None, None),
     };
@@ -848,7 +945,9 @@ where
         DetachBehaviour::SignalAndDrain => {
             drain_after_chord(stream, tty, stdout, stderr, last_stdout_byte, quiet).await
         }
-        DetachBehaviour::LeaveRunning | DetachBehaviour::DetachRun => 0,
+        DetachBehaviour::CloseSession
+        | DetachBehaviour::LeaveRunning
+        | DetachBehaviour::DetachRun => 0,
     }
 }
 
@@ -930,7 +1029,7 @@ where
 
 async fn run_stdin_pump(
     socket: PathBuf,
-    run_id: String,
+    target: lns_ipc::SessionTarget,
     detach_chord: Vec<u8>,
     detach: DetachBehaviour,
     stdin: StdinForwarding,
@@ -947,12 +1046,21 @@ async fn run_stdin_pump(
                         let _ = send_one_shot(
                             &socket,
                             &Request::SessionStdin {
-                                target: primary_target(run_id.clone()),
+                                target: target.clone(),
                                 bytes: held,
                             },
                         )
                         .await;
                     }
+                }
+                if stdin == StdinForwarding::ToRun {
+                    let _ = send_one_shot(
+                        &socket,
+                        &Request::SessionStdinClose {
+                            target: target.clone(),
+                        },
+                    )
+                    .await;
                 }
                 return Ok(false);
             }
@@ -965,7 +1073,7 @@ async fn run_stdin_pump(
         let chunk = &buf[..n];
         match detector.as_mut() {
             Some(d) => {
-                if !pump_with_detector(&socket, &run_id, chunk, d, detach, stdin).await? {
+                if !pump_with_detector_target(&socket, &target, chunk, d, detach, stdin).await? {
                     return Ok(true);
                 }
             }
@@ -974,7 +1082,7 @@ async fn run_stdin_pump(
                     send_one_shot(
                         &socket,
                         &Request::SessionStdin {
-                            target: primary_target(run_id.clone()),
+                            target: target.clone(),
                             bytes: chunk.to_vec(),
                         },
                     )
@@ -985,9 +1093,9 @@ async fn run_stdin_pump(
     }
 }
 
-async fn pump_with_detector(
+async fn pump_with_detector_target(
     socket: &Path,
-    run_id: &str,
+    target: &lns_ipc::SessionTarget,
     bytes: &[u8],
     detector: &mut DetachChordDetector,
     detach: DetachBehaviour,
@@ -995,7 +1103,8 @@ async fn pump_with_detector(
 ) -> Result<bool> {
     let mut pending: Vec<u8> = Vec::new();
     for &b in bytes {
-        let (requests, control) = plan_feed(detector.feed(b), run_id, &mut pending, detach, stdin);
+        let (requests, control) =
+            plan_feed_target(detector.feed(b), target, &mut pending, detach, stdin);
         for request in &requests {
             send_one_shot(socket, request).await?;
         }
@@ -1004,7 +1113,7 @@ async fn pump_with_detector(
         }
     }
     if stdin == StdinForwarding::ToRun
-        && let Some(request) = drain_pending(run_id, &mut pending)
+        && let Some(request) = drain_pending_target(target, &mut pending)
     {
         send_one_shot(socket, &request).await?;
     }
@@ -1016,17 +1125,18 @@ enum PumpControl {
     Detach,
 }
 
-fn drain_pending(run_id: &str, pending: &mut Vec<u8>) -> Option<Request> {
+fn drain_pending_target(target: &lns_ipc::SessionTarget, pending: &mut Vec<u8>) -> Option<Request> {
     if pending.is_empty() {
         None
     } else {
         Some(Request::SessionStdin {
-            target: primary_target(run_id.to_string()),
+            target: target.clone(),
             bytes: std::mem::take(pending),
         })
     }
 }
 
+#[cfg(test)]
 fn plan_feed(
     action: FeedAction,
     run_id: &str,
@@ -1034,15 +1144,31 @@ fn plan_feed(
     detach: DetachBehaviour,
     stdin: StdinForwarding,
 ) -> (Vec<Request>, PumpControl) {
+    plan_feed_target(
+        action,
+        &primary_target(run_id.to_string()),
+        pending,
+        detach,
+        stdin,
+    )
+}
+
+fn plan_feed_target(
+    action: FeedAction,
+    target: &lns_ipc::SessionTarget,
+    pending: &mut Vec<u8>,
+    detach: DetachBehaviour,
+    stdin: StdinForwarding,
+) -> (Vec<Request>, PumpControl) {
     let stdin_requests = |bytes: Vec<u8>| match stdin {
         StdinForwarding::ToRun => vec![Request::SessionStdin {
-            target: primary_target(run_id.to_string()),
+            target: target.clone(),
             bytes,
         }],
         StdinForwarding::Withheld => Vec::new(),
     };
     let drained = |pending: &mut Vec<u8>| match stdin {
-        StdinForwarding::ToRun => drain_pending(run_id, pending).into_iter().collect(),
+        StdinForwarding::ToRun => drain_pending_target(target, pending).into_iter().collect(),
         StdinForwarding::Withheld => {
             pending.clear();
             Vec::<Request>::new()
@@ -1070,11 +1196,14 @@ fn plan_feed(
             let mut requests = drained(pending);
             match detach {
                 DetachBehaviour::SignalAndDrain => requests.push(Request::SessionSignal {
-                    target: primary_target(run_id.to_string()),
+                    target: target.clone(),
                     signal: SignalKind::Hup,
                 }),
+                DetachBehaviour::CloseSession => requests.push(Request::SessionDetach {
+                    target: target.clone(),
+                }),
                 DetachBehaviour::DetachRun => requests.push(Request::SessionDetach {
-                    target: primary_target(run_id.to_string()),
+                    target: target.clone(),
                 }),
                 DetachBehaviour::LeaveRunning => {}
             }
@@ -1083,7 +1212,7 @@ fn plan_feed(
     }
 }
 
-async fn run_winsize_forwarder(socket: PathBuf, run_id: String) -> Result<()> {
+async fn run_winsize_forwarder(socket: PathBuf, target: lns_ipc::SessionTarget) -> Result<()> {
     use tokio::signal::unix::{SignalKind as TokioSig, signal};
     let mut sigwinch = match signal(TokioSig::window_change()) {
         Ok(s) => s,
@@ -1099,7 +1228,7 @@ async fn run_winsize_forwarder(socket: PathBuf, run_id: String) -> Result<()> {
         if send_one_shot(
             &socket,
             &Request::SessionResize {
-                target: primary_target(run_id.clone()),
+                target: target.clone(),
                 rows,
                 cols,
             },
@@ -1288,6 +1417,23 @@ fn phrase_for_verb(verb: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_started_handshake_preserves_the_service_assigned_session_target() {
+        let frame = encode_frame(&Response::ExecStarted {
+            run_id: "run-7".to_string(),
+            session_id: "exec-2".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            decode_exec_started(&frame).unwrap(),
+            lns_ipc::SessionTarget::Exec {
+                run_id: "run-7".to_string(),
+                session_id: "exec-2".to_string(),
+            }
+        );
+    }
     use tokio::io::AsyncWriteExt;
 
     #[test]
@@ -2445,6 +2591,26 @@ mod tests {
         );
         assert!(matches!(control, PumpControl::Detach));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_feed_close_session_targets_only_the_exec_session() {
+        let target = lns_ipc::SessionTarget::Exec {
+            run_id: "run-7".to_string(),
+            session_id: "exec-2".to_string(),
+        };
+        let mut pending = Vec::new();
+
+        let (requests, control) = plan_feed_target(
+            FeedAction::Trigger,
+            &target,
+            &mut pending,
+            DetachBehaviour::CloseSession,
+            StdinForwarding::ToRun,
+        );
+
+        assert_eq!(requests, vec![Request::SessionDetach { target }]);
+        assert!(matches!(control, PumpControl::Detach));
     }
 
     #[tokio::test(start_paused = true)]

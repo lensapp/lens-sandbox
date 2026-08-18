@@ -19,6 +19,9 @@ pub enum Request {
         target: SessionTarget,
         bytes: Vec<u8>,
     },
+    SessionStdinClose {
+        target: SessionTarget,
+    },
     SessionResize {
         target: SessionTarget,
         rows: u16,
@@ -936,6 +939,14 @@ mod tests {
             }),
             serde_json::json!({
                 "type": "SessionDetach",
+                "target": {
+                    "kind": "exec",
+                    "run_id": "7",
+                    "session_id": "exec-1"
+                }
+            }),
+            serde_json::json!({
+                "type": "SessionStdinClose",
                 "target": {
                     "kind": "exec",
                     "run_id": "7",

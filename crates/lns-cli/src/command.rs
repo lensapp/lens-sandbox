@@ -558,14 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_exec_expands_a_leading_it_cluster_then_refuses_the_session() {
-        let parsed: clap::error::Result<crate::cli::ExecArgs> =
-            parse_args(["lns", "sandbox", "exec", "-it", "demo", "sh"]);
-        let err = parsed
-            .err()
-            .unwrap_or_else(|| panic!("a session exec must be refused"));
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-        assert!(err.to_string().contains("not yet supported"), "{err}");
+    fn sandbox_exec_expands_a_leading_it_cluster_into_both_session_flags() {
+        let args = sandbox_exec_args(&["lns", "sandbox", "exec", "-it", "demo", "sh"]);
+        assert!(args.interactive);
+        assert!(args.tty);
     }
 
     #[test]
@@ -717,17 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn exec_expands_a_leading_it_cluster_then_refuses_the_session() {
-        let parsed: clap::error::Result<crate::cli::ExecArgs> =
-            parse_args(["lns", "exec", "-it", "demo", "--", "sh"]);
-        let err = parsed
-            .err()
-            .unwrap_or_else(|| panic!("a session exec must be refused"));
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-        assert!(
-            err.to_string().contains("not yet supported"),
-            "the cluster must expand so the user reads our refusal, not `unexpected argument`: {err}"
-        );
+    fn exec_expands_a_leading_it_cluster_into_both_session_flags() {
+        let args: crate::cli::ExecArgs =
+            parse_args(["lns", "exec", "-it", "demo", "--", "sh"]).unwrap();
+        assert!(args.interactive);
+        assert!(args.tty);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub enum ClientFrame {
         confine: bool,
     },
     StdinBytes(Vec<u8>),
+    StdinClose,
     Resize(Winsize),
     Signal(SignalKind),
     Detach,

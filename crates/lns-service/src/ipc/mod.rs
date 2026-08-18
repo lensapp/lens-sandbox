@@ -223,6 +223,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         }
         Request::SessionDetach { .. }
         | Request::SessionStdin { .. }
+        | Request::SessionStdinClose { .. }
         | Request::SessionResize { .. }
         | Request::SessionSignal { .. } => handle_session_control(request).await,
         Request::Kill { run, signal } => kill_request(run, *signal).await,
@@ -527,6 +528,14 @@ async fn handle_session_control(request: &Request) -> Response {
             )
             .await
         }
+        Request::SessionStdinClose { target } => {
+            forward_target_input(
+                target,
+                Some(crate::vm::session_client::SessionInput::StdinClose),
+                "SessionStdinClose",
+            )
+            .await
+        }
         Request::SessionResize { target, rows, cols } => {
             forward_target_input(
                 target,
@@ -654,15 +663,19 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
     if args.argv.is_empty() {
         return Err("ExecImage.argv is empty".to_string());
     }
-    if args.tty || args.stdin {
-        return Err(format!(
-            "lns exec -t/-i against run {} is not yet supported (input \
-             routing for exec sessions awaits an IPC discriminator); for now lns exec \
-             supports non-interactive commands only",
-            args.run
-        ));
-    }
     Ok(())
+}
+
+pub(super) fn register_exec_input(
+    run_id: &str,
+    input_tx: tokio::sync::mpsc::Sender<crate::vm::session_client::SessionInput>,
+) -> Result<String, String> {
+    let session_id = crate::run_registry::allocate_run_id();
+    if crate::run_registry::register_exec_session(run_id, session_id.clone(), input_tx) {
+        Ok(session_id)
+    } else {
+        Err(format!("no active run with id {run_id}"))
+    }
 }
 
 /// `run_id` is the *resolved* id: `args.run` may be a name or an id prefix, and the registry keys tool paths by id alone.
@@ -1347,6 +1360,40 @@ mod tests {
             Some(SessionInput::StdinBytes(bytes)) if bytes == b"exec only"
         ));
         assert!(primary_rx.try_recv().is_err());
+
+        crate::run_registry::deregister(&run_id);
+    }
+
+    #[tokio::test]
+    async fn handle_request_closes_only_the_named_exec_sessions_stdin() {
+        use crate::vm::session_client::SessionInput;
+
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel_rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(run_id.clone(), handle);
+        let (exec_tx, mut exec_rx) = tokio::sync::mpsc::channel::<SessionInput>(1);
+        assert!(crate::run_registry::register_exec_session(
+            &run_id,
+            "exec-1".to_string(),
+            exec_tx,
+        ));
+
+        let response = handle_request(
+            &Request::SessionStdinClose {
+                target: lns_ipc::SessionTarget::Exec {
+                    run_id: run_id.clone(),
+                    session_id: "exec-1".to_string(),
+                },
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(response, Response::Acknowledged);
+        assert!(matches!(
+            exec_rx.recv().await,
+            Some(SessionInput::StdinClose)
+        ));
 
         crate::run_registry::deregister(&run_id);
     }
@@ -2212,13 +2259,44 @@ mod tests {
     }
 
     #[test]
-    fn validate_exec_rejects_interactive_exec_and_names_the_run() {
-        for (tty, stdin) in [(true, false), (false, true)] {
-            let err = validate_exec(&exec_args(vec!["sh".into()], tty, stdin))
-                .expect_err("interactive exec is unsupported");
-            assert!(err.contains("run 42"), "should name the run: {err}");
-            assert!(err.contains("not yet supported"), "got: {err}");
+    fn validate_exec_accepts_explicit_terminal_modes() {
+        for (tty, stdin) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                validate_exec(&exec_args(vec!["sh".into()], tty, stdin)),
+                Ok(())
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn register_exec_input_publishes_an_addressable_session_id() {
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel_rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(run_id.clone(), handle);
+        let (input_tx, _input_rx) =
+            tokio::sync::mpsc::channel::<crate::vm::session_client::SessionInput>(1);
+
+        let session_id = register_exec_input(&run_id, input_tx)
+            .expect("an active run should accept a new exec session");
+        assert!(
+            crate::run_registry::session_input_sender(&lns_ipc::SessionTarget::Exec {
+                run_id: run_id.clone(),
+                session_id,
+            })
+            .is_some()
+        );
+
+        crate::run_registry::deregister(&run_id);
+    }
+
+    #[tokio::test]
+    async fn register_exec_input_refuses_a_run_that_disappeared() {
+        let (input_tx, _input_rx) =
+            tokio::sync::mpsc::channel::<crate::vm::session_client::SessionInput>(1);
+        assert_eq!(
+            register_exec_input("missing-run", input_tx),
+            Err("no active run with id missing-run".to_string())
+        );
     }
 
     #[test]

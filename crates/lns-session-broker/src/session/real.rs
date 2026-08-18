@@ -371,6 +371,9 @@ fn client_loop_tty(conn: SharedFd, master_in: RawFd, master_ctrl: RawFd, child_p
                     break;
                 }
             }
+            LoopAction::CloseStdin => {
+                let _ = vsock::write_all(master_in, &[0x04]);
+            }
             LoopAction::Resize(ws) => apply_winsize(master_ctrl, ws),
             LoopAction::Signal(sig) => deliver_signal(master_ctrl, child_pid, sig),
             LoopAction::Detach => {
@@ -384,7 +387,7 @@ fn client_loop_tty(conn: SharedFd, master_in: RawFd, master_ctrl: RawFd, child_p
     close(master_ctrl);
 }
 
-fn client_loop_pipes(conn: SharedFd, stdin_w: Option<RawFd>, child_pid: libc::pid_t) {
+fn client_loop_pipes(conn: SharedFd, mut stdin_w: Option<RawFd>, child_pid: libc::pid_t) {
     while let Some(frame) = read_client_frame(conn.raw()) {
         match dispatch_frame(frame) {
             LoopAction::WriteStdin(bytes) => {
@@ -392,6 +395,11 @@ fn client_loop_pipes(conn: SharedFd, stdin_w: Option<RawFd>, child_pid: libc::pi
                     && !vsock::write_all(fd, &bytes)
                 {
                     break;
+                }
+            }
+            LoopAction::CloseStdin => {
+                if let Some(fd) = stdin_w.take() {
+                    close(fd);
                 }
             }
             LoopAction::Resize(_) => {
