@@ -125,6 +125,8 @@ pub struct ExecRoutingRig {
     pub second_target: Option<lns_ipc::SessionTarget>,
     pub first_event: Option<lns_service::vm::session_client::SessionInput>,
     pub response: Option<Response>,
+    /// Whether the disconnected exec's guest task was observed cancelled by the production stream driver.
+    pub first_task_terminated: Option<bool>,
 }
 
 impl Drop for ExecRoutingRig {

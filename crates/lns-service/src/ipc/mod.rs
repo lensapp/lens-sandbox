@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use crate::log;
+
 use lns_ipc::{Request, Response, StatusInfo, WireFrame, encode_frame, encode_wire_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -183,6 +185,27 @@ where
             }
         }
     }
+}
+
+/// Drives an accepted exec stream until its client stops reading — exit frame, or a silent disconnect — then deregisters the session and cancels its guest task, so an abandoned exec never outlives its client.
+pub async fn drive_exec_stream<S>(
+    stream: &mut S,
+    run_id: &str,
+    session_id: &str,
+    session_task: tokio::task::JoinHandle<()>,
+    frame_rx: &mut mpsc::Receiver<WireFrame>,
+) -> anyhow::Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let outcome = pump_exec_responses(stream, frame_rx).await?;
+    if let PumpOutcome::WriteFailed(e) = &outcome {
+        log::debug!(error = %e, "exec stream write failed; tearing session down");
+    }
+    crate::run_registry::deregister_exec_session(run_id, session_id);
+    session_task.abort();
+    let _ = session_task.await;
+    Ok(())
 }
 
 pub(super) async fn pump_exec_responses<S>(

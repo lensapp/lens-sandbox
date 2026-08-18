@@ -144,15 +144,44 @@ async fn first_exec_detaches(world: &mut BehaviourWorld) {
         .await;
 }
 
+struct TerminationProbe(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for TerminationProbe {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 #[when("the first exec client disconnects unexpectedly")]
-fn first_exec_disconnects(world: &mut BehaviourWorld) {
+async fn first_exec_disconnects(world: &mut BehaviourWorld) {
     let target = world.exec.first_target.as_ref().expect("first exec target");
-    let lns_ipc::SessionTarget::Exec { run_id, session_id } = target else {
+    let lns_ipc::SessionTarget::Exec { run_id, session_id } = target.clone() else {
         unreachable!()
     };
-    assert!(lns_service::run_registry::deregister_exec_session(
-        run_id, session_id
-    ));
+    let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
+    let session_task = tokio::spawn(async move {
+        let _probe = TerminationProbe(Some(terminated_tx));
+        std::future::pending::<()>().await
+    });
+    let (client, mut server) = tokio::io::duplex(64);
+    drop(client);
+    let (_frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<lns_ipc::WireFrame>(4);
+    lns_service::ipc::drive_exec_stream(
+        &mut server,
+        &run_id,
+        &session_id,
+        session_task,
+        &mut frame_rx,
+    )
+    .await
+    .expect("the stream driver survives a vanished client");
+    world.exec.first_task_terminated = Some(
+        tokio::time::timeout(std::time::Duration::from_secs(1), terminated_rx)
+            .await
+            .is_ok(),
+    );
 }
 
 #[then("the user receives a live shell prompt")]
@@ -257,6 +286,11 @@ fn primary_remains_running(world: &mut BehaviourWorld) {
 
 #[then("only the first exec session is cancelled")]
 fn first_exec_cancelled(world: &mut BehaviourWorld) {
+    assert_eq!(
+        world.exec.first_task_terminated,
+        Some(true),
+        "the disconnected exec's guest task must be cancelled, not left running"
+    );
     assert!(
         lns_service::run_registry::session_input_sender(
             world.exec.first_target.as_ref().expect("first exec target")
