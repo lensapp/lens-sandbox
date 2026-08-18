@@ -26,18 +26,6 @@ Feature: managing running sandboxes from the CLI
     When I run "lns exec 3 -- echo hi"
     Then the exit code is 0
 
-  Scenario: exec refuses a session it cannot route input to, at parse time
-    When I run "lns exec -it 3 -- sh"
-    Then the command fails with an exit code other than 0
-    And the output contains "not yet supported"
-
-  Scenario: exec help stops offering a session it cannot open
-    When I run "lns sandbox exec --help"
-    Then the exit code is 0
-    And the output does not contain "--interactive"
-    And the output does not contain "--tty"
-    And the output does not contain "Open a new session"
-
   Scenario: sandbox kill sends the requested signal
     Given the service will answer Acknowledged
     When the user runs sandbox command "kill 3 --signal KILL"

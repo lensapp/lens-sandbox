@@ -24,6 +24,12 @@ use crate::run::summary::print_run_summary;
 
 const PUBLISHED_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn primary_target(run_id: impl Into<String>) -> lns_ipc::SessionTarget {
+    lns_ipc::SessionTarget::Primary {
+        run_id: run_id.into(),
+    }
+}
+
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = RunArgs::from_arg_matches(matches)?;
@@ -969,8 +975,8 @@ async fn run_stdin_pump(
                     if !held.is_empty() && stdin == StdinForwarding::ToRun {
                         let _ = send_one_shot(
                             &socket,
-                            &Request::RunStdin {
-                                run_id: run_id.clone(),
+                            &Request::SessionStdin {
+                                target: primary_target(run_id.clone()),
                                 bytes: held,
                             },
                         )
@@ -996,8 +1002,8 @@ async fn run_stdin_pump(
                 if stdin == StdinForwarding::ToRun {
                     send_one_shot(
                         &socket,
-                        &Request::RunStdin {
-                            run_id: run_id.clone(),
+                        &Request::SessionStdin {
+                            target: primary_target(run_id.clone()),
                             bytes: chunk.to_vec(),
                         },
                     )
@@ -1043,8 +1049,8 @@ fn drain_pending(run_id: &str, pending: &mut Vec<u8>) -> Option<Request> {
     if pending.is_empty() {
         None
     } else {
-        Some(Request::RunStdin {
-            run_id: run_id.to_string(),
+        Some(Request::SessionStdin {
+            target: primary_target(run_id.to_string()),
             bytes: std::mem::take(pending),
         })
     }
@@ -1058,8 +1064,8 @@ fn plan_feed(
     stdin: StdinForwarding,
 ) -> (Vec<Request>, PumpControl) {
     let stdin_requests = |bytes: Vec<u8>| match stdin {
-        StdinForwarding::ToRun => vec![Request::RunStdin {
-            run_id: run_id.to_string(),
+        StdinForwarding::ToRun => vec![Request::SessionStdin {
+            target: primary_target(run_id.to_string()),
             bytes,
         }],
         StdinForwarding::Withheld => Vec::new(),
@@ -1092,12 +1098,12 @@ fn plan_feed(
         FeedAction::Trigger => {
             let mut requests = drained(pending);
             match detach {
-                DetachBehaviour::SignalAndDrain => requests.push(Request::RunSignal {
-                    run_id: run_id.to_string(),
+                DetachBehaviour::SignalAndDrain => requests.push(Request::SessionSignal {
+                    target: primary_target(run_id.to_string()),
                     signal: SignalKind::Hup,
                 }),
-                DetachBehaviour::DetachRun => requests.push(Request::RunDetach {
-                    run_id: run_id.to_string(),
+                DetachBehaviour::DetachRun => requests.push(Request::SessionDetach {
+                    target: primary_target(run_id.to_string()),
                 }),
                 DetachBehaviour::LeaveRunning => {}
             }
@@ -1121,8 +1127,8 @@ async fn run_winsize_forwarder(socket: PathBuf, run_id: String) -> Result<()> {
         };
         if send_one_shot(
             &socket,
-            &Request::RunResize {
-                run_id: run_id.clone(),
+            &Request::SessionResize {
+                target: primary_target(run_id.clone()),
                 rows,
                 cols,
             },
@@ -2397,8 +2403,8 @@ mod tests {
         );
         assert_eq!(
             requests,
-            vec![Request::RunSignal {
-                run_id: "9".to_string(),
+            vec![Request::SessionSignal {
+                target: primary_target("9".to_string()),
                 signal: SignalKind::Hup
             }],
             "the chord must still detach, and must not flush the withheld bytes on its way out"
@@ -2433,8 +2439,8 @@ mod tests {
         );
         assert_eq!(
             requests,
-            vec![Request::RunStdin {
-                run_id: "7".to_string(),
+            vec![Request::SessionStdin {
+                target: primary_target("7".to_string()),
                 bytes: vec![b'x', b'y']
             }]
         );
@@ -2467,12 +2473,12 @@ mod tests {
         assert_eq!(
             requests,
             vec![
-                Request::RunStdin {
-                    run_id: "3".to_string(),
+                Request::SessionStdin {
+                    target: primary_target("3".to_string()),
                     bytes: vec![b'p']
                 },
-                Request::RunStdin {
-                    run_id: "3".to_string(),
+                Request::SessionStdin {
+                    target: primary_target("3".to_string()),
                     bytes: vec![b'h']
                 },
             ]
@@ -2492,8 +2498,8 @@ mod tests {
         );
         assert_eq!(
             requests,
-            vec![Request::RunStdin {
-                run_id: "3".to_string(),
+            vec![Request::SessionStdin {
+                target: primary_target("3".to_string()),
                 bytes: vec![b'h', b'c']
             }]
         );
@@ -2512,12 +2518,12 @@ mod tests {
         assert_eq!(
             requests,
             vec![
-                Request::RunStdin {
-                    run_id: "9".to_string(),
+                Request::SessionStdin {
+                    target: primary_target("9".to_string()),
                     bytes: vec![b'p']
                 },
-                Request::RunSignal {
-                    run_id: "9".to_string(),
+                Request::SessionSignal {
+                    target: primary_target("9".to_string()),
                     signal: SignalKind::Hup
                 },
             ]
@@ -2538,8 +2544,8 @@ mod tests {
         );
         assert_eq!(
             requests,
-            vec![Request::RunStdin {
-                run_id: "9".to_string(),
+            vec![Request::SessionStdin {
+                target: primary_target("9".to_string()),
                 bytes: vec![b'p']
             }],
             "a docker-style detach flushes pending input but never signals the workload"
@@ -2561,12 +2567,12 @@ mod tests {
         assert_eq!(
             requests,
             vec![
-                Request::RunStdin {
-                    run_id: "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string(),
+                Request::SessionStdin {
+                    target: primary_target("9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string()),
                     bytes: vec![b'p']
                 },
-                Request::RunDetach {
-                    run_id: "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string(),
+                Request::SessionDetach {
+                    target: primary_target("9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a".to_string()),
                 },
             ],
             "detaching a run flushes pending input then asks the service to keep it running — no SIGHUP",
@@ -2578,8 +2584,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn write_and_await_ack_blocks_until_the_service_responds() {
         let (mut client, mut server) = tokio::io::duplex(4096);
-        let detach = Request::RunDetach {
-            run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+        let detach = Request::SessionDetach {
+            target: primary_target("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string()),
         };
         let mut ack = std::pin::pin!(write_and_await_ack(&mut client, &detach));
 
@@ -2596,8 +2602,8 @@ mod tests {
         let decoded: Request = decode_frame(&mut &req[..]).expect("decode request");
         assert_eq!(
             decoded,
-            Request::RunDetach {
-                run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+            Request::SessionDetach {
+                target: primary_target("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string()),
             }
         );
 

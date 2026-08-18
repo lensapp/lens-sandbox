@@ -95,6 +95,12 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+fn primary_target(run_id: impl Into<String>) -> lns_ipc::SessionTarget {
+    lns_ipc::SessionTarget::Primary {
+        run_id: run_id.into(),
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PumpOutcome {
     ExitFrame,
@@ -216,25 +222,10 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }
         }
-        Request::RunDetach { run_id } => match crate::run_registry::request_detach(run_id) {
-            crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
-            crate::run_registry::DetachOutcome::NotAttached => Response::Error {
-                message: format!("run {run_id} is not attached"),
-            },
-            crate::run_registry::DetachOutcome::NotFound => Response::Error {
-                message: format!("no active run with id {run_id}"),
-            },
-        },
-        Request::RunStdin { run_id, bytes } => {
-            forward_session_input(run_id, session_input_from_stdin(bytes.clone()), "RunStdin").await
-        }
-        Request::RunResize { run_id, rows, cols } => {
-            forward_session_input(run_id, session_input_from_resize(*rows, *cols), "RunResize")
-                .await
-        }
-        Request::RunSignal { run_id, signal } => {
-            forward_session_input(run_id, session_input_from_signal(*signal), "RunSignal").await
-        }
+        Request::SessionDetach { .. }
+        | Request::SessionStdin { .. }
+        | Request::SessionResize { .. }
+        | Request::SessionSignal { .. } => handle_session_control(request).await,
         Request::Kill { run, signal } => kill_request(run, *signal).await,
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
@@ -523,6 +514,69 @@ async fn wait_for_exit(run_id: &str, timeout: std::time::Duration) -> bool {
             return false;
         }
         tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+    }
+}
+
+async fn handle_session_control(request: &Request) -> Response {
+    match request {
+        Request::SessionDetach { target } => handle_session_detach(target),
+        Request::SessionStdin { target, bytes } => {
+            forward_target_input(
+                target,
+                session_input_from_stdin(bytes.clone()),
+                "SessionStdin",
+            )
+            .await
+        }
+        Request::SessionResize { target, rows, cols } => {
+            forward_target_input(
+                target,
+                session_input_from_resize(*rows, *cols),
+                "SessionResize",
+            )
+            .await
+        }
+        Request::SessionSignal { target, signal } => {
+            forward_target_input(target, session_input_from_signal(*signal), "SessionSignal").await
+        }
+        _ => unreachable!("handle_session_control only accepts session control requests"),
+    }
+}
+
+fn handle_session_detach(target: &lns_ipc::SessionTarget) -> Response {
+    let lns_ipc::SessionTarget::Primary { run_id } = target else {
+        return missing_exec_session(target);
+    };
+    match crate::run_registry::request_detach(run_id) {
+        crate::run_registry::DetachOutcome::Detached => Response::DetachAccepted,
+        crate::run_registry::DetachOutcome::NotAttached => Response::Error {
+            message: format!("run {run_id} is not attached"),
+        },
+        crate::run_registry::DetachOutcome::NotFound => Response::Error {
+            message: format!("no active run with id {run_id}"),
+        },
+    }
+}
+
+async fn forward_target_input(
+    target: &lns_ipc::SessionTarget,
+    input: Option<crate::vm::session_client::SessionInput>,
+    kind: &'static str,
+) -> Response {
+    match target {
+        lns_ipc::SessionTarget::Primary { run_id } => {
+            forward_session_input(run_id, input, kind).await
+        }
+        lns_ipc::SessionTarget::Exec { .. } => missing_exec_session(target),
+    }
+}
+
+fn missing_exec_session(target: &lns_ipc::SessionTarget) -> Response {
+    let lns_ipc::SessionTarget::Exec { run_id, session_id } = target else {
+        unreachable!("missing_exec_session only accepts exec targets")
+    };
+    Response::Error {
+        message: format!("no active exec session {session_id} for run {run_id}"),
     }
 }
 
@@ -1013,8 +1067,8 @@ mod tests {
     #[tokio::test]
     async fn handle_request_detach_unknown_run_returns_error() {
         let resp = handle_request(
-            &Request::RunDetach {
-                run_id: "ffffffffffffffffffffffffffffffff".to_string(),
+            &Request::SessionDetach {
+                target: primary_target("ffffffffffffffffffffffffffffffff".to_string()),
             },
             Instant::now(),
         )
@@ -1065,8 +1119,8 @@ mod tests {
         });
 
         let resp = handle_request(
-            &Request::RunStdin {
-                run_id: id.clone(),
+            &Request::SessionStdin {
+                target: primary_target(id.clone()),
                 bytes: b"second".to_vec(),
             },
             Instant::now(),
@@ -1086,8 +1140,8 @@ mod tests {
     async fn forward_session_input_errors_when_run_not_registered() {
         let id = "deadbeef00000000000000000000aa01".to_string();
         let resp = handle_request(
-            &Request::RunStdin {
-                run_id: id.clone(),
+            &Request::SessionStdin {
+                target: primary_target(id.clone()),
                 bytes: b"hi".to_vec(),
             },
             Instant::now(),
@@ -1229,8 +1283,8 @@ mod tests {
     #[tokio::test]
     async fn handle_request_run_stdin_for_unregistered_run_returns_error() {
         let response = handle_request(
-            &Request::RunStdin {
-                run_id: "ffffffffffffffffffffffffffff9999".to_string(),
+            &Request::SessionStdin {
+                target: primary_target("ffffffffffffffffffffffffffff9999".to_string()),
                 bytes: vec![],
             },
             Instant::now(),
@@ -1242,8 +1296,8 @@ mod tests {
     #[tokio::test]
     async fn handle_request_run_resize_for_unregistered_run_returns_error() {
         let response = handle_request(
-            &Request::RunResize {
-                run_id: "ffffffffffffffffffffffffffff9999".to_string(),
+            &Request::SessionResize {
+                target: primary_target("ffffffffffffffffffffffffffff9999".to_string()),
                 rows: 24,
                 cols: 80,
             },
@@ -1256,8 +1310,8 @@ mod tests {
     #[tokio::test]
     async fn handle_request_run_signal_for_unregistered_run_returns_error() {
         let response = handle_request(
-            &Request::RunSignal {
-                run_id: "ffffffffffffffffffffffffffff9999".to_string(),
+            &Request::SessionSignal {
+                target: primary_target("ffffffffffffffffffffffffffff9999".to_string()),
                 signal: lns_ipc::SignalKind::Term,
             },
             Instant::now(),
@@ -1454,8 +1508,8 @@ mod tests {
         crate::run_registry::register(run_id.clone(), handle);
 
         let resp = handle_request(
-            &Request::RunDetach {
-                run_id: run_id.clone(),
+            &Request::SessionDetach {
+                target: primary_target(run_id.clone()),
             },
             Instant::now(),
         )
@@ -1467,8 +1521,8 @@ mod tests {
         );
 
         let resp = handle_request(
-            &Request::RunDetach {
-                run_id: run_id.clone(),
+            &Request::SessionDetach {
+                target: primary_target(run_id.clone()),
             },
             Instant::now(),
         )
@@ -1510,8 +1564,8 @@ mod tests {
         crate::run_registry::register(run_id.clone(), handle);
 
         let resp = handle_request(
-            &Request::RunStdin {
-                run_id: run_id.clone(),
+            &Request::SessionStdin {
+                target: primary_target(run_id.clone()),
                 bytes: b"hi".to_vec(),
             },
             Instant::now(),
@@ -1520,7 +1574,7 @@ mod tests {
         match resp {
             Response::Error { message } => {
                 assert!(message.contains("forwarding"));
-                assert!(message.contains("RunStdin"));
+                assert!(message.contains("SessionStdin"));
                 assert!(message.contains(&run_id));
             }
             other => unreachable!("expected Error, got {other:?}"),
