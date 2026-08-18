@@ -1140,10 +1140,15 @@ mod tests {
             .unwrap();
         let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
         let probe = TerminationProbe(Some(terminated_tx));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
         let session_task = tokio::spawn(async move {
             let _probe = probe;
+            let _ = started_tx.send(());
             std::future::pending::<()>().await
         });
+        started_rx
+            .await
+            .expect("the fake guest session task is running before the teardown");
 
         drive_exec_stream(&mut stream, "run-w", "exec-w", session_task, &mut frame_rx)
             .await

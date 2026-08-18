@@ -162,10 +162,15 @@ async fn first_exec_disconnects(world: &mut BehaviourWorld) {
     };
     let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
     let probe = TerminationProbe(Some(terminated_tx));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
     let session_task = tokio::spawn(async move {
         let _probe = probe;
+        let _ = started_tx.send(());
         std::future::pending::<()>().await
     });
+    started_rx
+        .await
+        .expect("the fake guest session task is running before the disconnect");
     let (client, mut server) = tokio::io::duplex(64);
     drop(client);
     let (_frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<lns_ipc::WireFrame>(4);
