@@ -315,7 +315,7 @@ pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
     Ok(specs)
 }
 
-/// The packed fileset layers a pulled manifest carries, in manifest order — the only layer media type a kit's fileset travels in, so anything else is not one and is left out rather than guessed at.
+/// The packed fileset layers a pulled manifest carries, in manifest order — the only layer media type an artifact's fileset travels in, so anything else is not one and is left out rather than guessed at.
 pub(crate) fn packed_layers(manifest: &OciImageManifest) -> Vec<crate::artifact::PackedLayer> {
     manifest
         .layers

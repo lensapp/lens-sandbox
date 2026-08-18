@@ -41,7 +41,7 @@ pub struct NetworkPolicy {
     pub egress: Egress,
 }
 
-/// The document format every kit is written in (`docs/sandbox-spec.md` §2), which the directory's own decisions are written in too.
+/// The document format every artifact is written in (`docs/sandbox-spec.md` §2), which the directory's own decisions are written in too.
 pub const API_VERSION: &str = "lns.run/v1";
 
 /// The kind §8.1 records a decision as, so it merges under the same rules as anything the developer pulled.
@@ -50,7 +50,7 @@ pub const KIND: &str = "mixin";
 /// What §4.2's `description` says about the one entry nobody typed, so a destination the run wrote down does not read as one somebody chose on purpose.
 const APPROVED_NOTE: &str = "approved during a run";
 
-/// The decisions file on disk. Its envelope is restated here rather than read through the crate that parses a kit, which depends on this one; only the block a run writes back is modelled, and every other one travels in [`LocalMixinSpec::rest`].
+/// The decisions file on disk. Its envelope is restated here rather than read through the crate that parses an artifact, which depends on this one; only the block a run writes back is modelled, and every other one travels in [`LocalMixinSpec::rest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LocalMixinDocument {

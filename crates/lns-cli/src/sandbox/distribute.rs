@@ -565,7 +565,7 @@ mod tests {
             &mut out,
         )
         .await
-        .expect("a mixin is a kit, published like any other");
+        .expect("a mixin is an artifact, published like any other");
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(
