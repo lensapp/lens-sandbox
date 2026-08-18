@@ -71,6 +71,11 @@ pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<Vec<RunRe
 }
 
 #[cfg(test)]
+pub(crate) fn test_record(run_id: &str) -> RunRecord {
+    tests::sample_record(run_id)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -176,7 +181,7 @@ mod tests {
         }
     }
 
-    fn sample_record(run_id: &str) -> RunRecord {
+    pub(crate) fn sample_record(run_id: &str) -> RunRecord {
         RunRecord {
             version: CURRENT_VERSION,
             run_id: run_id.to_string(),
