@@ -6,12 +6,20 @@ use std::time::{Duration, Instant};
 
 /// Atomically installs `contents` at a `.json` `path` with mode 0600 via a NOFOLLOW create-new tmp + rename, so a stale tmp or planted symlink cannot leak the secret through broader perms.
 pub fn write_json_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomic_at(path, &path.with_extension("json.tmp"), contents, 0o600)
+}
+
+/// The same install for a `.yaml` document the developer commits, whose mode umask decides rather than the 0600 a secret takes.
+pub fn write_yaml_document_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomic_at(path, &path.with_extension("yaml.tmp"), contents, 0o666)
+}
+
+fn write_atomic_at(path: &Path, tmp: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    // Drop any leftover tmp so the next open is create_new — `.mode(0o600)` is ignored on an existing file, so a stale tmp with broader perms (or a planted symlink) would otherwise carry through the rename and leave the secret world-readable.
-    match fs::remove_file(&tmp) {
+    // Drop any leftover tmp so the next open is create_new — `.mode()` is ignored on an existing file, so a stale tmp with broader perms (or a planted symlink) would otherwise carry through the rename.
+    match fs::remove_file(tmp) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
@@ -19,13 +27,13 @@ pub fn write_json_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> 
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(mode)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)?;
+        .open(tmp)?;
     f.write_all(contents)?;
     f.sync_all()?;
     drop(f);
-    fs::rename(&tmp, path)?;
+    fs::rename(tmp, path)?;
     Ok(())
 }
 

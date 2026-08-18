@@ -445,15 +445,7 @@ impl Policy {
         };
         let yaml = serde_yaml::to_string(&document)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("yaml.tmp");
-        fs::write(&tmp, yaml)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::secure_file::write_yaml_document_atomic(path, yaml.as_bytes())
     }
 
     pub fn add_rule(&mut self, rule: RouteRule) {
@@ -1555,6 +1547,45 @@ egress:
         Policy::default().save_atomic(&path).unwrap();
         let tmp = path.with_extension("yaml.tmp");
         assert!(!tmp.exists(), "tmp file should be renamed away");
+    }
+
+    #[test]
+    fn save_atomic_does_not_follow_a_symlink_planted_at_the_tmp_path() {
+        // The service writes this file unattended on every approval, so a symlink planted at the tmp path would turn a click into a write of whatever it points at.
+        let dir = TempDir::new().unwrap();
+        let victim = dir.path().join("victim");
+        let victim_contents = b"victim-data-must-survive";
+        fs::write(&victim, victim_contents).unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+        std::os::unix::fs::symlink(&victim, path.with_extension("yaml.tmp")).unwrap();
+
+        let _ = Policy::default().save_atomic(&path);
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_contents,
+            "a symlink at the tmp path must not redirect the decisions write"
+        );
+    }
+
+    #[test]
+    fn save_atomic_leaves_the_mode_umask_gives_a_file_the_developer_commits() {
+        // §8.2 makes this a file a project commits and shares, so the 0600 a secret sidecar takes would lock out a second account for no gain — compared against a plain write in the same directory, so the assertion holds under any umask.
+        let dir = TempDir::new().unwrap();
+        let reference = dir.path().join("reference");
+        fs::write(&reference, b"").unwrap();
+        let path = dir.path().join("lns-local-mixin.yaml");
+
+        Policy::default().save_atomic(&path).unwrap();
+
+        let mode = |p: &Path| {
+            std::os::unix::fs::PermissionsExt::mode(&fs::metadata(p).unwrap().permissions()) & 0o777
+        };
+        assert_eq!(
+            mode(&path),
+            mode(&reference),
+            "the decisions file must be as readable as any file the developer writes here"
+        );
     }
 
     #[test]
