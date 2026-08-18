@@ -28,6 +28,7 @@ pub async fn run_server(
     shutdown: Arc<Shutdown>,
     started_at: Instant,
 ) -> anyhow::Result<()> {
+    rebuild_stopped_runs().await;
     let listener = bind_or_replace_stale(&socket_path).await?;
 
     loop {
@@ -534,6 +535,17 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 const FRAME_CHAN_BUF: usize = 512;
 
 /// Everything a run does once it is going to start: its registry entry, the `RunStarted` its client waits for, and the boot task's frames.
+async fn rebuild_stopped_runs() {
+    let records = match crate::cache::root() {
+        Ok(root) => crate::run_record::load_all_with(&crate::image_store::RealFs, &root).await,
+        Err(e) => Err(e),
+    };
+    match records {
+        Ok(records) => crate::run_registry::rebuild_from_records(records),
+        Err(e) => log::warn!("stopped runs not rebuilt; they stay invisible until restart: {e:#}"),
+    }
+}
+
 async fn serve_prepared_run<W>(
     stream: &mut W,
     run_id: String,
