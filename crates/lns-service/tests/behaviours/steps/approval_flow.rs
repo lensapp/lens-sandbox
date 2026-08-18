@@ -683,6 +683,49 @@ fn then_inform_underivable_rule(world: &mut BehaviourWorld) -> Result<(), String
     ))
 }
 
+#[then(regex = r#"^the rule for "([^"]+)" in "([^"]+)" is noted as approved during a run$"#)]
+fn then_file_rule_says_how_it_got_there(
+    world: &mut BehaviourWorld,
+    host: String,
+    _filename: String,
+) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let matched = on_disk
+        .network
+        .egress
+        .http
+        .iter()
+        .find(|r| r.match_pattern == host)
+        .ok_or_else(|| format!("no rule for {host} in the policy file"))?;
+    assert_approval_note(matched.description.as_deref(), &host)
+}
+
+#[then(regex = r#"^the raw rule for "([^"]+)" in "([^"]+)" is noted as approved during a run$"#)]
+fn then_raw_file_rule_says_how_it_got_there(
+    world: &mut BehaviourWorld,
+    destination: String,
+    _filename: String,
+) -> Result<(), String> {
+    let on_disk = on_disk_policy(world)?;
+    let matched = on_disk
+        .network
+        .egress
+        .tcp
+        .iter()
+        .find(|r| r.match_pattern == destination)
+        .ok_or_else(|| format!("no raw rule for {destination} in the policy file"))?;
+    assert_approval_note(matched.description.as_deref(), &destination)
+}
+
+fn assert_approval_note(note: Option<&str>, destination: &str) -> Result<(), String> {
+    match note {
+        Some("approved during a run") => Ok(()),
+        other => Err(format!(
+            "an entry nobody typed has to say how it got there, or the file reads as though somebody chose {destination} on purpose; got {other:?}"
+        )),
+    }
+}
+
 fn on_disk_policy(world: &mut BehaviourWorld) -> Result<Policy, String> {
     let rig = world.approval();
     Policy::load_or_default(&rig.policy_path).map_err(|e| e.to_string())
