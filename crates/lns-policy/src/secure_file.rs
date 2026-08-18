@@ -24,17 +24,26 @@ fn write_atomic_at(path: &Path, tmp: &Path, contents: &[u8], mode: u32) -> io::R
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let mut f = fs::OpenOptions::new()
+    let f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(mode)
         .custom_flags(libc::O_NOFOLLOW)
         .open(tmp)?;
+    match fill_and_rename(f, tmp, path, contents) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(tmp);
+            Err(e)
+        }
+    }
+}
+
+fn fill_and_rename(mut f: fs::File, tmp: &Path, path: &Path, contents: &[u8]) -> io::Result<()> {
     f.write_all(contents)?;
     f.sync_all()?;
     drop(f);
-    fs::rename(tmp, path)?;
-    Ok(())
+    fs::rename(tmp, path)
 }
 
 pub struct SidecarLock {
@@ -129,6 +138,22 @@ mod tests {
         assert!(
             !path.with_extension("json.tmp").exists(),
             "tmp must be renamed away, not left in place"
+        );
+    }
+
+    #[test]
+    fn an_install_that_cannot_land_leaves_no_tmp_behind() {
+        // A tmp the writer created and could not install is untracked noise the developer then finds beside their own file, and only the next write of the same path clears it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("secret.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("occupant"), b"x").unwrap();
+
+        write_json_secret_atomic(&path, b"{}").unwrap_err();
+
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "a write that cannot reach its target must take its tmp with it"
         );
     }
 
