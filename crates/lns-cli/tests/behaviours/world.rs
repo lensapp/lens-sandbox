@@ -58,6 +58,14 @@ pub struct BehaviourWorld {
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
     pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
     pub decisions: LocalDecisionsRig,
+    pub web_login: WebLoginRig,
+}
+
+/// Scripted web-flow outcome for `lns login`, plus what the fake verifier was asked; `outcome: None` means the flow panics if consulted.
+#[derive(Debug, Default)]
+pub struct WebLoginRig {
+    pub outcome: Option<lns_cli::login::WebLoginOutcome>,
+    pub verifier_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
 }
 
 /// What the service answered when a run resolved this directory's decisions: the sources the merge reached, and which of them decided each entry.

@@ -7,7 +7,7 @@ use lns_policy::registry_auth::default_registry_auth_path;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::{LoginArgs, LoginOutcome, LogoutArgs, RegistryVerifier};
+use super::{LoginArgs, LoginOutcome, LogoutArgs, RegistryVerifier, WebLoginFlow, WebLoginOutcome};
 use crate::command::{RunCtx, RunFuture};
 use crate::connector::LocalBoxFuture;
 
@@ -24,6 +24,7 @@ pub fn run_login<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
             &default_registry,
             &auth_path,
             &verifier,
+            &RealWebLoginFlow,
             input,
             &mut out,
         )
@@ -45,6 +46,37 @@ fn configured_default_registry() -> Result<String> {
     let path = crate::config::default_config_path()?;
     let defaults = crate::config::load_run_defaults(&path)?;
     Ok(defaults.registry_or_default().to_string())
+}
+
+/// Opens `url` via the platform opener (`open` on macOS, `xdg-open` elsewhere), reporting whether it spawned.
+struct RealBrowserOpener;
+
+impl super::BrowserOpener for RealBrowserOpener {
+    fn open(&self, url: &str) -> bool {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(opener).arg(url).spawn().is_ok()
+    }
+}
+
+/// Builds the reqwest device-auth client for the registry and drives the browser device flow with it.
+struct RealWebLoginFlow;
+
+impl WebLoginFlow for RealWebLoginFlow {
+    fn login<'a>(
+        &'a self,
+        registry: &'a str,
+        out: &'a mut dyn std::io::Write,
+    ) -> LocalBoxFuture<'a, Result<WebLoginOutcome>> {
+        Box::pin(async move {
+            let client = super::RealDeviceAuthClient::for_registry(registry)?;
+            let flow = super::WebLogin::new(client, RealBrowserOpener);
+            flow.login(registry, out).await
+        })
+    }
 }
 
 pub struct RealRegistryVerifier {
