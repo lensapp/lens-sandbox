@@ -13,19 +13,76 @@ use crate::{
 
 use super::{
     build_workload_argv, connector_never_arrived, emit_completion, exec_env_strings,
-    vm_ended_before_connector, workload_identity,
+    vm_ended_before_connector,
 };
+
+/// What a run is turned away for before it exists: its host ports, what its reference resolves to, and whether it can be identified at all. Everything here is decided without a registry entry, so a refusal costs no run id and no run name.
+pub struct PreparedRun {
+    forwards: crate::forward::ForwardGuard,
+    document: PreparedDocument,
+    workload: super::WorkloadIdentity,
+}
+
+/// What a run will boot from: the definition its request carried, what its published reference resolved to, or neither.
+enum PreparedDocument {
+    Local(String),
+    Published(Box<crate::artifact::real::ResolvedForRun>),
+    Imageless,
+}
+
+/// Decide everything a run can be refused for before it starts. What is left in [`orchestrate`] either needs the planned document — which discloses and materializes — or streams to a client that is already attached.
+pub async fn prepare(run_id: &str, args: &RunImageArgs) -> Result<PreparedRun> {
+    let forwards = crate::forward::establish(
+        std::sync::Arc::new(crate::forward::real::VsockForwarder::new(
+            run_id.to_string(),
+        )),
+        &crate::forward::plan(&args.published_ports),
+    )?;
+    let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
+    let document = match (args.definition.as_deref(), resolved_image) {
+        (Some(definition), _) => {
+            crate::artifact::mixin::refuse_mixins_without_a_document(&args.mixins)?;
+            PreparedDocument::Local(definition.to_string())
+        }
+        (None, Some(image_ref)) => {
+            match crate::artifact::real::resolve_for_run(
+                image_ref,
+                args.verify_sandbox,
+                &args.mixins,
+                args.policy_path.as_deref().map(Path::new),
+            )
+            .await?
+            {
+                Some(resolved) => PreparedDocument::Published(Box::new(resolved)),
+                None => PreparedDocument::Imageless,
+            }
+        }
+        (None, None) => PreparedDocument::Imageless,
+    };
+    let digest = match &document {
+        PreparedDocument::Published(resolved) => Some(resolved.digest.as_str()),
+        _ => None,
+    };
+    // Refuse an unidentifiable run before its sign-in gate can drag the user through a device flow.
+    let workload = super::workload_identity(args, resolved_image, digest)?;
+    Ok(PreparedRun {
+        forwards,
+        document,
+        workload,
+    })
+}
 
 pub async fn handle(
     run_id: String,
     microvm: String,
     args: RunImageArgs,
+    prepared: PreparedRun,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) {
     let auto_remove = args.auto_remove;
     let finished_run_id = run_id.clone();
-    let result = orchestrate(run_id, microvm, args, frame_tx.clone(), input_rx)
+    let result = orchestrate(run_id, microvm, args, prepared, frame_tx.clone(), input_rx)
         .instrument(tracing::Span::current())
         .await;
     let code = emit_completion(&frame_tx, result).await;
@@ -54,15 +111,17 @@ async fn orchestrate(
     run_id: String,
     microvm: String,
     args: RunImageArgs,
+    prepared: PreparedRun,
     frame_tx: Sender<WireFrame>,
     input_rx: tokio::sync::mpsc::Receiver<crate::vm::session_client::SessionInput>,
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
-    let forwards = crate::forward::establish(
-        std::sync::Arc::new(crate::forward::real::VsockForwarder::new(run_id.clone())),
-        &crate::forward::plan(&args.published_ports),
-    )?;
+    let PreparedRun {
+        forwards,
+        document,
+        workload,
+    } = prepared;
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
@@ -76,39 +135,22 @@ async fn orchestrate(
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
-    // A local definition plans directly; a published sandbox reference boots its base image; a plain image passes through unchanged.
+    // A local definition plans directly; a published sandbox reference boots what it resolved to; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
-    let sandbox_plan = match (args.definition.as_deref(), resolved_image) {
-        (Some(definition), _) => {
-            crate::artifact::mixin::refuse_mixins_without_a_document(&args.mixins)?;
-            Some(
-                crate::artifact::real::plan_local(
-                    definition,
-                    args.authored_egress.as_deref(),
-                    &crate::artifact::packed_from_the_wire(&args.packed_filesets),
-                )
-                .await?,
+    let sandbox_plan = match document {
+        PreparedDocument::Local(definition) => Some(
+            crate::artifact::real::plan_local(
+                &definition,
+                args.authored_egress.as_deref(),
+                &crate::artifact::packed_from_the_wire(&args.packed_filesets),
             )
+            .await?,
+        ),
+        PreparedDocument::Published(resolved) => {
+            Some(crate::artifact::real::plan_resolved(*resolved, &run_id, &microvm).await?)
         }
-        (None, Some(image_ref)) => {
-            crate::artifact::real::peek_and_plan(
-                image_ref,
-                args.verify_sandbox,
-                &args.mixins,
-                &run_id,
-                &microvm,
-                policy.as_deref(),
-            )
-            .await?
-        }
-        (None, None) => None,
+        PreparedDocument::Imageless => None,
     };
-    // Refuse an unidentifiable run before its sign-in gate can drag the user through a device flow.
-    let workload = workload_identity(
-        &args,
-        resolved_image,
-        sandbox_plan.as_ref().and_then(|p| p.digest.as_deref()),
-    )?;
     let mut signed_in = Vec::new();
     let mut revocations_at_gate = std::collections::HashMap::new();
     if let Some(plan) = &sandbox_plan {

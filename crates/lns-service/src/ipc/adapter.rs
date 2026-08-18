@@ -16,7 +16,7 @@ use crate::time_fmt::rfc3339_now;
 
 use super::{
     PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
-    pump_responses,
+    pump_responses, write_error,
 };
 use super::{build_session_params, validate_exec};
 
@@ -499,21 +499,54 @@ async fn handle_one_shot(
     Ok(())
 }
 
-const FRAME_CHAN_BUF: usize = 512;
+/// The production run host: what a run refuses before it starts, and what it does once it will.
+struct RealRunHost;
 
-async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyhow::Result<()> {
-    if let Some(name) = &args.name
-        && let Err(message) = crate::run_registry::ensure_name_available(name)
-    {
-        let _ = write_error(&mut stream, message).await;
-        return Ok(());
+impl super::RunHost for RealRunHost {
+    type Prepared = crate::run::PreparedRun;
+
+    async fn prepare(
+        &self,
+        run_id: &str,
+        args: &lns_ipc::RunImageArgs,
+    ) -> anyhow::Result<Self::Prepared> {
+        crate::run::prepare(run_id, args).await
     }
 
+    async fn serve<W>(
+        &self,
+        stream: &mut W,
+        run_id: String,
+        args: lns_ipc::RunImageArgs,
+        prepared: Self::Prepared,
+    ) -> anyhow::Result<()>
+    where
+        W: AsyncWriteExt + Unpin + Send,
+    {
+        serve_prepared_run(stream, run_id, args, prepared).await
+    }
+}
+
+async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyhow::Result<()> {
+    super::start_run(&mut stream, args, &RealRunHost).await
+}
+
+const FRAME_CHAN_BUF: usize = 512;
+
+/// Everything a run does once it is going to start: its registry entry, the `RunStarted` its client waits for, and the boot task's frames.
+async fn serve_prepared_run<W>(
+    stream: &mut W,
+    run_id: String,
+    args: lns_ipc::RunImageArgs,
+    prepared: crate::run::PreparedRun,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     let (cancel_tx, cancel_rx) = oneshot::channel::<i32>();
     let (detach_tx, detach_rx) = oneshot::channel::<()>();
 
-    let run_id = crate::run_registry::allocate_run_id();
     let detached = args.detached;
 
     let (input_tx, input_rx) = mpsc::channel::<crate::vm::session_client::SessionInput>(256);
@@ -540,7 +573,15 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
     let fallback_microvm = run_id.clone();
     let run_task = tokio::spawn(async move {
         let microvm = microvm_rx.await.unwrap_or(fallback_microvm);
-        crate::run::handle(task_run_id, microvm, run_args, task_frame_tx, input_rx).await;
+        crate::run::handle(
+            task_run_id,
+            microvm,
+            run_args,
+            prepared,
+            task_frame_tx,
+            input_rx,
+        )
+        .await;
     });
 
     let abort = run_task.abort_handle();
@@ -571,7 +612,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         }
         Err(message) => {
             abort.abort();
-            let _ = write_error(&mut stream, message).await;
+            let _ = write_error(stream, message).await;
             return Ok(());
         }
     }
@@ -596,7 +637,7 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
         return Err(e);
     }
 
-    let outcome = pump_responses(&mut stream, &mut frame_rx, cancel_rx, detach_rx).await?;
+    let outcome = pump_responses(stream, &mut frame_rx, cancel_rx, detach_rx).await?;
     match post_pump_action(&outcome, detached) {
         PostPumpAction::Retain => {
             crate::run_registry::mark_exited_from_log(&run_id);
@@ -712,11 +753,5 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
     drop(input_keepalive);
     session_task.abort();
     let _ = session_task.await;
-    Ok(())
-}
-
-async fn write_error(stream: &mut UnixStream, message: String) -> anyhow::Result<()> {
-    let frame = encode_frame(&Response::Error { message })?;
-    stream.write_all(&frame).await?;
     Ok(())
 }
