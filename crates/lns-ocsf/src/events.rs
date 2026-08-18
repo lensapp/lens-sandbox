@@ -284,6 +284,109 @@ pub fn workload_launch(ctx: &Context, image: &str) -> Value {
     .build()
 }
 
+pub fn workload_exit(ctx: &Context, exit_code: i32, killed: bool) -> Value {
+    let how = if killed { "killed" } else { "exited" };
+    Event::new(
+        "exit",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_TERMINATE,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("workload {how} with code {exit_code}").into(),
+    )
+    .set("process", json!({"uid": ctx.run, "name": "workload"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_exit_code", exit_code.into())
+    .note("lns_killed", killed.into())
+    .build()
+}
+
+pub fn workload_restart(ctx: &Context, image: &str) -> Value {
+    Event::new(
+        "restart",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!(
+            "restarted {image} on its preserved state; policy and credentials re-resolved live"
+        )
+        .into(),
+    )
+    .set("process", json!({"uid": ctx.run, "name": "workload"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_image", image.into())
+    .build()
+}
+
+pub fn run_removed(ctx: &Context, forced: bool, auto: bool) -> Value {
+    let how = if forced {
+        "forced (lns rm -f)"
+    } else if auto {
+        "auto (--rm)"
+    } else {
+        "requested (lns rm)"
+    };
+    Event::new(
+        "run_removed",
+        class::FILE_ACTIVITY,
+        category::SYSTEM,
+        activity::FILE_DELETE,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!(
+            "run removed, {how}: its record and writable layer are gone; this log outlives them"
+        )
+        .into(),
+    )
+    .set("file", json!({"name": ctx.run, "type_id": 2}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_forced", forced.into())
+    .note("lns_auto", auto.into())
+    .build()
+}
+
+pub fn runs_pruned(ctx: &Context, removed: &[String]) -> Value {
+    Event::new(
+        "runs_pruned",
+        class::FILE_ACTIVITY,
+        category::SYSTEM,
+        activity::FILE_DELETE,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("prune swept stopped runs: {}", removed.join(", ")).into(),
+    )
+    .set("file", json!({"name": ctx.run, "type_id": 2}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note(
+        "lns_removed",
+        Value::Array(removed.iter().cloned().map(Value::String).collect()),
+    )
+    .build()
+}
+
 pub fn run_env(ctx: &Context, env: &Map<String, Value>) -> Value {
     let message = format!(
         "injected: {}",
@@ -738,6 +841,53 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_kind"], "launch");
         assert_eq!(ev["unmapped"]["lns_image"], "alpine:latest");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
+    }
+
+    #[test]
+    fn workload_exit_records_the_code_and_how_the_run_ended() {
+        let ev = workload_exit(&ctx(), 137, true);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["activity_id"], 2);
+        assert_eq!(ev["message"], "workload killed with code 137");
+        assert_eq!(ev["unmapped"]["lns_exit_code"], 137);
+        assert_eq!(ev["unmapped"]["lns_killed"], true);
+        let graceful = workload_exit(&ctx(), 0, false);
+        assert_eq!(graceful["message"], "workload exited with code 0");
+    }
+
+    #[test]
+    fn workload_restart_notes_that_policy_re_resolves_live() {
+        let ev = workload_restart(&ctx(), "alpine:latest");
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["unmapped"]["lns_kind"], "restart");
+        assert!(ev["message"].as_str().unwrap().contains("re-resolved live"));
+    }
+
+    #[test]
+    fn run_removed_says_how_the_removal_was_asked_for() {
+        let ev = run_removed(&ctx(), false, false);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1001);
+        assert_eq!(ev["activity_id"], 4);
+        assert!(ev["message"].as_str().unwrap().contains("lns rm"));
+        assert_eq!(
+            run_removed(&ctx(), true, false)["unmapped"]["lns_forced"],
+            true
+        );
+        assert_eq!(
+            run_removed(&ctx(), false, true)["unmapped"]["lns_auto"],
+            true
+        );
+    }
+
+    #[test]
+    fn runs_pruned_names_what_it_removed() {
+        let ev = runs_pruned(&ctx(), &["aa01".into(), "bb02".into()]);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1001);
+        assert!(ev["message"].as_str().unwrap().contains("aa01, bb02"));
     }
 
     #[test]

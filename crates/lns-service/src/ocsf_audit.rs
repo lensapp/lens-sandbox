@@ -92,6 +92,22 @@ pub fn workload_launch_event(cx: &OcsfCtx, image: &str) -> Map<String, Value> {
     into_object(lns_ocsf::workload_launch(&cx.ctx(), image))
 }
 
+pub fn workload_exit_event(cx: &OcsfCtx, exit_code: i32, killed: bool) -> Map<String, Value> {
+    into_object(lns_ocsf::workload_exit(&cx.ctx(), exit_code, killed))
+}
+
+pub fn workload_restart_event(cx: &OcsfCtx, image: &str) -> Map<String, Value> {
+    into_object(lns_ocsf::workload_restart(&cx.ctx(), image))
+}
+
+pub fn run_removed_event(cx: &OcsfCtx, forced: bool, auto: bool) -> Map<String, Value> {
+    into_object(lns_ocsf::run_removed(&cx.ctx(), forced, auto))
+}
+
+pub fn runs_pruned_event(cx: &OcsfCtx, removed: &[String]) -> Map<String, Value> {
+    into_object(lns_ocsf::runs_pruned(&cx.ctx(), removed))
+}
+
 pub fn volume_event(cx: &OcsfCtx, name: &str, target: &str) -> Map<String, Value> {
     into_object(lns_ocsf::volume_mount(&cx.ctx(), name, target))
 }
