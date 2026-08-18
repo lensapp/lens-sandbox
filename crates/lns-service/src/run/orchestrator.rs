@@ -86,6 +86,22 @@ pub async fn handle(
         .instrument(tracing::Span::current())
         .await;
     let code = emit_completion(&frame_tx, result).await;
+    match crate::cache::root() {
+        Ok(cache_dir) => {
+            if let Err(e) = crate::run_record::mark_exited_with(
+                &crate::image_store::RealFs,
+                &cache_dir,
+                &finished_run_id,
+                code,
+                crate::time_fmt::rfc3339_now(),
+            )
+            .await
+            {
+                log::warn!("run record not updated at exit: {e:#}");
+            }
+        }
+        Err(e) => log::warn!("run record not updated at exit: {e:#}"),
+    }
     if auto_remove {
         crate::run_registry::set_exit_code(&finished_run_id, code);
         let _ = crate::run_registry::remove_if_exited(&finished_run_id);
@@ -129,7 +145,7 @@ async fn orchestrate(
     let cache_dir = cache::root()?;
     let layer_cache = oci_layer_cache::LayerCache::new(cache_dir.join("layers"));
     let content_store = content_store::ContentStore::new(cache_dir.join("content"));
-    let run_scratch_dir = cache_dir.join("runs").join(&run_id);
+    let run_scratch_dir = cache::run_dir(&cache_dir, &run_id);
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
     let mut run_scratch =
         super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
@@ -363,6 +379,7 @@ async fn orchestrate(
 
     let layers = std::mem::take(&mut image.bytes);
     let layer_digests = std::mem::take(&mut image.digests);
+    let recorded_layer_digests = layer_digests.clone();
     let probe = composefs::descriptor::DescriptorRequest {
         layer_digests: &layer_digests,
         layers: &layers,
@@ -399,6 +416,8 @@ async fn orchestrate(
         sha256 = %descriptor.descriptor_sha256,
         "composefs descriptor materialised",
     );
+    let recorded_descriptor_sha = descriptor.descriptor_sha256.clone();
+    let record_args = args.clone();
 
     let run_as = vm::resolve_run_as(
         args.sandbox_user.as_deref(),
@@ -577,6 +596,29 @@ async fn orchestrate(
         .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(30))
         .await?;
     run_scratch.keep();
+    let image_label = record_args
+        .image
+        .clone()
+        .unwrap_or_else(|| "<imageless>".to_string());
+    let command_label = record_args.cmd.join(" ");
+    let record = crate::run_record::RunRecord {
+        version: crate::run_record::CURRENT_VERSION,
+        run_id: run_id.clone(),
+        name: microvm.clone(),
+        args: record_args,
+        descriptor_sha256: recorded_descriptor_sha,
+        layer_digests: recorded_layer_digests,
+        image: image_label,
+        command: command_label,
+        created_at: crate::time_fmt::rfc3339_now(),
+        finished_at: None,
+        exit_code: None,
+    };
+    if let Err(e) =
+        crate::run_record::save_with(&crate::image_store::RealFs, &cache_dir, &record).await
+    {
+        log::warn!("run record not written; the run will not be restartable: {e:#}");
+    }
     log::debug!("connected broker in {:.2?}", connect_started.elapsed());
     let session_started = std::time::Instant::now();
     let session_code =
