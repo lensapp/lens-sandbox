@@ -116,6 +116,18 @@ pub fn register_stopped(stopped: StoppedRun) {
         .insert(stopped.record.run_id.clone(), RunEntry::Stopped(stopped));
 }
 
+pub fn rebuild_from_records(records: Vec<crate::run_record::RunRecord>) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    rebuild_in(g.get_or_insert_with(HashMap::new), records);
+}
+
+fn rebuild_in(map: &mut HashMap<String, RunEntry>, records: Vec<crate::run_record::RunRecord>) {
+    for record in records {
+        map.entry(record.run_id.clone())
+            .or_insert(RunEntry::Stopped(StoppedRun { record }));
+    }
+}
+
 pub fn stopped_run_names() -> Vec<String> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     stopped_names_in(g.as_ref())
@@ -1548,6 +1560,36 @@ mod tests {
         assert!(log_buffer(&id).is_none());
         assert!(connector(&id).is_none());
         deregister(&id);
+    }
+
+    #[test]
+    fn rebuild_in_lists_every_recorded_run_as_stopped() {
+        let mut map = HashMap::new();
+        rebuild_in(
+            &mut map,
+            vec![
+                stopped_record("aa07", "reviewer"),
+                stopped_record("aa08", "builder"),
+            ],
+        );
+        assert_eq!(
+            resolve_in(Some(&map), "reviewer"),
+            Ok("aa07".to_string()),
+            "a rebuilt run resolves by its recorded name"
+        );
+        assert_eq!(
+            stopped_names_in(Some(&map)),
+            vec!["builder".to_string(), "reviewer".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_in_never_displaces_a_listed_run() {
+        let mut map = HashMap::new();
+        named_handle(&mut map, "aa07", "reviewer").await;
+        rebuild_in(&mut map, vec![stopped_record("aa07", "stale-name")]);
+        assert_eq!(map.get("aa07").unwrap().name(), "reviewer");
+        assert!(map.get("aa07").unwrap().as_live().is_some());
     }
 
     #[tokio::test]
