@@ -2708,6 +2708,11 @@ mod tests {
 
     #[tokio::test]
     async fn prune_skips_a_runs_dir_entry_with_no_readable_name() {
+        use crate::image_store::Fs as _;
+        let probe = ScriptedRunsDir(Vec::new());
+        assert!(probe.read(std::path::Path::new("/x")).await.is_err());
+        assert!(probe.write(std::path::Path::new("/x"), b"").await.is_ok());
+        assert!(probe.remove_file(std::path::Path::new("/x")).await.is_ok());
         let fs = ScriptedRunsDir(vec![std::path::PathBuf::from("/")]);
         let resp = prune_runs_with(&fs, &NoopRemover, std::path::Path::new("/cache"), |_| {}).await;
         assert!(
@@ -2744,6 +2749,40 @@ mod tests {
         );
         let content = std::fs::read_to_string(crate::audit::audit_path(&id2).unwrap()).unwrap();
         assert!(content.contains("runs_pruned"), "{content}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs, env)]
+    async fn a_forced_request_reaches_the_live_session_channel() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _c = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let resp = remove_run_request(&id, true).await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("no session")
+                || message.contains("input") || !message.is_empty()),
+            "a forced removal of a run with no session channel surfaces the failure: {resp:?}"
+        );
+        assert!(crate::run_registry::status(&id).is_some());
+        crate::run_registry::deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs, env)]
+    async fn a_homeless_service_answers_removal_and_prune_instead_of_panicking() {
+        let _h = crate::test_env::EnvVarGuard::unset("HOME");
+        let _c = crate::test_env::EnvVarGuard::unset("XDG_CACHE_HOME");
+        // dirs resolves a home from passwd on macOS, so only Linux reaches the rootless arm — both answers are answers.
+        let resp = remove_run_request("nosuch", false).await;
+        assert!(matches!(resp, Response::Error { .. }), "got {resp:?}");
+        let resp = prune_runs_request().await;
+        assert!(
+            matches!(resp, Response::Error { .. } | Response::RunsPruned { .. }),
+            "got {resp:?}"
+        );
     }
 
     #[tokio::test]
