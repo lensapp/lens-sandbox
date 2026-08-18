@@ -16,7 +16,7 @@ use crate::time_fmt::rfc3339_now;
 
 use super::{
     PostPumpAction, PumpOutcome, handle_request, peer_is_authorized, post_pump_action,
-    pump_exec_responses, pump_responses, write_error,
+    pump_responses, write_error,
 };
 use super::{build_session_params, register_exec_input, validate_exec};
 
@@ -751,13 +751,12 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
 
     drop(frame_tx);
 
-    let outcome = pump_exec_responses(&mut stream, &mut frame_rx).await?;
-    if let PumpOutcome::WriteFailed(e) = &outcome {
-        log::debug!(error = %e, "exec stream write failed; tearing session down");
-    }
-
-    crate::run_registry::deregister_exec_session(&target_run_id, &session_id);
-    session_task.abort();
-    let _ = session_task.await;
-    Ok(())
+    super::drive_exec_stream(
+        &mut stream,
+        &target_run_id,
+        &session_id,
+        session_task,
+        &mut frame_rx,
+    )
+    .await
 }
