@@ -114,6 +114,23 @@ pub struct BehaviourWorld {
     /// Whether the run-start exchange returned rather than pending forever.
     pub start_returned: bool,
     pub exec: ExecRoutingRig,
+
+    /// What a stopped-run start scenario's preflight refuses with; `None` refuses nothing.
+    pub startrun_refusal: Option<String>,
+    /// Frames the StartRun exchange wrote to its client.
+    pub startrun_frames: Vec<Response>,
+    /// Whether the StartRun exchange reached the boot step.
+    pub startrun_served: bool,
+    /// The handle a StartRun scenario targets.
+    pub startrun_target: Option<String>,
+    /// Registry ids a StartRun scenario registered, deregistered after the exchange.
+    pub startrun_cleanup: Vec<String>,
+    /// The target run's status snapshotted after the exchange, before cleanup.
+    pub startrun_status_after: Option<lns_ipc::RunStatus>,
+    /// The volume holder's short run id, for the held-volume refusal.
+    pub startrun_volume_holder: Option<String>,
+    /// Held from a StartRun scenario's first Given to the end of its When: these scenarios share fixed names and the global stopped-run listing, so they must not interleave.
+    pub startrun_serial: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 #[derive(Debug, Default)]

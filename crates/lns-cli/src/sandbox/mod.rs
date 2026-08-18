@@ -436,6 +436,7 @@ async fn remove_run<W: std::io::Write>(
     match svc
         .one_shot(Request::RemoveRun {
             run: run.to_string(),
+            force: false,
         })
         .await?
     {

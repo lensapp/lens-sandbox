@@ -166,7 +166,13 @@ async fn stop_by_numeric_id(world: &mut BehaviourWorld) {
 
 #[when(regex = r#"^a RemoveRun request for run "([^"]+)" arrives$"#)]
 async fn remove_by_handle(world: &mut BehaviourWorld, run: String) {
-    world.response = Some(run_one_shot(&Request::RemoveRun { run }, world.started_at()).await);
+    world.response = Some(
+        run_one_shot(
+            &Request::RemoveRun { run, force: false },
+            world.started_at(),
+        )
+        .await,
+    );
 }
 
 #[then(regex = r#"^a run can then be registered with the name "([^"]+)"$"#)]
