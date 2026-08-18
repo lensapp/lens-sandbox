@@ -130,6 +130,12 @@ pub struct BehaviourWorld {
     /// The record the scripted boot received.
     pub startrun_booted:
         std::sync::Arc<std::sync::Mutex<Option<lns_service::run_record::RunRecord>>>,
+    /// Run dirs the removal scenarios' fake remover reclaimed.
+    pub rm_reclaimed: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    /// The stopped run ids a prune scenario staged.
+    pub prune_stopped: Vec<String>,
+    /// The orphan run dir id a prune scenario staged.
+    pub prune_orphan: Option<String>,
     /// Held from a StartRun scenario's first Given to the end of its When: these scenarios share fixed names and the global stopped-run listing, so they must not interleave.
     pub startrun_serial: Option<tokio::sync::OwnedMutexGuard<()>>,
 }

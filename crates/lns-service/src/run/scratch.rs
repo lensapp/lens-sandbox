@@ -1,14 +1,28 @@
 use std::path::{Path, PathBuf};
 
-pub(super) trait RemoveDir {
+pub trait RemoveDir: Send + Sync {
     fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()>;
 }
 
-pub(super) struct RealRemoveDir;
+pub struct RealRemoveDir;
 
 impl RemoveDir for RealRemoveDir {
     fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(dir)
+    }
+}
+
+/// Deletes a run's whole dir — record and writable layer — logging rather than failing, since the registry entry is already gone.
+pub fn reclaim_run_dir<R: RemoveDir>(remover: &R, cache_root: &Path, run_id: &str) -> bool {
+    let dir = crate::cache::run_dir(cache_root, run_id);
+    match remover.remove_dir_all(&dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            let dir = dir.display();
+            crate::log::warn!("run dir not reclaimed at {dir}: {e}");
+            false
+        }
     }
 }
 
@@ -83,6 +97,20 @@ mod tests {
                 Some(kind) => Err(std::io::Error::new(kind, "fake remover")),
             }
         }
+    }
+
+    #[test]
+    fn reclaim_deletes_the_run_dir_and_tolerates_it_being_gone() {
+        let (remover, calls) = FakeRemover::returning(None);
+        assert!(reclaim_run_dir(&remover, Path::new("/cache"), "aa07"));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![PathBuf::from("/cache/runs/aa07")]
+        );
+        let (gone, _) = FakeRemover::returning(Some(ErrorKind::NotFound));
+        assert!(reclaim_run_dir(&gone, Path::new("/cache"), "aa07"));
+        let (denied, _) = FakeRemover::returning(Some(ErrorKind::PermissionDenied));
+        assert!(!reclaim_run_dir(&denied, Path::new("/cache"), "aa07"));
     }
 
     #[test]

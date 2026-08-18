@@ -419,14 +419,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         } => login_response(crate::image::verify_login(registry, username, secret).await),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
-        Request::RemoveRun { run, force: _ } => remove_run_request(run),
+        Request::RemoveRun { run, force } => remove_run_request(run, *force).await,
         Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
             Ok(()) => Response::Acknowledged,
             Err(message) => Response::Error { message },
         },
-        Request::PruneRuns => Response::RunsPruned {
-            removed: crate::run_registry::prune_exited(),
-        },
+        Request::PruneRuns => prune_runs_request().await,
         Request::StartRun { .. } => {
             unreachable!(
                 "Request::StartRun must be dispatched via handle_start, not handle_request"
@@ -503,26 +501,110 @@ fn inspect_resolved(id: &str) -> Response {
     }
 }
 
-fn remove_run_request(run: &str) -> Response {
+async fn remove_run_request(run: &str, force: bool) -> Response {
+    match crate::cache::root() {
+        Ok(root) => {
+            remove_run_with(
+                run,
+                force,
+                &crate::run::RealRemoveDir,
+                &root,
+                |id, sig| async move {
+                    forward_session_input(&id, session_input_from_signal(sig), "RemoveRun").await
+                },
+            )
+            .await
+        }
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+async fn prune_runs_request() -> Response {
+    match crate::cache::root() {
+        Ok(root) => {
+            prune_runs_with(
+                &crate::image_store::RealFs,
+                &crate::run::RealRemoveDir,
+                &root,
+            )
+            .await
+        }
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+/// Serve one `RemoveRun`: an exited run's registry entry and run dir go together; a running one is refused unless forced, and force is a stop first, not a shortcut around one.
+pub async fn remove_run_with<R, F, Fut>(
+    run: &str,
+    force: bool,
+    remover: &R,
+    cache_root: &std::path::Path,
+    send_signal: F,
+) -> Response
+where
+    R: crate::run::RemoveDir,
+    F: Fn(String, lns_ipc::SignalKind) -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
         Err(message) => return Response::Error { message },
     };
-    remove_resolved_run(&id)
-}
-
-fn remove_resolved_run(id: &str) -> Response {
-    match crate::run_registry::remove_if_exited(id) {
-        crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+    if force
+        && let Response::Error { message } =
+            stop_run_with(&id, std::time::Duration::ZERO, KILL_GRACE, |sig| {
+                send_signal(id.clone(), sig)
+            })
+            .await
+    {
+        return Response::Error { message };
+    }
+    match crate::run_registry::remove_if_exited(&id) {
+        crate::run_registry::RemoveOutcome::Removed => {
+            crate::run::reclaim_run_dir(remover, cache_root, &id);
+            Response::Acknowledged
+        }
         crate::run_registry::RemoveOutcome::Running => Response::Error {
             message: format!(
-                "run {id} is still running; stop it first with `lns sandbox stop {id}`"
+                "run {run} is still running; stop it first with `lns stop {run}` or force with `lns rm -f {run}`"
             ),
         },
         crate::run_registry::RemoveOutcome::NotFound => Response::Error {
             message: format!("no run with id {id}"),
         },
     }
+}
+
+/// Sweep every stopped run and every orphan run dir — the one command that takes a machine back to clean.
+pub async fn prune_runs_with<F, R>(fs: &F, remover: &R, cache_root: &std::path::Path) -> Response
+where
+    F: crate::image_store::Fs,
+    R: crate::run::RemoveDir,
+{
+    let mut removed = crate::run_registry::prune_exited();
+    for id in &removed {
+        crate::run::reclaim_run_dir(remover, cache_root, id);
+    }
+    let known: std::collections::HashSet<String> = crate::run_registry::snapshot()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    if let Ok(entries) = fs.read_dir(&cache_root.join("runs")).await {
+        for dir in entries {
+            let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !known.contains(id) && !removed.iter().any(|r| r == id) {
+                crate::run::reclaim_run_dir(remover, cache_root, id);
+                removed.push(id.to_string());
+            }
+        }
+    }
+    Response::RunsPruned { removed }
 }
 
 fn volume_response(result: anyhow::Result<Response>) -> Response {
@@ -1903,11 +1985,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_resolved_run_reports_no_run_when_the_id_vanished_after_resolution() {
-        let resp = remove_resolved_run("ffffffffffffffffffffffffffffffff");
+    struct NoopRemover;
+    impl crate::run::RemoveDir for NoopRemover {
+        fn remove_dir_all(&self, _dir: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_run_with_reports_no_such_run_for_an_unknown_handle() {
+        let resp = remove_run_with(
+            "ffffffffffffffffffffffffffffffff",
+            false,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            |_, _| async { Response::Acknowledged },
+        )
+        .await;
         assert!(
-            matches!(&resp, Response::Error { message } if message.contains("no run with id")),
+            matches!(&resp, Response::Error { message } if message.contains("no such run")),
             "got {resp:?}"
         );
     }

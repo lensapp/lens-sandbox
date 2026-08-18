@@ -7,6 +7,32 @@ mod orchestrator;
 mod scratch;
 mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
+pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
+
+/// Everything a run's end owes the world: its record gets the exit stamped, and a --rm run takes its state with it.
+pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir>(
+    fs: &F,
+    remover: &R,
+    cache_root: &std::path::Path,
+    run_id: &str,
+    code: i32,
+    auto_remove: bool,
+    finished_at: String,
+) {
+    if let Err(e) =
+        crate::run_record::mark_exited_with(fs, cache_root, run_id, code, finished_at).await
+    {
+        crate::log::warn!("run record not updated at exit: {e:#}");
+    }
+    if auto_remove {
+        crate::run_registry::set_exit_code(run_id, code);
+        if crate::run_registry::remove_if_exited(run_id)
+            == crate::run_registry::RemoveOutcome::Removed
+        {
+            reclaim_run_dir(remover, cache_root, run_id);
+        }
+    }
+}
 
 /// Whether a boot creates a run or revives one: a restart boots over a preserved writable layer, so it must not arm the scratch guard and must find the exact lower stack the layer was written on.
 #[derive(Clone, Debug, PartialEq, Eq)]
