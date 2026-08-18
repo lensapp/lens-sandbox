@@ -5,6 +5,7 @@ pub mod credential_flow;
 pub mod declared_connectors;
 pub mod declared_tools;
 pub mod env_injection;
+pub mod exec_session_routing;
 pub mod forward;
 pub mod host_binds;
 pub mod image_management;

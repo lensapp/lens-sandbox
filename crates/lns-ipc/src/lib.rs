@@ -24,9 +24,10 @@ pub use protocol::{
     DisplacedEntry, ExecImageArgs, ImageInfo, ImageView, LogLevel, MixinView, MountSpec,
     PackedFilesetSource, PortPublish, Protocol, Request, Response, RunConfig, RunDetails,
     RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset, SandboxFilesetOwner,
-    SandboxMount, SandboxMountKind, SandboxPort, SandboxView, SignalKind, SourceContribution,
-    StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure, cmdline_unsafe_char,
-    validate_bind_source, validate_run_name, validate_volume_name, validate_volume_target,
+    SandboxMount, SandboxMountKind, SandboxPort, SandboxView, SessionTarget, SignalKind,
+    SourceContribution, StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure,
+    cmdline_unsafe_char, validate_bind_source, validate_run_name, validate_volume_name,
+    validate_volume_target,
 };
 pub use socket::{SocketPathError, default_socket_path};
 pub use update::{NO_UPDATE_CHECK_ENV, UpdateStatus};

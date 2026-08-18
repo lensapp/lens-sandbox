@@ -15,21 +15,21 @@ pub enum Request {
     CancelRun {
         run_id: String,
     },
-    RunStdin {
-        run_id: String,
+    SessionStdin {
+        target: SessionTarget,
         bytes: Vec<u8>,
     },
-    RunResize {
-        run_id: String,
+    SessionResize {
+        target: SessionTarget,
         rows: u16,
         cols: u16,
     },
-    RunSignal {
-        run_id: String,
+    SessionSignal {
+        target: SessionTarget,
         signal: SignalKind,
     },
-    RunDetach {
-        run_id: String,
+    SessionDetach {
+        target: SessionTarget,
     },
     ExecImage(ExecImageArgs),
     Kill {
@@ -139,6 +139,21 @@ pub enum SignalKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionTarget {
+    Primary { run_id: String },
+    Exec { run_id: String, session_id: String },
+}
+
+impl SessionTarget {
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::Primary { run_id } | Self::Exec { run_id, .. } => run_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
     Pong,
@@ -149,6 +164,10 @@ pub enum Response {
     },
     RunStarted {
         run_id: String,
+    },
+    ExecStarted {
+        run_id: String,
+        session_id: String,
     },
     RunLog {
         level: LogLevel,
@@ -852,9 +871,9 @@ pub struct ExecImageArgs {
     pub run: String,
     pub argv: Vec<String>,
     pub env: Vec<String>,
-    #[serde(default = "default_tty")]
+    #[serde(default)]
     pub tty: bool,
-    #[serde(default = "default_stdin")]
+    #[serde(default)]
     pub stdin: bool,
     #[serde(default)]
     pub initial_winsize: Option<(u16, u16)>,
@@ -874,15 +893,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exec_image_args_tty_defaults_to_true_when_missing() {
+    fn exec_image_args_terminal_flags_default_to_false_when_missing() {
         let frame = serde_json::json!({
             "run": "1",
             "argv": ["sh"],
             "env": []
         });
         let parsed: ExecImageArgs = serde_json::from_value(frame).unwrap();
-        assert!(parsed.tty);
-        assert!(parsed.stdin);
+        assert!(!parsed.tty);
+        assert!(!parsed.stdin);
+    }
+
+    #[test]
+    fn session_control_requests_round_trip_with_explicit_targets() {
+        for frame in [
+            serde_json::json!({
+                "type": "SessionStdin",
+                "target": {
+                    "kind": "exec",
+                    "run_id": "7",
+                    "session_id": "exec-1"
+                },
+                "bytes": [104, 105]
+            }),
+            serde_json::json!({
+                "type": "SessionResize",
+                "target": {
+                    "kind": "primary",
+                    "run_id": "7"
+                },
+                "rows": 24,
+                "cols": 80
+            }),
+            serde_json::json!({
+                "type": "SessionSignal",
+                "target": {
+                    "kind": "exec",
+                    "run_id": "7",
+                    "session_id": "exec-1"
+                },
+                "signal": "int"
+            }),
+            serde_json::json!({
+                "type": "SessionDetach",
+                "target": {
+                    "kind": "exec",
+                    "run_id": "7",
+                    "session_id": "exec-1"
+                }
+            }),
+        ] {
+            let parsed: Request = serde_json::from_value(frame.clone())
+                .expect("session control request should decode");
+            assert_eq!(serde_json::to_value(parsed).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn exec_started_response_round_trips_with_session_id() {
+        let frame = serde_json::json!({
+            "type": "ExecStarted",
+            "run_id": "7",
+            "session_id": "exec-1"
+        });
+        let parsed: Response =
+            serde_json::from_value(frame.clone()).expect("ExecStarted response should decode");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), frame);
     }
 
     #[test]
@@ -1401,9 +1477,11 @@ mod tests {
     }
 
     #[test]
-    fn run_detach_request_survives_a_round_trip() {
-        let req = Request::RunDetach {
-            run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+    fn primary_session_detach_request_survives_a_round_trip() {
+        let req = Request::SessionDetach {
+            target: SessionTarget::Primary {
+                run_id: "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string(),
+            },
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
