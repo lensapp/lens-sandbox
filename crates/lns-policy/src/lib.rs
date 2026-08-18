@@ -47,6 +47,9 @@ pub const API_VERSION: &str = "lns.run/v1";
 /// The kind §8.1 records a decision as, so it merges under the same rules as anything the developer pulled.
 pub const KIND: &str = "mixin";
 
+/// What §4.2's `description` says about the one entry nobody typed, so a destination the run wrote down does not read as one somebody chose on purpose.
+const APPROVED_NOTE: &str = "approved during a run";
+
 /// The decisions file on disk. Its envelope is restated here rather than read through the crate that parses a kit, which depends on this one; only the block a run writes back is modelled, and every other one travels in [`LocalMixinSpec::rest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -228,6 +231,11 @@ impl TcpEgressRule {
             binaries: None,
             description: None,
         }
+    }
+
+    pub fn approved(mut self) -> Self {
+        self.description = Some(APPROVED_NOTE.to_string());
+        self
     }
 
     /// Rejects everything lens-sandbox-core's `parse_tcp_egress` rejects — one rule it refuses force-denies the whole policy inside the guest — plus the scopes that parse there but can never match a caller.
@@ -495,6 +503,8 @@ pub enum Approval {
 trait Placed: PartialEq {
     fn verdict(&self) -> Verdict;
     fn match_pattern(&self) -> &str;
+    /// Whether the file already holds this entry, disregarding the note beside it: a note says how an entry got there, never what it decides.
+    fn already_held_as(&self, other: &Self) -> bool;
 }
 
 impl Placed for RouteRule {
@@ -504,6 +514,14 @@ impl Placed for RouteRule {
 
     fn match_pattern(&self) -> &str {
         &self.match_pattern
+    }
+
+    fn already_held_as(&self, other: &Self) -> bool {
+        let unnoted = |rule: &Self| Self {
+            description: None,
+            ..rule.clone()
+        };
+        unnoted(self) == unnoted(other)
     }
 }
 
@@ -515,6 +533,14 @@ impl Placed for TcpEgressRule {
     fn match_pattern(&self) -> &str {
         &self.match_pattern
     }
+
+    fn already_held_as(&self, other: &Self) -> bool {
+        let unnoted = |rule: &Self| Self {
+            description: None,
+            ..rule.clone()
+        };
+        unnoted(self) == unnoted(other)
+    }
 }
 
 /// Places an approval-derived rule where the gate reaches it: appended when nothing covers the destination, and otherwise written neither ahead of the rule that already decides it — that would grant more than the card showed — nor behind it, where it would never fire.
@@ -523,7 +549,9 @@ fn place_approved<R: Placed>(
     rule: R,
     shadowing: Option<(usize, R)>,
 ) -> Approval {
-    let held = table.iter().position(|existing| *existing == rule);
+    let held = table
+        .iter()
+        .position(|existing| existing.already_held_as(&rule));
     let Some((index, shadowing)) = shadowing else {
         if held.is_none() {
             table.push(rule);
@@ -597,6 +625,11 @@ impl RouteRule {
             rules: Vec::new(),
             binaries: None,
         }
+    }
+
+    pub fn approved(mut self) -> Self {
+        self.description = Some(APPROVED_NOTE.to_string());
+        self
     }
 
     pub fn validate_binaries(&self) -> io::Result<()> {
@@ -1547,6 +1580,44 @@ egress:
         Policy::default().save_atomic(&path).unwrap();
         let tmp = path.with_extension("yaml.tmp");
         assert!(!tmp.exists(), "tmp file should be renamed away");
+    }
+
+    #[test]
+    fn an_approval_for_a_host_the_developer_already_allowed_keeps_their_own_entry() {
+        // The note belongs to the run, so an entry somebody typed without one has to still read as the answer they already gave rather than as a near-duplicate to append.
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("docs.some-vendor.example"));
+
+        let approval =
+            p.add_approved_rule(RouteRule::allow_host("docs.some-vendor.example").approved());
+
+        assert_eq!(approval, Approval::Stands);
+        assert_eq!(
+            p.network.egress.http,
+            [RouteRule::allow_host("docs.some-vendor.example")],
+            "the entry they wrote keeps its own words, and nothing is written beside it"
+        );
+    }
+
+    #[test]
+    fn an_approval_for_a_raw_destination_the_developer_already_allowed_keeps_their_own_entry() {
+        let mut p = Policy::default();
+        p.network.egress.tcp.push(TcpEgressRule::allow_destination(
+            "db.some-vendor.example:5432",
+        ));
+
+        let approval = p.add_approved_tcp_rule(
+            TcpEgressRule::allow_destination("db.some-vendor.example:5432").approved(),
+        );
+
+        assert_eq!(approval, Approval::Stands);
+        assert_eq!(
+            p.network.egress.tcp,
+            [TcpEgressRule::allow_destination(
+                "db.some-vendor.example:5432"
+            )],
+            "the entry they wrote keeps its own words, and nothing is written beside it"
+        );
     }
 
     #[test]

@@ -168,3 +168,19 @@ Feature: lns-service approval flow
     And the running policy contains the new allow rule
     And the approval window informs the developer that the rule could not be persisted
     And a future request to "api.linear.app" is allowed without prompting until the sandbox exits
+
+  # A destination sitting in this file with nothing beside it reads as one the project
+  # decided on purpose. §4.2 gives an entry a description for saying otherwise, and the
+  # entry nobody typed is the one that needs it.
+  Scenario: An entry an always-decision writes says how it got there
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
+    And the policy has no rule for "docs.some-vendor.example"
+    And an approval entry is visible for a request to "docs.some-vendor.example"
+    When the developer picks "always allow"
+    Then the rule for "docs.some-vendor.example" in "lns-local-mixin.yaml" is noted as approved during a run
+
+  Scenario: A raw entry an always-decision writes says how it got there
+    Given the sandbox was launched with --policy "lns-local-mixin.yaml"
+    And an approval entry is visible for a raw splice to "db.internal:5432"
+    When the developer picks "always allow"
+    Then the raw rule for "db.internal:5432" in "lns-local-mixin.yaml" is noted as approved during a run

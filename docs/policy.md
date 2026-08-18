@@ -397,7 +397,9 @@ background service shows an approval window with the host and the action — for
 - **Allow once** / **Deny once** — apply to this request only; nothing is written
   to the policy file.
 - **Allow always** / **Deny always** — apply now *and* write a matching rule to
-  the policy file, so the same question isn't asked again.
+  the policy file, so the same question isn't asked again. The rule carries the
+  note `approved during a run`, so a destination you answered for reads
+  differently from one somebody wrote by hand.
 
 **Always** writes a rule only where the guest would reach it. If some rule already
 decides that destination — an earlier answer, or a rule you wrote — the gate stops

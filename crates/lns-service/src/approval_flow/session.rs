@@ -716,8 +716,8 @@ fn offers_connector(entry: &PendingEntry, connector_id: &str) -> bool {
 
 fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
     match decision {
-        Decision::AllowAlways => Some(RouteRule::allow_host(host)),
-        Decision::DenyAlways => Some(RouteRule::deny_host(host)),
+        Decision::AllowAlways => Some(RouteRule::allow_host(host).approved()),
+        Decision::DenyAlways => Some(RouteRule::deny_host(host).approved()),
         Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
     }
 }
@@ -733,8 +733,8 @@ fn pre_empted_http_patterns(policy: &Policy, rule: &TcpEgressRule) -> Vec<String
 
 fn tcp_rule_for_always_decision(destination: &str, decision: Decision) -> Option<TcpEgressRule> {
     match decision {
-        Decision::AllowAlways => Some(TcpEgressRule::allow_destination(destination)),
-        Decision::DenyAlways => Some(TcpEgressRule::deny_destination(destination)),
+        Decision::AllowAlways => Some(TcpEgressRule::allow_destination(destination).approved()),
+        Decision::DenyAlways => Some(TcpEgressRule::deny_destination(destination).approved()),
         Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
     }
 }
@@ -1108,7 +1108,7 @@ pub(crate) mod tests {
         let policy = saved.last().expect("the decision is persisted");
         assert_eq!(
             policy.network.egress.tcp,
-            vec![TcpEgressRule::allow_destination("db.internal:5432")]
+            vec![TcpEgressRule::allow_destination("db.internal:5432").approved()]
         );
         assert!(
             policy.network.egress.http.is_empty(),
@@ -1124,7 +1124,7 @@ pub(crate) mod tests {
         let saved = store.saves.lock().unwrap();
         assert_eq!(
             saved.last().expect("saved").network.egress.tcp,
-            vec![TcpEgressRule::allow_destination("[2001:db8::1]:5432")],
+            vec![TcpEgressRule::allow_destination("[2001:db8::1]:5432").approved()],
             "re-deriving the pattern from host and port is how a bracketed literal gets mangled"
         );
     }
@@ -1226,7 +1226,7 @@ pub(crate) mod tests {
         let saved = store.saves.lock().unwrap();
         assert_eq!(
             saved.last().expect("saved").network.egress.tcp,
-            vec![TcpEgressRule::deny_destination("db.internal:5432")]
+            vec![TcpEgressRule::deny_destination("db.internal:5432").approved()]
         );
     }
 
