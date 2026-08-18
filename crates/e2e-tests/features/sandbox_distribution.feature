@@ -63,7 +63,7 @@ Feature: distributing a sandbox through a registry end to end
 
   Scenario: rm removes the cached sandbox
     When I run lns "pull <pushed-ref>" against the service
-    And I run lns "rm <pushed-ref>" against the service
+    And I run lns "rmi <pushed-ref>" against the service
     Then the exit code is 0
     When I run lns "artifact ls" against the service
     Then the output no longer lists the pushed reference

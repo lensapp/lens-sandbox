@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cucumber::{given, then, when};
 use lns_ipc::{Response, RunStatus};
-use lns_service::ipc::StartHost;
+use lns_service::ipc::{StartHost, StartOptions};
 use lns_service::run_record::RunRecord;
 use lns_service::run_registry;
 use tokio::io::AsyncWriteExt;
@@ -34,7 +34,12 @@ impl StartHost for ScriptedStartHost {
         }
     }
 
-    async fn serve<S>(&self, _stream: &mut S, record: RunRecord) -> anyhow::Result<()>
+    async fn serve<S>(
+        &self,
+        _stream: &mut S,
+        record: RunRecord,
+        _options: StartOptions,
+    ) -> anyhow::Result<()>
     where
         S: tokio::io::AsyncReadExt + AsyncWriteExt + Unpin + Send,
     {
@@ -274,7 +279,7 @@ async fn drive_start_stopped(w: &mut BehaviourWorld, handle: &str) {
         booted: w.startrun_booted.clone(),
     };
     let (mut client, mut server) = tokio::io::duplex(64 * 1024);
-    lns_service::ipc::start_stopped_run(&mut server, handle, &host)
+    lns_service::ipc::start_stopped_run(&mut server, handle, &host, StartOptions::default())
         .await
         .expect("a refused start is an answer, not a transport failure");
     drop(server);

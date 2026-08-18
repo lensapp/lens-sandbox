@@ -47,15 +47,7 @@ impl SandboxService for FakeSandboxService {
                 .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
-            Request::ListImages => Some(Response::ImageList {
-                images: self
-                    .cached_references
-                    .iter()
-                    .map(|reference| cached_entry(reference))
-                    .collect(),
-            })
-            .filter(|_| !self.cached_references.is_empty())
-            .or_else(|| self.response.clone()),
+677da9bf (feat!: give the CLI docker-start parity — start, rm for runs, rmi for images)
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);
