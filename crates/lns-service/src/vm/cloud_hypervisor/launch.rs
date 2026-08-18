@@ -26,6 +26,27 @@ impl SocketLayout {
     pub(crate) fn bind_virtiofsd(&self, index: usize) -> PathBuf {
         self.run_dir.join(format!("virtiofsd-bind-{index}.sock"))
     }
+
+    /// A restarted run reuses its run dir, and a listener refuses a socket path that still exists.
+    pub(crate) fn remove_stale(&self) -> std::io::Result<()> {
+        for sock in [&self.vsock, &self.api, &self.virtiofsd] {
+            match std::fs::remove_file(sock) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&self.run_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("virtiofsd-bind-") && name.ends_with(".sock") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) const GUEST_CID: u32 = 3;
@@ -137,6 +158,30 @@ pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remove_stale_clears_every_socket_a_previous_boot_left_behind() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = super::SocketLayout::for_run_dir(d.path());
+        for p in [&layout.vsock, &layout.api, &layout.virtiofsd] {
+            std::fs::write(p, b"stale").unwrap();
+        }
+        std::fs::write(layout.bind_virtiofsd(0), b"stale").unwrap();
+        std::fs::write(d.path().join("upper.img"), b"keep").unwrap();
+        layout.remove_stale().unwrap();
+        assert!(!layout.vsock.exists());
+        assert!(!layout.api.exists());
+        assert!(!layout.virtiofsd.exists());
+        assert!(!layout.bind_virtiofsd(0).exists());
+        assert!(d.path().join("upper.img").exists(), "only sockets go");
+    }
+
+    #[test]
+    fn remove_stale_on_a_clean_run_dir_is_a_no_op() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = super::SocketLayout::for_run_dir(d.path());
+        layout.remove_stale().unwrap();
+    }
+
     use super::*;
     use crate::vm::{BindAttachment, ExecSpec, VolumeAttachment};
 

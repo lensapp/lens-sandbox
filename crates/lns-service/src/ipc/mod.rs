@@ -42,13 +42,13 @@ pub trait StartHost {
         record: &crate::run_record::RunRecord,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
-    fn serve<W>(
+    fn serve<S>(
         &self,
-        stream: &mut W,
+        stream: &mut S,
         record: crate::run_record::RunRecord,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
     where
-        W: AsyncWriteExt + Unpin + Send;
+        S: AsyncReadExt + AsyncWriteExt + Unpin + Send;
 }
 
 /// Serve one `StartRun` exchange. A running run answers `RunStarted` unchanged; a stopped run fails closed on any conflict before anything boots, so a refusal leaves its stopped state untouched.
@@ -2235,13 +2235,13 @@ mod tests {
             Ok(())
         }
 
-        async fn serve<W>(
+        async fn serve<S>(
             &self,
-            _stream: &mut W,
+            _stream: &mut S,
             _record: crate::run_record::RunRecord,
         ) -> anyhow::Result<()>
         where
-            W: AsyncWriteExt + Unpin + Send,
+            S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
         {
             self.served.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
