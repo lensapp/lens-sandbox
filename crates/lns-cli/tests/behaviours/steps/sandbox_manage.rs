@@ -27,6 +27,23 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
     });
 }
 
+#[given(regex = r#"^the daemon refuses to remove the running run "([^"]+)"$"#)]
+fn daemon_refuses_running_removal(w: &mut BehaviourWorld, name: String) {
+    w.sandbox.response = Some(Response::Error {
+        message: format!(
+            "run {name} is still running; stop it first with `lns stop {name}` or force with `lns rm -f {name}`"
+        ),
+    });
+}
+
+#[given("a cached sandbox not used by any run")]
+fn a_cached_sandbox_not_used(w: &mut BehaviourWorld) {
+    w.sandbox.remove_image_response = Some(Response::ImageRemoved {
+        reference: "registry.example.test/idle-sandbox:1".into(),
+        reclaimed_bytes: 1024,
+    });
+}
+
 #[given(regex = r#"^the reference "([^"]+)" resolves to a cached sandbox$"#)]
 fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.cached_references = vec![reference.clone()];

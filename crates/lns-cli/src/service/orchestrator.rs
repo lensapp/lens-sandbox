@@ -725,7 +725,7 @@ pub enum StdinForwarding {
 }
 
 impl StdinForwarding {
-    fn of(interactive: bool) -> Self {
+    pub(crate) fn of(interactive: bool) -> Self {
         if interactive {
             Self::ToRun
         } else {
