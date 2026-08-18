@@ -594,6 +594,7 @@ where
             detach_tx: std::sync::Mutex::new(Some(detach_tx)),
             task: run_task,
             input_tx: Some(input_tx),
+            exec_sessions: Default::default(),
             connector: None,
             name: String::new(),
             image: image_label,

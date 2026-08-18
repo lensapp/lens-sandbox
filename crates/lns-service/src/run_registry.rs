@@ -22,6 +22,7 @@ pub struct RunHandle {
     pub detach_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub task: JoinHandle<()>,
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
+    pub exec_sessions: HashMap<String, mpsc::Sender<SessionInput>>,
     pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
     pub name: String,
     pub image: String,
@@ -194,6 +195,40 @@ pub fn input_sender(run_id: &str) -> Option<mpsc::Sender<SessionInput>> {
     g.as_ref()
         .and_then(|m| m.get(run_id))
         .and_then(|h| h.input_tx.clone())
+}
+
+pub fn register_exec_session(
+    run_id: &str,
+    session_id: String,
+    input_tx: mpsc::Sender<SessionInput>,
+) -> bool {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    let Some(handle) = g.as_mut().and_then(|runs| runs.get_mut(run_id)) else {
+        return false;
+    };
+    handle.exec_sessions.insert(session_id, input_tx);
+    true
+}
+
+pub fn deregister_exec_session(run_id: &str, session_id: &str) -> bool {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_mut()
+        .and_then(|runs| runs.get_mut(run_id))
+        .and_then(|handle| handle.exec_sessions.remove(session_id))
+        .is_some()
+}
+
+pub fn session_input_sender(target: &lns_ipc::SessionTarget) -> Option<mpsc::Sender<SessionInput>> {
+    match target {
+        lns_ipc::SessionTarget::Primary { run_id } => input_sender(run_id),
+        lns_ipc::SessionTarget::Exec { run_id, session_id } => {
+            let g = ACTIVE.lock().expect("ACTIVE poisoned");
+            g.as_ref()
+                .and_then(|runs| runs.get(run_id))
+                .and_then(|handle| handle.exec_sessions.get(session_id))
+                .cloned()
+        }
+    }
 }
 
 pub fn log_buffer(run_id: &str) -> Option<std::sync::Arc<crate::run_log::RunLogBuffer>> {
@@ -414,6 +449,7 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
             detach_tx: Mutex::new(None),
             task,
             input_tx: None,
+            exec_sessions: Default::default(),
             connector: None,
             name: String::new(),
             image: String::new(),
@@ -839,6 +875,95 @@ mod tests {
         assert!(cloned.is_some());
 
         deregister(&id);
+    }
+
+    #[tokio::test]
+    async fn two_exec_sessions_on_one_run_route_input_independently() {
+        let run_id = allocate_run_id();
+        let (mut handle, _cancel_rx) = make_handle();
+        let (primary_tx, mut primary_rx) = mpsc::channel::<SessionInput>(1);
+        handle.input_tx = Some(primary_tx);
+        register(run_id.clone(), handle);
+
+        let (first_tx, mut first_rx) = mpsc::channel::<SessionInput>(1);
+        let (second_tx, mut second_rx) = mpsc::channel::<SessionInput>(1);
+        register_exec_session(&run_id, "exec-1".to_string(), first_tx);
+        register_exec_session(&run_id, "exec-2".to_string(), second_tx);
+
+        let target = lns_ipc::SessionTarget::Exec {
+            run_id: run_id.clone(),
+            session_id: "exec-1".to_string(),
+        };
+        session_input_sender(&target)
+            .expect("the first exec session should be addressable")
+            .send(SessionInput::StdinBytes(b"first only".to_vec()))
+            .await
+            .expect("the first exec session should accept input");
+
+        assert!(matches!(
+            first_rx.recv().await,
+            Some(SessionInput::StdinBytes(bytes)) if bytes == b"first only"
+        ));
+        assert!(primary_rx.try_recv().is_err());
+        assert!(second_rx.try_recv().is_err());
+
+        deregister(&run_id);
+    }
+
+    #[tokio::test]
+    async fn registering_an_exec_session_for_a_missing_run_is_refused() {
+        let (input_tx, _input_rx) = mpsc::channel::<SessionInput>(1);
+        assert!(!register_exec_session(
+            "missing-run",
+            "exec-1".to_string(),
+            input_tx,
+        ));
+    }
+
+    #[tokio::test]
+    async fn deregistering_one_exec_session_leaves_the_primary_and_sibling_addressable() {
+        let run_id = allocate_run_id();
+        let (mut handle, _cancel_rx) = make_handle();
+        let (primary_tx, _primary_rx) = mpsc::channel::<SessionInput>(1);
+        handle.input_tx = Some(primary_tx);
+        register(run_id.clone(), handle);
+
+        let (first_tx, _first_rx) = mpsc::channel::<SessionInput>(1);
+        let (second_tx, _second_rx) = mpsc::channel::<SessionInput>(1);
+        assert!(register_exec_session(
+            &run_id,
+            "exec-1".to_string(),
+            first_tx
+        ));
+        assert!(register_exec_session(
+            &run_id,
+            "exec-2".to_string(),
+            second_tx
+        ));
+
+        assert!(deregister_exec_session(&run_id, "exec-1"));
+        assert!(
+            session_input_sender(&lns_ipc::SessionTarget::Exec {
+                run_id: run_id.clone(),
+                session_id: "exec-1".to_string(),
+            })
+            .is_none()
+        );
+        assert!(
+            session_input_sender(&lns_ipc::SessionTarget::Exec {
+                run_id: run_id.clone(),
+                session_id: "exec-2".to_string(),
+            })
+            .is_some()
+        );
+        assert!(
+            session_input_sender(&lns_ipc::SessionTarget::Primary {
+                run_id: run_id.clone(),
+            })
+            .is_some()
+        );
+
+        deregister(&run_id);
     }
 
     #[tokio::test]
