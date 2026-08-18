@@ -181,7 +181,7 @@ the `./lns.yaml` definition with its command overridden.
 | `-i`, `--interactive`        | `true`           | Keep stdin open and forward host stdin to the workload. Disable with `--interactive=false` (or `-i=false`). |
 | `-t`, `--tty`                | `true`           | Allocate a PTY; pipe mode is auto-selected when stdin isn't a TTY. Disable with `--tty=false` (or `-t=false`). |
 | `-d`, `--detach`             | `false`          | Return immediately; the run continues in the service. Conflicts with `-i`/`-t`. |
-| `--rm`                       | `false`          | Remove the run record once the workload exits (Docker-style `--rm`).    |
+| `--rm`                       | `false`          | Remove the run's state — record and writable layer — the moment the workload exits (Docker-style `--rm`). Without it every run persists as a stopped run, restartable with `lns start` until `lns rm`. |
 | `--detach-keys <CHORD>`      | `ctrl-p,ctrl-q`  | Detach chord (single chars or `ctrl-X`, comma-separated). On match `lns` returns `0` and leaves the run executing in the background — re-join with `lns attach`; no signal is sent. Killing `lns` without the chord cancels the run. |
 | `-u`, `--user <USER[:GROUP]>`| image `USER`, else `sandbox` | Run-as user or uid inside the sandbox; a numeric segment is used as the uid. Outranks the definition's `spec.user`, which outranks the image's `USER`. `HOME` and `USER` follow that user's guest passwd entry unless the definition's `env:` or a `-e` declares them, which wins; an image's `ENV HOME` does not. |
 | `--entrypoint <COMMAND>`     | image `ENTRYPOINT` | Override the image `ENTRYPOINT`; the `COMMAND` after the reference is kept as its arguments. Pass `--entrypoint ""` to clear the image entrypoint. |

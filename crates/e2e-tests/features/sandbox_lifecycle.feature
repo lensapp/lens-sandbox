@@ -3,7 +3,7 @@ Feature: sandbox lifecycle verbs reach the service end to end
   socket. Without a bootable microVM these scenarios confirm the wiring:
   requests arrive, are dispatched, and the daemon's answers come back.
   Happy paths against live runs are covered by the behaviours layers, and
-  the cached-store verbs (ls, rm, prune) by sandbox_management.
+  the cached-store verbs (ls, rmi, prune) by sandbox_management.
 
   Scenario: the sandbox family lists its verbs in help
     When I run "lns sandbox --help"
@@ -23,7 +23,9 @@ Feature: sandbox lifecycle verbs reach the service end to end
     And the output contains "pull"
     And the output contains "tag"
     And the output contains "stop"
+    And the output contains "start"
     And the output contains "rm"
+    And the output contains "rmi"
     And the output contains "inspect"
     And the output contains "logs"
     And the output contains "attach"

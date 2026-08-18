@@ -84,7 +84,7 @@ see what the log claims.
 ## Where logs live
 
 Audit logs and their anchors are kept per run under the service's data directory, so
-the trail outlives the ephemeral run overlay under the cache directory:
+the trail outlives the run's own state under the cache directory — a stopped run's removal (`lns rm`, `--rm`, or a prune sweep) appends a final removal event and leaves the log readable:
 
 ```text
 ~/.lns/runs/<run-id>/audit.jsonl
