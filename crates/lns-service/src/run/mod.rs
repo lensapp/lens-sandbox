@@ -893,6 +893,24 @@ mod launch_mode_tests {
     }
 
     #[tokio::test]
+    async fn the_test_fakes_honour_their_whole_port_surface() {
+        use crate::image_store::Fs as _;
+        assert!(EmptyFs.read_dir(std::path::Path::new("/")).await.is_err());
+        assert!(EmptyFs.write(std::path::Path::new("/x"), b"").await.is_ok());
+        assert!(
+            EmptyFs
+                .remove_file(std::path::Path::new("/x"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            NoopRemover
+                .remove_dir_all(std::path::Path::new("/x"))
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn a_recordless_exit_warns_and_still_concludes() {
         conclude_run(
             &EmptyFs,

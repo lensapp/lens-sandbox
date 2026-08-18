@@ -60,10 +60,8 @@ mod tests {
         let existing = root.path().join("runs").join("aa07");
         std::fs::create_dir_all(&existing).unwrap();
         std::fs::write(existing.join("upper.img"), b"a stopped run's data").unwrap();
-        let path = provision_image(root.path(), "aa07", [0; 16], 0, |_, _| {
-            panic!("reformatted")
-        })
-        .unwrap();
+        provision_image(root.path(), "aa07", [0; 16], 0, |_, _| unreachable!()).unwrap();
+        let path = crate::cache::run_dir(root.path(), "aa07").join("upper.img");
         assert_eq!(std::fs::read(&path).unwrap(), b"a stopped run's data");
     }
 
