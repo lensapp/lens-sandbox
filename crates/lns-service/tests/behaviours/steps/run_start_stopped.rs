@@ -44,7 +44,7 @@ impl StartHost for ScriptedStartHost {
     }
 }
 
-fn stopped_record(run_id: &str, name: &str) -> RunRecord {
+pub(crate) fn stopped_record(run_id: &str, name: &str) -> RunRecord {
     RunRecord {
         version: lns_service::run_record::CURRENT_VERSION,
         run_id: run_id.to_string(),
@@ -96,7 +96,7 @@ fn sample_args() -> lns_ipc::RunImageArgs {
     }
 }
 
-async fn hold_serial(w: &mut BehaviourWorld) {
+pub(crate) async fn hold_serial(w: &mut BehaviourWorld) {
     if w.startrun_serial.is_none() {
         static SERIAL: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
             std::sync::OnceLock::new();
@@ -107,13 +107,13 @@ async fn hold_serial(w: &mut BehaviourWorld) {
     }
 }
 
-fn clear_name(name: &str) {
+pub(crate) fn clear_name(name: &str) {
     if let Ok(id) = run_registry::resolve(name) {
         run_registry::deregister(&id);
     }
 }
 
-fn register_stopped_named(w: &mut BehaviourWorld, name: &str) -> String {
+pub(crate) fn register_stopped_named(w: &mut BehaviourWorld, name: &str) -> String {
     clear_name(name);
     let id = run_registry::allocate_run_id();
     run_registry::register_stopped(lns_service::run_registry::StoppedRun {
@@ -307,6 +307,12 @@ fn first_error(w: &BehaviourWorld) -> Result<&str, String> {
 
 #[then("it exits 0")]
 fn it_exits_zero(w: &mut BehaviourWorld) -> Result<(), String> {
+    if let Some(resp) = &w.response {
+        return match resp {
+            Response::Error { message } => Err(format!("expected success, got error: {message}")),
+            _ => Ok(()),
+        };
+    }
     match w.startrun_frames.first() {
         Some(Response::RunStarted { .. }) => Ok(()),
         other => Err(format!("expected RunStarted, got {other:?}")),
@@ -326,6 +332,12 @@ fn the_run_is_unchanged(w: &mut BehaviourWorld) -> Result<(), String> {
 
 #[then("it exits 1")]
 fn it_exits_one(w: &mut BehaviourWorld) -> Result<(), String> {
+    if let Some(resp) = &w.response {
+        return match resp {
+            Response::Error { .. } => Ok(()),
+            other => Err(format!("expected an error, got {other:?}")),
+        };
+    }
     first_error(w).map(|_| ())
 }
 
