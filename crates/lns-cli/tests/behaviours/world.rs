@@ -66,8 +66,10 @@ pub struct BehaviourWorld {
 #[derive(Debug, Default)]
 pub struct ExecCliRig {
     pub active: bool,
-    pub stdin: Option<String>,
+    /// The `ExecImageArgs` the fake service decoded off the wire, not a fabricated copy.
     pub request: Option<lns_ipc::ExecImageArgs>,
+    /// Whether the fake service answered the handshake with `ExecStarted`.
+    pub session_started: bool,
 }
 
 /// Scripted web-flow outcome for `lns login`, plus what the fake verifier was asked; `outcome: None` means the flow panics if consulted.
