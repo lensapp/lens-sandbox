@@ -14,10 +14,43 @@ fn assemble_with_recording_sink(world: &mut BehaviourWorld) {
     let rig = world.assembly.as_mut().expect("assembly rig");
     let events = rig.events.clone();
     let sink = move |current: u64, total: u64| events.lock().unwrap().push((current, total));
+    rig.built = Some(build_descriptor(rig, &sink));
+}
+
+#[given("an image whose descriptor was already assembled")]
+fn already_assembled_image(world: &mut BehaviourWorld) {
+    let mut rig = AssemblyRig::with_layer_sizes(&[3072, 5120]);
+    rig.built = Some(build_descriptor(&rig, &|_, _| {}));
+    world.assembly = Some(rig);
+}
+
+#[when("the same rootfs is requested again with a recording progress sink")]
+fn request_again_with_recording_sink(world: &mut BehaviourWorld) {
+    let rig = world.assembly.as_mut().expect("assembly rig");
+    let events = rig.events.clone();
+    let sink = move |current: u64, total: u64| events.lock().unwrap().push((current, total));
+    rig.rebuilt = Some(build_descriptor(rig, &sink));
+}
+
+#[then("the descriptor is served from cache")]
+fn descriptor_served_from_cache(world: &mut BehaviourWorld) {
+    let rig = world.assembly.as_ref().expect("assembly rig");
+    assert_eq!(rig.rebuilt, rig.built);
+}
+
+#[then("the sink observes no progress at all")]
+fn sink_observes_nothing(world: &mut BehaviourWorld) {
+    assert_eq!(observed(world), Vec::<(u64, u64)>::new());
+}
+
+fn build_descriptor(
+    rig: &AssemblyRig,
+    progress: &dyn Fn(u64, u64),
+) -> lns_service::composefs::descriptor::BuiltDescriptor {
     let store = ContentStore::new(rig.dir.path().join("content"));
     let builder = DescriptorBuilder::new(rig.dir.path());
     let digests = rig.layer_digests();
-    let built = builder
+    builder
         .build(
             &store,
             &DescriptorRequest {
@@ -25,10 +58,9 @@ fn assemble_with_recording_sink(world: &mut BehaviourWorld) {
                 layers: &rig.layers,
                 runtime_layer: None,
             },
-            &sink,
+            progress,
         )
-        .expect("descriptor build");
-    rig.built = Some(built);
+        .expect("descriptor build")
 }
 
 #[then(regex = r"^the sink first observes (\d+) of (\d+) bytes$")]
