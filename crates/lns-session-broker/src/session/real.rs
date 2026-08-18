@@ -15,8 +15,8 @@ const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
     Confinement, LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close,
-    confinement, dispatch_frame, keys_to_scrub, read_client_frame, signal_target, validate_argv,
-    validate_open_session,
+    confinement, dispatch_frame, eof_action, keys_to_scrub, read_client_frame, signal_target,
+    validate_argv, validate_open_session,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
@@ -215,7 +215,7 @@ fn run_tty_session(
         apply_winsize(pty.master, ws);
     }
     let conn = SharedFd::new(conn);
-    let outcome = drive_session_tty(conn.clone(), pty.master, pid, forker);
+    let outcome = drive_session_tty(conn.clone(), pty.master, pid, forker, spec.confinement);
     close(pty.master);
     conn.close();
     outcome
@@ -277,6 +277,7 @@ fn run_pipe_session(
         stderr_r,
         pid,
         forker,
+        spec.confinement,
     );
     conn.close();
     outcome
@@ -287,6 +288,7 @@ fn drive_session_tty(
     master: RawFd,
     child_pid: libc::pid_t,
     forker: &dyn Forker,
+    confinement: Confinement,
 ) -> Result<SessionOutcome, SessionError> {
     let stdin_dup = dup(master);
     let ctrl_dup = dup(master);
@@ -305,7 +307,7 @@ fn drive_session_tty(
     let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_for_ctrl = conn.clone();
     let ctrl_thread = std::thread::spawn(move || {
-        client_loop_tty(conn_for_ctrl, stdin_dup, ctrl_dup, child_pid);
+        client_loop_tty(conn_for_ctrl, stdin_dup, ctrl_dup, child_pid, confinement);
         let _ = host_closed_tx.send(());
     });
 
@@ -332,6 +334,7 @@ fn drive_session_pipes(
     stderr_r: RawFd,
     child_pid: libc::pid_t,
     forker: &dyn Forker,
+    confinement: Confinement,
 ) -> Result<SessionOutcome, SessionError> {
     let conn_out = conn.clone();
     let out_thread = std::thread::spawn(move || {
@@ -345,7 +348,7 @@ fn drive_session_pipes(
     let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_in = conn.clone();
     let in_thread = std::thread::spawn(move || {
-        client_loop_pipes(conn_in, stdin_w, child_pid);
+        client_loop_pipes(conn_in, stdin_w, child_pid, confinement);
         let _ = host_closed_tx.send(());
     });
 
@@ -363,8 +366,20 @@ fn drive_session_pipes(
     Ok(SessionOutcome { exit_code })
 }
 
-fn client_loop_tty(conn: SharedFd, master_in: RawFd, master_ctrl: RawFd, child_pid: libc::pid_t) {
-    while let Some(frame) = read_client_frame(conn.raw()) {
+fn client_loop_tty(
+    conn: SharedFd,
+    master_in: RawFd,
+    master_ctrl: RawFd,
+    child_pid: libc::pid_t,
+    confinement: Confinement,
+) {
+    loop {
+        let Some(frame) = read_client_frame(conn.raw()) else {
+            if eof_action(&confinement) == LoopAction::Detach {
+                deliver_signal(master_ctrl, child_pid, libc::SIGHUP);
+            }
+            break;
+        };
         match dispatch_frame(frame) {
             LoopAction::WriteStdin(bytes) => {
                 if !vsock::write_all(master_in, &bytes) {
@@ -387,8 +402,19 @@ fn client_loop_tty(conn: SharedFd, master_in: RawFd, master_ctrl: RawFd, child_p
     close(master_ctrl);
 }
 
-fn client_loop_pipes(conn: SharedFd, mut stdin_w: Option<RawFd>, child_pid: libc::pid_t) {
-    while let Some(frame) = read_client_frame(conn.raw()) {
+fn client_loop_pipes(
+    conn: SharedFd,
+    mut stdin_w: Option<RawFd>,
+    child_pid: libc::pid_t,
+    confinement: Confinement,
+) {
+    loop {
+        let Some(frame) = read_client_frame(conn.raw()) else {
+            if eof_action(&confinement) == LoopAction::Detach {
+                kill(child_pid, libc::SIGHUP);
+            }
+            break;
+        };
         match dispatch_frame(frame) {
             LoopAction::WriteStdin(bytes) => {
                 if let Some(fd) = stdin_w
