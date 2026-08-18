@@ -11,15 +11,20 @@ use tokio::io::AsyncWriteExt;
 use crate::steps::run_lifecycle::fresh_handle;
 use crate::world::BehaviourWorld;
 
-/// A start host scripted with what `preflight` refuses, recording whether the boot was reached.
+/// A start host scripted with what `preflight` refuses, recording whether the boot was reached and with what.
 struct ScriptedStartHost {
     preflight_refusal: Option<String>,
+    record: Option<RunRecord>,
     served: Arc<AtomicBool>,
+    booted: std::sync::Arc<std::sync::Mutex<Option<RunRecord>>>,
 }
 
 impl StartHost for ScriptedStartHost {
     async fn record(&self, run_id: &str) -> anyhow::Result<RunRecord> {
-        Ok(stopped_record(run_id, "recorded"))
+        Ok(self
+            .record
+            .clone()
+            .unwrap_or_else(|| stopped_record(run_id, "recorded")))
     }
 
     async fn preflight(&self, _record: &RunRecord) -> anyhow::Result<()> {
@@ -29,11 +34,12 @@ impl StartHost for ScriptedStartHost {
         }
     }
 
-    async fn serve<W>(&self, _stream: &mut W, _record: RunRecord) -> anyhow::Result<()>
+    async fn serve<S>(&self, _stream: &mut S, record: RunRecord) -> anyhow::Result<()>
     where
-        W: AsyncWriteExt + Unpin + Send,
+        S: tokio::io::AsyncReadExt + AsyncWriteExt + Unpin + Send,
     {
         self.served.store(true, Ordering::SeqCst);
+        *self.booted.lock().unwrap() = Some(record);
         Ok(())
     }
 }
@@ -200,6 +206,50 @@ async fn a_stopped_run_with_no_upper(w: &mut BehaviourWorld) {
         Some("run damaged's state is damaged: its writable layer is missing".into());
 }
 
+#[given("a stopped run started from an lns.yaml that has since changed")]
+async fn a_stopped_run_from_an_edited_yaml(w: &mut BehaviourWorld) {
+    hold_serial(w).await;
+    let id = register_stopped_named(w, "yaml-frozen");
+    let mut record = stopped_record(&id, "yaml-frozen");
+    record.args.env = vec!["FROZEN=at-launch".into()];
+    record.args.cmd = vec!["agent".into(), "serve".into()];
+    w.startrun_target = Some(id);
+    w.startrun_record = Some(record);
+}
+
+#[then("it boots with the recorded image, command, env, mounts, and ports")]
+fn it_boots_with_the_recorded_config(w: &mut BehaviourWorld) -> Result<(), String> {
+    let recorded = w
+        .startrun_record
+        .as_ref()
+        .expect("the scenario recorded a launch");
+    let booted = w.startrun_booted.lock().unwrap();
+    let booted = booted
+        .as_ref()
+        .ok_or("the run never reached its boot".to_string())?;
+    if booted.args == recorded.args && booted.descriptor_sha256 == recorded.descriptor_sha256 {
+        Ok(())
+    } else {
+        Err("a restart boots exactly what the record says, nothing else".into())
+    }
+}
+
+#[then("the changed lns.yaml has no effect on it")]
+fn the_changed_yaml_has_no_effect(w: &mut BehaviourWorld) -> Result<(), String> {
+    let booted = w.startrun_booted.lock().unwrap();
+    let booted = booted
+        .as_ref()
+        .ok_or("the run never reached its boot".to_string())?;
+    if booted.args.env == vec!["FROZEN=at-launch".to_string()] {
+        Ok(())
+    } else {
+        Err(format!(
+            "the record is the only config source at start; booted env: {:?}",
+            booted.args.env
+        ))
+    }
+}
+
 #[when(regex = r#"^I run "lns start ([^"]+)"$"#)]
 async fn i_run_lns_start(w: &mut BehaviourWorld, handle: String) {
     drive_start_stopped(w, &handle).await;
@@ -219,7 +269,9 @@ async fn drive_start_stopped(w: &mut BehaviourWorld, handle: &str) {
     let served = Arc::new(AtomicBool::new(false));
     let host = ScriptedStartHost {
         preflight_refusal: w.startrun_refusal.clone(),
+        record: w.startrun_record.clone(),
         served: served.clone(),
+        booted: w.startrun_booted.clone(),
     };
     let (mut client, mut server) = tokio::io::duplex(64 * 1024);
     lns_service::ipc::start_stopped_run(&mut server, handle, &host)

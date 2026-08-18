@@ -22,25 +22,11 @@ Feature: lns start — restart a stopped run
     Then it exits 1
     And the error says there are no stopped runs
 
-  @todo
   Scenario: launch config replays verbatim from the run record
     Given a stopped run started from an lns.yaml that has since changed
     When I start it
     Then it boots with the recorded image, command, env, mounts, and ports
     And the changed lns.yaml has no effect on it
-
-  @todo
-  Scenario: network policy re-resolves at start
-    Given a stopped run
-    And a rule added to the decisions file after it was stopped
-    When I start it
-    Then the new rule applies to the restarted run
-
-  @todo
-  Scenario: credentials re-resolve at start
-    Given a stopped run holding a connector whose grant was revoked after it was stopped
-    When I start it
-    Then the same connect/approval flow a fresh run would show is surfaced
 
   Scenario: a taken host port fails the start closed
     Given a stopped run that published host port 8080

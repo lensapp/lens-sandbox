@@ -217,20 +217,32 @@ impl super::StartHost for RealStartHost {
         Ok(())
     }
 
-    async fn serve<W>(
+    async fn serve<S>(
         &self,
-        stream: &mut W,
+        stream: &mut S,
         record: crate::run_record::RunRecord,
     ) -> anyhow::Result<()>
     where
-        W: AsyncWriteExt + Unpin + Send,
+        S: tokio::io::AsyncReadExt + AsyncWriteExt + Unpin + Send,
     {
-        let _ = write_error(
-            stream,
-            format!("run {} cannot be restarted yet", record.name),
-        )
-        .await;
-        Ok(())
+        let run_id = record.run_id.clone();
+        let args = record.args.clone();
+        let mode = crate::run::LaunchMode::Restart {
+            pinned_descriptor_sha256: record.descriptor_sha256.clone(),
+        };
+        let Some(prepared) =
+            super::prepare_while_the_client_waits(stream, &RealRunHost, &run_id, &args).await
+        else {
+            return Ok(());
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                let _ = write_error(stream, format!("{e:#}")).await;
+                return Ok(());
+            }
+        };
+        serve_prepared_run(stream, run_id, args, prepared, mode).await
     }
 }
 
@@ -599,7 +611,14 @@ impl super::RunHost for RealRunHost {
     where
         W: AsyncWriteExt + Unpin + Send,
     {
-        serve_prepared_run(stream, run_id, args, prepared).await
+        serve_prepared_run(
+            stream,
+            run_id,
+            args,
+            prepared,
+            crate::run::LaunchMode::Fresh,
+        )
+        .await
     }
 }
 
@@ -626,6 +645,7 @@ async fn serve_prepared_run<W>(
     run_id: String,
     args: lns_ipc::RunImageArgs,
     prepared: crate::run::PreparedRun,
+    mode: crate::run::LaunchMode,
 ) -> anyhow::Result<()>
 where
     W: AsyncWriteExt + Unpin,
@@ -658,6 +678,7 @@ where
     let task_run_id = run_id.clone();
     let (microvm_tx, microvm_rx) = oneshot::channel::<String>();
     let fallback_microvm = run_id.clone();
+    let task_mode = mode.clone();
     let run_task = tokio::spawn(async move {
         let microvm = microvm_rx.await.unwrap_or(fallback_microvm);
         crate::run::handle(
@@ -665,6 +686,7 @@ where
             microvm,
             run_args,
             prepared,
+            task_mode,
             task_frame_tx,
             input_rx,
         )
@@ -673,25 +695,29 @@ where
 
     let abort = run_task.abort_handle();
     let runtime_cache_registration = crate::image_store::lock_runtime_cache_shared().await;
-    let registered = crate::run_registry::register_named(
-        run_id.clone(),
-        requested_name,
-        crate::run_registry::RunHandle {
-            cancel_tx,
-            detach_tx: std::sync::Mutex::new(Some(detach_tx)),
-            task: run_task,
-            input_tx: Some(input_tx),
-            connector: None,
-            name: String::new(),
-            image: image_label,
-            command: command_label,
-            started: started_label,
-            status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
-            logs,
-            config,
-            exec_environment: Default::default(),
-        },
-    );
+    let handle = crate::run_registry::RunHandle {
+        cancel_tx,
+        detach_tx: std::sync::Mutex::new(Some(detach_tx)),
+        task: run_task,
+        input_tx: Some(input_tx),
+        connector: None,
+        name: String::new(),
+        image: image_label,
+        command: command_label,
+        started: started_label,
+        status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
+        logs,
+        config,
+        exec_environment: Default::default(),
+    };
+    let registered = match &mode {
+        crate::run::LaunchMode::Fresh => {
+            crate::run_registry::register_named(run_id.clone(), requested_name, handle)
+        }
+        crate::run::LaunchMode::Restart { .. } => {
+            crate::run_registry::transition_to_live(&run_id, handle)
+        }
+    };
     drop(runtime_cache_registration);
     match registered {
         Ok(microvm) => {

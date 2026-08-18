@@ -8,6 +8,27 @@ mod scratch;
 mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 
+/// Whether a boot creates a run or revives one: a restart boots over a preserved writable layer, so it must not arm the scratch guard and must find the exact lower stack the layer was written on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchMode {
+    Fresh,
+    Restart { pinned_descriptor_sha256: String },
+}
+
+pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result<()> {
+    match mode {
+        LaunchMode::Fresh => Ok(()),
+        LaunchMode::Restart {
+            pinned_descriptor_sha256,
+        } if pinned_descriptor_sha256 == built_sha256 => Ok(()),
+        LaunchMode::Restart {
+            pinned_descriptor_sha256,
+        } => anyhow::bail!(
+            "the sandbox stack changed under this run: its layers now build descriptor {built_sha256}, but its writable layer was written on {pinned_descriptor_sha256}; remove the run with `lns rm` and start a fresh one"
+        ),
+    }
+}
+
 /// The rootfs-assembly progress sink: `span` is the run span captured before `spawn_blocking`, since the blocking thread has no ambient span for the frame forwarder to find the run's channel through.
 fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     move |current, total| {
@@ -808,5 +829,26 @@ mod tests {
             ],
             "agent env first, user -e appended so last-wins env resolution prefers the user",
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_mode_tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_launch_accepts_any_descriptor() {
+        assert!(verify_pinned_descriptor(&LaunchMode::Fresh, "sha256:anything").is_ok());
+    }
+
+    #[test]
+    fn a_restart_accepts_only_the_descriptor_its_upper_was_written_on() {
+        let mode = LaunchMode::Restart {
+            pinned_descriptor_sha256: "sha256:pinned".into(),
+        };
+        assert!(verify_pinned_descriptor(&mode, "sha256:pinned").is_ok());
+        let err = verify_pinned_descriptor(&mode, "sha256:drifted").unwrap_err();
+        assert!(err.to_string().contains("sha256:pinned"), "{err}");
+        assert!(err.to_string().contains("lns rm"), "{err}");
     }
 }

@@ -24,6 +24,9 @@ fn provision_image(
     let run_dir = crate::cache::run_dir(root, run_id);
     std::fs::create_dir_all(&run_dir)?;
     let path = run_dir.join("upper.img");
+    if path.exists() {
+        return Ok(path);
+    }
     let plan = Plan::new(DEFAULT_SIZE_BYTES, uuid, "lns-upper", mkfs_time)?;
     write(&plan, &path)?;
     Ok(path)
@@ -49,6 +52,19 @@ mod tests {
             root.path().join("runs").join("aa07").join("upper.img")
         );
         assert!(path.exists());
+    }
+
+    #[test]
+    fn provision_image_keeps_an_existing_writable_layer_untouched() {
+        let root = tempfile::TempDir::new().unwrap();
+        let existing = root.path().join("runs").join("aa07");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("upper.img"), b"a stopped run's data").unwrap();
+        let path = provision_image(root.path(), "aa07", [0; 16], 0, |_, _| {
+            panic!("a preserved writable layer must never be reformatted")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a stopped run's data");
     }
 
     #[test]

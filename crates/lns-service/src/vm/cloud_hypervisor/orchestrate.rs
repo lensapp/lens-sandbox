@@ -44,6 +44,7 @@ pub(crate) async fn launch<S: Spawner>(
     relay_fd_tx: Option<UnboundedSender<RawFd>>,
     timeouts: &LaunchTimeouts,
 ) -> Result<RunningVm<S::Child>> {
+    layout.remove_stale()?;
     let content = spawn_virtiofsd(
         spawner,
         &bins.virtiofsd,
