@@ -52,6 +52,7 @@ async fn run_session(
         stdin: params.stdin,
         winsize: params.initial_winsize,
         confine: params.confine,
+        dies_with_client: params.dies_with_client,
     };
     send_client_frame(&writer, &open)
         .await
@@ -118,6 +119,7 @@ pub async fn capture_session_exec(
         stdin: false,
         initial_winsize: None,
         confine: false,
+        dies_with_client: false,
     };
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(64);
     let (input_keepalive, input_rx) = mpsc::channel::<SessionInput>(1);

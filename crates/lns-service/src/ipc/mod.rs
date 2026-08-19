@@ -755,6 +755,7 @@ pub(super) fn build_session_params(
             .initial_winsize
             .map(|(rows, cols)| lns_session::Winsize { rows, cols }),
         confine: true,
+        dies_with_client: true,
     }
 }
 
@@ -2587,6 +2588,15 @@ mod tests {
         assert!(
             params.confine,
             "an exec reaches the broker, not the supervisor, so the broker is the only place its identity and capabilities can be capped"
+        );
+    }
+
+    #[test]
+    fn build_session_params_declares_the_exec_dies_with_its_client() {
+        let params = build_session_params(exec_args(vec!["nft".into()], false, false), "1");
+        assert!(
+            params.dies_with_client,
+            "an exec has no other owner, so a vanished host stream must hang its child up instead of leaking it"
         );
     }
 
