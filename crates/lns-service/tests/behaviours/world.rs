@@ -121,6 +121,7 @@ pub struct ExecRoutingRig {
         Option<tokio::sync::mpsc::Receiver<lns_service::vm::session_client::SessionInput>>,
     pub second_rx:
         Option<tokio::sync::mpsc::Receiver<lns_service::vm::session_client::SessionInput>>,
+    pub primary_detach_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     pub first_target: Option<lns_ipc::SessionTarget>,
     pub second_target: Option<lns_ipc::SessionTarget>,
     pub first_event: Option<lns_service::vm::session_client::SessionInput>,

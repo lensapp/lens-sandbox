@@ -714,7 +714,8 @@ pub(super) fn validate_exec(args: &lns_ipc::ExecImageArgs) -> Result<(), String>
     Ok(())
 }
 
-pub(super) fn register_exec_input(
+/// The exec handshake's registration step: allocates the session id that makes an exec addressable within its run.
+pub fn register_exec_input(
     run_id: &str,
     input_tx: tokio::sync::mpsc::Sender<crate::vm::session_client::SessionInput>,
 ) -> Result<String, String> {
