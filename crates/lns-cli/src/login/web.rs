@@ -85,7 +85,7 @@ impl<C: DeviceAuthClient, B: BrowserOpener> WebLogin<C, B> {
     async fn wait_for_grant(&self, auth: &DeviceAuthorization) -> Result<WebLoginOutcome> {
         let expiry = tokio::time::sleep(Duration::from_secs(auth.expires_in));
         tokio::pin!(expiry);
-        let mut interval = Duration::from_secs(auth.interval);
+        let mut interval = Duration::from_secs(auth.interval.max(1));
         loop {
             tokio::select! {
                 biased;
@@ -387,6 +387,26 @@ mod tests {
             instants[1] - instants[0],
             Duration::from_secs(10),
             "5s interval + 5s slow-down increment"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_poll_interval_from_the_registry_is_floored_to_one_second() {
+        let mut auth = authorization();
+        auth.interval = 0;
+        let client = ScriptedClient::new(Ok(DeviceStart::Started(auth)), vec![issued()]);
+        let browser = ScriptedBrowser {
+            opens: true,
+            seen: Mutex::new(Vec::new()),
+        };
+        let began = tokio::time::Instant::now();
+        let (result, _) = drive(&client, &browser).await;
+        result.unwrap();
+        let instants = client.poll_instants.lock().unwrap();
+        assert_eq!(
+            instants[0] - began,
+            Duration::from_secs(1),
+            "a 0s interval must not turn the wait into a hot request loop"
         );
     }
 
