@@ -13,6 +13,7 @@ pub struct PlatformInfo {
 pub enum Method {
     InstallScript,
     CliUpdate,
+    CliLogin,
     ServiceUpdateCheck,
 }
 
@@ -20,7 +21,7 @@ impl Method {
     pub fn product(self) -> &'static str {
         match self {
             Method::InstallScript => "lns-install",
-            Method::CliUpdate | Method::ServiceUpdateCheck => "lns",
+            Method::CliUpdate | Method::CliLogin | Method::ServiceUpdateCheck => "lns",
         }
     }
 
@@ -28,6 +29,7 @@ impl Method {
         match self {
             Method::InstallScript => "install-script",
             Method::CliUpdate => "cli-update",
+            Method::CliLogin => "cli-login",
             Method::ServiceUpdateCheck => "service-update-check",
         }
     }
@@ -131,6 +133,19 @@ mod tests {
         assert_eq!(
             ua,
             "lns/9.9.9 (os=Linux; arch=x86_64; kernel=Linux/6.6.0-test; shell=unknown; method=service-update-check)"
+        );
+    }
+
+    #[test]
+    fn cli_login_method_shares_the_cli_shape_and_token() {
+        let ua = user_agent(
+            "0.16.0",
+            &platform("Darwin", "arm64", "24.6.0", "zsh"),
+            Method::CliLogin,
+        );
+        assert_eq!(
+            ua,
+            "lns/0.16.0 (os=Darwin; arch=arm64; kernel=Darwin/24.6.0; shell=zsh; method=cli-login)"
         );
     }
 

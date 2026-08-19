@@ -2,6 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use lns_ipc::{Method, PlatformInfo};
 
 use super::{FLAG_FALLBACK, WebLoginFlow, WebLoginOutcome};
 use crate::connector::LocalBoxFuture;
@@ -151,12 +152,13 @@ pub struct RealDeviceAuthClient {
 }
 
 impl RealDeviceAuthClient {
-    pub fn for_registry(registry: &str) -> Result<Self> {
-        Self::with_base(format!("https://{registry}"))
+    pub fn for_registry(registry: &str, version: &str, platform: &PlatformInfo) -> Result<Self> {
+        Self::with_base(format!("https://{registry}"), version, platform)
     }
 
-    fn with_base(base: String) -> Result<Self> {
+    fn with_base(base: String, version: &str, platform: &PlatformInfo) -> Result<Self> {
         let http = reqwest::Client::builder()
+            .user_agent(lns_ipc::user_agent(version, platform, Method::CliLogin))
             .timeout(Duration::from_secs(10))
             .build()
             .context("building the device-login HTTP client")?;
@@ -486,8 +488,18 @@ mod tests {
         use httpmock::Method::POST;
         use httpmock::MockServer;
 
+        fn darwin_platform() -> PlatformInfo {
+            PlatformInfo {
+                os: "Darwin".into(),
+                arch: "arm64".into(),
+                kernel_release: "24.6.0".into(),
+                shell: "zsh".into(),
+            }
+        }
+
         async fn client_for(server: &MockServer) -> RealDeviceAuthClient {
-            RealDeviceAuthClient::with_base(server.base_url()).unwrap()
+            RealDeviceAuthClient::with_base(server.base_url(), "0.16.0", &darwin_platform())
+                .unwrap()
         }
 
         fn authorization_json() -> String {
@@ -577,7 +589,12 @@ mod tests {
 
         #[tokio::test]
         async fn an_unreachable_registry_is_a_transport_error() {
-            let client = RealDeviceAuthClient::with_base("http://127.0.0.1:1".into()).unwrap();
+            let client = RealDeviceAuthClient::with_base(
+                "http://127.0.0.1:1".into(),
+                "0.16.0",
+                &darwin_platform(),
+            )
+            .unwrap();
             let err = format!("{:#}", client.start().await.unwrap_err());
             assert!(err.contains("requesting http://127.0.0.1:1"), "got: {err}");
         }
@@ -676,8 +693,29 @@ mod tests {
 
         #[test]
         fn for_registry_pins_the_https_base() {
-            let client = RealDeviceAuthClient::for_registry("hub.lns.run").unwrap();
+            let client =
+                RealDeviceAuthClient::for_registry("hub.lns.run", "0.16.0", &darwin_platform())
+                    .unwrap();
             assert_eq!(client.base, "https://hub.lns.run");
+        }
+
+        #[tokio::test]
+        async fn every_request_identifies_the_cli_with_the_standard_user_agent() {
+            let server = MockServer::start_async().await;
+            server
+                .mock_async(|when, then| {
+                    when.method(POST).path("/cli/device/code").header_matches(
+                        "user-agent",
+                        r"^lns/0\.16\.0 \(os=Darwin; arch=arm64; kernel=Darwin/24\.6\.0; shell=zsh; method=cli-login\)$",
+                    );
+                    then.status(200).body(authorization_json());
+                })
+                .await;
+            let start = client_for(&server).await.start().await.unwrap();
+            assert_eq!(
+                start,
+                DeviceStart::Started(super::super::tests::authorization())
+            );
         }
     }
 }
