@@ -5,9 +5,8 @@ use lns_cli::command::parse_args;
 use lns_cli::run::host_bind::{DirScan, ResolvedBind, resolve_binds};
 use lns_cli::run::summary::{PolicySource, format_bind_dispositions, format_summary};
 use lns_policy::Policy;
-use lns_policy::host_bind_decisions::{
-    HostBindDecisionFile, HostBindDecisionStore, SecretDisposition,
-};
+use lns_policy::decision_store::DecisionStore;
+use lns_policy::host_bind_decisions::{HostBindDecisionFile, SecretDisposition};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -94,7 +93,7 @@ impl DirScan for FakeDir {
 struct FakeStore {
     state: Mutex<HostBindDecisionFile>,
 }
-impl HostBindDecisionStore for FakeStore {
+impl DecisionStore<SecretDisposition> for FakeStore {
     fn load(&self) -> std::io::Result<HostBindDecisionFile> {
         Ok(self.state.lock().unwrap().clone())
     }

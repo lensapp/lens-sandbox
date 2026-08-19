@@ -78,6 +78,34 @@ Feature: a pulled sandbox's host file is decided per machine
     And the run continues
     And nothing is recorded
 
+  Scenario: a mixin's host file is decided even in your own directory
+    Given a local sandbox whose mixin "ghcr.io/someone/toolkit@sha256:abc" reads host file "~/.gitconfig"
+    And the user will answer "yes" to the host file prompt
+    When the local sandbox host files are decided
+    Then the prompt names "~/.gitconfig"
+    And the prompt names "ghcr.io/someone/toolkit"
+    And the run reads the host file
+
+  Scenario: a mixin's host file is keyed to the mixin that declared it
+    Given a local sandbox whose mixin "ghcr.io/someone/toolkit@sha256:abc" reads host file "~/.gitconfig"
+    And the user allowed "~/.gitconfig" for "ghcr.io/someone/toolkit"
+    When the local sandbox host files are decided
+    Then the developer is not asked
+    And the run reads the host file
+
+  Scenario: declining a mixin's required host file refuses the local run
+    Given a local sandbox whose mixin "ghcr.io/someone/toolkit@sha256:abc" reads host file "~/.gitconfig"
+    And the user will answer "no" to the host file prompt
+    When the local sandbox host files are decided
+    Then the run is refused naming "~/.gitconfig"
+
+  Scenario: a pulled sandbox's own host file is not keyed to a mixin it layers on
+    Given a pulled sandbox "ghcr.io/team/hermes:1.4.0" reads host file "~/.gitconfig"
+    And the user allowed "~/.gitconfig" for "ghcr.io/someone/toolkit"
+    And the user will answer "yes" to the host file prompt
+    When the pulled sandbox host files are decided
+    Then the prompt names "ghcr.io/team/hermes"
+
   Scenario: a local definition's host file is never asked about
     Given a local sandbox reads host file "~/.gitconfig"
     When the local sandbox host files are decided

@@ -120,7 +120,7 @@ impl ResolvedBind {
 pub fn resolve_binds(
     specs: &[lns_ipc::BindSpec],
     scan: &dyn DirScan,
-    store: &dyn HostBindDecisionStore,
+    store: &HostBindDecisionStore,
     interactive: bool,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
@@ -235,6 +235,7 @@ fn prompt_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lns_policy::decision_store::DecisionStore;
     use lns_policy::host_bind_decisions::HostBindDecisionFile;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -267,7 +268,7 @@ mod tests {
         state: Mutex<HostBindDecisionFile>,
         saves: Mutex<usize>,
     }
-    impl HostBindDecisionStore for FakeStore {
+    impl DecisionStore<SecretDisposition> for FakeStore {
         fn load(&self) -> std::io::Result<HostBindDecisionFile> {
             Ok(self.state.lock().unwrap().clone())
         }

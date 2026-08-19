@@ -408,12 +408,28 @@ pub struct FilesetSummary {
     pub owner: String,
     pub host_path: Option<String>,
     pub optional: bool,
+    /// The mixin that contributed this entry, absent when the document being run declared it itself — a merged document cannot otherwise say which of its filesets came from a registry.
+    pub declared_by: Option<String>,
 }
 
 impl FilesetSummary {
     pub fn from_host(&self) -> bool {
         self.host_path.is_some()
     }
+}
+
+/// Which registry artifact contributed the entry at this guest path, absent when something on the developer's own machine did — a merged document reads as one file, so only the merge's own attribution can tell a pulled mixin's entry from one the developer wrote.
+///
+/// The preflight digest-pins every reference it fetches, so being pinned is what separates a registry source from the root document, this directory's decisions file, and a directory mixin the developer pointed at — all three of which are their own consent.
+pub fn fileset_declared_by(
+    contributions: &[lns_ipc::SourceContribution],
+    guest_path: &str,
+) -> Option<String> {
+    contributions
+        .iter()
+        .find(|c| c.block == lns_ipc::ContributionBlock::Mount && c.key == guest_path)
+        .map(|c| c.source.clone())
+        .filter(|source| lns_artifact::spec::is_digest_pinned_image(source))
 }
 
 /// A pulled sandbox disclosed the same way at launch as a local one: its preflight view's filesets become summary lines.
@@ -426,6 +442,7 @@ pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<FilesetSu
             owner: fileset_view_owner_display(fileset.owner).to_string(),
             host_path: fileset.host_path.clone(),
             optional: fileset.optional,
+            declared_by: None,
         })
         .collect()
 }
@@ -693,6 +710,7 @@ mod tests {
                 owner: "root".to_string(),
                 host_path: None,
                 optional: false,
+                declared_by: None,
             }]
         );
     }
@@ -824,6 +842,99 @@ mod tests {
     fn composed(args: &mut RunArgs, contributions: Vec<lns_ipc::SourceContribution>) {
         args.resolved_mixins = vec![format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64))];
         args.contributions = contributions;
+    }
+
+    fn pinned_mixin() -> String {
+        format!("ghcr.io/someone/toolkit@sha256:{}", "a".repeat(64))
+    }
+
+    #[test]
+    fn a_registry_mixins_fileset_names_the_mixin_that_declared_it() {
+        let mixin = pinned_mixin();
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Mount,
+            "/home/agent/.gitconfig",
+            &mixin,
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            Some(mixin),
+            "a merged document reads as one file, so only the attribution can say a mixin declared this"
+        );
+    }
+
+    #[test]
+    fn the_running_documents_own_fileset_owes_no_decision() {
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Mount,
+            "/home/agent/.gitconfig",
+            lns_artifact::merge::ROOT_LABEL,
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            None
+        );
+    }
+
+    #[test]
+    fn this_directorys_own_decisions_file_owes_no_decision() {
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Mount,
+            "/home/agent/.gitconfig",
+            "lns-local-mixin.yaml",
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            None,
+            "the local mixin is the developer's own file; asking them to grant it would refuse a non-interactive run over their own decision"
+        );
+    }
+
+    #[test]
+    fn a_directory_mixin_the_developer_named_owes_no_decision() {
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Mount,
+            "/home/agent/.gitconfig",
+            "/work/mixins/pg/lns.yaml",
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            None,
+            "a directory the developer pointed at is on their machine and is their own consent, exactly as their lns.yaml is"
+        );
+    }
+
+    #[test]
+    fn a_contribution_of_another_block_never_supplies_a_decider() {
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Credential,
+            "/home/agent/.gitconfig",
+            &pinned_mixin(),
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            None,
+            "a credential keyed alike must not decide a fileset"
+        );
+    }
+
+    #[test]
+    fn a_guest_path_no_contribution_claims_owes_no_decision() {
+        let contributions = vec![contributed(
+            lns_ipc::ContributionBlock::Mount,
+            "/home/agent/.vimrc",
+            &pinned_mixin(),
+            &[],
+        )];
+        assert_eq!(
+            fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
+            None
+        );
     }
 
     #[test]
