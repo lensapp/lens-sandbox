@@ -56,7 +56,7 @@ authoring surface and the wire format.
 ### 1.2 Strict decoding
 
 Decoding rejects unrecognized fields at every level of every document. Misspell a
-field — `mountpath` for `mountPath`, or `egres` for `egress` — and the load fails
+field — `guestpath` for `guestPath`, or `egres` for `egress` — and the load fails
 on that line instead of ignoring the key and running with a default. `lns sandbox
 validate` runs the whole schema and cross-field check offline — no service, no
 network.
@@ -124,7 +124,7 @@ MUST preserve that.
 A mixin resolves into the sandbox at **startup**, so the document a consumer
 pulls is not yet the sandbox that boots. What the consumer approves is therefore
 the **resolved** sandbox: before boot, the run presents the merged result in full
-— every rule, mount, tool, and credential, each attributed to the mixin it
+— every rule, mount, file, tool, and credential, each attributed to the mixin it
 came from. Whatever the reference looked like, the approval is against a resolved
 digest, so what boots is what was approved
 ([§3.3.1](#331-how-a-mixin-enters-a-run)).
@@ -261,9 +261,9 @@ spec:
     - inline:
         REVIEW-RULES.md: |
           Prefer small diffs. Flag any change that adds no test.
-      mountPath: /etc/reviewer
+      guestPath: /etc/reviewer
     - path: ./prompts
-      mountPath: /opt/reviewer/prompts
+      guestPath: /opt/reviewer/prompts
       owner: root
 
   ports:
@@ -274,8 +274,8 @@ spec:
 Read against the rules below, that document is valid: the image is digest-pinned,
 `user: node` resolves in the guest's own `passwd`, both `egress` tables carry a
 `verdict` on every entry, each credential's `injections` name a destination the
-egress reaches, both mount shapes appear with distinct targets, and no `envVar`,
-tool, mount target, or port repeats.
+egress reaches, volumes and filesets claim distinct guest paths, and no `envVar`,
+tool, guest path, or port repeats.
 
 | Field | Required | Summary |
 |---|---|---|
@@ -579,19 +579,19 @@ appears on a [`hostPath` fileset](#3111-filesets) and means the same thing.
 
 #### 3.1.11 `filesets`
 
-Files the guest mounts: shipped by the document, or read off the machine that
+Files the guest gets: shipped by the document, or read off the machine that
 runs it.
 
 ```yaml
 filesets:
   - inline:
       config.json: '{"mode":"review"}'
-    mountPath: /home/agent/.agent
+    guestPath: /home/agent/.agent
   - path: ./skills
-    mountPath: /home/agent/.agent/skills
+    guestPath: /home/agent/.agent/skills
     owner: root
   - hostPath: ~/.gitconfig
-    mountPath: /home/agent/.gitconfig
+    guestPath: /home/agent/.gitconfig
     optional: true
 ```
 
@@ -600,7 +600,7 @@ filesets:
 | `path` | string | Conditional. A directory beside this document, packed at publish. Non-empty. |
 | `inline` | map<string,string> | Conditional. Relative path → file content. MUST NOT be empty. |
 | `hostPath` | string | Conditional. One file on the machine that runs the document. See the rules below. |
-| `mountPath` | string | REQUIRED. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). A `hostPath` mounts one file, so its `mountPath` MUST NOT end in `/`. |
+| `guestPath` | string | REQUIRED. Where the files land in the guest. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). A `hostPath` entry carries one file, so its `guestPath` MUST NOT end in `/`. |
 | `owner` | string | optional. `workload` (default) or `root`. |
 | `optional` | bool | optional. Default `false`. `hostPath` only. A file the running machine does not have is skipped instead of refusing the run. |
 
@@ -608,9 +608,17 @@ filesets:
 one is an error. `optional` on a `path` or `inline` fileset is an error too:
 those always ship.
 
+**`guestPath`, because a fileset is not a mount.** A volume `target`
+([§3.1.10](#3110-volumes)) is a mount point: the guest mounts a host directory or
+a named volume there. A fileset is not. The run writes its files into the guest's
+filesystem before the workload starts. Nothing is mounted at the path, and
+nothing can be unmounted from it. The field says where the files land, which is
+what `guestPath` names. The two keep separate words because they are separate
+things — one attaches a filesystem, the other places files.
+
 A `path` or `inline` fileset is **not a separate artifact**. `inline` content
 lives in this document, and a `path` directory is packed into a layer of the same
-artifact this document configures, so the files and the declaration that mounts
+artifact this document configures, so the files and the declaration that places
 them share one digest and are approved together. To share one directory across
 several sandboxes, publish a [mixin](#33-kind-mixin) that carries it.
 
@@ -633,7 +641,7 @@ is live and two-way.
 | Contained | MUST NOT contain a `..` segment. |
 | Literal | MUST be free of whitespace, quotes, and control characters. |
 | Not secret-shaped | The same name check as an inline path, below. A `hostPath` file is copied whole, so its name is the only guard it has. |
-| One file | It names a file, not a directory, so `mountPath` MUST NOT end in `/`. |
+| One file | It names a file, not a directory, so `guestPath` MUST NOT end in `/`. |
 
 A home-anchored `path` is refused and points here: `path` packs a directory
 beside the document at publish, and the publisher's home is not the consumer's.
@@ -661,7 +669,7 @@ and the credential directories `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`,
 `.oci`, `.docker`.
 
 **A pulled `hostPath` is a per-machine decision.** A `hostPath` makes what a
-document mounts depend on the machine running it, so an artifact from a registry
+document reads depend on the machine running it, so an artifact from a registry
 MUST NOT read one on the strength of its own declaration. On the first run that
 would read it, the developer is asked, and the answer is recorded per machine —
 keyed by the artifact's repository and the host path, so a version bump does not
@@ -840,7 +848,7 @@ spec:
   filesets:
     - inline:
         USING-POSTGRES.md: "Connect with $DATABASE_URL."
-      mountPath: /home/agent/notes
+      guestPath: /home/agent/notes
 ```
 
 | Block | In a mixin |
@@ -937,11 +945,11 @@ What "wins" means per block:
 | `egress` | Union of entries, later sources placed ahead of earlier ones, so the latest entry matching a destination is the one that decides ([§4.2](#42-the-egress-definition)). |
 | `credentials` | Union by `envVar`. A later source redefining one replaces it whole — its `placeholder` and `injections` together, never half of each. |
 | `tools` | Union by name. The last version declared wins. |
-| `volumes`, `filesets` | Union by mount target. The last source to claim a target owns it. |
+| `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace. The last source to claim a path owns it. |
 | `ports` | Union by `container`. The last mapping wins. |
 
 Uniqueness is a **per-document** rule: one document may not name the same
-`envVar`, tool, mount target, or `container` port twice ([§3.1](#31-kind-sandbox)),
+`envVar`, tool, guest path, or `container` port twice ([§3.1](#31-kind-sandbox)),
 because nothing inside one file disambiguates them. Across sources, the same
 collision is the override mechanism, not an error.
 
@@ -1161,8 +1169,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   `optional` appears only on a bind.
 - **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
   limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
-  literal, and mounts one file; `optional` appears only on a `hostPath`;
-  `mountPath` unique across volumes and filesets.
+  literal, and names one file; `optional` appears only on a `hostPath`;
+  `guestPath` unique across volumes and filesets.
 - **ports**: `container` and `host` in range and each unique.
 - **Connector**: at least one method; each method carries the block its
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
@@ -1194,7 +1202,7 @@ runs exactly what the author tested:
 
 | Surface | Transform |
 |---|---|
-| `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `mountPath`; the content is now part of the artifact's digest. |
+| `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 
 Each transform pins something that means one thing on the author's machine and
@@ -1214,7 +1222,7 @@ and a version that moves next week. Three surfaces stay unresolved, on purpose:
   on whichever machine runs the document, and the consumer decides whether it is
   read ([§3.1.11](#3111-filesets)).
 
-`workdir`, every mount declaration, and every other field publish unchanged.
+`workdir`, every volume, every fileset, and every other field publish unchanged.
 
 `lns push --dry-run` performs everything short of the upload and prints the
 digests that would publish. It stays offline, so it does **not** resolve tool
