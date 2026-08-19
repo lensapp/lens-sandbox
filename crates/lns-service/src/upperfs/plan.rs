@@ -211,8 +211,8 @@ fn backup_groups_above_zero(layout: &Layout) -> Vec<u32> {
         .collect()
 }
 
-/// The resize inode's block tree, laid out exactly as e2fsck walks it: DIND slot `gdt_blocks + k` names reserved block `k`, and that block lists its copy in every backup group above 0.
-pub fn resize_blocks(layout: &Layout) -> Option<ResizeBlocks> {
+/// The resize inode's block tree as e2fsck walks it: DIND slot `gdt_blocks + k` names reserved block `k`, and that block lists its copy in every backup group above 0.
+pub fn resize_blocks(layout: &Layout, dind_block: u32) -> Option<ResizeBlocks> {
     if layout.reserved_gdt_blocks == 0 {
         return None;
     }
@@ -239,7 +239,7 @@ pub fn resize_blocks(layout: &Layout) -> Option<ResizeBlocks> {
     }
 
     Some(ResizeBlocks {
-        dind_block: resize_dind_block(layout),
+        dind_block,
         dind_contents,
         indirect,
     })
@@ -256,7 +256,7 @@ impl Plan {
             image_size_bytes >= BLOCK_SIZE as u64,
             "an image of {image_size_bytes} bytes is too small for a journalled volume: it holds no whole {BLOCK_SIZE}-byte block"
         );
-        let layout = Layout::from_image_size(image_size_bytes);
+        let layout = Layout::for_fresh_image(image_size_bytes);
         let free = group_zero_free_blocks(&layout);
         anyhow::ensure!(
             free >= JBD2_MIN_JOURNAL_BLOCKS * 4,
@@ -359,11 +359,11 @@ mod tests {
     use super::*;
 
     fn small() -> Layout {
-        Layout::from_image_size(32 * 1024 * 1024)
+        Layout::for_fresh_image(32 * 1024 * 1024)
     }
 
     fn ten_gib() -> Layout {
-        Layout::from_image_size(10 * 1024 * 1024 * 1024)
+        Layout::for_fresh_image(10 * 1024 * 1024 * 1024)
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn block_bitmap_pads_past_real_blocks() {
-        let l = Layout::from_image_size(40 * 1024 * 1024);
+        let l = Layout::for_fresh_image(40 * 1024 * 1024);
         assert_eq!(l.num_groups, 1);
         assert_eq!(l.last_group_blocks, 10240);
         let bm = block_bitmap(&l, 0);
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn the_journal_never_exceeds_a_quarter_of_group_zeros_free_space() {
         for size in (4 * 1024 * 1024..=10 * 1024 * 1024 * 1024u64).step_by(7 * 1024 * 1024) {
-            let layout = Layout::from_image_size(size);
+            let layout = Layout::for_fresh_image(size);
             let free = group_zero_free_blocks(&layout);
             if free < JBD2_MIN_JOURNAL_BLOCKS * 4 {
                 continue;
@@ -778,7 +778,7 @@ mod tests {
     #[test]
     fn the_dind_block_names_every_reserved_gdt_block_at_the_slot_e2fsck_reads() {
         let l = ten_gib();
-        let r = resize_blocks(&l).unwrap();
+        let r = resize_blocks(&l, resize_dind_block(&l)).unwrap();
         assert_eq!(r.dind_block, 5256);
         assert_eq!(
             slot(&r.dind_contents, 0),
@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn each_reserved_gdt_block_lists_its_own_copy_in_every_backup_group() {
         let l = ten_gib();
-        let r = resize_blocks(&l).unwrap();
+        let r = resize_blocks(&l, resize_dind_block(&l)).unwrap();
         let backups = backup_groups_above_zero(&l);
         assert_eq!(backups, vec![1, 3, 5, 7, 9, 25, 27, 49]);
 
@@ -839,7 +839,7 @@ mod tests {
         let mut l = ten_gib();
         l.reserved_gdt_blocks = 0;
         assert!(
-            resize_blocks(&l).is_none(),
+            resize_blocks(&l, resize_dind_block(&l)).is_none(),
             "reserved blocks and the resize inode arrive together or not at all"
         );
     }
@@ -859,9 +859,10 @@ mod tests {
     #[test]
     fn a_volume_past_one_descriptor_block_still_addresses_its_reserved_run() {
         for gib in [17u64, 20, 64, 1024] {
-            let l = Layout::from_image_size(gib * 1024 * 1024 * 1024);
+            let l = Layout::for_fresh_image(gib * 1024 * 1024 * 1024);
             assert!(l.gdt_blocks > 1, "{gib} GiB needs more than one GDT block");
-            let r = resize_blocks(&l).expect("a volume this size still reserves room to grow");
+            let r = resize_blocks(&l, resize_dind_block(&l))
+                .expect("a volume this size still reserves room to grow");
             let highest = (l.gdt_blocks + l.reserved_gdt_blocks - 1) as usize;
             assert!(
                 highest < ADDRS_PER_BLOCK as usize,

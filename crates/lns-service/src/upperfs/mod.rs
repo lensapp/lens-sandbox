@@ -2,6 +2,7 @@ mod constants;
 mod dir;
 mod extents;
 mod format;
+pub mod grow;
 mod journal;
 mod layout;
 mod plan;
@@ -10,7 +11,7 @@ mod writer;
 mod real;
 pub use plan::Plan;
 pub use real::provision;
-pub use writer::write_ext4;
+pub use writer::{grow_ext4, write_ext4};
 
 pub const DEFAULT_SIZE_BYTES: u64 = lns_artifact::resources::DEFAULT_VM_SIZE.disk_bytes;
 

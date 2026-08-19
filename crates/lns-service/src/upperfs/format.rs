@@ -139,6 +139,107 @@ impl Superblock {
         b
     }
 
+    /// Reads back what a written image says about itself, refusing anything this writer did not produce rather than rewriting it on a guess.
+    pub fn from_bytes(b: &[u8; 1024]) -> anyhow::Result<Self> {
+        let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+
+        let magic = u16_at(0x38);
+        anyhow::ensure!(
+            magic == EXT2_SUPER_MAGIC,
+            "not an ext4 image: superblock magic is {magic:#06x}, not {EXT2_SUPER_MAGIC:#06x}"
+        );
+        let log_block_size = u32_at(0x18);
+        anyhow::ensure!(
+            log_block_size == LOG_BLOCK_SIZE,
+            "image uses {}-byte blocks; this writer only handles {BLOCK_SIZE}",
+            1024u32 << log_block_size
+        );
+        let blocks_per_group = u32_at(0x20);
+        anyhow::ensure!(
+            blocks_per_group == BLOCKS_PER_GROUP,
+            "image puts {blocks_per_group} blocks in a group; this writer only handles {BLOCKS_PER_GROUP}"
+        );
+        let inode_size = u16_at(0x58);
+        anyhow::ensure!(
+            inode_size == INODE_SIZE,
+            "image uses {inode_size}-byte inodes; this writer only handles {INODE_SIZE}"
+        );
+
+        let feature_incompat = u32_at(0x60);
+        let feature_ro_compat = u32_at(0x64);
+        anyhow::ensure!(
+            feature_incompat & !SB_FEATURE_INCOMPAT == 0,
+            "image sets incompatible features {:#010x} this writer cannot rewrite",
+            feature_incompat & !SB_FEATURE_INCOMPAT
+        );
+        anyhow::ensure!(
+            feature_ro_compat & !SB_FEATURE_RO_COMPAT == 0,
+            "image sets read-only features {:#010x} this writer cannot rewrite",
+            feature_ro_compat & !SB_FEATURE_RO_COMPAT
+        );
+
+        let state = u16_at(0x3A);
+        anyhow::ensure!(
+            state == EXT2_VALID_FS,
+            "image was not unmounted cleanly; check it before resizing it, or a resize would erase the record of what it left unfinished"
+        );
+
+        let inodes_count = u32_at(0x00);
+        let blocks_count = u32_at(0x04);
+        let inodes_per_group = u32_at(0x28);
+        anyhow::ensure!(blocks_count > 0, "image counts no blocks at all");
+        let num_groups = blocks_count.div_ceil(blocks_per_group);
+        anyhow::ensure!(
+            inodes_per_group != 0 && inodes_per_group.checked_mul(num_groups) == Some(inodes_count),
+            "image counts {inodes_count} inodes but {inodes_per_group} per group across {num_groups} groups"
+        );
+
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&b[0x68..0x78]);
+        let mut volume_name = [0u8; 16];
+        volume_name.copy_from_slice(&b[0x78..0x88]);
+
+        Ok(Self {
+            inodes_count,
+            blocks_count,
+            r_blocks_count: u32_at(0x08),
+            free_blocks_count: u32_at(0x0C),
+            free_inodes_count: u32_at(0x10),
+            first_data_block: u32_at(0x14),
+            log_block_size,
+            log_cluster_size: u32_at(0x1C),
+            blocks_per_group,
+            clusters_per_group: u32_at(0x24),
+            inodes_per_group,
+            mtime: u32_at(0x2C),
+            wtime: u32_at(0x30),
+            mnt_count: u16_at(0x34),
+            max_mnt_count: u16_at(0x36) as i16,
+            magic,
+            state,
+            errors: u16_at(0x3C),
+            minor_rev_level: u16_at(0x3E),
+            lastcheck: u32_at(0x40),
+            checkinterval: u32_at(0x44),
+            creator_os: u32_at(0x48),
+            rev_level: u32_at(0x4C),
+            def_resuid: u16_at(0x50),
+            def_resgid: u16_at(0x52),
+            first_ino: u32_at(0x54),
+            inode_size,
+            block_group_nr: u16_at(0x5A),
+            feature_compat: u32_at(0x5C),
+            feature_incompat,
+            feature_ro_compat,
+            uuid,
+            volume_name,
+            reserved_gdt_blocks: u16_at(0xCE),
+            journal_inum: u32_at(0xE0),
+            mkfs_time: u32_at(0x108),
+        })
+    }
+
     pub fn for_backup_group(&self, g: u16) -> Self {
         let mut s = self.clone();
         s.block_group_nr = g;
@@ -360,7 +461,7 @@ mod tests {
     use super::*;
 
     fn small_layout() -> Layout {
-        Layout::from_image_size(32 * 1024 * 1024)
+        Layout::for_fresh_image(32 * 1024 * 1024)
     }
 
     #[test]
