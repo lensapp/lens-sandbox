@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.19.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.18.0...lns-v0.19.0) (2026-08-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse a disk the writer could not format
+* decide a mixin's host file per machine too, and share one decision store
+* rename the fileset field mountPath to guestPath
+* let this machine decide which of its files a pulled sandbox reads
+* govern a run by the decisions of the project it runs
+* pack a fileset into a layer of the artifact that declares it
+* merge what a directory decided into the document its run discloses
+* let an lns flag be an lns flag wherever it is written
+
+### Features
+
+* forward per-layer assembly progress from the run into the CLI status line ([b6beba2](https://github.com/lensapp/lens-sandbox/commit/b6beba248aa37ad1c85ae4c0da29c1fabeac6cba))
+* give every volume the room it needs to grow later ([20dd3bb](https://github.com/lensapp/lens-sandbox/commit/20dd3bb6002873516a4d94af3e08a61bca2c56e0))
+* govern a run by the decisions of the project it runs ([9148369](https://github.com/lensapp/lens-sandbox/commit/914836963c703d43f55dba3ea6217e61694f00a6))
+* grow a volume in place, keeping what it holds ([e06829e](https://github.com/lensapp/lens-sandbox/commit/e06829ed984f7b36941af6d7f2903ca236588652))
+* let an lns flag be an lns flag wherever it is written ([f9d06e8](https://github.com/lensapp/lens-sandbox/commit/f9d06e88a1ce039b0f13e886d84ef2f6981849a3))
+* let this machine decide which of its files a pulled sandbox reads ([0b45931](https://github.com/lensapp/lens-sandbox/commit/0b459316ef52468256530522b20708c8aa9bbd5b))
+* merge what a directory decided into the document its run discloses ([80acdec](https://github.com/lensapp/lens-sandbox/commit/80acdec93f4b99111ccbac43ec0565cf34e73e7a))
+* pack a fileset into a layer of the artifact that declares it ([d207614](https://github.com/lensapp/lens-sandbox/commit/d2076149c235269555dbea01c66f293488d4876a))
+* read the disk size a document asks for ([305ceca](https://github.com/lensapp/lens-sandbox/commit/305ceca4d66d7da5cc791d0819ca4a06dc537903))
+* report determinate progress while assembling the rootfs from layers ([97052bb](https://github.com/lensapp/lens-sandbox/commit/97052bb9127bab01bb412ff0c25f475e71b9b4f1))
+* say how an entry the run wrote down got into the file ([d368f9d](https://github.com/lensapp/lens-sandbox/commit/d368f9d5dda58b2a93d296bc90ae3b7e24fc3fa8))
+* show what a rule says about itself where the run explains the rule ([3c9e278](https://github.com/lensapp/lens-sandbox/commit/3c9e278d5eaa4543ac3272bd51842658afcbf0b0))
+* size a named volume from the document that declares it ([f1604d4](https://github.com/lensapp/lens-sandbox/commit/f1604d4ca055c7bcd9df9dc53152d075e47216ba))
+* size the run's disk from the document that asked for it ([2d1618b](https://github.com/lensapp/lens-sandbox/commit/2d1618bd4af755ba4c513a8a1bdd711545fc47b4))
+* web-based login by default for lns login ([a2e0456](https://github.com/lensapp/lens-sandbox/commit/a2e0456ab3513e66969a3c459d0c3b69fa6fae1a))
+
+
+### Bug Fixes
+
+* decide a mixin's host file per machine too, and share one decision store ([9defb35](https://github.com/lensapp/lens-sandbox/commit/9defb35df15aeaac8253cbb8e3633aadd33ad98b))
+* floor the registry-supplied poll interval at one second ([212f684](https://github.com/lensapp/lens-sandbox/commit/212f68427cb19287bf3dcfb7fc59b37f5a64f399))
+* identify device-login requests with the standard lns user agent ([34ceafd](https://github.com/lensapp/lens-sandbox/commit/34ceafd5f6e51f5ce6142464a6f0b673881f669d))
+* keep a symlink at the tmp path from redirecting a decision ([bb99d02](https://github.com/lensapp/lens-sandbox/commit/bb99d02c2805e65e0f15d044ac5b55ed5aca335b))
+* keep a volume usable after the run that held it was killed ([8aa957e](https://github.com/lensapp/lens-sandbox/commit/8aa957e8992cddc6601d7e0b3829b8c0077df55e))
+* let a mixin reference name the document, not only its directory ([aa1e2e9](https://github.com/lensapp/lens-sandbox/commit/aa1e2e942484165407700ca53c2b81ba876e0b91))
+* let the approval window appear without taking the keyboard ([cf9b7d0](https://github.com/lensapp/lens-sandbox/commit/cf9b7d0ccbec59fe0982f2454c0658a50df7fe70))
+* percent-encode the device code in the token poll form body ([2bdd837](https://github.com/lensapp/lens-sandbox/commit/2bdd837ec49cf349094bd051e07dc018e40400e5))
+* probe the service before starting a browser login ([77d096c](https://github.com/lensapp/lens-sandbox/commit/77d096c853db3cd05818db1a72195f54dab69fc0))
+* refuse a disk the writer could not format ([ab8282c](https://github.com/lensapp/lens-sandbox/commit/ab8282c84207847e5e6145ae3c1ce69e90e0094d))
+* refuse a run before it starts, not after it has ([a73fbcd](https://github.com/lensapp/lens-sandbox/commit/a73fbcdf364cf2a31a532a32919813530ee1428b))
+* refuse to hand a non-https verification URL to the platform opener ([a4678ab](https://github.com/lensapp/lens-sandbox/commit/a4678ab488166082f0e97d94ead2738f4525016b))
+* reword the browser-login output in plain language and offer the token fallback last ([5617d99](https://github.com/lensapp/lens-sandbox/commit/5617d9967cd3f5cfe42d26d57cc2cc4adb950aca))
+* state the disk caching mode Vz must use, instead of taking its default ([9a00e08](https://github.com/lensapp/lens-sandbox/commit/9a00e08a982edfe1690d5d4c680277a4c12276b0)), closes [#247](https://github.com/lensapp/lens-sandbox/issues/247)
+* take the tmp with a write that cannot reach its target ([3f06434](https://github.com/lensapp/lens-sandbox/commit/3f064349cdf7ba12a6561790fdba2a4929486188))
+* write the connector catalog through the same careful install ([d6457b0](https://github.com/lensapp/lens-sandbox/commit/d6457b0b82d9e58611e42664c8cea5763a407abc))
+
+
+### Code Refactoring
+
+* rename the fileset field mountPath to guestPath ([a805026](https://github.com/lensapp/lens-sandbox/commit/a805026abc18aa45eac497be2526d947fcd8778e))
+
 ## [0.18.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.17.0...lns-v0.18.0) (2026-08-14)
 
 
