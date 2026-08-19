@@ -73,10 +73,14 @@ fn resolve_defaults(world: &mut BehaviourWorld, defaults: &Defaults, project: &P
             .iter()
             .map(|v| {
                 format!(
-                    "{}:{}{}",
+                    "{}:{}{}{}",
                     v.name,
                     v.target,
-                    if v.read_only { ":ro" } else { "" }
+                    if v.read_only { ":ro" } else { "" },
+                    match v.size_bytes {
+                        Some(bytes) => format!(":{}Gi", bytes >> 30),
+                        None => String::new(),
+                    }
                 )
             })
             .collect(),
@@ -98,6 +102,14 @@ fn resolve_defaults(world: &mut BehaviourWorld, defaults: &Defaults, project: &P
 #[given(regex = r"^an lns.yaml declaring 3 vCPU and 6Gi of memory$")]
 fn declares_resources(world: &mut BehaviourWorld) {
     install_definition(world, "  resources:\n    cpu: 3\n    memory: 6Gi\n");
+}
+
+#[given(regex = r"^an lns.yaml declaring a volume sized 40Gi$")]
+fn declares_a_sized_volume(world: &mut BehaviourWorld) {
+    install_definition(
+        world,
+        "  volumes:\n    - type: volume\n      source: some-cache\n      target: /home/node/.cache\n      size: 40Gi\n",
+    );
 }
 
 #[given(regex = r"^an lns.yaml declaring a 40Gi disk$")]
@@ -207,6 +219,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
                 read_only: volume.read_only(),
                 exclude: volume.exclude().to_vec(),
                 optional: volume.optional(),
+                size_bytes: volume.size_bytes(),
             })
             .collect(),
         ports: Vec::new(),

@@ -1049,6 +1049,7 @@ mod tests {
             name: "scratch".into(),
             target: "/scratch".into(),
             read_only: false,
+            size_bytes: None,
         })];
         composed(&mut args, Vec::new());
         let s = summary_of(
@@ -1071,6 +1072,7 @@ mod tests {
             name: "mine".into(),
             target: "/scratch".into(),
             read_only: false,
+            size_bytes: None,
         })];
         composed(
             &mut args,
@@ -1363,11 +1365,13 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
+                size_bytes: None,
             }),
             lns_ipc::MountSpec::Named(lns_ipc::VolumeMount {
                 name: "ro-cfg".into(),
                 target: "/cfg".into(),
                 read_only: true,
+                size_bytes: None,
             }),
         ];
         let s = summary_of(

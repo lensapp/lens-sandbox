@@ -165,6 +165,7 @@ mod tests {
             name: name.into(),
             target: "/data".into(),
             read_only,
+            size_bytes: None,
         }
     }
 
@@ -194,6 +195,7 @@ mod tests {
             name: name.into(),
             target: target.into(),
             read_only: false,
+            size_bytes: None,
         })
     }
 
@@ -230,6 +232,7 @@ mod tests {
                 name: "cache".into(),
                 target: "/cache".into(),
                 read_only: false,
+                size_bytes: None,
             }],
             "a declared mount the consumer did not touch stays disclosed"
         );

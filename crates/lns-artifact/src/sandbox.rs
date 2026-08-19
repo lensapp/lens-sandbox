@@ -92,6 +92,13 @@ impl Volume {
     pub fn read_only(&self) -> bool {
         self.read_only
     }
+
+    /// The capacity this volume must have, in bytes; `None` when the document named none, because validation already refused any size that does not parse.
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.size
+            .as_ref()
+            .and_then(|q| crate::disk::parse_bytes(q).ok())
+    }
 }
 
 /// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the connector ids it needs.
@@ -1268,6 +1275,20 @@ mod tests {
         .unwrap();
         let size = def.spec.volumes[0].size.clone().unwrap();
         assert_eq!(crate::disk::parse_bytes(&size).unwrap(), 100 << 30);
+    }
+
+    #[test]
+    fn a_volume_reports_the_size_it_declared_in_bytes() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"cache","target":"/c","size":"40Gi"},{"name":"plain","target":"/p"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(def.spec.volumes[0].size_bytes(), Some(40 << 30));
+        assert_eq!(
+            def.spec.volumes[1].size_bytes(),
+            None,
+            "a volume that declared nothing must stay distinguishable from one that declared the default"
+        );
     }
 
     #[test]

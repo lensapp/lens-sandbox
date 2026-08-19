@@ -764,6 +764,7 @@ mod tests {
                 name: "cache".into(),
                 target: "/cache".into(),
                 read_only: false,
+                size_bytes: None,
             })
         );
 
@@ -775,6 +776,7 @@ mod tests {
                 name: "cache".into(),
                 target: "/cache".into(),
                 read_only: true,
+                size_bytes: None,
             })
         );
     }
@@ -789,6 +791,7 @@ mod tests {
                 name: "cache".into(),
                 target: "/cache".into(),
                 read_only: false,
+                size_bytes: None,
             })
         );
     }

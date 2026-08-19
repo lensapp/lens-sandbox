@@ -383,6 +383,7 @@ fn definition_declares_bind(world: &mut BehaviourWorld, source: String, target: 
             read_only: false,
             exclude: Vec::new(),
             optional: false,
+            size_bytes: None,
         });
 }
 

@@ -11,6 +11,21 @@ Feature: applying declarative sandbox launch settings
     And the resolved host binds are exactly "/work -> /workspace"
     And the resolved volumes are exactly "some-cache:/home/node/.cache:ro"
 
+  Scenario: a declared volume size reaches the launch request
+    Given an lns.yaml declaring a volume sized 40Gi
+    When the local sandbox launch settings are resolved with no overrides
+    Then the resolved volumes are exactly "some-cache:/home/node/.cache:40Gi"
+
+  Scenario: a pulled sandbox's declared volume size reaches the consumer's launch request
+    Given an lns.yaml declaring a volume sized 40Gi
+    When the published sandbox launch settings are resolved from "/consumer/project"
+    Then the resolved volumes are exactly "some-cache:/home/node/.cache:40Gi"
+
+  Scenario: a volume that declares no size asks the service for nothing in particular
+    Given an lns.yaml declaring workdir and declarative mounts
+    When the local sandbox launch settings are resolved with no overrides
+    Then the resolved volumes are exactly "some-cache:/home/node/.cache:ro"
+
   Scenario: explicit workdir and mount flags override matching declarative settings
     Given an lns.yaml declaring workdir and declarative mounts
     When the local sandbox launch settings are resolved with "--workdir /src -v cli-cache:/home/node/.cache -v /other:/workspace:ro"

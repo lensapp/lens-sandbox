@@ -61,4 +61,12 @@ impl Fs for RealFs {
         .map_err(io::Error::other)?
         .map_err(io::Error::other)
     }
+
+    async fn grow_ext4_image(&self, p: &Path, size_bytes: u64) -> io::Result<()> {
+        let path = p.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::upperfs::grow_ext4(&path, size_bytes))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)
+    }
 }

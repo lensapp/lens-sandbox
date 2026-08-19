@@ -22,4 +22,10 @@ pub trait Fs: Send + Sync {
     ) -> impl std::future::Future<Output = io::Result<Vec<PathBuf>>> + Send;
     fn metadata(&self, p: &Path) -> impl std::future::Future<Output = io::Result<FileMeta>> + Send;
     fn remove_file(&self, p: &Path) -> impl std::future::Future<Output = io::Result<()>> + Send;
+    /// Extends an existing image towards `size_bytes`, keeping its contents; a smaller size leaves it alone.
+    fn grow_ext4_image(
+        &self,
+        p: &Path,
+        size_bytes: u64,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }

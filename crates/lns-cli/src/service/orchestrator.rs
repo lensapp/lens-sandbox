@@ -1338,6 +1338,7 @@ mod tests {
                     read_only: false,
                     exclude: Vec::new(),
                     optional: false,
+                    size_bytes: None,
                 }],
                 ports: Vec::new(),
                 filesets: vec![lns_ipc::SandboxFileset {
