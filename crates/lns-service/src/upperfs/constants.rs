@@ -14,12 +14,27 @@ pub const INODE_RATIO: u32 = 16384;
 // `INCOMPAT_64BIT` is not set; the kernel and e2fsprogs both infer GROUP_DESC_SIZE = 32 from that — do not change this without setting INCOMPAT_64BIT.
 pub const GROUP_DESC_SIZE: u32 = 32;
 
+pub const DESCS_PER_BLOCK: u32 = BLOCK_SIZE / GROUP_DESC_SIZE;
+
+pub const ADDRS_PER_BLOCK: u32 = BLOCK_SIZE / 4;
+
+/// How much room a fresh image reserves to grow into, the factor mke2fs itself reserves for.
+pub const GROWTH_FACTOR: u32 = 1024;
+
 pub const FIRST_INO: u32 = 11;
 
 pub const ROOT_INO: u32 = 2;
 pub const LOST_FOUND_INO: u32 = 11;
 
 pub const LOST_FOUND_BLOCKS: u32 = 4;
+
+/// The resize inode's one double-indirect block, whose slots point at the reserved GDT blocks.
+pub const RESIZE_DIND_BLOCKS: u32 = 1;
+
+pub const RESIZE_INO: u32 = 7;
+
+pub const EXT2_NDIR_BLOCKS: u32 = 12;
+pub const EXT2_DIND_BLOCK: usize = 13;
 
 pub const JOURNAL_INO: u32 = 8;
 
@@ -51,7 +66,11 @@ pub const FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 
 pub const FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 
-pub const SB_FEATURE_COMPAT: u32 = FEATURE_COMPAT_EXT_ATTR | FEATURE_COMPAT_HAS_JOURNAL;
+// `COMPAT_RESIZE_INODE` MUST be set whenever `reserved_gdt_blocks` is non-zero — e2fsck refuses reserved blocks without it, and refuses a non-zero inode 7 without it.
+pub const FEATURE_COMPAT_RESIZE_INODE: u32 = 0x0010;
+
+pub const SB_FEATURE_COMPAT: u32 =
+    FEATURE_COMPAT_EXT_ATTR | FEATURE_COMPAT_HAS_JOURNAL | FEATURE_COMPAT_RESIZE_INODE;
 pub const SB_FEATURE_INCOMPAT: u32 = FEATURE_INCOMPAT_FILETYPE | FEATURE_INCOMPAT_EXTENTS;
 pub const SB_FEATURE_RO_COMPAT: u32 = FEATURE_RO_COMPAT_SPARSE_SUPER | FEATURE_RO_COMPAT_LARGE_FILE;
 

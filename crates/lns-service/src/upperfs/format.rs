@@ -38,7 +38,7 @@ pub struct Superblock {
     pub feature_ro_compat: u32,
     pub uuid: [u8; 16],
     pub volume_name: [u8; 16],
-    // reserved_gdt_blocks MUST be 0 when COMPAT_RESIZE_INODE is clear — e2fsprogs warns on any non-zero value without the matching feature.
+    // reserved_gdt_blocks MUST be 0 when COMPAT_RESIZE_INODE is clear — e2fsck refuses any non-zero value without the matching feature.
     pub reserved_gdt_blocks: u16,
     pub journal_inum: u32,
     pub mkfs_time: u32,
@@ -80,12 +80,17 @@ impl Superblock {
             first_ino: FIRST_INO,
             inode_size: INODE_SIZE,
             block_group_nr: 0,
-            feature_compat: SB_FEATURE_COMPAT,
+            feature_compat: if layout.reserved_gdt_blocks > 0 {
+                SB_FEATURE_COMPAT
+            } else {
+                SB_FEATURE_COMPAT & !FEATURE_COMPAT_RESIZE_INODE
+            },
             feature_incompat: SB_FEATURE_INCOMPAT,
             feature_ro_compat: SB_FEATURE_RO_COMPAT,
             uuid,
             volume_name: pad_name::<16>(volume_name),
-            reserved_gdt_blocks: 0,
+            reserved_gdt_blocks: u16::try_from(layout.reserved_gdt_blocks)
+                .expect("reserved_gdt_blocks is capped at one block of addresses"),
             journal_inum: JOURNAL_INO,
             mkfs_time,
         }
@@ -192,6 +197,7 @@ pub struct Inode {
     pub i_block: [u8; I_BLOCK_BYTES],
     pub generation: u32,
     pub file_acl: u32,
+    pub size_high: u32,
 }
 
 impl Default for Inode {
@@ -211,6 +217,7 @@ impl Default for Inode {
             i_block: [0u8; I_BLOCK_BYTES],
             generation: 0,
             file_acl: 0,
+            size_high: 0,
         }
     }
 }
@@ -237,6 +244,7 @@ impl Inode {
             i_block,
             generation: 0,
             file_acl: 0,
+            size_high: 0,
         }
     }
 
@@ -261,6 +269,7 @@ impl Inode {
             i_block,
             generation: 0,
             file_acl: 0,
+            size_high: 0,
         }
     }
 
@@ -285,6 +294,43 @@ impl Inode {
             i_block,
             generation: 0,
             file_acl: 0,
+            size_high: 0,
+        }
+    }
+
+    /// Inode 7, which owns the reserved GDT blocks so a later grow can extend the descriptor table into them.
+    pub fn resize(
+        time: u32,
+        dind_block: u32,
+        reserved_gdt_blocks: u32,
+        backup_groups: u32,
+    ) -> Self {
+        let mut i_block = [0u8; I_BLOCK_BYTES];
+        i_block[EXT2_DIND_BLOCK * 4..EXT2_DIND_BLOCK * 4 + 4]
+            .copy_from_slice(&dind_block.to_le_bytes());
+
+        let visited = 1 + reserved_gdt_blocks + reserved_gdt_blocks * backup_groups;
+        let size = u64::from(ADDRS_PER_BLOCK) * u64::from(ADDRS_PER_BLOCK)
+            + u64::from(ADDRS_PER_BLOCK)
+            + u64::from(EXT2_NDIR_BLOCKS);
+        let size = size * u64::from(BLOCK_SIZE);
+
+        Self {
+            mode: S_IFREG | 0o600,
+            uid: 0,
+            size: size as u32,
+            atime: time,
+            ctime: time,
+            mtime: time,
+            dtime: 0,
+            gid: 0,
+            links_count: 1,
+            blocks: visited * (BLOCK_SIZE / 512),
+            flags: 0,
+            i_block,
+            generation: 0,
+            file_acl: 0,
+            size_high: (size >> 32) as u32,
         }
     }
 
@@ -304,6 +350,7 @@ impl Inode {
         b[0x28..0x28 + I_BLOCK_BYTES].copy_from_slice(&self.i_block);
         b[0x64..0x68].copy_from_slice(&self.generation.to_le_bytes());
         b[0x68..0x6C].copy_from_slice(&self.file_acl.to_le_bytes());
+        b[0x6C..0x70].copy_from_slice(&self.size_high.to_le_bytes());
         b
     }
 }
@@ -336,7 +383,7 @@ mod tests {
         let compat = u32::from_le_bytes([b[0x5C], b[0x5D], b[0x5E], b[0x5F]]);
         let incompat = u32::from_le_bytes([b[0x60], b[0x61], b[0x62], b[0x63]]);
         let ro_compat = u32::from_le_bytes([b[0x64], b[0x65], b[0x66], b[0x67]]);
-        assert_eq!(compat, 0x0000_000C, "EXT_ATTR | HAS_JOURNAL");
+        assert_eq!(compat, 0x0000_001C, "EXT_ATTR | HAS_JOURNAL | RESIZE_INODE");
         assert_eq!(incompat, 0x0000_0042, "FILETYPE | EXTENTS");
         assert_eq!(ro_compat, 0x0000_0003, "SPARSE_SUPER | LARGE_FILE");
     }
