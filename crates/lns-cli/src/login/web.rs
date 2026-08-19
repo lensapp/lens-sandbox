@@ -64,7 +64,9 @@ impl<C: DeviceAuthClient, B: BrowserOpener> WebLogin<C, B> {
             "Your one-time confirmation code is: {}",
             auth.user_code
         )?;
-        if self.browser.open(&auth.verification_uri_complete) {
+        if is_https_url(&auth.verification_uri_complete)
+            && self.browser.open(&auth.verification_uri_complete)
+        {
             writeln!(
                 out,
                 "Opening {} in your browser. Enter the code there.",
@@ -104,6 +106,10 @@ impl<C: DeviceAuthClient, B: BrowserOpener> WebLogin<C, B> {
             }
         }
     }
+}
+
+fn is_https_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| u.scheme() == "https")
 }
 
 async fn sleep_then_poll(
@@ -477,6 +483,29 @@ mod tests {
         };
         let (result, out) = drive(&client, &browser).await;
         result.unwrap();
+        assert!(
+            out.contains(
+                "Could not open a browser. Go to https://registry.example.test/cli/authorize and enter the code."
+            ),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_non_https_verification_url_never_reaches_the_browser_opener() {
+        let mut auth = authorization();
+        auth.verification_uri_complete = "file:///etc/passwd".into();
+        let client = ScriptedClient::new(Ok(DeviceStart::Started(auth)), vec![issued()]);
+        let browser = ScriptedBrowser {
+            opens: true,
+            seen: Mutex::new(Vec::new()),
+        };
+        let (result, out) = drive(&client, &browser).await;
+        result.unwrap();
+        assert!(
+            browser.seen.lock().unwrap().is_empty(),
+            "a registry-supplied non-https URL must not be handed to the platform opener"
+        );
         assert!(
             out.contains(
                 "Could not open a browser. Go to https://registry.example.test/cli/authorize and enter the code."
