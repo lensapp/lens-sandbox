@@ -80,7 +80,6 @@ pub enum WebLoginOutcome {
     Unsupported,
     Denied,
     Expired,
-    Failed(String),
 }
 
 /// Runs a browser-based device login against a registry, rendering progress to `out`.
@@ -257,7 +256,6 @@ async fn web_credentials(
                 "the confirmation code expired before the login was approved; run `lns login` again"
             )
         }
-        WebLoginOutcome::Failed(reason) => bail!("browser login to {registry} failed: {reason}"),
     }
 }
 
@@ -795,21 +793,6 @@ mod tests {
         let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("service must be running"));
-    }
-
-    #[tokio::test]
-    async fn web_login_failure_reason_is_surfaced() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
-        let web = FakeWebLogin {
-            outcome: Ok(WebLoginOutcome::Failed("registry answered 500".into())),
-        };
-        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("browser login to hub.lns.run failed: registry answered 500"),
-            "got: {err}"
-        );
     }
 
     #[tokio::test]
