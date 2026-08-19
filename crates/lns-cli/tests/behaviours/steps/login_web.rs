@@ -28,6 +28,10 @@ struct RecordingVerifier {
     calls: Arc<Mutex<Vec<(String, String, String)>>>,
 }
 impl RegistryVerifier for RecordingVerifier {
+    fn available<'a>(&'a self) -> LocalBoxFuture<'a, anyhow::Result<bool>> {
+        Box::pin(async move { Ok(true) })
+    }
+
     fn verify<'a>(
         &'a self,
         registry: &'a str,

@@ -94,6 +94,25 @@ impl RealRegistryVerifier {
 }
 
 impl RegistryVerifier for RealRegistryVerifier {
+    fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
+                return Ok(false);
+            };
+            let frame = encode_frame(&Request::Ping).context("encoding ping request")?;
+            stream
+                .write_all(&frame)
+                .await
+                .context("writing ping request")?;
+            let bytes = read_frame_bytes_async(&mut stream)
+                .await
+                .context("reading ping response")?;
+            let response =
+                decode_frame::<Response, _>(&mut &bytes[..]).context("decoding ping response")?;
+            Ok(matches!(response, Response::Pong))
+        })
+    }
+
     fn verify<'a>(
         &'a self,
         registry: &'a str,
