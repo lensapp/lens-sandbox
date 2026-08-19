@@ -455,6 +455,41 @@ mod tests {
         );
     }
 
+    /// A grow onto a whole-group boundary edits no existing group, so both tail paths must fall straight through.
+    #[test]
+    fn a_grow_onto_a_group_boundary_touches_no_existing_group() {
+        let (_d, _p, bytes) = grow_and_read(256 * 1024 * 1024, 384 * 1024 * 1024);
+        let sb = superblock_of(&bytes);
+        assert_eq!(sb.blocks_count, 98_304, "three whole groups");
+        assert_eq!(sb.state, EXT2_VALID_FS);
+    }
+
+    /// An image written before volumes reserved room to grow carries no resize tree, so a grow inside its existing table must leave that tree alone rather than invent one.
+    #[test]
+    fn a_grow_of_an_image_with_no_reserved_run_writes_no_resize_tree() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("upper.img");
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "t", 0).expect("plan");
+        write_ext4(&plan, &path).expect("write_ext4");
+
+        let mut stripped = plan.superblock.clone();
+        stripped.reserved_gdt_blocks = 0;
+        stripped.feature_compat &= !FEATURE_COMPAT_RESIZE_INODE;
+        let mut f = File::options().read(true).write(true).open(&path).unwrap();
+        write_at(&mut f, 1024, &stripped.to_bytes()).expect("strip the reserved run");
+        drop(f);
+
+        grow_ext4(&path, 64 * 1024 * 1024).expect("grow_ext4");
+
+        let bytes = std::fs::read(&path).expect("read");
+        let sb = superblock_of(&bytes);
+        assert_eq!(sb.blocks_count, 16_384, "the image still grew");
+        assert_eq!(
+            sb.reserved_gdt_blocks, 0,
+            "an image with nothing reserved must not gain a reservation it never had room for"
+        );
+    }
+
     #[test]
     fn a_grow_refuses_an_image_that_was_not_unmounted_cleanly() {
         let dir = tempfile::TempDir::new().expect("tempdir");

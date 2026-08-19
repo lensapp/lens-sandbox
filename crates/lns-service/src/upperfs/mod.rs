@@ -97,7 +97,7 @@ mod tests {
             [0; 16],
             0,
             DEFAULT_SIZE_BYTES,
-            |_, _| Ok(()),
+            write_ext4,
         )
         .unwrap_err();
         assert!(
