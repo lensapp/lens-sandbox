@@ -165,25 +165,6 @@ fn stdin_forwarded_through_pty(world: &mut BehaviourWorld) -> Result<(), String>
     }
 }
 
-#[then("the user receives a live shell prompt")]
-fn live_shell_prompt(world: &mut BehaviourWorld) -> Result<(), String> {
-    stdin_forwarded_through_pty(world)
-}
-
-#[then("raw-mode terminal programs can run")]
-fn raw_mode_programs_run(world: &mut BehaviourWorld) -> Result<(), String> {
-    stdin_forwarded_through_pty(world)
-}
-
-#[then("terminal output is displayed live")]
-fn terminal_output_live(world: &mut BehaviourWorld) -> Result<(), String> {
-    if request(world)?.tty {
-        Ok(())
-    } else {
-        Err("terminal output had no PTY".into())
-    }
-}
-
 #[then("no exec session is started")]
 fn no_exec_session_started(world: &mut BehaviourWorld) -> Result<(), String> {
     if !world.exec.session_started {

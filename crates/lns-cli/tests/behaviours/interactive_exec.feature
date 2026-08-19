@@ -26,13 +26,10 @@ Feature: interactive exec sessions from the CLI
     Then the exec command has a PTY
     And host stdin is not forwarded
 
-  Scenario: interactive TTY mode supports terminal applications
+  Scenario: interactive TTY mode requests a PTY with host stdin forwarded
     Given an active run named "reviewer"
     When the user runs "lns exec -it reviewer sh"
     Then host stdin is forwarded through an allocated PTY
-    And the user receives a live shell prompt
-    And raw-mode terminal programs can run
-    And terminal output is displayed live
 
   Scenario: exec help exposes its terminal controls
     When the user runs "lns exec --help"
