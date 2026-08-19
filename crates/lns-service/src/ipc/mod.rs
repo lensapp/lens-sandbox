@@ -280,11 +280,34 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 }
             }
         }
-        Request::SessionDetach { .. }
-        | Request::SessionStdin { .. }
-        | Request::SessionStdinClose { .. }
-        | Request::SessionResize { .. }
-        | Request::SessionSignal { .. } => handle_session_control(request).await,
+        Request::SessionDetach { target } => handle_session_detach(target).await,
+        Request::SessionStdin { target, bytes } => {
+            forward_target_input(
+                target,
+                session_input_from_stdin(bytes.clone()),
+                "SessionStdin",
+            )
+            .await
+        }
+        Request::SessionStdinClose { target } => {
+            forward_target_input(
+                target,
+                Some(crate::vm::session_client::SessionInput::StdinClose),
+                "SessionStdinClose",
+            )
+            .await
+        }
+        Request::SessionResize { target, rows, cols } => {
+            forward_target_input(
+                target,
+                session_input_from_resize(*rows, *cols),
+                "SessionResize",
+            )
+            .await
+        }
+        Request::SessionSignal { target, signal } => {
+            forward_target_input(target, session_input_from_signal(*signal), "SessionSignal").await
+        }
         Request::Kill { run, signal } => kill_request(run, *signal).await,
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
@@ -573,40 +596,6 @@ async fn wait_for_exit(run_id: &str, timeout: std::time::Duration) -> bool {
             return false;
         }
         tokio::time::sleep(EXIT_POLL_INTERVAL).await;
-    }
-}
-
-async fn handle_session_control(request: &Request) -> Response {
-    match request {
-        Request::SessionDetach { target } => handle_session_detach(target).await,
-        Request::SessionStdin { target, bytes } => {
-            forward_target_input(
-                target,
-                session_input_from_stdin(bytes.clone()),
-                "SessionStdin",
-            )
-            .await
-        }
-        Request::SessionStdinClose { target } => {
-            forward_target_input(
-                target,
-                Some(crate::vm::session_client::SessionInput::StdinClose),
-                "SessionStdinClose",
-            )
-            .await
-        }
-        Request::SessionResize { target, rows, cols } => {
-            forward_target_input(
-                target,
-                session_input_from_resize(*rows, *cols),
-                "SessionResize",
-            )
-            .await
-        }
-        Request::SessionSignal { target, signal } => {
-            forward_target_input(target, session_input_from_signal(*signal), "SessionSignal").await
-        }
-        _ => unreachable!("handle_session_control only accepts session control requests"),
     }
 }
 
@@ -1753,12 +1742,6 @@ mod tests {
         assert!(crate::run_registry::session_input_sender(&target).is_none());
 
         crate::run_registry::deregister(&run_id);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "handle_session_control only accepts session control requests")]
-    async fn session_control_dispatch_rejects_a_non_session_request() {
-        handle_session_control(&Request::Ping).await;
     }
 
     #[tokio::test]
