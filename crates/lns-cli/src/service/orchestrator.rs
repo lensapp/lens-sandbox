@@ -859,26 +859,26 @@ where
         Some(socket) => {
             let cancel_target = target.clone();
             let cancel_socket = socket.clone();
-            let cancel_task = tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                match cancel {
-                    CancelBehaviour::CancelRun => {
-                        if let Ok(client) = real_client() {
-                            client.cancel_run(cancel_target.run_id().to_string()).await;
-                        }
-                    }
-                    CancelBehaviour::SignalSession => {
-                        let _ = send_one_shot(
-                            &cancel_socket,
-                            &Request::SessionSignal {
-                                target: cancel_target,
-                                signal: SignalKind::Int,
-                            },
-                        )
-                        .await;
-                    }
+            let cancel_task = match cancel {
+                CancelBehaviour::CancelRun => {
+                    let client = real_client()?;
+                    tokio::spawn(async move {
+                        let _ = tokio::signal::ctrl_c().await;
+                        client.cancel_run(cancel_target.run_id().to_string()).await;
+                    })
                 }
-            });
+                CancelBehaviour::SignalSession => tokio::spawn(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    let _ = send_one_shot(
+                        &cancel_socket,
+                        &Request::SessionSignal {
+                            target: cancel_target,
+                            signal: SignalKind::Int,
+                        },
+                    )
+                    .await;
+                }),
+            };
             let winsize_target = target.clone();
             let winsize = tty.then(|| {
                 let s = socket.clone();
