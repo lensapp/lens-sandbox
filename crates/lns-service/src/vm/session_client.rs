@@ -89,6 +89,8 @@ pub struct SessionParams {
     pub initial_winsize: Option<Winsize>,
     /// Ask the broker to drop to the guest run-as identity before exec; false for the primary session, whose workload is the supervisor.
     pub confine: bool,
+    /// Tell the broker this session exists only for its host client, so a vanished stream hangs the child up.
+    pub dies_with_client: bool,
 }
 
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {

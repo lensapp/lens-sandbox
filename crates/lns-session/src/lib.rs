@@ -29,6 +29,8 @@ pub enum ClientFrame {
         winsize: Option<Winsize>,
         /// Drop to the guest's run-as identity (or cap a root one) and scrub the relay credentials before exec; only a supervised primary session leaves it false, because its workload is the supervisor.
         confine: bool,
+        /// This session exists only for its host client: when the client's stream vanishes the broker hangs the child up instead of leaving it running.
+        dies_with_client: bool,
     },
     StdinBytes(Vec<u8>),
     StdinClose,
@@ -137,6 +139,7 @@ mod tests {
             stdin: true,
             winsize: Some(Winsize { rows: 24, cols: 80 }),
             confine: true,
+            dies_with_client: true,
         };
         let bytes = encode_frame(&frame).expect("encode");
         let len = decode_length_prefix(&bytes[..4].try_into().unwrap()).expect("len");
@@ -156,6 +159,7 @@ mod tests {
             stdin: false,
             winsize: None,
             confine: false,
+            dies_with_client: false,
         };
         let bytes = encode_frame(&frame).expect("encode");
         let back: ClientFrame = decode_frame(&bytes[4..]).expect("decode");

@@ -111,11 +111,12 @@ pub(crate) enum LoopAction {
     Stop,
 }
 
-/// A confined session exists only for its host client, so a vanished stream hangs its child up; the inherited primary outlives any one connection.
-pub(crate) fn eof_action(confinement: &Confinement) -> LoopAction {
-    match confinement {
-        Confinement::Inherit => LoopAction::Stop,
-        Confinement::CapsOnly | Confinement::Setuid { .. } => LoopAction::Detach,
+/// The opener declares whether the session dies with its client; a vanished stream then hangs the child up, everything else outlives the connection.
+pub(crate) fn eof_action(dies_with_client: bool) -> LoopAction {
+    if dies_with_client {
+        LoopAction::Detach
+    } else {
+        LoopAction::Stop
     }
 }
 
@@ -235,6 +236,7 @@ mod tests {
             stdin: false,
             winsize: None,
             confine: false,
+            dies_with_client: false,
         };
         assert!(validate_open_session(&frame).is_ok());
     }
@@ -250,6 +252,7 @@ mod tests {
             stdin: false,
             winsize: None,
             confine: false,
+            dies_with_client: false,
         };
         let err = validate_open_session(&frame).unwrap_err();
         assert!(matches!(&err, SessionError::Protocol(s) if s.contains("argv empty")));
@@ -262,20 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn host_eof_hangs_up_a_confined_sessions_child() {
-        assert_eq!(eof_action(&Confinement::CapsOnly), LoopAction::Detach);
-        assert_eq!(
-            eof_action(&Confinement::Setuid {
-                uid: 1000,
-                gid: 1000
-            }),
-            LoopAction::Detach
-        );
+    fn host_eof_hangs_up_a_session_declared_to_die_with_its_client() {
+        assert_eq!(eof_action(true), LoopAction::Detach);
     }
 
     #[test]
-    fn host_eof_leaves_an_inherited_sessions_workload_running() {
-        assert_eq!(eof_action(&Confinement::Inherit), LoopAction::Stop);
+    fn host_eof_leaves_a_shared_sessions_workload_running() {
+        assert_eq!(eof_action(false), LoopAction::Stop);
     }
 
     #[test]
@@ -306,6 +302,7 @@ mod tests {
             stdin: false,
             winsize: None,
             confine: false,
+            dies_with_client: false,
         };
         assert_eq!(dispatch_frame(opener), LoopAction::Stop);
     }

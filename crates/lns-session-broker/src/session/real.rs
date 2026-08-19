@@ -161,6 +161,7 @@ pub fn handle_session(
         stdin,
         winsize,
         confine,
+        dies_with_client,
     } = opening
     else {
         unreachable!("validate_open_session guarantees OpenSession");
@@ -176,9 +177,9 @@ pub fn handle_session(
         confinement,
     };
     if tty {
-        run_tty_session(conn, spec, winsize, stdin, pid_tx, forker)
+        run_tty_session(conn, spec, winsize, stdin, dies_with_client, pid_tx, forker)
     } else {
-        run_pipe_session(conn, spec, stdin, pid_tx, forker)
+        run_pipe_session(conn, spec, stdin, dies_with_client, pid_tx, forker)
     }
 }
 
@@ -187,6 +188,7 @@ fn run_tty_session(
     spec: WorkloadSpec,
     winsize: Option<Winsize>,
     _stdin_enabled: bool,
+    dies_with_client: bool,
     pid_tx: Option<SyncSender<libc::pid_t>>,
     forker: &dyn Forker,
 ) -> Result<SessionOutcome, SessionError> {
@@ -215,7 +217,7 @@ fn run_tty_session(
         apply_winsize(pty.master, ws);
     }
     let conn = SharedFd::new(conn);
-    let outcome = drive_session_tty(conn.clone(), pty.master, pid, forker, spec.confinement);
+    let outcome = drive_session_tty(conn.clone(), pty.master, pid, forker, dies_with_client);
     close(pty.master);
     conn.close();
     outcome
@@ -225,6 +227,7 @@ fn run_pipe_session(
     conn: RawFd,
     spec: WorkloadSpec,
     stdin_enabled: bool,
+    dies_with_client: bool,
     pid_tx: Option<SyncSender<libc::pid_t>>,
     forker: &dyn Forker,
 ) -> Result<SessionOutcome, SessionError> {
@@ -277,7 +280,7 @@ fn run_pipe_session(
         stderr_r,
         pid,
         forker,
-        spec.confinement,
+        dies_with_client,
     );
     conn.close();
     outcome
@@ -288,7 +291,7 @@ fn drive_session_tty(
     master: RawFd,
     child_pid: libc::pid_t,
     forker: &dyn Forker,
-    confinement: Confinement,
+    dies_with_client: bool,
 ) -> Result<SessionOutcome, SessionError> {
     let stdin_dup = dup(master);
     let ctrl_dup = dup(master);
@@ -307,7 +310,13 @@ fn drive_session_tty(
     let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_for_ctrl = conn.clone();
     let ctrl_thread = std::thread::spawn(move || {
-        client_loop_tty(conn_for_ctrl, stdin_dup, ctrl_dup, child_pid, confinement);
+        client_loop_tty(
+            conn_for_ctrl,
+            stdin_dup,
+            ctrl_dup,
+            child_pid,
+            dies_with_client,
+        );
         let _ = host_closed_tx.send(());
     });
 
@@ -334,7 +343,7 @@ fn drive_session_pipes(
     stderr_r: RawFd,
     child_pid: libc::pid_t,
     forker: &dyn Forker,
-    confinement: Confinement,
+    dies_with_client: bool,
 ) -> Result<SessionOutcome, SessionError> {
     let conn_out = conn.clone();
     let out_thread = std::thread::spawn(move || {
@@ -348,7 +357,7 @@ fn drive_session_pipes(
     let (host_closed_tx, host_closed_rx) = std::sync::mpsc::channel::<()>();
     let conn_in = conn.clone();
     let in_thread = std::thread::spawn(move || {
-        client_loop_pipes(conn_in, stdin_w, child_pid, confinement);
+        client_loop_pipes(conn_in, stdin_w, child_pid, dies_with_client);
         let _ = host_closed_tx.send(());
     });
 
@@ -371,11 +380,11 @@ fn client_loop_tty(
     master_in: RawFd,
     master_ctrl: RawFd,
     child_pid: libc::pid_t,
-    confinement: Confinement,
+    dies_with_client: bool,
 ) {
     loop {
         let Some(frame) = read_client_frame(conn.raw()) else {
-            if eof_action(&confinement) == LoopAction::Detach {
+            if eof_action(dies_with_client) == LoopAction::Detach {
                 deliver_signal(master_ctrl, child_pid, libc::SIGHUP);
             }
             break;
@@ -406,11 +415,11 @@ fn client_loop_pipes(
     conn: SharedFd,
     mut stdin_w: Option<RawFd>,
     child_pid: libc::pid_t,
-    confinement: Confinement,
+    dies_with_client: bool,
 ) {
     loop {
         let Some(frame) = read_client_frame(conn.raw()) else {
-            if eof_action(&confinement) == LoopAction::Detach {
+            if eof_action(dies_with_client) == LoopAction::Detach {
                 kill(child_pid, libc::SIGHUP);
             }
             break;
@@ -626,6 +635,7 @@ mod tests {
             stdin: false,
             winsize: None,
             confine: false,
+            dies_with_client: false,
         };
         let bytes = encode_frame(&frame).expect("encode OpenSession");
         // SAFETY: bytes is borrowed for the duration of the call.
