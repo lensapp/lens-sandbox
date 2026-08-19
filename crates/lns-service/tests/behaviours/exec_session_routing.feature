@@ -6,7 +6,7 @@ Feature: routing exec sessions within a run
     Given an active run named "reviewer"
     And its primary session is attached to another client
     When the user runs "lns exec -it reviewer sh"
-    Then the user receives a live shell prompt
+    Then the exec session is opened and its input routes to it alone
     And the primary session remains attached and usable
 
   Scenario: a resize targets one exec session

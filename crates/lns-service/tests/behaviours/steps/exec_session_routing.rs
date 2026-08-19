@@ -4,11 +4,12 @@ use lns_service::vm::session_client::SessionInput;
 
 fn make_handle(
     input_tx: tokio::sync::mpsc::Sender<SessionInput>,
+    detach_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> lns_service::run_registry::RunHandle {
     let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel::<i32>();
     lns_service::run_registry::RunHandle {
         cancel_tx,
-        detach_tx: std::sync::Mutex::new(None),
+        detach_tx: std::sync::Mutex::new(detach_tx),
         task: tokio::spawn(std::future::pending::<()>()),
         input_tx: Some(input_tx),
         exec_sessions: Default::default(),
@@ -53,14 +54,19 @@ fn register_exec(world: &mut BehaviourWorld, session_id: &str, first: bool) {
 fn active_run_named(world: &mut BehaviourWorld, _name: String) {
     let run_id = lns_service::run_registry::allocate_run_id();
     let (primary_tx, primary_rx) = tokio::sync::mpsc::channel::<SessionInput>(8);
-    lns_service::run_registry::register(run_id.clone(), make_handle(primary_tx));
+    let (detach_tx, detach_rx) = tokio::sync::oneshot::channel::<()>();
+    lns_service::run_registry::register(run_id.clone(), make_handle(primary_tx, Some(detach_tx)));
     world.exec.run_id = Some(run_id);
     world.exec.primary_rx = Some(primary_rx);
+    world.exec.primary_detach_rx = Some(detach_rx);
 }
 
 #[given("its primary session is attached to another client")]
 fn primary_attached_elsewhere(world: &mut BehaviourWorld) {
-    assert!(world.exec.primary_rx.is_some());
+    assert!(
+        world.exec.primary_detach_rx.is_some(),
+        "an attached primary holds a live detach channel in the registry"
+    );
 }
 
 #[given("its primary session is running")]
@@ -76,8 +82,23 @@ fn two_exec_sessions(world: &mut BehaviourWorld) {
 
 #[when(regex = r#"^the user runs \"(lns exec(?: [^\"]*)?)\"$"#)]
 fn user_runs(world: &mut BehaviourWorld, _command: String) {
-    register_exec(world, "exec-1", true);
-    world.exec.response = Some(lns_ipc::Response::Acknowledged);
+    let resolved =
+        lns_service::run_registry::resolve(&run_id(world)).expect("the active run resolves");
+    let (tx, rx) = tokio::sync::mpsc::channel::<SessionInput>(8);
+    match lns_service::ipc::register_exec_input(&resolved, tx) {
+        Ok(session_id) => {
+            world.exec.first_target = Some(lns_ipc::SessionTarget::Exec {
+                run_id: resolved.clone(),
+                session_id: session_id.clone(),
+            });
+            world.exec.first_rx = Some(rx);
+            world.exec.response = Some(lns_ipc::Response::ExecStarted {
+                run_id: resolved,
+                session_id,
+            });
+        }
+        Err(message) => world.exec.response = Some(lns_ipc::Response::Error { message }),
+    }
 }
 
 #[when("the first exec client resizes its terminal")]
@@ -190,14 +211,77 @@ async fn first_exec_disconnects(world: &mut BehaviourWorld) {
     );
 }
 
-#[then("the user receives a live shell prompt")]
-fn live_shell_prompt(world: &mut BehaviourWorld) {
-    assert!(world.exec.first_target.is_some());
+#[then("the exec session is opened and its input routes to it alone")]
+async fn exec_opened_and_routable(world: &mut BehaviourWorld) {
+    assert!(
+        matches!(
+            world.exec.response,
+            Some(lns_ipc::Response::ExecStarted { .. })
+        ),
+        "the handshake must answer ExecStarted, got {:?}",
+        world.exec.response
+    );
+    let target = world.exec.first_target.clone().expect("exec target");
+    let response = lns_service::ipc::handle_request(
+        &lns_ipc::Request::SessionStdin {
+            target,
+            bytes: b"pwd\n".to_vec(),
+        },
+        std::time::Instant::now(),
+    )
+    .await;
+    assert_eq!(response, lns_ipc::Response::Acknowledged);
+    let received = world
+        .exec
+        .first_rx
+        .as_mut()
+        .expect("first exec rx")
+        .recv()
+        .await;
+    assert!(
+        matches!(received, Some(SessionInput::StdinBytes(ref b)) if b == b"pwd\n"),
+        "the exec session must receive its own stdin, got {received:?}"
+    );
+    primary_unaffected(world);
 }
 
 #[then("the primary session remains attached and usable")]
-fn primary_remains_attached(world: &mut BehaviourWorld) {
+async fn primary_remains_attached(world: &mut BehaviourWorld) {
     primary_remains_running(world);
+    assert!(
+        matches!(
+            world
+                .exec
+                .primary_detach_rx
+                .as_mut()
+                .expect("primary detach rx")
+                .try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "opening an exec must not detach or drop the primary's attachment"
+    );
+    let response = lns_service::ipc::handle_request(
+        &lns_ipc::Request::SessionStdin {
+            target: lns_ipc::SessionTarget::Primary {
+                run_id: run_id(world),
+            },
+            bytes: b"echo hi\n".to_vec(),
+        },
+        std::time::Instant::now(),
+    )
+    .await;
+    assert_eq!(response, lns_ipc::Response::Acknowledged);
+    let received = world
+        .exec
+        .primary_rx
+        .as_mut()
+        .expect("primary rx")
+        .recv()
+        .await;
+    assert!(
+        matches!(received, Some(SessionInput::StdinBytes(ref b)) if b == b"echo hi\n"),
+        "the primary session must still receive its own stdin, got {received:?}"
+    );
 }
 
 #[then("only the first exec session receives the new dimensions")]
