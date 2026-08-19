@@ -3,6 +3,11 @@
 Every `lns` command, subcommand, and flag. Run `lns <command> --help` for the same
 information at the terminal.
 
+This page describes what `lns` does today. For the normative rules the surface is
+built on — the invocation grammar, the output and exit-code contracts, and what
+the CLI asks before it acts — see the
+[CLI specification](cli-spec.md).
+
 ## Global options
 
 | Option              | Default | Meaning                                                                              |
