@@ -65,6 +65,7 @@ pub enum LoginOutcome {
 
 /// Verifies a registry credential by running the pull-auth handshake through the running service.
 pub trait RegistryVerifier {
+    fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>>;
     fn verify<'a>(
         &'a self,
         registry: &'a str,
@@ -150,12 +151,13 @@ async fn login(
     out: &mut impl Write,
 ) -> Result<i32> {
     let registry = target_registry(args.registry.as_deref(), default_registry)?;
+    if args.wants_web_login() && !verifier.available().await? {
+        bail!("{SERVICE_REQUIRED}");
+    }
     let (username, secret) = resolve_credentials(args, &registry, web, input, out).await?;
 
     match verifier.verify(&registry, &username, &secret).await? {
-        LoginOutcome::ServiceUnavailable => bail!(
-            "the background service must be running to verify a login; start it with `lns service start`"
-        ),
+        LoginOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
         LoginOutcome::Rejected(reason) => bail!("login to {registry} was rejected: {reason}"),
         LoginOutcome::Verified => {}
     }
@@ -216,6 +218,15 @@ fn list(auth_path: &Path, out: &mut impl Write) -> Result<i32> {
     Ok(0)
 }
 
+impl LoginArgs {
+    fn wants_web_login(&self) -> bool {
+        self.username.is_none() && self.password.is_none() && !self.password_stdin
+    }
+}
+
+const SERVICE_REQUIRED: &str =
+    "the background service must be running to verify a login; start it with `lns service start`";
+
 async fn resolve_credentials(
     args: &LoginArgs,
     registry: &str,
@@ -223,7 +234,7 @@ async fn resolve_credentials(
     input: &mut dyn std::io::BufRead,
     out: &mut dyn Write,
 ) -> Result<(String, String)> {
-    if args.username.is_none() && args.password.is_none() && !args.password_stdin {
+    if args.wants_web_login() {
         return web_credentials(registry, web, out).await;
     }
     let username = args
@@ -298,6 +309,11 @@ mod tests {
     }
 
     impl RegistryVerifier for FakeVerifier {
+        fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>> {
+            let up = !matches!(self.outcome, LoginOutcome::ServiceUnavailable);
+            Box::pin(async move { Ok(up) })
+        }
+
         fn verify<'a>(
             &'a self,
             registry: &'a str,
@@ -781,16 +797,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_login_reports_when_the_service_is_unavailable_after_completion() {
+    async fn a_down_service_stops_a_web_login_before_the_browser_flow_starts() {
         let dir = TempDir::new().unwrap();
         let verifier = FakeVerifier::returning(LoginOutcome::ServiceUnavailable);
-        let web = FakeWebLogin {
-            outcome: Ok(WebLoginOutcome::Completed {
-                username: "webuser".into(),
-                secret: "some-web-token".into(),
-            }),
-        };
-        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
+        let (result, _) = flagless_login(&NoWebLogin, &verifier, &store_at(&dir)).await;
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("service must be running"));
     }
