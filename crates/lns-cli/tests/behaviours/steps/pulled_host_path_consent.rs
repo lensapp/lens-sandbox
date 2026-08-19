@@ -3,9 +3,8 @@ use std::sync::Mutex;
 use cucumber::{given, then, when};
 use lns_cli::run::host_path_consent::{DocumentOrigin, decide_host_paths};
 use lns_cli::run::summary::FilesetSummary;
-use lns_policy::host_path_decisions::{
-    HostPathDecision, HostPathDecisionFile, HostPathDecisionStore, decision_key,
-};
+use lns_policy::decision_store::DecisionStore;
+use lns_policy::host_path_decisions::{HostPathDecision, HostPathDecisionFile, decision_key};
 
 use crate::world::BehaviourWorld;
 
@@ -15,7 +14,7 @@ struct FakeStore {
     load_fails: bool,
 }
 
-impl HostPathDecisionStore for FakeStore {
+impl DecisionStore<HostPathDecision> for FakeStore {
     fn load(&self) -> std::io::Result<HostPathDecisionFile> {
         if self.load_fails {
             return Err(std::io::Error::new(
@@ -40,6 +39,7 @@ fn fileset(host_path: &str, optional: bool) -> FilesetSummary {
         owner: "workload".into(),
         host_path: Some(host_path.to_string()),
         optional,
+        declared_by: None,
     }
 }
 
@@ -74,6 +74,7 @@ fn pulled_declares_no_host_file(world: &mut BehaviourWorld, reference: String) {
         owner: "root".into(),
         host_path: None,
         optional: false,
+        declared_by: None,
     }];
 }
 
@@ -96,6 +97,14 @@ fn pulled_reads_two_host_files(
 #[given(regex = r#"^the user will answer "([^"]+)" then "([^"]+)" to the host file prompts$"#)]
 fn will_answer_twice(world: &mut BehaviourWorld, first: String, second: String) {
     world.host_paths.answer = Some(format!("{first}\n{second}\n"));
+}
+
+#[given(regex = r#"^a local sandbox whose mixin "([^"]+)" reads host file "([^"]+)"$"#)]
+fn local_mixin_reads_host_file(world: &mut BehaviourWorld, mixin: String, host_path: String) {
+    world.host_paths.reference = None;
+    let mut entry = fileset(&host_path, false);
+    entry.declared_by = Some(mixin);
+    world.host_paths.filesets = vec![entry];
 }
 
 #[given(regex = r#"^a local sandbox reads host file "([^"]+)"$"#)]
@@ -205,9 +214,12 @@ fn recorded_answer_is(
 ) -> Result<(), String> {
     let reference = world
         .host_paths
-        .reference
-        .as_deref()
-        .ok_or("no reference staged")?;
+        .filesets
+        .iter()
+        .find(|f| f.host_path.as_deref() == Some(host_path.as_str()))
+        .and_then(|f| f.declared_by.as_deref())
+        .or(world.host_paths.reference.as_deref())
+        .ok_or("no deciding artifact staged")?;
     let wanted = if expected == "allow" {
         HostPathDecision::Allow
     } else {

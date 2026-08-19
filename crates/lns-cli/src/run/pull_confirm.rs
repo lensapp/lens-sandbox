@@ -156,6 +156,7 @@ mod tests {
             owner: owner.into(),
             host_path: None,
             optional: false,
+            declared_by: None,
         }
     }
 

@@ -143,6 +143,7 @@ async fn orchestrate(
                 &definition,
                 args.authored_egress.as_deref(),
                 &crate::artifact::packed_from_the_wire(&args.packed_filesets),
+                &args.denied_host_paths,
             )
             .await?,
         ),

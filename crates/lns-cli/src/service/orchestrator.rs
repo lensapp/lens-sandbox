@@ -367,6 +367,10 @@ pub async fn run_image(
                 owner: crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
                 host_path: fileset.host_path.clone(),
                 optional: fileset.optional,
+                declared_by: crate::run::summary::fileset_declared_by(
+                    &args.contributions,
+                    &fileset.guest_path,
+                ),
             })
             .collect(),
         (_, Some(published)) => published.filesets.clone(),
@@ -399,13 +403,14 @@ pub async fn run_image(
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
-    let mut denied_host_paths = Vec::new();
+    let reference = target.image();
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
     if published.is_some() {
         let (declared_volumes, declared_binds) = crate::run::pull_confirm::artifact_declared_mounts(
             &args.mounts,
             &consumer_mount_targets,
         );
-        let reference = target.image();
         let effects = crate::run::pull_confirm::PulledEffects {
             reference: &reference,
             binds: &declared_binds,
@@ -413,8 +418,6 @@ pub async fn run_image(
             filesets: &args.filesets,
             tools: &args.tools,
         };
-        let stdin = std::io::stdin();
-        let mut input = stdin.lock();
         crate::run::pull_confirm::confirm_pulled_effects(
             &effects,
             args.assume_yes,
@@ -422,22 +425,27 @@ pub async fn run_image(
             &mut input,
             &mut std::io::stderr(),
         )?;
-        let origin = crate::run::host_path_consent::DocumentOrigin::Pulled {
-            reference: reference.clone(),
-        };
-        denied_host_paths = crate::run::host_path_consent::decide_host_paths(
-            &origin,
-            &args.filesets,
-            &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
-                lns_policy::host_path_decisions::default_host_path_decisions_path(),
-            ),
-            args.assume_yes,
-            interactive,
-            &mut input,
-            &mut std::io::stderr(),
-        )?
-        .denied;
     }
+    // A mixin is an artifact from a registry whichever document layered it in, so a local run reaches this too.
+    let origin = if published.is_some() {
+        crate::run::host_path_consent::DocumentOrigin::Pulled {
+            reference: reference.clone(),
+        }
+    } else {
+        crate::run::host_path_consent::DocumentOrigin::OwnDirectory
+    };
+    let denied_host_paths = crate::run::host_path_consent::decide_host_paths(
+        &origin,
+        &args.filesets,
+        &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
+            lns_policy::host_path_decisions::default_host_path_decisions_path(),
+        ),
+        args.assume_yes,
+        interactive,
+        &mut input,
+        &mut std::io::stderr(),
+    )?
+    .denied;
     let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
@@ -1364,6 +1372,7 @@ mod tests {
                 owner: "workload".to_string(),
                 host_path: None,
                 optional: false,
+                declared_by: None,
             }]
         );
         assert_eq!(

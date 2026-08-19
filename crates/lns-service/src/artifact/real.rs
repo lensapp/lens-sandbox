@@ -139,6 +139,7 @@ pub(crate) async fn plan_local(
     definition_json: &str,
     authored_egress: Option<&str>,
     packed: &crate::artifact::PackedFilesets,
+    denied_host_paths: &[String],
 ) -> Result<SandboxPlan> {
     let mut resolved = crate::artifact::plan_local_sandbox(definition_json.as_bytes(), packed)?;
     if let Some(authored) = authored_egress {
@@ -157,7 +158,7 @@ pub(crate) async fn plan_local(
     crate::artifact::fileset::host_fileset_specs(
         &RealSnapshotDir,
         &resolved.host_filesets,
-        &[],
+        denied_host_paths,
         &mut materialized,
     )?;
     Ok(SandboxPlan {

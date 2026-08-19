@@ -8,6 +8,7 @@ use crate::matching::{port_shaped, split_destination};
 
 pub mod connectors;
 pub mod credentials;
+pub mod decision_store;
 mod env_subst;
 pub mod grants;
 pub mod host_bind_decisions;

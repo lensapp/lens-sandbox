@@ -5,7 +5,8 @@ use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
 use lns_cli::run::declarative::{Defaults, resolve};
 use lns_cli::run::host_bind::{DirScan, resolve_binds};
-use lns_policy::host_bind_decisions::{HostBindDecisionFile, HostBindDecisionStore};
+use lns_policy::decision_store::DecisionStore;
+use lns_policy::host_bind_decisions::{HostBindDecisionFile, SecretDisposition};
 
 use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, TEST_HOST};
 
@@ -243,7 +244,7 @@ impl DirScan for FakeDir {
 
 struct FakeStore(std::sync::Mutex<HostBindDecisionFile>);
 
-impl HostBindDecisionStore for FakeStore {
+impl DecisionStore<SecretDisposition> for FakeStore {
     fn load(&self) -> std::io::Result<HostBindDecisionFile> {
         Ok(self.0.lock().unwrap().clone())
     }
