@@ -165,12 +165,10 @@ impl RealDeviceAuthClient {
         Ok(Self { base, http })
     }
 
-    async fn post(&self, url: &str, form_body: Option<String>) -> Result<(u16, Vec<u8>)> {
+    async fn post(&self, url: &str, form: Option<&[(&str, &str)]>) -> Result<(u16, Vec<u8>)> {
         let mut request = self.http.post(url);
-        if let Some(body) = form_body {
-            request = request
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(body);
+        if let Some(pairs) = form {
+            request = request.form(pairs);
         }
         let response = request
             .send()
@@ -212,8 +210,9 @@ impl DeviceAuthClient for RealDeviceAuthClient {
     fn poll<'a>(&'a self, device_code: &'a str) -> LocalBoxFuture<'a, Result<TokenPoll>> {
         Box::pin(async move {
             let url = format!("{}/cli/device/token", self.base);
-            let body = format!("device_code={device_code}");
-            let (status, bytes) = self.post(&url, Some(body)).await?;
+            let (status, bytes) = self
+                .post(&url, Some(&[("device_code", device_code)]))
+                .await?;
             match status {
                 200 => {
                     let issued: TokenBody = parse(&bytes, &url)?;
@@ -637,6 +636,30 @@ mod tests {
                 .poll("some-device-code")
                 .await
                 .unwrap();
+            assert_eq!(
+                poll,
+                TokenPoll::Issued {
+                    token: "some-web-token".into(),
+                    username: "webuser".into()
+                }
+            );
+            mock.assert_async().await;
+        }
+
+        #[tokio::test]
+        async fn poll_percent_encodes_a_device_code_with_reserved_characters() {
+            let server = MockServer::start_async().await;
+            let mock = server
+                .mock_async(|when, then| {
+                    when.method(POST)
+                        .path("/cli/device/token")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body("device_code=a%2Bb%26c%3Dd%25e");
+                    then.status(200)
+                        .body(r#"{"token":"some-web-token","username":"webuser"}"#);
+                })
+                .await;
+            let poll = client_for(&server).await.poll("a+b&c=d%e").await.unwrap();
             assert_eq!(
                 poll,
                 TokenPoll::Issued {
