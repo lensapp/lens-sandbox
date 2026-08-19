@@ -669,7 +669,7 @@ fn decode_exec_started(bytes: &[u8]) -> Result<lns_ipc::SessionTarget> {
     }
 }
 
-/// Whether host stdin reaches the session's workload.
+/// Whether host stdin reaches the session's workload; a session opened without `-i` still watches for the detach chord but hands the run nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdinForwarding {
     ToRun,
@@ -684,14 +684,6 @@ impl StdinForwarding {
             Self::Withheld
         }
     }
-}
-
-fn should_pump_stdin(stdin: StdinForwarding) -> bool {
-    stdin == StdinForwarding::ToRun
-}
-
-fn should_enable_raw_mode(tty: bool, stdin: StdinForwarding) -> bool {
-    tty && should_pump_stdin(stdin)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -826,7 +818,7 @@ where
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
 {
-    let _raw_guard = if should_enable_raw_mode(tty, stdin) {
+    let _raw_guard = if tty {
         crate::raw_mode::RawModeGuard::enable_if_tty()
     } else {
         None
@@ -863,18 +855,16 @@ where
                 let s = socket.clone();
                 tokio::spawn(async move { run_winsize_forwarder(s, winsize_target).await })
             });
-            let stdin_task = should_pump_stdin(stdin).then(|| {
-                let pump_chord = detach_chord;
-                let pump_early_exit = early_exit_tx.clone();
-                tokio::spawn(async move {
-                    let r = run_stdin_pump(socket, target, pump_chord, detach, stdin).await;
-                    if matches!(&r, Ok(true)) {
-                        let _ = pump_early_exit.send(());
-                    }
-                    r
-                })
+            let pump_chord = detach_chord;
+            let pump_early_exit = early_exit_tx.clone();
+            let stdin_task = tokio::spawn(async move {
+                let r = run_stdin_pump(socket, target, pump_chord, detach, stdin).await;
+                if matches!(&r, Ok(true)) {
+                    let _ = pump_early_exit.send(());
+                }
+                r
             });
-            (Some(cancel_task), winsize, stdin_task)
+            (Some(cancel_task), winsize, Some(stdin_task))
         }
         None => (None, None, None),
     };
@@ -2458,15 +2448,6 @@ mod tests {
             );
             assert!(matches!(control, PumpControl::Continue));
         }
-    }
-
-    #[test]
-    fn a_session_opened_without_stdin_does_not_read_host_input() {
-        assert!(!should_pump_stdin(StdinForwarding::Withheld));
-        assert!(should_pump_stdin(StdinForwarding::ToRun));
-        assert!(!should_enable_raw_mode(true, StdinForwarding::Withheld));
-        assert!(should_enable_raw_mode(true, StdinForwarding::ToRun));
-        assert!(!should_enable_raw_mode(false, StdinForwarding::ToRun));
     }
 
     #[test]
