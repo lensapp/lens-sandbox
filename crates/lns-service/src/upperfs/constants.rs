@@ -61,6 +61,9 @@ pub const FEATURE_INCOMPAT_FILETYPE: u32 = 0x0002;
 
 pub const FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
 
+// The kernel sets `INCOMPAT_RECOVER` on every read-write mount and clears it on a clean unmount, so it is what tells a guest's unfinished journal from this writer's own marker.
+pub const FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+
 // `RO_COMPAT_SPARSE_SUPER` MUST be set — the group_block_layout logic assumes SPARSE_SUPER placement; removing it silently corrupts the GDT.
 pub const FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 

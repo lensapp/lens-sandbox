@@ -50,8 +50,20 @@ pub fn grow_ext4(path: &Path, new_size_bytes: u64) -> Result<()> {
         .with_context(|| format!("reading the superblock of {}", path.display()))?;
 
     let Some(plan) = crate::upperfs::grow::plan_grow(&superblock, new_size_bytes)? else {
-        return Ok(());
+        return finish_resumable(path);
     };
+
+    let resizing = || format!("resizing {}", path.display());
+    superblock
+        .ensure_rewritable_features()
+        .with_context(resizing)?;
+    // A grow re-plans from the primary superblock, which it does not touch until the commit, so an interrupted one is replayable. The marker excuses the cleared valid bit that grow itself set, and nothing else — a guest that mounted since carries its own journal, which the feature check above refuses.
+    if !std::fs::exists(resume_path(path)).unwrap_or(false) {
+        superblock
+            .ensure_unmounted_cleanly()
+            .with_context(resizing)?;
+    }
+    begin_resumable(path)?;
 
     mark_unclean(&mut f, &superblock)?;
 
@@ -66,10 +78,10 @@ pub fn grow_ext4(path: &Path, new_size_bytes: u64) -> Result<()> {
 
     let mut live_gdt = vec![0u8; plan.before.gdt_blocks as usize * BLOCK_SIZE as usize];
     read_at(&mut f, gdt_offset(&plan.before, 0), &mut live_gdt)?;
+    let tail_free = fill_old_tail(&mut f, &plan)?;
     let mut gdt = grown_gdt_bytes(&plan, &live_gdt);
-    retally_filled_tail(&plan, &mut gdt);
+    retally_filled_tail(&plan, &mut gdt, tail_free);
     write_at(&mut f, gdt_offset(&plan.after, 0), &gdt)?;
-    fill_old_tail(&mut f, &plan)?;
     write_resize_tree(&mut f, &plan, dind_block)?;
     f.sync_all().context("fsync the descriptor table")?;
 
@@ -79,6 +91,33 @@ pub fn grow_ext4(path: &Path, new_size_bytes: u64) -> Result<()> {
     write_at(&mut f, 1024, &commit_superblock(&plan).to_bytes())?;
     f.sync_all().context("fsync the superblock")?;
 
+    finish_resumable(path)
+}
+
+fn resume_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_default();
+    name.push(".growing");
+    path.with_file_name(name)
+}
+
+/// Records that the unclean bit about to be set is this writer's, so a grow cut short can be told apart from a volume a killed run left dirty.
+fn begin_resumable(path: &Path) -> Result<()> {
+    let marker = resume_path(path);
+    std::fs::write(&marker, b"").with_context(|| format!("creating {}", marker.display()))?;
+    File::open(&marker)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("fsync {}", marker.display()))
+}
+
+/// Clearing the marker is not part of the commit: the grow is already durable, and a marker left behind excuses nothing a guest could have done since.
+fn finish_resumable(path: &Path) -> Result<()> {
+    let marker = resume_path(path);
+    if std::fs::exists(&marker).unwrap_or(false) {
+        std::fs::remove_file(&marker).with_context(|| format!("removing {}", marker.display()))?;
+    }
     Ok(())
 }
 
@@ -138,15 +177,13 @@ fn grown_gdt_bytes(plan: &GrowPlan, live_gdt: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The tail group's descriptor is the one existing entry a grow rewrites, because the blocks it just gained are free now.
-fn retally_filled_tail(plan: &GrowPlan, gdt: &mut [u8]) {
-    let Some((tail, gained)) = &plan.filled_tail else {
+/// The tail group's descriptor is the one existing entry a grow rewrites, because the blocks it just gained are free now. The count is taken from the bitmap rather than added to, so a grow that ran this far already and was cut short does not count the same blocks twice.
+fn retally_filled_tail(plan: &GrowPlan, gdt: &mut [u8], tail_free: Option<u16>) {
+    let (Some((tail, _)), Some(free)) = (&plan.filled_tail, tail_free) else {
         return;
     };
     let at = *tail as usize * GROUP_DESC_SIZE as usize;
-    let was = u16::from_le_bytes([gdt[at + 0x0C], gdt[at + 0x0D]]);
-    let now = was + u16::try_from(gained.end - gained.start).expect("a group's blocks fit u16");
-    gdt[at + 0x0C..at + 0x0E].copy_from_slice(&now.to_le_bytes());
+    gdt[at + 0x0C..at + 0x0E].copy_from_slice(&free.to_le_bytes());
 }
 
 fn write_appended_groups(f: &mut File, plan: &GrowPlan) -> Result<()> {
@@ -166,20 +203,25 @@ fn write_appended_groups(f: &mut File, plan: &GrowPlan) -> Result<()> {
     Ok(())
 }
 
-/// The one existing group a grow edits. Its padding bits stood for blocks the image did not have; now it does, so they become free.
-fn fill_old_tail(f: &mut File, plan: &GrowPlan) -> Result<()> {
-    let Some((tail, _)) = &plan.filled_tail else {
-        return Ok(());
+/// The one existing group a grow edits. Its padding bits stood for blocks the image did not have; now it does, so they become free. Returns how many blocks the group has free afterwards, counted from the bitmap so a repeated grow reaches the same answer.
+fn fill_old_tail(f: &mut File, plan: &GrowPlan) -> Result<Option<u16>> {
+    let Some((tail, gained)) = &plan.filled_tail else {
+        return Ok(None);
     };
     let gbl = group_block_layout(&plan.after, *tail);
     let offset = gbl.bbmp_block as u64 * BLOCK_SIZE as u64;
     let mut bitmap = vec![0u8; BLOCK_SIZE as usize];
     read_at(f, offset, &mut bitmap)?;
-    for bit in plan.filled_tail.as_ref().expect("checked above").1.clone() {
+    for bit in gained.clone() {
         clear_bit(&mut bitmap, bit as usize);
     }
     write_at(f, offset, &bitmap)?;
-    Ok(())
+
+    let blocks = plan.after.blocks_in_group(*tail) as usize;
+    let free = (0..blocks).filter(|b| !get_bit(&bitmap, *b)).count();
+    Ok(Some(
+        u16::try_from(free).expect("a group's block count fits u16"),
+    ))
 }
 
 fn write_resize_tree(f: &mut File, plan: &GrowPlan, dind_block: u32) -> Result<()> {
@@ -253,6 +295,10 @@ fn read_at(f: &mut File, offset: u64, buf: &mut [u8]) -> Result<()> {
 
 fn clear_bit(buf: &mut [u8], bit: usize) {
     buf[bit / 8] &= !(1u8 << (bit % 8));
+}
+
+fn get_bit(buf: &[u8], bit: usize) -> bool {
+    (buf[bit / 8] >> (bit % 8)) & 1 == 1
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
@@ -490,30 +536,151 @@ mod tests {
         );
     }
 
+    /// The guest mounts a volume read-write, so a killed run leaves it unclean and often mid-journal. Attaching it again asks for no growth, and must not be refused for a resize that is not happening.
     #[test]
-    fn a_grow_refuses_an_image_that_was_not_unmounted_cleanly() {
+    fn a_volume_a_killed_run_left_dirty_still_attaches_when_nothing_needs_to_grow() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("upper.img");
         let plan = Plan::new(32 * 1024 * 1024, [0; 16], "t", 0).expect("plan");
         write_ext4(&plan, &path).expect("write_ext4");
+        let before = dirty_as_a_killed_run_would(&path, &plan);
 
-        let mut unclean = plan.superblock.clone();
-        unclean.state = 0;
-        let mut f = File::options().read(true).write(true).open(&path).unwrap();
-        write_at(&mut f, 1024, &unclean.to_bytes()).expect("mark unclean");
-        drop(f);
-        let before = std::fs::read(&path).expect("read");
+        grow_ext4(&path, 32 * 1024 * 1024).expect("a volume at its size must attach, dirty or not");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "nothing needed writing, so nothing may have been written"
+        );
+    }
+
+    #[test]
+    fn a_grow_of_a_volume_a_killed_run_left_dirty_is_refused_and_says_how_to_get_it_back() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("upper.img");
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "t", 0).expect("plan");
+        write_ext4(&plan, &path).expect("write_ext4");
+        let before = dirty_as_a_killed_run_would(&path, &plan);
 
         let err = grow_ext4(&path, 160 * 1024 * 1024).unwrap_err();
+        let rendered = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("not unmounted cleanly"),
-            "growing a dirty image would erase the record of what the crash left unfinished: {err:#}"
+            rendered.contains("run the sandbox once"),
+            "growing a dirty volume would overwrite what its journal still holds, so the refusal has to say how to get it back: {rendered}"
         );
         assert_eq!(
             std::fs::read(&path).expect("read"),
             before,
             "a refused grow must leave the volume exactly as it was"
         );
+    }
+
+    /// A grow marks the image unclean on purpose, so an interrupted one must be told apart from a volume a killed run left dirty — otherwise the marker that exists to survive a crash is what makes the volume unrecoverable.
+    #[test]
+    fn a_grow_cut_short_can_be_run_again() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("upper.img");
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "t", 0).expect("plan");
+        write_ext4(&plan, &path).expect("write_ext4");
+
+        // Exactly what a SIGKILL between mark_unclean and the commit leaves behind.
+        let mut unclean = plan.superblock.clone();
+        unclean.state = 0;
+        let mut f = File::options().read(true).write(true).open(&path).unwrap();
+        write_at(&mut f, 1024, &unclean.to_bytes()).expect("mark unclean");
+        drop(f);
+        std::fs::write(resume_path(&path), b"").expect("leave the marker behind");
+
+        grow_ext4(&path, 160 * 1024 * 1024).expect("an interrupted grow must be replayable");
+
+        let bytes = std::fs::read(&path).expect("read");
+        assert_eq!(superblock_of(&bytes).blocks_count, 40_960);
+        assert!(
+            !std::fs::exists(resume_path(&path)).unwrap_or(true),
+            "a finished grow must not leave the marker that skips the cleanliness check"
+        );
+    }
+
+    /// The marker says the cleared valid bit is this writer's — but a guest can mount and be killed while it sits there, and its journal must still refuse the grow.
+    #[test]
+    fn a_stale_marker_does_not_excuse_a_guest_journal_that_needs_replay() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("upper.img");
+        let plan = Plan::new(32 * 1024 * 1024, [0; 16], "t", 0).expect("plan");
+        write_ext4(&plan, &path).expect("write_ext4");
+        let before = dirty_as_a_killed_run_would(&path, &plan);
+        std::fs::write(resume_path(&path), b"").expect("leave a stale marker behind");
+
+        let err = grow_ext4(&path, 160 * 1024 * 1024).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("run the sandbox once"),
+            "replaying that journal would undo everything the grow wrote: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "a refused grow must leave the volume exactly as it was"
+        );
+    }
+
+    /// A grow cut short after the descriptor table was written must not count the tail's freed blocks a second time when it runs again.
+    #[test]
+    fn a_grow_resumed_after_its_table_landed_reaches_the_same_bytes_as_one_that_ran_once() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        let control = dir.path().join("control.img");
+        let plan = Plan::new(130 * 1024 * 1024, [0xAA; 16], "lns-vol", 7).expect("plan");
+        write_ext4(&plan, &control).expect("write_ext4");
+        grow_ext4(&control, 400 * 1024 * 1024).expect("the control grow");
+
+        let interrupted = dir.path().join("interrupted.img");
+        write_ext4(&plan, &interrupted).expect("write_ext4");
+        run_grow_up_to_the_commit(&interrupted, 400 * 1024 * 1024);
+        std::fs::write(resume_path(&interrupted), b"").expect("marker");
+
+        grow_ext4(&interrupted, 400 * 1024 * 1024).expect("the resumed grow");
+
+        assert_eq!(
+            std::fs::read(&interrupted).expect("read"),
+            std::fs::read(&control).expect("read"),
+            "a resumed grow must land on the same bytes as one that was never interrupted"
+        );
+    }
+
+    /// Everything `grow_ext4` writes before the superblock commit, so a test can leave an image exactly as a crash in that window would.
+    fn run_grow_up_to_the_commit(path: &Path, new_size_bytes: u64) {
+        let mut f = File::options().read(true).write(true).open(path).unwrap();
+        let mut sb_bytes = [0u8; 1024];
+        read_at(&mut f, 1024, &mut sb_bytes).unwrap();
+        let superblock = Superblock::from_bytes(&sb_bytes).unwrap();
+        let plan = crate::upperfs::grow::plan_grow(&superblock, new_size_bytes)
+            .unwrap()
+            .expect("this size grows");
+
+        mark_unclean(&mut f, &superblock).unwrap();
+        f.set_len(plan.image_size_bytes()).unwrap();
+        write_appended_groups(&mut f, &plan).unwrap();
+        let dind_block = read_resize_dind_block(&mut f, &plan.before).unwrap();
+        let mut live_gdt = vec![0u8; plan.before.gdt_blocks as usize * BLOCK_SIZE as usize];
+        read_at(&mut f, gdt_offset(&plan.before, 0), &mut live_gdt).unwrap();
+        let tail_free = fill_old_tail(&mut f, &plan).unwrap();
+        let mut gdt = grown_gdt_bytes(&plan, &live_gdt);
+        retally_filled_tail(&plan, &mut gdt, tail_free);
+        write_at(&mut f, gdt_offset(&plan.after, 0), &gdt).unwrap();
+        write_resize_tree(&mut f, &plan, dind_block).unwrap();
+        refresh_backups(&mut f, &plan, &gdt).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    /// A killed run leaves the valid bit clear and, once the guest has written anything, the recovery flag set.
+    fn dirty_as_a_killed_run_would(path: &Path, plan: &Plan) -> Vec<u8> {
+        let mut dirty = plan.superblock.clone();
+        dirty.state = 0;
+        dirty.feature_incompat |= 0x0000_0004;
+        let mut f = File::options().read(true).write(true).open(path).unwrap();
+        write_at(&mut f, 1024, &dirty.to_bytes()).expect("dirty the superblock");
+        drop(f);
+        std::fs::read(path).expect("read")
     }
 
     #[test]
