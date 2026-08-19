@@ -530,6 +530,14 @@ mod tests {
         assert_eq!(journal_blocks(&l), JBD2_MIN_JOURNAL_BLOCKS);
     }
 
+    /// The document validator refuses a smaller disk than this, so anything it admits has to format — otherwise a valid document fails at provisioning with an error about block groups.
+    #[test]
+    fn the_smallest_size_a_document_may_declare_is_a_size_this_writer_can_format() {
+        let smallest = lns_artifact::disk::MIN_MIB * 1024 * 1024;
+        Plan::new(smallest, [0; 16], "test", 0)
+            .expect("the validator's minimum must be formattable");
+    }
+
     #[test]
     fn an_image_too_small_to_hold_the_minimum_journal_is_refused() {
         let err = Plan::new(4 * 1024 * 1024, [0; 16], "test", 0).unwrap_err();

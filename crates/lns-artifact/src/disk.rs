@@ -1,7 +1,7 @@
 use crate::memory::{self, ParseError};
 use crate::spec::Quantity;
 
-pub const MIN_MIB: u64 = 16;
+pub const MIN_MIB: u64 = 20;
 
 /// The guest filesystem numbers its 4 KiB blocks in 32 bits, so 16 TiB is the first size it cannot address.
 pub const MAX_MIB_EXCLUSIVE: u64 = 16 * 1024 * 1024;
@@ -19,7 +19,7 @@ pub fn parse_bytes(quantity: &Quantity) -> Result<u64, ParseError> {
     };
     if mib < MIN_MIB {
         return Err(ParseError::new(format!(
-            "disk size {quantity:?} must be at least 16Mi, which is what the guest filesystem needs for its own metadata"
+            "disk size {quantity:?} must be at least 20Mi, which is what the guest filesystem needs for its own metadata and a journal it can recover"
         )));
     }
     if mib >= MAX_MIB_EXCLUSIVE {
@@ -42,8 +42,8 @@ mod tests {
             40 << 30
         );
         assert_eq!(
-            parse_bytes(&Quantity::Text("16Mi".into())).unwrap(),
-            16 << 20
+            parse_bytes(&Quantity::Text("20Mi".into())).unwrap(),
+            20 << 20
         );
         assert_eq!(parse_bytes(&Quantity::Text("2t".into())).unwrap(), 2 << 40);
     }
@@ -62,15 +62,17 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_too_small_to_hold_its_own_metadata_is_refused() {
+    fn a_disk_too_small_to_hold_a_recoverable_journal_is_refused() {
         for quantity in [
-            Quantity::Text("15Mi".into()),
-            Quantity::Int(15),
+            Quantity::Text("19Mi".into()),
+            Quantity::Int(19),
+            Quantity::Int(16),
             Quantity::Int(0),
         ] {
             let err = parse_bytes(&quantity).unwrap_err().to_string();
-            assert!(err.contains("at least 16Mi"), "{quantity:?}: {err}");
+            assert!(err.contains("at least 20Mi"), "{quantity:?}: {err}");
         }
+        assert!(parse_bytes(&Quantity::Text("20Mi".into())).is_ok());
     }
 
     #[test]
@@ -85,7 +87,7 @@ mod tests {
     #[test]
     fn a_negative_integer_is_refused_before_it_becomes_a_size() {
         let err = parse_bytes(&Quantity::Int(-1)).unwrap_err().to_string();
-        assert!(err.contains("at least 16Mi"), "{err}");
+        assert!(err.contains("at least 20Mi"), "{err}");
     }
 
     #[test]
