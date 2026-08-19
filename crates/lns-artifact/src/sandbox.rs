@@ -1239,8 +1239,8 @@ mod tests {
                 "is a share",
             ),
             (
-                r#"{"image":"x:1","resources":{"disk":"15Mi"}}"#,
-                "at least 16Mi",
+                r#"{"image":"x:1","resources":{"disk":"19Mi"}}"#,
+                "at least 20Mi",
             ),
             (
                 r#"{"image":"x:1","resources":{"disk":"16Ti"}}"#,
@@ -1287,7 +1287,7 @@ mod tests {
     fn parse_rejects_a_volume_size_the_service_could_not_provision() {
         for (spec, expected) in [
             (r#""50%""#, "is a share"),
-            (r#""15Mi""#, "at least 16Mi"),
+            (r#""19Mi""#, "at least 20Mi"),
             (r#""16Ti""#, "less than 16Ti"),
         ] {
             let json = format!(
