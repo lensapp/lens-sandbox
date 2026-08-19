@@ -11,6 +11,27 @@ Feature: named volumes — host-side store, locking, and attach
     When a run requests volume "prism-data" at "/data"
     Then a backing image for "prism-data" is created in the store
 
+  Scenario: A declared size creates the volume at that size
+    Given no volume named "prism-data" exists in the store
+    When a run requests volume "prism-data" at "/data" sized 40Gi
+    Then the backing image for "prism-data" holds 40Gi
+
+  Scenario: A larger declared size grows the volume that already exists
+    Given volume "prism-data" already exists in the store holding 10Gi
+    When a run requests volume "prism-data" at "/data" sized 40Gi
+    Then no backing image is created
+    And the backing image for "prism-data" holds 40Gi
+
+  Scenario: A smaller declared size leaves the volume alone
+    Given volume "prism-data" already exists in the store holding 40Gi
+    When a run requests volume "prism-data" at "/data" sized 10Gi
+    Then the backing image for "prism-data" holds 40Gi
+
+  Scenario: One volume mounted twice takes the larger of the two sizes
+    Given no volume named "prism-data" exists in the store
+    When a run requests volume "prism-data" at "/data" sized 10Gi and at "/srv" sized 40Gi
+    Then the backing image for "prism-data" holds 40Gi
+
   Scenario: Attaching an existing volume reuses its backing image
     Given volume "prism-data" already exists in the store
     When a run requests volume "prism-data" at "/data"

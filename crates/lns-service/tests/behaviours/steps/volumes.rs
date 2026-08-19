@@ -39,6 +39,54 @@ async fn request_two_paths(w: &mut BehaviourWorld, name: String, a: String, b: S
     w.volume().request_paths(&name, &[&a, &b], false).await;
 }
 
+#[given(expr = "volume {string} already exists in the store holding {word}")]
+async fn volume_exists_sized(w: &mut BehaviourWorld, name: String, size: String) {
+    let bytes = gib(&size);
+    w.volume().preexisting_image_sized(&name, bytes);
+}
+
+#[when(expr = "a run requests volume {string} at {string} sized {word}")]
+async fn request_sized(w: &mut BehaviourWorld, name: String, target: String, size: String) {
+    let bytes = gib(&size);
+    w.volume().request_sized(&name, &target, bytes).await;
+}
+
+#[when(
+    expr = "a run requests volume {string} at {string} sized {word} and at {string} sized {word}"
+)]
+async fn request_two_sizes(
+    w: &mut BehaviourWorld,
+    name: String,
+    a: String,
+    a_size: String,
+    b: String,
+    b_size: String,
+) {
+    let (first, second) = (gib(&a_size), gib(&b_size));
+    w.volume()
+        .request_mounts(&[
+            (&name, &a, false, Some(first)),
+            (&name, &b, false, Some(second)),
+        ])
+        .await;
+}
+
+#[then(expr = "the backing image for {string} holds {word}")]
+async fn image_holds(w: &mut BehaviourWorld, name: String, size: String) {
+    let want = gib(&size);
+    let got = w.volume().image_size(&name);
+    assert_eq!(
+        got,
+        Some(want),
+        "volume {name} should hold {size}, not {got:?} bytes"
+    );
+}
+
+fn gib(spec: &str) -> u64 {
+    let digits = spec.trim_end_matches("Gi");
+    digits.parse::<u64>().expect("a size in GiB") << 30
+}
+
 #[when(expr = "a volume {string} at {string} is recorded in the audit chain")]
 async fn record_audit(w: &mut BehaviourWorld, name: String, target: String) {
     w.volume().record_attach(&name, &target);
@@ -119,6 +167,7 @@ async fn hold_unaffected(w: &mut BehaviourWorld, name: String) {
         &rig.store_root,
         &name,
         "deadbeef00000000000000000000aa99",
+        lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES,
     )
     .await;
     assert!(

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 pub const VOLUME_DEFAULT_SIZE_BYTES: u64 = crate::upperfs::DEFAULT_SIZE_BYTES;
 
@@ -94,7 +94,15 @@ pub struct Acquired {
 }
 
 pub async fn acquire(name: &str, run_id: &str) -> Result<Acquired> {
-    acquire_with(&real::RealFs, &global(), &store_root()?, name, run_id).await
+    acquire_with(
+        &real::RealFs,
+        &global(),
+        &store_root()?,
+        name,
+        run_id,
+        VOLUME_DEFAULT_SIZE_BYTES,
+    )
+    .await
 }
 
 pub async fn resolve(
@@ -114,12 +122,17 @@ pub async fn resolve_with<F: Fs>(
     let mut attachments = Vec::with_capacity(mounts.len());
     let mut leases = Vec::new();
     let mut image_by_name: HashMap<&str, PathBuf> = HashMap::new();
+    let sizes = declared_sizes(mounts);
     for m in mounts {
         validate_target(&m.target)?;
         let image_path = if let Some(p) = image_by_name.get(m.name.as_str()) {
             p.clone()
         } else {
-            let acq = acquire_with(fs, registry, store_root, &m.name, run_id).await?;
+            let size = sizes
+                .get(m.name.as_str())
+                .copied()
+                .unwrap_or(VOLUME_DEFAULT_SIZE_BYTES);
+            let acq = acquire_with(fs, registry, store_root, &m.name, run_id, size).await?;
             image_by_name.insert(m.name.as_str(), acq.image_path.clone());
             leases.push(acq.lease);
             acq.image_path
@@ -133,16 +146,28 @@ pub async fn resolve_with<F: Fs>(
     Ok((attachments, leases))
 }
 
+/// One volume may be mounted at several targets, each declaring its own size, so the volume has to satisfy the largest of them.
+fn declared_sizes(mounts: &[lns_ipc::VolumeMount]) -> HashMap<&str, u64> {
+    let mut sizes: HashMap<&str, u64> = HashMap::new();
+    for m in mounts {
+        let asked = m.size_bytes.unwrap_or(VOLUME_DEFAULT_SIZE_BYTES);
+        let entry = sizes.entry(m.name.as_str()).or_insert(asked);
+        *entry = (*entry).max(asked);
+    }
+    sizes
+}
+
 pub async fn acquire_with<F: Fs>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
     store_root: &Path,
     name: &str,
     run_id: &str,
+    size_bytes: u64,
 ) -> Result<Acquired> {
     validate_name(name)?;
     let lease = take_lease(registry, name, run_id)?;
-    let image_path = ensure_image(fs, store_root, name).await?;
+    let image_path = ensure_image(fs, store_root, name, size_bytes).await?;
     Ok(Acquired { image_path, lease })
 }
 
@@ -165,13 +190,22 @@ fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: &str) -> Result
 
 const MAINTENANCE_HOLDER_RUN_ID: &str = "maintenance";
 
-async fn ensure_image<F: Fs>(fs: &F, store_root: &Path, name: &str) -> Result<PathBuf> {
+/// A declared size is a floor: an absent volume is created at it, a smaller one grows to it, and a larger one is already past it and is left alone.
+async fn ensure_image<F: Fs>(
+    fs: &F,
+    store_root: &Path,
+    name: &str,
+    size_bytes: u64,
+) -> Result<PathBuf> {
     let image_path = image_path_in(store_root, name);
     if !fs.exists(&image_path).await {
         fs.create_dir_all(store_root).await?;
-        fs.create_ext4_image(&image_path, VOLUME_DEFAULT_SIZE_BYTES)
-            .await?;
+        fs.create_ext4_image(&image_path, size_bytes).await?;
+        return Ok(image_path);
     }
+    fs.grow_ext4_image(&image_path, size_bytes)
+        .await
+        .with_context(|| format!("growing volume {name:?} to {size_bytes} bytes"))?;
     Ok(image_path)
 }
 
@@ -234,7 +268,7 @@ pub async fn create_with<F: Fs>(
     let image_path = image_path_in(store_root, name);
     if !fs.exists(&image_path).await {
         let _guard = take_lease(registry, name, MAINTENANCE_HOLDER_RUN_ID)?;
-        ensure_image(fs, store_root, name).await?;
+        ensure_image(fs, store_root, name, VOLUME_DEFAULT_SIZE_BYTES).await?;
     }
     info_for(fs, registry, &image_path, name).await
 }
@@ -333,6 +367,9 @@ mod tests {
     struct FakeFs {
         existing: Mutex<HashSet<PathBuf>>,
         created: Mutex<Vec<PathBuf>>,
+        created_sizes: Mutex<Vec<u64>>,
+        grown_to: Mutex<Vec<(PathBuf, u64)>>,
+        fail_grow: bool,
         allocated: Mutex<HashMap<PathBuf, u64>>,
         vanished: Mutex<HashSet<PathBuf>>,
         unremovable: Mutex<HashSet<PathBuf>>,
@@ -352,6 +389,12 @@ mod tests {
         }
         fn created_images(&self) -> Vec<PathBuf> {
             self.created.lock().unwrap().clone()
+        }
+        fn created_sizes(&self) -> Vec<u64> {
+            self.created_sizes.lock().unwrap().clone()
+        }
+        fn grown_to(&self) -> Vec<(PathBuf, u64)> {
+            self.grown_to.lock().unwrap().clone()
         }
         fn set_allocated(&self, p: &str, bytes: u64) {
             self.allocated
@@ -374,10 +417,11 @@ mod tests {
         async fn create_dir_all(&self, _p: &Path) -> io::Result<()> {
             Ok(())
         }
-        async fn create_ext4_image(&self, p: &Path, _size: u64) -> io::Result<()> {
+        async fn create_ext4_image(&self, p: &Path, size: u64) -> io::Result<()> {
             if self.fail_create {
                 return Err(io::Error::other("boom"));
             }
+            self.created_sizes.lock().unwrap().push(size);
             self.existing.lock().unwrap().insert(p.to_path_buf());
             self.created.lock().unwrap().push(p.to_path_buf());
             Ok(())
@@ -409,6 +453,13 @@ mod tests {
                 created_unix_secs: FAKE_CREATED_UNIX_SECS,
             })
         }
+        async fn grow_ext4_image(&self, p: &Path, size: u64) -> io::Result<()> {
+            if self.fail_grow {
+                return Err(io::Error::other("no room"));
+            }
+            self.grown_to.lock().unwrap().push((p.to_path_buf(), size));
+            Ok(())
+        }
         async fn remove_file(&self, p: &Path) -> io::Result<()> {
             if self.fail_remove || self.unremovable.lock().unwrap().contains(p) {
                 return Err(io::Error::other("remove boom"));
@@ -425,9 +476,16 @@ mod tests {
     #[tokio::test]
     async fn acquiring_unknown_name_creates_the_backing_image() {
         let fs = FakeFs::default();
-        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", "aa01")
-            .await
-            .unwrap();
+        let got = acquire_with(
+            &fs,
+            &reg(),
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         assert_eq!(got.image_path, Path::new("/store/prism-data.img"));
         assert_eq!(
             fs.created_images(),
@@ -436,11 +494,127 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquiring_existing_name_does_not_recreate_the_image() {
+    async fn a_volume_that_does_not_exist_is_created_at_the_size_the_document_asked_for() {
+        let fs = FakeFs::default();
+        acquire_with(
+            &fs,
+            &reg(),
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            40 << 30,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.created_sizes(), vec![40 << 30]);
+        assert!(
+            fs.grown_to().is_empty(),
+            "a fresh volume has nothing to grow"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_that_already_exists_is_offered_the_declared_size_as_a_floor() {
         let fs = FakeFs::with(&["/store/prism-data.img"]);
-        let got = acquire_with(&fs, &reg(), Path::new("/store"), "prism-data", "aa01")
+        acquire_with(
+            &fs,
+            &reg(),
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            40 << 30,
+        )
+        .await
+        .unwrap();
+        assert!(
+            fs.created_images().is_empty(),
+            "an existing volume is never recreated"
+        );
+        assert_eq!(
+            fs.grown_to(),
+            vec![(PathBuf::from("/store/prism-data.img"), 40 << 30)],
+            "the store hands the size down; only the writer knows whether it means growing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_that_cannot_grow_refuses_the_run_and_names_itself() {
+        let fs = FakeFs {
+            fail_grow: true,
+            ..FakeFs::with(&["/store/prism-data.img"])
+        };
+        let err = acquire_with(
+            &fs,
+            &reg(),
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            40 << 30,
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("prism-data") && rendered.contains("no room"),
+            "a run that cannot get the volume it asked for must say which one: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_volume_mounted_twice_gets_the_largest_size_either_mount_asked_for() {
+        let fs = FakeFs::default();
+        let mounts = [
+            lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/a".into(),
+                read_only: false,
+                size_bytes: Some(10 << 30),
+            },
+            lns_ipc::VolumeMount {
+                name: "cache".into(),
+                target: "/b".into(),
+                read_only: false,
+                size_bytes: Some(50 << 30),
+            },
+        ];
+        resolve_with(&fs, &reg(), Path::new("/store"), &mounts, "aa01")
             .await
             .unwrap();
+        assert_eq!(
+            fs.created_sizes(),
+            vec![50 << 30],
+            "one image cannot be two sizes, so it has to satisfy the larger mount"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mount_that_declares_no_size_still_asks_for_the_built_in_default() {
+        let fs = FakeFs::default();
+        let mounts = [lns_ipc::VolumeMount {
+            name: "cache".into(),
+            target: "/a".into(),
+            read_only: false,
+            size_bytes: None,
+        }];
+        resolve_with(&fs, &reg(), Path::new("/store"), &mounts, "aa01")
+            .await
+            .unwrap();
+        assert_eq!(fs.created_sizes(), vec![VOLUME_DEFAULT_SIZE_BYTES]);
+    }
+
+    #[tokio::test]
+    async fn acquiring_existing_name_does_not_recreate_the_image() {
+        let fs = FakeFs::with(&["/store/prism-data.img"]);
+        let got = acquire_with(
+            &fs,
+            &reg(),
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         assert_eq!(got.image_path, Path::new("/store/prism-data.img"));
         assert!(
             fs.created_images().is_empty(),
@@ -457,11 +631,13 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
+                size_bytes: None,
             },
             lns_ipc::VolumeMount {
                 name: "prism-data".into(),
                 target: "/srv/state".into(),
                 read_only: true,
+                size_bytes: None,
             },
         ];
         let (attachments, leases) =
@@ -484,13 +660,27 @@ mod tests {
     async fn second_live_acquire_is_refused_naming_the_holder() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
-            .await
-            .unwrap();
-        let err = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa08")
-            .await
-            .unwrap_err()
-            .to_string();
+        let _held = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa07",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
+        let err = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa08",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("in use by run aa07"), "got: {err}");
     }
 
@@ -499,23 +689,44 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
         {
-            let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
-                .await
-                .unwrap();
-        }
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa08")
+            let _held = acquire_with(
+                &fs,
+                &registry,
+                Path::new("/store"),
+                "prism-data",
+                "aa07",
+                VOLUME_DEFAULT_SIZE_BYTES,
+            )
             .await
-            .expect("volume should be free after the prior lease dropped");
+            .unwrap();
+        }
+        acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa08",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .expect("volume should be free after the prior lease dropped");
     }
 
     #[tokio::test]
     async fn invalid_name_is_refused_before_any_image_is_created_or_lease_taken() {
         let registry = reg();
         let fs = FakeFs::default();
-        let err = acquire_with(&fs, &registry, Path::new("/store"), "../etc", "aa01")
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "../etc",
+            "aa01",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("invalid volume name"), "got: {err}");
         assert!(
             fs.created_images().is_empty(),
@@ -534,6 +745,7 @@ mod tests {
             name: "prism-data".into(),
             target: "/data init=/bin/sh".into(),
             read_only: false,
+            size_bytes: None,
         }];
         let err = resolve_with(&fs, &registry, Path::new("/store"), &mounts, "aa01")
             .await
@@ -556,9 +768,16 @@ mod tests {
             fail_create: true,
             ..Default::default()
         };
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa01")
-            .await
-            .expect_err("create should fail");
+        acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa01",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .expect_err("create should fail");
         registry
             .try_acquire("prism-data", "aa02")
             .expect("a failed create must not strand the lease");
@@ -643,6 +862,7 @@ mod tests {
             name: "cov-resolve".to_string(),
             target: "/data".to_string(),
             read_only: true,
+            size_bytes: None,
         }];
         let (attachments, leases) = resolve(&mounts, "aa03").await.unwrap();
         assert_eq!(attachments.len(), 1);
@@ -669,9 +889,16 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
         fs.set_allocated("/store/prism-data.img", 1024);
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
-            .await
-            .unwrap();
+        let _held = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa07",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         let got = list_with(&fs, &registry, Path::new("/store"))
             .await
             .unwrap();
@@ -740,9 +967,16 @@ mod tests {
     async fn create_reports_an_already_held_volume_as_in_use_without_recreating_it() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
-            .await
-            .unwrap();
+        let _held = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa07",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         let info = create_with(&fs, &registry, Path::new("/store"), "prism-data")
             .await
             .unwrap();
@@ -811,9 +1045,16 @@ mod tests {
     async fn remove_of_an_in_use_volume_is_refused_naming_the_holder() {
         let registry = reg();
         let fs = FakeFs::default();
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa07")
-            .await
-            .unwrap();
+        let _held = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa07",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
@@ -864,9 +1105,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!fs.exists(Path::new("/store/prism-data.img")).await);
-        acquire_with(&fs, &registry, Path::new("/store"), "prism-data", "aa03")
-            .await
-            .expect("the name must be free right after remove");
+        acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "prism-data",
+            "aa03",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .expect("the name must be free right after remove");
     }
 
     #[tokio::test]
@@ -874,9 +1122,16 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::with(&["/store/held.img", "/store/idle.img"]);
         fs.set_allocated("/store/idle.img", 2048);
-        let _held = acquire_with(&fs, &registry, Path::new("/store"), "held", "aa07")
-            .await
-            .unwrap();
+        let _held = acquire_with(
+            &fs,
+            &registry,
+            Path::new("/store"),
+            "held",
+            "aa07",
+            VOLUME_DEFAULT_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
         let report = prune_with(&fs, &registry, Path::new("/store"))
             .await
             .unwrap();

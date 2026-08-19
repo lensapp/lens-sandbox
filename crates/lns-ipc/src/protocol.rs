@@ -454,6 +454,9 @@ pub struct SandboxMount {
     /// True when the published bind is skipped on a machine that lacks its source, rather than refusing the run.
     #[serde(default)]
     pub optional: bool,
+    /// The capacity a published named volume asked for, so a pulled sandbox sizes its volume the way its author meant.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -637,6 +640,9 @@ pub struct VolumeMount {
     pub name: String,
     pub target: String,
     pub read_only: bool,
+    /// The capacity the volume must have before the run starts; the service grows a smaller one and leaves a larger one alone.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// Splits a `:ro`/`:rw` suffix off a mount spec, so the two parsers cannot drift on which suffixes mean read-only.
@@ -660,6 +666,7 @@ impl VolumeMount {
             name: name.to_string(),
             target: target.to_string(),
             read_only,
+            size_bytes: None,
         })
     }
 }
@@ -1004,6 +1011,7 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: true,
+                size_bytes: None,
             }],
             binds: vec![BindMount {
                 host_source: "/Users/me/proj".into(),
@@ -1151,6 +1159,7 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
+                size_bytes: None,
             }],
             binds: vec![BindMount {
                 host_source: "/Users/me/proj".into(),
@@ -1557,6 +1566,7 @@ mod tests {
                 read_only: true,
                 exclude: Vec::new(),
                 optional: false,
+                size_bytes: None,
             }],
             ports: vec![
                 SandboxPort {
@@ -1610,6 +1620,7 @@ mod tests {
                 name: "prism-data".into(),
                 target: "/data".into(),
                 read_only: false,
+                size_bytes: None,
             }
         );
     }
@@ -1748,6 +1759,7 @@ mod tests {
                 name: "build-cache".into(),
                 target: "/cache".into(),
                 read_only: false,
+                size_bytes: None,
             })
         );
     }

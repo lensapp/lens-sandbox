@@ -65,8 +65,8 @@ The `spec` fields:
 | `egress`       | Where the workload may reach — the `http` and `tcp` rule tables (see [Policy](policy.md)). |
 | `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
 | `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
-| `resources`    | vCPUs, memory, and disk the sandbox boots with. `cpu` and `memory` take a unit suffix or `N%` of the host, and per-run `--cpus` / `--mem` flags win. `disk` sizes the writable disk the run throws away when it ends; it takes an absolute size only (`40Gi`, minimum `20Mi`), defaults to `10Gi`, and no flag overrides it. It does not size a named volume. |
-| `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
+| `resources`    | vCPUs, memory, and disk the sandbox boots with. `cpu` and `memory` take a unit suffix or `N%` of the host, and per-run `--cpus` / `--mem` flags win. `disk` sizes the writable disk the run throws away when it ends; it takes an absolute size only (`40Gi`, minimum `20Mi`), defaults to `10Gi`, and no flag overrides it. A named volume sizes itself with its own `size` — see [Declarative mounts](#declarative-mounts). |
+| `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose, and a named volume may set its `size`. See [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `guestPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
@@ -361,6 +361,10 @@ The format is `name:/absolute/path[:ro]`. The volume `name` may contain letters,
 digits, `_`, `.`, and `-`; the target must be an absolute path with no `.`/`..`
 segments. Volume contents are stored by the service and survive between runs.
 
+A volume created this way holds `10Gi`. To ask for a different size, declare the
+mount in `spec.volumes` with a `size` — see
+[Declarative mounts](#declarative-mounts). The `-v` flag takes no size.
+
 A volume outlives the identity that wrote it, so its **root directory** is
 transferred to the run-as user on each writable attach. That is what lets a
 volume first written under one `-u` still be written under another. Files already
@@ -414,12 +418,29 @@ spec:
       source: agent-config
       target: /home/node/.config/agent
       readOnly: true
+    - type: volume
+      name: build-cache
+      target: /root/.cache
+      size: 100Gi
 ```
 
 `target` is always an absolute guest path. A named-volume `source` follows the
 same naming rules as `lns run -v name:/path`. The older
 `{name: agent-config, target: /path, readOnly: true}` shape remains accepted.
 Duplicate targets in one `lns.yaml` are rejected.
+
+**`size` sizes a named volume**, and it is a floor rather than a fixed size. A
+volume that does not exist is created at it; one that is smaller grows to it,
+keeping everything it holds; one that is already larger is left alone. The
+service never shrinks a volume — remove it with `lns volume rm` and the next run
+creates it at the declared size. `size` is an absolute byte size (`100Gi`, or a
+bare integer of MiB), at least `20Mi`, and it is rejected on a bind. Without it
+a volume is `10Gi`. Volumes are sparse, so a volume costs what the workload
+wrote, not what the document declared.
+
+Raising the number is enough: the next run grows the volume before the workload
+starts. If one volume is mounted at more than one target and the entries declare
+different sizes, the volume takes the largest.
 
 A relative bind source is resolved from the directory containing the local
 `lns.yaml`. For a published sandbox it is resolved from the directory where the

@@ -13,6 +13,7 @@ pub struct TrackingFs {
     existing: Arc<Mutex<HashSet<PathBuf>>>,
     created: Arc<Mutex<Vec<PathBuf>>>,
     touched: Arc<Mutex<Vec<PathBuf>>>,
+    sized: Arc<Mutex<std::collections::HashMap<PathBuf, u64>>>,
 }
 
 impl TrackingFs {
@@ -28,6 +29,13 @@ impl TrackingFs {
     pub fn has(&self, p: &Path) -> bool {
         self.existing.lock().unwrap().contains(p)
     }
+    pub fn size_of(&self, p: &Path) -> Option<u64> {
+        self.sized.lock().unwrap().get(p).copied()
+    }
+    pub fn preset_size(&self, p: &Path, size: u64) {
+        self.existing.lock().unwrap().insert(p.to_path_buf());
+        self.sized.lock().unwrap().insert(p.to_path_buf(), size);
+    }
 }
 
 impl Fs for TrackingFs {
@@ -38,10 +46,17 @@ impl Fs for TrackingFs {
         self.touched.lock().unwrap().push(p.to_path_buf());
         Ok(())
     }
-    async fn create_ext4_image(&self, p: &Path, _size: u64) -> std::io::Result<()> {
+    async fn create_ext4_image(&self, p: &Path, size: u64) -> std::io::Result<()> {
         self.touched.lock().unwrap().push(p.to_path_buf());
         self.existing.lock().unwrap().insert(p.to_path_buf());
         self.created.lock().unwrap().push(p.to_path_buf());
+        self.sized.lock().unwrap().insert(p.to_path_buf(), size);
+        Ok(())
+    }
+    async fn grow_ext4_image(&self, p: &Path, size: u64) -> std::io::Result<()> {
+        let mut sized = self.sized.lock().unwrap();
+        let held = sized.entry(p.to_path_buf()).or_insert(size);
+        *held = (*held).max(size);
         Ok(())
     }
     async fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -56,7 +71,9 @@ impl Fs for TrackingFs {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
         Ok(FileMeta {
-            size_bytes: lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES,
+            size_bytes: self
+                .size_of(p)
+                .unwrap_or(lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES),
             allocated_bytes: FAKE_ALLOCATED_BYTES,
             created_unix_secs: FAKE_CREATED_UNIX_SECS,
         })
@@ -125,6 +142,14 @@ impl VolumeRig {
         self.fs.preexist(&self.image_path(name));
     }
 
+    pub fn preexisting_image_sized(&self, name: &str, size_bytes: u64) {
+        self.fs.preset_size(&self.image_path(name), size_bytes);
+    }
+
+    pub fn image_size(&self, name: &str) -> Option<u64> {
+        self.fs.size_of(&self.image_path(name))
+    }
+
     pub async fn hold(&mut self, name: &str) {
         let id = self.alloc_run_id();
         let acq = lns_service::volume_store::acquire_with(
@@ -133,6 +158,7 @@ impl VolumeRig {
             &self.store_root,
             name,
             &id,
+            lns_service::volume_store::VOLUME_DEFAULT_SIZE_BYTES,
         )
         .await
         .expect("hold acquire");
@@ -148,15 +174,31 @@ impl VolumeRig {
         self.request_paths(name, &[target], read_only).await;
     }
 
+    pub async fn request_sized(&mut self, name: &str, target: &str, size_bytes: u64) {
+        self.request_mounts(&[(name, target, false, Some(size_bytes))])
+            .await;
+    }
+
     pub async fn request_paths(&mut self, name: &str, targets: &[&str], read_only: bool) {
-        let id = self.alloc_run_id();
-        let mounts: Vec<lns_ipc::VolumeMount> = targets
+        let mounts: Vec<(&str, &str, bool, Option<u64>)> = targets
             .iter()
-            .map(|t| lns_ipc::VolumeMount {
-                name: name.to_string(),
-                target: t.to_string(),
-                read_only,
-            })
+            .map(|t| (name, *t, read_only, None))
+            .collect();
+        self.request_mounts(&mounts).await;
+    }
+
+    pub async fn request_mounts(&mut self, spec: &[(&str, &str, bool, Option<u64>)]) {
+        let id = self.alloc_run_id();
+        let mounts: Vec<lns_ipc::VolumeMount> = spec
+            .iter()
+            .map(
+                |(name, target, read_only, size_bytes)| lns_ipc::VolumeMount {
+                    name: name.to_string(),
+                    target: target.to_string(),
+                    read_only: *read_only,
+                    size_bytes: *size_bytes,
+                },
+            )
             .collect();
         match lns_service::volume_store::resolve_with(
             &self.fs,

@@ -12,6 +12,7 @@ pub struct MountDefault {
     pub read_only: bool,
     pub exclude: Vec<String>,
     pub optional: bool,
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl Defaults {
                     read_only: volume.read_only(),
                     exclude: volume.exclude().to_vec(),
                     optional: volume.optional(),
+                    size_bytes: volume.size_bytes(),
                 })
                 .collect(),
             ports: definition
@@ -83,6 +85,7 @@ impl Defaults {
                     read_only: mount.read_only,
                     exclude: mount.exclude.clone(),
                     optional: mount.optional,
+                    size_bytes: mount.size_bytes,
                 })
                 .collect(),
             ports: view
@@ -243,6 +246,7 @@ fn resolve_mount(
         name: mount.source.clone(),
         target: mount.target.clone(),
         read_only: mount.read_only,
+        size_bytes: mount.size_bytes,
     }))
 }
 

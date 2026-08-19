@@ -48,6 +48,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
                 read_only: false,
                 exclude: Vec::new(),
                 optional: false,
+                size_bytes: None,
             },
             SandboxMount {
                 kind: SandboxMountKind::Volume,
@@ -56,6 +57,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
                 read_only: true,
                 exclude: Vec::new(),
                 optional: false,
+                size_bytes: None,
             },
         ],
         ports: Vec::new(),

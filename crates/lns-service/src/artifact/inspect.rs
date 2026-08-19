@@ -35,6 +35,7 @@ fn declared_view_mounts(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<Sandbo
             read_only: volume.read_only(),
             exclude: volume.exclude().to_vec(),
             optional: volume.optional(),
+            size_bytes: volume.size_bytes(),
         })
         .collect()
 }
@@ -484,6 +485,21 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_projects_the_size_its_volume_declared_so_a_pulled_run_provisions_it() {
+        let ArtifactInspection::Sandbox(view) = project_sandbox(
+            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","volumes":[{"name":"cache","target":"/cache","size":"40Gi"}]}}"#,
+        )
+        .unwrap() else {
+            panic!("a sandbox document projects a sandbox view");
+        };
+        assert_eq!(
+            view.mounts[0].size_bytes,
+            Some(40 << 30),
+            "without this a pulled sandbox's volume is created at the default, not the size its author declared"
+        );
+    }
+
+    #[test]
     fn a_sandbox_that_declares_no_size_projects_none_not_the_default() {
         assert_eq!(
             project_sandbox(
@@ -513,6 +529,7 @@ mod tests {
                     read_only: false,
                     exclude: vec![".cargo".into(), "tmp/scratch".into()],
                     optional: false,
+                    size_bytes: None,
                 }]
             ),
             "a pulled sandbox whose exclusions are dropped here publishes masks that never apply"
@@ -556,6 +573,7 @@ mod tests {
                     read_only: false,
                     exclude: Vec::new(),
                     optional: true,
+                    size_bytes: None,
                 }]
             ),
             "dropping this makes a pulled optional bind required again, so a consumer without the directory could not run the sandbox at all"
@@ -587,6 +605,7 @@ mod tests {
                         read_only: false,
                         exclude: Vec::new(),
                         optional: false,
+                        size_bytes: None,
                     },
                     SandboxMount {
                         kind: SandboxMountKind::Volume,
@@ -595,6 +614,7 @@ mod tests {
                         read_only: true,
                         exclude: Vec::new(),
                         optional: false,
+                        size_bytes: None,
                     },
                 ],
                 ports: vec![
