@@ -49,7 +49,7 @@ fn declared_view_filesets(
             inline: fileset.inline.is_some(),
             host_path: fileset.host_path.clone(),
             optional: fileset.optional,
-            mount_path: fileset.mount_path.clone(),
+            guest_path: fileset.guest_path.clone(),
             owner: match fileset.owner {
                 lns_artifact::sandbox::FilesetOwner::Workload => {
                     lns_ipc::SandboxFilesetOwner::Workload
@@ -504,14 +504,14 @@ mod tests {
     fn a_sandbox_discloses_a_host_file_source_and_whether_it_is_optional() {
         assert_eq!(
             project_sandbox(
-                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}}"#
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","filesets":[{"hostPath":"~/.gitconfig","guestPath":"/home/agent/.gitconfig","optional":true}]}}"#
             )
             .unwrap(),
             sandbox_view_with_filesets(vec![SandboxFileset {
                 path: None,
                 inline: false,
                 host_path: Some("~/.gitconfig".into()),
-                mount_path: "/home/agent/.gitconfig".into(),
+                guest_path: "/home/agent/.gitconfig".into(),
                 owner: lns_ipc::SandboxFilesetOwner::Workload,
                 optional: true,
             }]),
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_its_volumes_ports_filesets_and_over_broad_policy_flag() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"mountPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
+        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","workdir":"/work","volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","name":"cache","target":"/root/.cache","readOnly":true}],"ports":[{"container":8080},{"host":9090,"container":3000}],"filesets":[{"path":"./skills","guestPath":"/root/.agent/skills"},{"inline":{"settings.json":"do-not-print"},"guestPath":"/etc/agent","owner":"root"}],"egress":{"http":[{"match":"*","verdict":"allow"}]}}}"#;
 
         let inspection = project_sandbox(config).unwrap();
 
@@ -594,7 +594,7 @@ mod tests {
                         inline: false,
                         host_path: None,
                         optional: false,
-                        mount_path: "/root/.agent/skills".into(),
+                        guest_path: "/root/.agent/skills".into(),
                         owner: lns_ipc::SandboxFilesetOwner::Workload,
                     },
                     SandboxFileset {
@@ -602,7 +602,7 @@ mod tests {
                         inline: true,
                         host_path: None,
                         optional: false,
-                        mount_path: "/etc/agent".into(),
+                        guest_path: "/etc/agent".into(),
                         owner: lns_ipc::SandboxFilesetOwner::Root,
                     },
                 ],

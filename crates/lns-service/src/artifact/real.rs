@@ -296,7 +296,7 @@ fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
     lns_policy::connectors::effective_connectors(&user)
 }
 
-/// Pull each packed fileset's layer out of the artifact that carries it and expand it into guest-write specs, so the files a sandbox or mixin shipped land in the microVM at their mount paths.
+/// Pull each packed fileset's layer out of the artifact that carries it and expand it into guest-write specs, so the files a sandbox or mixin shipped land in the microVM at their guest paths.
 async fn materialize_filesets(
     resolved: &ResolvedSandbox,
 ) -> Result<crate::artifact::fileset::MaterializedFilesets> {
@@ -306,16 +306,16 @@ async fn materialize_filesets(
     for fileset in &resolved.packed_filesets {
         let layer = pull_packed_layer(&fileset.source, &content_store)
             .await
-            .with_context(|| format!("materializing the fileset at {}", fileset.mount_path))?;
+            .with_context(|| format!("materializing the fileset at {}", fileset.guest_path))?;
         let file = std::fs::File::open(&layer)
             .with_context(|| format!("opening fileset layer {}", layer.display()))?;
         let specs = fileset_runtime_specs_with_budget(
-            &fileset.mount_path,
+            &fileset.guest_path,
             flate2::read::GzDecoder::new(file),
             &content_store,
             &mut FilesetBudget::new(),
         )?;
-        out.absorb(fileset.owner, &fileset.mount_path, specs);
+        out.absorb(fileset.owner, &fileset.guest_path, specs);
     }
     crate::artifact::fileset::inline_fileset_specs(&resolved.inline_filesets, &mut out);
     Ok(out)
@@ -445,8 +445,8 @@ pub(crate) async fn resolve_definition(
     let packed_filesets = packed_filesets(&resolution, None)
         .map_err(|problems| anyhow::anyhow!(problems.join("; ")))?
         .into_iter()
-        .map(|(mount_path, source)| lns_ipc::PackedFilesetSource {
-            mount_path,
+        .map(|(guest_path, source)| lns_ipc::PackedFilesetSource {
+            guest_path,
             reference: source.reference,
             digest: source.layer.digest,
             size: source.layer.size,

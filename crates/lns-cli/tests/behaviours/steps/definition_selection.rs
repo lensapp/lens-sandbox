@@ -43,7 +43,7 @@ fn variant_definition_with_relative_sources(w: &mut BehaviourWorld, path: String
         .parent()
         .expect("the fixture path names a file in a directory")
         .to_path_buf();
-    let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
+    let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev-variant\nspec:\n  image: ghcr.io/team/dev-base:1\n  volumes:\n    - type: bind\n      source: .\n      target: /workspace\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n";
     w.author_files.insert(path, yaml.to_string());
     w.author_files
         .insert(dir.join("skills/prompts.md"), "p".to_string());

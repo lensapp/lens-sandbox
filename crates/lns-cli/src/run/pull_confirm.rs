@@ -109,7 +109,7 @@ fn disclosure(effects: &PulledEffects) -> String {
         writeln!(
             s,
             "  Fileset:   {} → {} — {provenance} {mode} (owner: {})",
-            fileset.source, fileset.mount_path, fileset.owner
+            fileset.source, fileset.guest_path, fileset.owner
         )
         .unwrap();
     }
@@ -149,10 +149,10 @@ mod tests {
         (r, String::from_utf8(out).unwrap())
     }
 
-    fn fileset(source: &str, mount_path: &str, owner: &str) -> crate::run::summary::FilesetSummary {
+    fn fileset(source: &str, guest_path: &str, owner: &str) -> crate::run::summary::FilesetSummary {
         crate::run::summary::FilesetSummary {
             source: source.into(),
-            mount_path: mount_path.into(),
+            guest_path: guest_path.into(),
             owner: owner.into(),
             host_path: None,
             optional: false,
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn disclosure_names_each_fileset_with_its_mount_path_and_access_mode() {
+    fn disclosure_names_each_fileset_with_its_guest_path_and_access_mode() {
         let filesets = [
             fileset(
                 "reg/skills@sha256:abcabcabcabc…",

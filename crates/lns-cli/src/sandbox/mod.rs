@@ -1045,7 +1045,7 @@ fn render_filesets<W: std::io::Write>(
         writeln!(
             out,
             "fileset: {source} -> {} (owner: {owner})",
-            fileset.mount_path
+            fileset.guest_path
         )?;
     }
     Ok(())

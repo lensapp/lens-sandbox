@@ -677,12 +677,12 @@ mod tests {
         let mixin = pinned("skills");
         let source = Fake::new(&[(
             mixin.as_str(),
-            r#"{"filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+            r#"{"filesets":[{"path":"./skills","guestPath":"/skills"}]}"#,
         )])
         .carrying(&mixin, &["sha256:cafe"]);
         let resolution = resolve(
             &sandbox(&format!(
-                r#"{{"image":"x:1","filesets":[{{"path":"./own","mountPath":"/own"}}],"mixins":["{mixin}"]}}"#
+                r#"{{"image":"x:1","filesets":[{{"path":"./own","guestPath":"/own"}}],"mixins":["{mixin}"]}}"#
             )),
             &[],
             &published(),
@@ -696,12 +696,12 @@ mod tests {
             resolution.fileset_origins,
             [
                 lns_artifact::merge::FilesetOrigin {
-                    mount_path: "/own".into(),
+                    guest_path: "/own".into(),
                     source: lns_artifact::merge::ROOT_LABEL.into(),
                     layer_index: 0
                 },
                 lns_artifact::merge::FilesetOrigin {
-                    mount_path: "/skills".into(),
+                    guest_path: "/skills".into(),
                     source: mixin.clone(),
                     layer_index: 0
                 },
@@ -736,7 +736,7 @@ mod tests {
     async fn a_directory_mixin_contributes_a_fileset_with_no_artifact_behind_it() {
         let source = Fake::new(&[(
             "/work/mixins/pg",
-            r#"{"filesets":[{"path":"/work/mixins/pg/skills","mountPath":"/skills"}]}"#,
+            r#"{"filesets":[{"path":"/work/mixins/pg/skills","guestPath":"/skills"}]}"#,
         )]);
         let resolution = resolve(
             &sandbox(r#"{"image":"x:1","mixins":["./mixins/pg"]}"#),
@@ -756,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn a_document_that_layers_on_nothing_still_says_what_its_own_layers_are_for() {
         let resolution = resolve(
-            &sandbox(r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#),
+            &sandbox(r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/skills"}]}"#),
             &[],
             &published(),
             &Fake::new(&[]),
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(
             resolution.fileset_origins,
             [lns_artifact::merge::FilesetOrigin {
-                mount_path: "/skills".into(),
+                guest_path: "/skills".into(),
                 source: lns_artifact::merge::ROOT_LABEL.into(),
                 layer_index: 0
             }],
@@ -1252,7 +1252,7 @@ mod tests {
     #[test]
     fn a_merge_that_could_not_have_been_authored_refuses_the_run() {
         let document = sandbox(
-            r#"{"image":"x:1","volumes":[{"name":"data","target":"/data"}],"filesets":[{"path":"./skills","mountPath":"/data"}]}"#,
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/data"}],"filesets":[{"path":"./skills","guestPath":"/data"}]}"#,
         );
         let empty = SandboxSpec::default();
         let mixin = pinned("m");

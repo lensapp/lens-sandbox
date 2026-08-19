@@ -33,7 +33,7 @@ pub struct E2eWorld {
     pub project_credentials: Vec<(String, String)>,
     /// Ports the project definition declares, as (host, container).
     pub project_ports: Vec<(Option<u16>, u16)>,
-    /// Path filesets the project declares, as (directory, file inside it, mountPath).
+    /// Path filesets the project declares, as (directory, file inside it, guestPath).
     pub project_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_inline_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_tools: Vec<String>,

@@ -57,9 +57,9 @@ pub struct MaterializedFilesets {
 }
 
 impl MaterializedFilesets {
-    pub fn absorb(&mut self, owner: FilesetOwner, mount_path: &str, specs: Vec<RuntimeFileSpec>) {
+    pub fn absorb(&mut self, owner: FilesetOwner, guest_path: &str, specs: Vec<RuntimeFileSpec>) {
         if owner == FilesetOwner::Workload {
-            self.owned_paths.extend(owned_paths_for(mount_path, &specs));
+            self.owned_paths.extend(owned_paths_for(guest_path, &specs));
         }
         self.specs.extend(specs);
     }
@@ -78,9 +78,9 @@ impl MaterializedFilesets {
     }
 }
 
-/// The mount path, every directory the fileset introduces beneath it, and each shipped file.
-fn owned_paths_for(mount_path: &str, specs: &[RuntimeFileSpec]) -> BTreeSet<String> {
-    let root = mount_path.trim_end_matches('/');
+/// The guest path, every directory the fileset introduces beneath it, and each shipped file.
+fn owned_paths_for(guest_path: &str, specs: &[RuntimeFileSpec]) -> BTreeSet<String> {
+    let root = guest_path.trim_end_matches('/');
     let mut owned = BTreeSet::new();
     owned.insert(root.to_string());
     for spec in specs {
@@ -115,11 +115,11 @@ pub fn local_fileset_specs<D: SnapshotDir + ?Sized>(
     out: &mut MaterializedFilesets,
 ) -> Result<()> {
     for local in locals {
-        let root = local.mount_path.trim_end_matches('/');
+        let root = local.guest_path.trim_end_matches('/');
         let mut specs = Vec::new();
         snapshot_into(dir, Path::new(&local.source), root, &mut specs)
             .with_context(|| format!("snapshotting fileset {}", local.source))?;
-        out.absorb(local.owner, &local.mount_path, specs);
+        out.absorb(local.owner, &local.guest_path, specs);
     }
     Ok(())
 }
@@ -138,7 +138,7 @@ pub trait HostFileProbe {
     fn stat(&self, path: &Path) -> std::io::Result<Option<HostFileFacts>>;
 }
 
-/// Snapshot each declared host file into one guest-write spec at its mountPath, so a definition can seed the guest from the machine that runs it; an absent path refuses the plan unless the author marked it optional, and a path this machine refused a pulled sandbox is never read at all.
+/// Snapshot each declared host file into one guest-write spec at its guestPath, so a definition can seed the guest from the machine that runs it; an absent path refuses the plan unless the author marked it optional, and a path this machine refused a pulled sandbox is never read at all.
 pub fn host_fileset_specs<P: HostFileProbe + ?Sized>(
     probe: &P,
     hosts: &[HostFileset],
@@ -162,11 +162,11 @@ pub fn host_fileset_specs<P: HostFileProbe + ?Sized>(
             continue;
         };
         let specs = vec![RuntimeFileSpec {
-            guest_path: host.mount_path.clone(),
+            guest_path: host.guest_path.clone(),
             mode: facts.mode,
             source: RuntimeSource::HostFile(resolved),
         }];
-        out.absorb(host.owner, &host.mount_path, specs);
+        out.absorb(host.owner, &host.guest_path, specs);
     }
     Ok(())
 }
@@ -214,7 +214,7 @@ fn resolve_host_source<P: HostFileProbe + ?Sized>(probe: &P, source: &str) -> Re
 
 pub fn inline_fileset_specs(inline_filesets: &[InlineFileset], out: &mut MaterializedFilesets) {
     for inline in inline_filesets {
-        let root = inline.mount_path.trim_end_matches('/');
+        let root = inline.guest_path.trim_end_matches('/');
         let specs = inline
             .files
             .iter()
@@ -224,7 +224,7 @@ pub fn inline_fileset_specs(inline_filesets: &[InlineFileset], out: &mut Materia
                 source: RuntimeSource::Bytes(content.as_bytes().to_vec()),
             })
             .collect();
-        out.absorb(inline.owner, &inline.mount_path, specs);
+        out.absorb(inline.owner, &inline.guest_path, specs);
     }
 }
 
@@ -253,14 +253,14 @@ fn snapshot_into<D: SnapshotDir + ?Sized>(
     Ok(())
 }
 
-/// Expand a packed fileset's tar into guest-write specs rooted at `mount_path`, so the files the artifact shipped land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered layer can't write outside its declared mount.
+/// Expand a packed fileset's tar into guest-write specs rooted at `guest_path`, so the files the artifact shipped land in the guest at boot. Fail-closed: an entry whose path escapes the mount (absolute or `..`) or isn't a regular file is refused, so a hand-built or tampered layer can't write outside its declared mount.
 pub fn fileset_runtime_specs<R: Read>(
-    mount_path: &str,
+    guest_path: &str,
     layer_tar: R,
     content_store: &ContentStore,
 ) -> Result<Vec<RuntimeFileSpec>> {
     fileset_runtime_specs_with_budget(
-        mount_path,
+        guest_path,
         layer_tar,
         content_store,
         &mut FilesetBudget::new(),
@@ -268,12 +268,12 @@ pub fn fileset_runtime_specs<R: Read>(
 }
 
 pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
-    mount_path: &str,
+    guest_path: &str,
     layer_tar: R,
     content_store: &ContentStore,
     budget: &mut FilesetBudget,
 ) -> Result<Vec<RuntimeFileSpec>> {
-    let root = mount_path.trim_end_matches('/');
+    let root = guest_path.trim_end_matches('/');
     let mut specs = Vec::new();
     let mut archive = tar::Archive::new(layer_tar);
     for entry in archive.entries().context("reading fileset layer")? {
@@ -296,7 +296,7 @@ pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
                 .components()
                 .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
         {
-            bail!("fileset entry {} escapes its mount path", path.display());
+            bail!("fileset entry {} escapes its guest path", path.display());
         }
         if path.to_string_lossy().chars().any(char::is_control) {
             bail!("fileset entry {path:?} must not contain control characters");
@@ -372,10 +372,10 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
-    fn expand(mount_path: &str, layer_tar: &[u8]) -> (tempfile::TempDir, Vec<RuntimeFileSpec>) {
+    fn expand(guest_path: &str, layer_tar: &[u8]) -> (tempfile::TempDir, Vec<RuntimeFileSpec>) {
         let dir = tempfile::tempdir().unwrap();
         let store = ContentStore::new(dir.path());
-        let specs = fileset_runtime_specs(mount_path, layer_tar, &store).unwrap();
+        let specs = fileset_runtime_specs(guest_path, layer_tar, &store).unwrap();
         (dir, specs)
     }
 
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_files_under_the_mount_path_as_streamed_content_specs() {
+    fn expands_files_under_the_guest_path_as_streamed_content_specs() {
         let tar = tar_with(&[("deep.md", b"research"), ("nested/tools.md", b"tools")]);
         let (dir, specs) = expand("/root/.some-agent/skills", &tar);
         let mut paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_slash_on_the_mount_path_does_not_double_up() {
+    fn a_trailing_slash_on_the_guest_path_does_not_double_up() {
         let tar = tar_with(&[("a.txt", b"x")]);
         let (_dir, specs) = expand("/mount/", &tar);
         assert_eq!(specs[0].guest_path, "/mount/a.txt");
@@ -528,7 +528,7 @@ mod tests {
         let err =
             fileset_runtime_specs("/mount", &tar[..], &ContentStore::new(dir.path())).unwrap_err();
         assert!(
-            format!("{err:#}").contains("escapes its mount"),
+            format!("{err:#}").contains("escapes its guest path"),
             "got: {err:#}"
         );
     }
@@ -540,7 +540,7 @@ mod tests {
         let err =
             fileset_runtime_specs("/mount", &tar[..], &ContentStore::new(dir.path())).unwrap_err();
         assert!(
-            format!("{err:#}").contains("escapes its mount"),
+            format!("{err:#}").contains("escapes its guest path"),
             "got: {err:#}"
         );
     }
@@ -576,10 +576,10 @@ mod tests {
         }
     }
 
-    fn local(source: &str, mount_path: &str, owner: FilesetOwner) -> LocalFileset {
+    fn local(source: &str, guest_path: &str, owner: FilesetOwner) -> LocalFileset {
         LocalFileset {
             source: source.into(),
-            mount_path: mount_path.into(),
+            guest_path: guest_path.into(),
             owner,
         }
     }
@@ -651,7 +651,7 @@ mod tests {
                 "/root/.agent/skills/deep/run.sh",
                 "/root/.agent/skills/prompts.md",
             ],
-            "the mount path, introduced dirs, and files must all transfer to the workload"
+            "the guest path, introduced dirs, and files must all transfer to the workload"
         );
         let manifest = out
             .into_specs()
@@ -715,10 +715,10 @@ mod tests {
         }
     }
 
-    fn host(source: &str, mount_path: &str, owner: FilesetOwner, optional: bool) -> HostFileset {
+    fn host(source: &str, guest_path: &str, owner: FilesetOwner, optional: bool) -> HostFileset {
         HostFileset {
             source: source.into(),
-            mount_path: mount_path.into(),
+            guest_path: guest_path.into(),
             owner,
             optional,
         }
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_paths_never_climb_above_the_mount_path() {
+    fn owned_paths_never_climb_above_the_guest_path() {
         let specs = [RuntimeFileSpec {
             guest_path: "/home/sandbox/.claude/settings.json".into(),
             mode: 0o644,

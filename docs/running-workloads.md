@@ -67,7 +67,7 @@ The `spec` fields:
 | `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
 | `resources`    | vCPUs and memory the sandbox boots with (`cpu`, `memory` with a unit suffix, or `N%` of the host); per-run `--cpus` / `--mem` flags win. |
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose. See [Declarative mounts](#declarative-mounts). |
-| `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `mountPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
+| `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `guestPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
 
@@ -475,18 +475,18 @@ guest at launch as a snapshot:
 spec:
   filesets:
     - path: ./seed                # a directory in the author's project
-      mountPath: /home/sandbox    # owned by the workload user (the default)
+      guestPath: /home/sandbox    # owned by the workload user (the default)
     - path: ./settings            # packed into a layer of this same artifact
-      mountPath: /root/.agent/settings
+      guestPath: /root/.agent/settings
       owner: root                 # pinned input: the workload can't rewrite it
     - inline:                     # small text files kept in lns.yaml itself
         .claude/settings.json: |
           {"permissions":{"defaultMode":"bypassPermissions"}}
         mcp.json: |
           {"mcpServers":{}}
-      mountPath: /home/sandbox
+      guestPath: /home/sandbox
     - hostPath: ~/.gitconfig      # one file from the machine that runs it
-      mountPath: /home/agent/.gitconfig
+      guestPath: /home/agent/.gitconfig
       optional: true
 ```
 
@@ -496,7 +496,7 @@ spec:
   `lns push`, each `path` directory is packed into a deterministic layer of the
   **same** artifact the document publishes as: the files and the declaration
   that mounts them share one digest and are approved together. The entry
-  publishes as written, keeping its `path` and `mountPath`, and push reports the
+  publishes as written, keeping its `path` and `guestPath`, and push reports the
   digest each directory shipped under (`packed fileset ./seed -> sha256:…`).
   A sandbox or mixin artifact carries one layer per `path` entry it declares, in
   declaration order; a pulled document whose entry no layer carries refuses the
@@ -508,7 +508,7 @@ spec:
   one directory across several sandboxes, publish a
   [mixin](#mixins--what-a-sandbox-layers-on) that carries it — a mixin's fileset
   is pulled from the mixin's own artifact, at the digest the disclosure named.
-  `lns inspect` lists every fileset (`fileset: <source> -> <mountPath>`) so you
+  `lns inspect` lists every fileset (`fileset: <source> -> <guestPath>`) so you
   can review what a sandbox ships before running it, and the run summary
   discloses them as `Fileset:` lines.
 - **`inline`** maps safe relative file paths to UTF-8 text. It is useful for
@@ -516,15 +516,15 @@ spec:
   should stay self-contained. Each file is limited to 128 KiB after YAML
   parsing, an inline fileset totals at most 1 MiB across at most 256 files.
   Inline files remain in the published sandbox config, so `lns push` packs no
-  layer for them. Inspect and run output disclose the inline source, mount path,
+  layer for them. Inspect and run output disclose the inline source, guest path,
   and owner, never the file contents.
 - **`hostPath`** names one file on the machine that *runs* the sandbox, not on
-  the author's. It is read once at launch and written to `mountPath`, so the
+  the author's. It is read once at launch and written to `guestPath`, so the
   guest gets a snapshot, never a live share — the file a workload edits inside
   the guest dies with the microVM, and the host copy is never touched. This is
   the portable way to seed the tool identity a workload needs, such as
   `~/.gitconfig`. The path must be absolute or start with `~/` (resolved
-  against the home of the user who runs `lns`), and `mountPath` names a guest
+  against the home of the user who runs `lns`), and `guestPath` names a guest
   **file**, so it must not end in `/`. A `hostPath` is carried into the
   published config verbatim — `lns push` packs nothing for it, which is exactly
   what keeps the artifact portable. Add `optional: true` when the file may be
@@ -542,12 +542,12 @@ spec:
   `lns.yaml` is your own consent, so a local run never asks.
 - Each entry sets exactly one of `path`/`inline`/`hostPath`. `inline` must
   contain at least one file. Every inline key must be a relative path without empty, `.`,
-  or `..` components. `mountPath` is an absolute
+  or `..` components. `guestPath` is an absolute
   guest path; duplicates — including collisions with a volume `target` — are
   rejected offline, as is any mount into the sandbox's own `/.lens` runtime
   namespace.
 - **`owner`** decides who owns the materialized files in the guest.
-  The default, `workload`, transfers the mount path and everything it ships
+  The default, `workload`, transfers the guest path and everything it ships
   to the run-as user, so a seeded config the tool rewrites at runtime
   (`~/.claude.json`-style state) just works. `owner: root` pins the content
   beyond the workload's reach — the right choice for skills, prompts, and

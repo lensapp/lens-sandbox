@@ -66,18 +66,18 @@ pub struct Port {
     pub container: i64,
 }
 
-pub fn validate_mount_path(path: &str) -> Result<()> {
+pub fn validate_guest_path(path: &str) -> Result<()> {
     if path.is_empty() {
-        bail!("mount path must not be empty");
+        bail!("guest path must not be empty");
     }
     if path.chars().any(char::is_control) {
-        bail!("mount path {path:?} must not contain control characters");
+        bail!("guest path {path:?} must not contain control characters");
     }
     if !path.starts_with('/') {
-        bail!("mount path {path} must be absolute (start with `/`)");
+        bail!("guest path {path} must be absolute (start with `/`)");
     }
     if path.split('/').any(|segment| segment == "..") {
-        bail!("mount path {path} must not contain a `..` segment");
+        bail!("guest path {path} must not contain a `..` segment");
     }
     Ok(())
 }
@@ -222,29 +222,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_mount_path_rejects_empty_relative_and_traversing_paths() {
-        assert!(validate_mount_path("/root/.some-agent/skills").is_ok());
+    fn validate_guest_path_rejects_empty_relative_and_traversing_paths() {
+        assert!(validate_guest_path("/root/.some-agent/skills").is_ok());
         assert!(
-            format!("{:#}", validate_mount_path("").unwrap_err()).contains("must not be empty")
+            format!("{:#}", validate_guest_path("").unwrap_err()).contains("must not be empty")
         );
         assert!(
-            format!("{:#}", validate_mount_path("relative").unwrap_err())
+            format!("{:#}", validate_guest_path("relative").unwrap_err())
                 .contains("must be absolute")
         );
         assert!(
-            format!("{:#}", validate_mount_path("/a/../b").unwrap_err()).contains("`..` segment")
+            format!("{:#}", validate_guest_path("/a/../b").unwrap_err()).contains("`..` segment")
         );
     }
 
     #[test]
-    fn validate_mount_path_rejects_control_characters() {
+    fn validate_guest_path_rejects_control_characters() {
         assert!(
-            validate_mount_path("/.lens\n/etc").is_err(),
-            "a newline in a mount path is line-injected into the newline-delimited /.lens/fileset-owned chown manifest and must be refused at the validation chokepoint"
+            validate_guest_path("/.lens\n/etc").is_err(),
+            "a newline in a guest path is line-injected into the newline-delimited /.lens/fileset-owned chown manifest and must be refused at the validation chokepoint"
         );
         assert!(
-            validate_mount_path("/ok\u{7f}/x").is_err(),
-            "any control character in a mount path must be refused"
+            validate_guest_path("/ok\u{7f}/x").is_err(),
+            "any control character in a guest path must be refused"
         );
     }
 

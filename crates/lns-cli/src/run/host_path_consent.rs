@@ -95,7 +95,7 @@ fn ask(
     writeln!(
         output,
         "{repository} wants to read {host_path} from this machine and mount a copy at {}.",
-        fileset.mount_path
+        fileset.guest_path
     )?;
     if !interactive {
         bail!(

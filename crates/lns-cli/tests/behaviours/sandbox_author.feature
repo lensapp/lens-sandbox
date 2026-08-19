@@ -147,7 +147,7 @@ Feature: authoring a sandbox
     Then the command fails with an exit code other than 0
     And the output contains "unknown field `ref`"
 
-  Scenario: validate refuses a relative fileset mountPath
+  Scenario: validate refuses a relative fileset guestPath
     Given an lns.yaml declaring fileset "./skills" mounted at "skills"
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0
@@ -159,7 +159,7 @@ Feature: authoring a sandbox
     Then the command fails with an exit code other than 0
     And the output contains "/.lens runtime namespace"
 
-  Scenario: validate refuses a duplicate fileset mountPath or one colliding with a volume target
+  Scenario: validate refuses a duplicate fileset guestPath or one colliding with a volume target
     Given an lns.yaml declaring two filesets mounted at "/root/.agent/skills"
     When the user runs sandbox command "validate"
     Then the command fails with an exit code other than 0

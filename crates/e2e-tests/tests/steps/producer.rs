@@ -117,7 +117,7 @@ async fn push_sandbox_with_fileset(world: &mut E2eWorld) {
     let reference = format!("{host}/e2e-fileset-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-fileset-sandbox\nspec:\n  image: {base}\n  filesets:\n    - path: ./skills\n      mountPath: /opt/agent-skills\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-fileset-sandbox\nspec:\n  image: {base}\n  filesets:\n    - path: ./skills\n      guestPath: /opt/agent-skills\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();
@@ -148,7 +148,7 @@ async fn push_sandbox_with_inline_fileset(world: &mut E2eWorld, content: String)
     let reference = format!("{host}/e2e-inline-sandbox:1");
     let base = seed_base_image(&host).await;
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-inline-sandbox\nspec:\n  image: {base}\n  filesets:\n    - inline:\n        mcp.json: {content}\n      mountPath: /etc/agent\n      owner: root\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-inline-sandbox\nspec:\n  image: {base}\n  filesets:\n    - inline:\n        mcp.json: {content}\n      guestPath: /etc/agent\n      owner: root\n"
     );
     let env = cache_env(world);
     let project = world.home.as_ref().expect("home set by cache_env").path();

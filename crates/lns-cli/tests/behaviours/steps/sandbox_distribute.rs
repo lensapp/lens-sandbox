@@ -51,7 +51,7 @@ fn valid_lns_yaml_with_fileset(w: &mut BehaviourWorld, path: String, mount: Stri
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - path: {path}\n      mountPath: {mount}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - path: {path}\n      guestPath: {mount}\n"
         ),
     );
 }
@@ -63,7 +63,7 @@ fn valid_lns_yaml_with_inline_fileset(w: &mut BehaviourWorld, mount: String) {
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - inline:\n        settings.json: do-not-print\n      mountPath: {mount}\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - inline:\n        settings.json: do-not-print\n      guestPath: {mount}\n"
         ),
     );
 }
@@ -110,11 +110,11 @@ fn published_config_keeps_the_fileset_path(w: &mut BehaviourWorld) -> Result<(),
     let value: serde_json::Value =
         serde_json::from_slice(doc).map_err(|e| format!("pushed doc is not json: {e}"))?;
     let entry = &value["spec"]["filesets"][0];
-    if entry["path"] == "./skills" && entry["mountPath"] == "/root/.agent/skills" {
+    if entry["path"] == "./skills" && entry["guestPath"] == "/root/.agent/skills" {
         Ok(())
     } else {
         Err(format!(
-            "the published entry keeps its path and mountPath — the content is what moved into the artifact's digest (§6); got: {entry}"
+            "the published entry keeps its path and guestPath — the content is what moved into the artifact's digest (§6); got: {entry}"
         ))
     }
 }
@@ -177,7 +177,7 @@ fn valid_lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String,
     w.author_files.insert(
         std::path::PathBuf::from("/work/lns.yaml"),
         format!(
-            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - hostPath: {source}\n      guestPath: {mount}\n      optional: true\n"
         ),
     );
 }

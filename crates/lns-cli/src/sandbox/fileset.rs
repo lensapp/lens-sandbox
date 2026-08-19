@@ -270,7 +270,7 @@ mod tests {
     fn path_fileset_problems_reports_only_broken_path_entries() {
         let fs = MapFs::with(&[("/work/skills/prompts.md", "p")]);
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"},{"path":"./missing","mountPath":"/b"},{"inline":{"a.md":"x"},"mountPath":"/c"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/a"},{"path":"./missing","guestPath":"/b"},{"inline":{"a.md":"x"},"guestPath":"/c"}]}}"#,
         )
         .unwrap();
         let problems = path_fileset_problems(&fs, Path::new("/work"), &def);

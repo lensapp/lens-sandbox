@@ -126,7 +126,7 @@ pub struct SandboxSpec {
     pub ports: Vec<Port>,
 }
 
-/// Files shipped inside the artifact: a directory beside this document packed into a layer of the same artifact at push (path), or content written in the document itself (inline), snapshot-mounted at mountPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
+/// Files shipped inside the artifact: a directory beside this document packed into a layer of the same artifact at push (path), or content written in the document itself (inline), snapshot-mounted at guestPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesetEntry {
@@ -136,8 +136,8 @@ pub struct FilesetEntry {
     pub inline: Option<BTreeMap<String, String>>,
     #[serde(rename = "hostPath", default)]
     pub host_path: Option<String>,
-    #[serde(rename = "mountPath")]
-    pub mount_path: String,
+    #[serde(rename = "guestPath")]
+    pub guest_path: String,
     #[serde(default)]
     pub owner: FilesetOwner,
     /// A hostPath the running machine does not have is skipped instead of refusing the run.
@@ -284,11 +284,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
         .validate_binary_scopes()
         .context("sandbox policy")?;
     if let Some(workdir) = &doc.spec.workdir {
-        spec::validate_mount_path(workdir).context("workdir")?;
+        spec::validate_guest_path(workdir).context("workdir")?;
     }
     let mut targets = BTreeSet::new();
     for volume in &doc.spec.volumes {
-        spec::validate_mount_path(&volume.target)
+        spec::validate_guest_path(&volume.target)
             .with_context(|| format!("volume targeting {}", volume.target))?;
         if overlaps_runtime_namespace(&volume.target) {
             bail!(
@@ -314,8 +314,8 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
-        if !targets.insert(&fileset.mount_path) {
-            bail!("duplicate mount target {}", fileset.mount_path);
+        if !targets.insert(&fileset.guest_path) {
+            bail!("duplicate guest path {}", fileset.guest_path);
         }
     }
     let mut container_ports = BTreeSet::new();
@@ -349,7 +349,7 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
     if source_count != 1 || fileset.inline.as_ref().is_some_and(BTreeMap::is_empty) {
         bail!(
             "fileset targeting {} must set exactly one of path, inline, or hostPath",
-            fileset.mount_path
+            fileset.guest_path
         );
     }
     if let Some(path) = &fileset.path {
@@ -368,10 +368,10 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
     match &fileset.host_path {
         Some(host_path) => {
             validate_host_source(host_path)?;
-            if fileset.mount_path.ends_with('/') {
+            if fileset.guest_path.ends_with('/') {
                 bail!(
-                    "fileset hostPath {host_path} names a guest file, so mountPath {} must not end in `/`",
-                    fileset.mount_path
+                    "fileset hostPath {host_path} names a guest file, so guestPath {} must not end in `/`",
+                    fileset.guest_path
                 );
             }
         }
@@ -380,11 +380,11 @@ fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
         ),
         None => {}
     }
-    spec::validate_mount_path(&fileset.mount_path).context("fileset mountPath")?;
-    if overlaps_runtime_namespace(&fileset.mount_path) {
+    spec::validate_guest_path(&fileset.guest_path).context("fileset guestPath")?;
+    if overlaps_runtime_namespace(&fileset.guest_path) {
         bail!(
-            "fileset mountPath {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
-            fileset.mount_path
+            "fileset guestPath {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",
+            fileset.guest_path
         );
     }
     Ok(())
@@ -430,7 +430,7 @@ fn validate_inline_path(path: &str) -> Result<()> {
         || path.chars().any(char::is_control)
     {
         bail!(
-            "inline file path {path:?} must be a safe relative path beneath its fileset mountPath"
+            "inline file path {path:?} must be a safe relative path beneath its fileset guestPath"
         );
     }
     if segments
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn a_mixin_reads_every_block_it_shares_with_a_sandbox() {
         let def = parse_mixin(&mixin_json(
-            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"mountPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
+            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"guestPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
         ))
         .expect("a mixin's shared blocks follow the same rules as a sandbox's");
         assert_eq!(def.name, "postgres-tools");
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(def.spec.volumes[0].target, "/home/agent/.cache");
         assert_eq!(def.spec.egress.tcp.len(), 1);
         assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
-        assert_eq!(def.spec.filesets[0].mount_path, "/home/agent/notes");
+        assert_eq!(def.spec.filesets[0].guest_path, "/home/agent/notes");
     }
 
     #[test]
@@ -1420,17 +1420,17 @@ mod tests {
     #[test]
     fn parse_reads_a_path_fileset_entry() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/root/.agent/skills"}]}"#,
         ))
         .unwrap();
         assert_eq!(def.spec.filesets[0].path.as_deref(), Some("./skills"));
-        assert_eq!(def.spec.filesets[0].mount_path, "/root/.agent/skills");
+        assert_eq!(def.spec.filesets[0].guest_path, "/root/.agent/skills");
     }
 
     #[test]
     fn a_fileset_naming_another_artifact_is_no_longer_a_document_anything_reads() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"ref":"registry.example.test/team/settings@sha256:abc","mountPath":"/root/.agent/settings"}]}"#,
+            r#"{"image":"x:1","filesets":[{"ref":"registry.example.test/team/settings@sha256:abc","guestPath":"/root/.agent/settings"}]}"#,
         ))
         .unwrap_err();
         assert!(
@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn parse_reads_an_inline_fileset_without_changing_its_text() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"inline":{".claude/settings.json":"{\"enabled\":true}\n"},"mountPath":"/home/sandbox"}]}"#,
+            r#"{"image":"x:1","filesets":[{"inline":{".claude/settings.json":"{\"enabled\":true}\n"},"guestPath":"/home/sandbox"}]}"#,
         ))
         .unwrap();
         let inline = def.spec.filesets[0].inline.as_ref().expect("inline source");
@@ -1468,8 +1468,8 @@ mod tests {
     #[test]
     fn parse_requires_exactly_one_fileset_source() {
         for entry in [
-            r#"{"path":"./skills","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
-            r#"{"inline":{},"mountPath":"/s"}"#,
+            r#"{"path":"./skills","inline":{"settings.json":"{}"},"guestPath":"/s"}"#,
+            r#"{"inline":{},"guestPath":"/s"}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
@@ -1484,7 +1484,7 @@ mod tests {
     fn a_home_anchored_fileset_path_is_refused_for_the_reason_it_cannot_work() {
         for source in ["~/skills", "~", "~alice/skills"] {
             let spec =
-                format!(r#"{{"image":"x:1","filesets":[{{"path":"{source}","mountPath":"/s"}}]}}"#);
+                format!(r#"{{"image":"x:1","filesets":[{{"path":"{source}","guestPath":"/s"}}]}}"#);
             let message = format!("{:#}", parse(&def_json(&spec)).unwrap_err());
             assert!(
                 message.contains("packed from a directory beside") && message.contains("hostPath"),
@@ -1494,9 +1494,9 @@ mod tests {
     }
 
     #[test]
-    fn a_host_path_fileset_parses_with_its_mount_path() {
+    fn a_host_path_fileset_parses_with_its_guest_path() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig","optional":true}]}"#,
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","guestPath":"/home/agent/.gitconfig","optional":true}]}"#,
         ))
         .unwrap();
         assert_eq!(
@@ -1510,7 +1510,7 @@ mod tests {
     #[test]
     fn a_host_path_fileset_is_required_unless_it_says_otherwise() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"hostPath":"/etc/gitconfig","mountPath":"/etc/gitconfig"}]}"#,
+            r#"{"image":"x:1","filesets":[{"hostPath":"/etc/gitconfig","guestPath":"/etc/gitconfig"}]}"#,
         ))
         .unwrap();
         assert!(
@@ -1522,7 +1522,7 @@ mod tests {
     #[test]
     fn a_host_path_fileset_ships_the_field_under_its_camel_case_name() {
         let entry: FilesetEntry = serde_json::from_str(
-            r#"{"hostPath":"~/.gitconfig","mountPath":"/home/agent/.gitconfig"}"#,
+            r#"{"hostPath":"~/.gitconfig","guestPath":"/home/agent/.gitconfig"}"#,
         )
         .expect("hostPath is the wire name; host_path would silently drop the source");
         assert_eq!(entry.host_path.as_deref(), Some("~/.gitconfig"));
@@ -1531,8 +1531,8 @@ mod tests {
     #[test]
     fn a_fileset_setting_both_host_path_and_path_is_refused() {
         for entry in [
-            r#"{"hostPath":"~/.gitconfig","path":"./skills","mountPath":"/s"}"#,
-            r#"{"hostPath":"~/.gitconfig","inline":{"settings.json":"{}"},"mountPath":"/s"}"#,
+            r#"{"hostPath":"~/.gitconfig","path":"./skills","guestPath":"/s"}"#,
+            r#"{"hostPath":"~/.gitconfig","inline":{"settings.json":"{}"},"guestPath":"/s"}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
@@ -1547,7 +1547,7 @@ mod tests {
     fn a_host_path_must_be_absolute_or_home_rooted() {
         for source in ["./x", "../x", "~", "~alice/x", "x", ""] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"mountPath":"/s"}}]}}"#,
+                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"guestPath":"/s"}}]}}"#,
                 serde_json::to_string(source).unwrap()
             );
             let err = parse(&def_json(&spec)).unwrap_err();
@@ -1558,7 +1558,7 @@ mod tests {
         }
         for source in ["/etc/gitconfig", "~/.gitconfig"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","guestPath":"/s"}}]}}"#
             );
             parse(&def_json(&spec)).unwrap_or_else(|e| panic!("source {source}: {e:#}"));
         }
@@ -1568,7 +1568,7 @@ mod tests {
     fn a_user_relative_host_path_names_the_one_form_that_is_supported() {
         for source in ["~", "~alice/x"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","guestPath":"/s"}}]}}"#
             );
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
@@ -1582,7 +1582,7 @@ mod tests {
     fn a_host_path_naming_a_secret_shaped_file_is_refused() {
         for source in ["~/.npmrc", "~/.ssh/id_rsa", "~/.aws/credentials", "/x/.env"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","mountPath":"/s"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","guestPath":"/s"}}]}}"#
             );
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
@@ -1596,7 +1596,7 @@ mod tests {
     fn a_host_path_that_could_split_the_guest_cmdline_is_refused() {
         for source in ["/etc/git config", "/etc/\"gitconfig", "/etc/../shadow"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"mountPath":"/s"}}]}}"#,
+                r#"{{"image":"x:1","filesets":[{{"hostPath":{},"guestPath":"/s"}}]}}"#,
                 serde_json::to_string(source).unwrap()
             );
             let err = parse(&def_json(&spec)).unwrap_err();
@@ -1608,22 +1608,22 @@ mod tests {
     }
 
     #[test]
-    fn a_host_path_mount_path_naming_a_directory_is_refused() {
+    fn a_host_path_guest_path_naming_a_directory_is_refused() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/home/agent/"}]}"#,
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","guestPath":"/home/agent/"}]}"#,
         ))
         .unwrap_err();
         assert!(
             format!("{err:#}").contains("names a guest file"),
-            "a hostPath fileset copies one file to one guest path, so a directory mountPath has no meaning: {err:#}"
+            "a hostPath fileset copies one file to one guest path, so a directory guestPath has no meaning: {err:#}"
         );
     }
 
     #[test]
     fn optional_is_refused_on_a_fileset_without_a_host_path() {
         for entry in [
-            r#"{"path":"./skills","mountPath":"/s","optional":true}"#,
-            r#"{"inline":{"settings.json":"{}"},"mountPath":"/s","optional":true}"#,
+            r#"{"path":"./skills","guestPath":"/s","optional":true}"#,
+            r#"{"inline":{"settings.json":"{}"},"guestPath":"/s","optional":true}"#,
         ] {
             let spec = format!(r#"{{"image":"x:1","filesets":[{entry}]}}"#);
             let err = parse(&def_json(&spec)).unwrap_err();
@@ -1637,11 +1637,11 @@ mod tests {
     #[test]
     fn a_host_path_fileset_still_collides_with_another_mount_target() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"hostPath":"~/.gitconfig","mountPath":"/s"}]}"#,
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"hostPath":"~/.gitconfig","guestPath":"/s"}]}"#,
         ))
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("duplicate mount target /s"),
+            format!("{err:#}").contains("duplicate guest path /s"),
             "got: {err:#}"
         );
     }
@@ -1656,7 +1656,7 @@ mod tests {
             "nested/.env.local",
         ] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"inline":{{"{path}":"x"}},"mountPath":"/s"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"inline":{{"{path}":"x"}},"guestPath":"/s"}}]}}"#
             );
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(format!("{err:#}").contains(path), "{path}: got {err:#}");
@@ -1667,7 +1667,7 @@ mod tests {
     fn parse_enforces_the_inline_path_length_cap() {
         let long_path = "a/".repeat(MAX_INLINE_PATH_BYTES / 2) + "f";
         let spec = format!(
-            r#"{{"image":"x:1","filesets":[{{"inline":{{"{long_path}":"x"}},"mountPath":"/s"}}]}}"#
+            r#"{{"image":"x:1","filesets":[{{"inline":{{"{long_path}":"x"}},"guestPath":"/s"}}]}}"#
         );
         let err = parse(&def_json(&spec)).unwrap_err();
         assert!(
@@ -1683,7 +1683,7 @@ mod tests {
             "image": "x:1",
             "filesets": [{
                 "inline": {"settings.json": accepted},
-                "mountPath": "/s"
+                "guestPath": "/s"
             }]
         });
         parse(&def_json(&spec.to_string())).unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
             "image": "x:1",
             "filesets": [{
                 "inline": {"settings.json": oversized},
-                "mountPath": "/s"
+                "guestPath": "/s"
             }]
         });
         let err = parse(&def_json(&spec.to_string())).unwrap_err();
@@ -1711,7 +1711,7 @@ mod tests {
             .collect();
         let spec = serde_json::json!({
             "image": "x:1",
-            "filesets": [{"inline": at_cap, "mountPath": "/s"}]
+            "filesets": [{"inline": at_cap, "guestPath": "/s"}]
         });
         parse(&def_json(&spec.to_string())).unwrap();
 
@@ -1721,7 +1721,7 @@ mod tests {
             .collect();
         let spec = serde_json::json!({
             "image": "x:1",
-            "filesets": [{"inline": over_cap, "mountPath": "/s"}]
+            "filesets": [{"inline": over_cap, "guestPath": "/s"}]
         });
         let err = parse(&def_json(&spec.to_string())).unwrap_err();
         let message = format!("{err:#}");
@@ -1736,7 +1736,7 @@ mod tests {
             .collect();
         let spec = serde_json::json!({
             "image": "x:1",
-            "filesets": [{"inline": at_cap, "mountPath": "/s"}]
+            "filesets": [{"inline": at_cap, "guestPath": "/s"}]
         });
         parse(&def_json(&spec.to_string())).unwrap();
 
@@ -1745,7 +1745,7 @@ mod tests {
             .collect();
         let spec = serde_json::json!({
             "image": "x:1",
-            "filesets": [{"inline": over_cap, "mountPath": "/s"}]
+            "filesets": [{"inline": over_cap, "guestPath": "/s"}]
         });
         let err = parse(&def_json(&spec.to_string())).unwrap_err();
         let message = format!("{err:#}");
@@ -1757,7 +1757,7 @@ mod tests {
     #[test]
     fn parse_defaults_fileset_owner_to_workload_so_seeded_state_is_rewritable() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/home/sandbox"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./seed","guestPath":"/home/sandbox"}]}"#,
         ))
         .unwrap();
         assert_eq!(def.spec.filesets[0].owner, FilesetOwner::Workload);
@@ -1766,7 +1766,7 @@ mod tests {
     #[test]
     fn parse_reads_an_explicit_root_owner_that_pins_shipped_inputs() {
         let def = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/opt/skills","owner":"root"}]}"#,
         ))
         .unwrap();
         assert_eq!(def.spec.filesets[0].owner, FilesetOwner::Root);
@@ -1775,7 +1775,7 @@ mod tests {
     #[test]
     fn parse_rejects_an_unknown_fileset_owner() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/s","owner":"nobody"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./seed","guestPath":"/s","owner":"nobody"}]}"#,
         ))
         .unwrap_err();
         assert!(
@@ -1788,7 +1788,7 @@ mod tests {
     fn parse_rejects_a_fileset_mounted_into_the_lens_runtime_namespace() {
         for mount in ["/", "/./", "/.lens", "/.lens/", "/.lens/bin"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"path":"./seed","mountPath":"{mount}"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"path":"./seed","guestPath":"{mount}"}}]}}"#
             );
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
@@ -1801,7 +1801,7 @@ mod tests {
     #[test]
     fn parse_rejects_a_fileset_naming_no_source() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"mountPath":"/s"}]}"#,
+            r#"{"image":"x:1","filesets":[{"guestPath":"/s"}]}"#,
         ))
         .unwrap_err();
         assert!(
@@ -1811,38 +1811,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_a_fileset_mount_path_that_smuggles_a_control_char() {
+    fn parse_rejects_a_fileset_guest_path_that_smuggles_a_control_char() {
         let result = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./seed","mountPath":"/.lens\n/x"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./seed","guestPath":"/.lens\n/x"}]}"#,
         ));
         assert!(
             result.is_err(),
-            "a mountPath of `/.lens\\n/x` slips past overlaps_runtime_namespace (first segment `.lens\\n` != `.lens`) and injects a `/x`-rooted line into the workload-owned chown manifest; it must be refused"
+            "a guestPath of `/.lens\\n/x` slips past overlaps_runtime_namespace (first segment `.lens\\n` != `.lens`) and injects a `/x`-rooted line into the workload-owned chown manifest; it must be refused"
         );
     }
 
     #[test]
-    fn parse_rejects_a_relative_or_traversing_fileset_mount_path() {
+    fn parse_rejects_a_relative_or_traversing_fileset_guest_path() {
         for mount in ["skills", "/root/../etc"] {
             let spec = format!(
-                r#"{{"image":"x:1","filesets":[{{"path":"./skills","mountPath":"{mount}"}}]}}"#
+                r#"{{"image":"x:1","filesets":[{{"path":"./skills","guestPath":"{mount}"}}]}}"#
             );
             let err = parse(&def_json(&spec)).unwrap_err();
             assert!(
-                format!("{err:#}").contains("fileset mountPath"),
+                format!("{err:#}").contains("fileset guestPath"),
                 "got: {err:#}"
             );
         }
     }
 
     #[test]
-    fn parse_rejects_duplicate_fileset_mount_paths() {
+    fn parse_rejects_duplicate_fileset_guest_paths() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"./a","mountPath":"/s"},{"path":"./b","mountPath":"/s"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./a","guestPath":"/s"},{"path":"./b","guestPath":"/s"}]}"#,
         ))
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("duplicate mount target /s"),
+            format!("{err:#}").contains("duplicate guest path /s"),
             "got: {err:#}"
         );
     }
@@ -1850,11 +1850,11 @@ mod tests {
     #[test]
     fn parse_rejects_a_fileset_colliding_with_a_volume_target() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"path":"./a","mountPath":"/s"}]}"#,
+            r#"{"image":"x:1","volumes":[{"name":"data","target":"/s"}],"filesets":[{"path":"./a","guestPath":"/s"}]}"#,
         ))
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("duplicate mount target /s"),
+            format!("{err:#}").contains("duplicate guest path /s"),
             "got: {err:#}"
         );
     }
@@ -1862,7 +1862,7 @@ mod tests {
     #[test]
     fn parse_rejects_an_empty_fileset_source() {
         let err = parse(&def_json(
-            r#"{"image":"x:1","filesets":[{"path":"","mountPath":"/s"}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"","guestPath":"/s"}]}"#,
         ))
         .unwrap_err();
         assert!(
@@ -2041,7 +2041,7 @@ mod tests {
             r#"{"image":"x:1","egress":{"http":[{"match":"api.example.test","verdict":"allow","rules":[{"path":"/v1","unexpected":true}]}]}}"#,
             r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-fake","injectons":[]}]}"#,
             r#"{"image":"x:1","volumes":[{"name":"data","target":"/data","readOlny":true}]}"#,
-            r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills","unexpected":true}]}"#,
+            r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/skills","unexpected":true}]}"#,
             r#"{"image":"x:1","ports":[{"container":3003,"unexpected":true}]}"#,
         ];
         for spec in specs {

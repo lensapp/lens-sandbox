@@ -218,7 +218,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
             inline: false,
             host_path: None,
             optional: false,
-            mount_path: mount,
+            guest_path: mount,
             owner: lns_ipc::SandboxFilesetOwner::Workload,
         }],
         connectors: Vec::new(),

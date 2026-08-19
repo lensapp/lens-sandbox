@@ -36,7 +36,7 @@ fn fileset(host_path: &str, optional: bool) -> FilesetSummary {
     let suffix = if optional { " (optional)" } else { "" };
     FilesetSummary {
         source: format!("host file {host_path}{suffix}"),
-        mount_path: format!("/home/agent/{}", host_path.trim_start_matches("~/")),
+        guest_path: format!("/home/agent/{}", host_path.trim_start_matches("~/")),
         owner: "workload".into(),
         host_path: Some(host_path.to_string()),
         optional,
@@ -70,7 +70,7 @@ fn pulled_declares_no_host_file(world: &mut BehaviourWorld, reference: String) {
     world.host_paths.reference = Some(reference);
     world.host_paths.filesets = vec![FilesetSummary {
         source: "./skills".into(),
-        mount_path: "/home/agent/.agent/skills".into(),
+        guest_path: "/home/agent/.agent/skills".into(),
         owner: "root".into(),
         host_path: None,
         optional: false,

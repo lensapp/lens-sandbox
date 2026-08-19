@@ -44,7 +44,7 @@ Feature: a sandbox's declared filesets are planned into the launch
     When the local definition is planned
     Then the plan ships no chown manifest
 
-  Scenario: planning an inline fileset writes its exact content beneath the mount path
+  Scenario: planning an inline fileset writes its exact content beneath the guest path
     Given a sandbox declaring inline file ".claude/settings.json" with content `{"enabled":true}` at "/home/sandbox"
     When the sandbox is planned
     Then the plan carries an inline guest-write spec for "/home/sandbox/.claude/settings.json" with content `{"enabled":true}`
@@ -63,7 +63,7 @@ Feature: a sandbox's declared filesets are planned into the launch
     When the sandbox is planned
     Then the plan accepts the inline fileset with nothing to pull
 
-  Scenario: a hostPath fileset lands at its mountPath as a host-file write
+  Scenario: a hostPath fileset lands at its guestPath as a host-file write
     Given a definition declaring a hostPath fileset "/etc/gitconfig" at "/home/agent/.gitconfig"
     And the host file "/etc/gitconfig" exists with mode 0644
     When the host files are planned

@@ -90,7 +90,7 @@ pub struct PackedDirectory {
     pub files: Vec<lns_artifact::build::FileEntry>,
 }
 
-/// Read every `path` fileset the document declares, in declaration order, so each becomes a layer of the artifact this document configures (`docs/sandbox-spec.md` §6). The entry itself publishes untouched: it keeps its `path`, `mountPath` and `owner`.
+/// Read every `path` fileset the document declares, in declaration order, so each becomes a layer of the artifact this document configures (`docs/sandbox-spec.md` §6). The entry itself publishes untouched: it keeps its `path`, `guestPath` and `owner`.
 pub fn pack_path_filesets<F: Fs + ?Sized>(
     fs: &F,
     cwd: &Path,
@@ -379,7 +379,7 @@ mod tests {
     const VALID: &[u8] =
         br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#;
 
-    const WITH_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]}}"#;
+    const WITH_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","filesets":[{"path":"./skills","guestPath":"/root/.agent/skills"}]}}"#;
 
     fn cwd() -> &'static Path {
         Path::new("/work")
@@ -391,7 +391,7 @@ mod tests {
             .map(|(name, _)| name.to_string())
             .expect("the snapshot carries at least one unsupported-backend entry");
         let fileset = if with_fileset {
-            r#","filesets":[{"path":"./skills","mountPath":"/root/.agent/skills"}]"#
+            r#","filesets":[{"path":"./skills","guestPath":"/root/.agent/skills"}]"#
         } else {
             ""
         };
@@ -497,7 +497,7 @@ mod tests {
             entry["path"], "./skills",
             "the published entry keeps its path; the content is now part of this artifact's digest (docs/sandbox-spec.md §6)"
         );
-        assert_eq!(entry["mountPath"], "/root/.agent/skills");
+        assert_eq!(entry["guestPath"], "/root/.agent/skills");
         assert!(
             entry.get("ref").is_none(),
             "a fileset is not a separate artifact, so nothing in the published entry names one: {entry}"
@@ -516,7 +516,7 @@ mod tests {
             ("/work/skills/prompts.md", "p"),
             ("/work/hooks/run.sh", "h"),
         ]);
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"},{"inline":{"a.md":"x"},"mountPath":"/notes"},{"path":"./hooks","mountPath":"/opt/hooks"}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/opt/skills","owner":"root"},{"inline":{"a.md":"x"},"guestPath":"/notes"},{"path":"./hooks","guestPath":"/opt/hooks"}]}}"#;
         let packed = pack_path_filesets(&fs, cwd(), doc).unwrap();
         assert_eq!(
             packed
@@ -531,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn push_keeps_an_explicit_root_owner_on_the_published_entry() {
         let producer = FakeProducer::ok();
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/opt/skills","owner":"root"}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/opt/skills","owner":"root"}]}}"#;
         let mut out = Vec::new();
         push(
             &fs_with_skills(),
