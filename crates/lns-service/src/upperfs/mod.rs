@@ -12,19 +12,20 @@ pub use plan::Plan;
 pub use real::provision;
 pub use writer::write_ext4;
 
-pub const DEFAULT_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const DEFAULT_SIZE_BYTES: u64 = lns_artifact::resources::DEFAULT_VM_SIZE.disk_bytes;
 
 fn provision_image(
     root: &std::path::Path,
     run_id: &str,
     uuid: [u8; 16],
     mkfs_time: u32,
+    size_bytes: u64,
     write: impl FnOnce(&Plan, &std::path::Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<std::path::PathBuf> {
     let run_dir = root.join("runs").join(run_id);
     std::fs::create_dir_all(&run_dir)?;
     let path = run_dir.join("upper.img");
-    let plan = Plan::new(DEFAULT_SIZE_BYTES, uuid, "lns-upper", mkfs_time)?;
+    let plan = Plan::new(size_bytes, uuid, "lns-upper", mkfs_time)?;
     write(&plan, &path)?;
     Ok(path)
 }
@@ -38,10 +39,17 @@ mod tests {
     fn provision_image_creates_run_dir_and_writes_through() {
         let root = tempfile::TempDir::new().unwrap();
         let wrote = Cell::new(false);
-        let path = provision_image(root.path(), "aa07", [0xCD; 16], 99, |_plan, p| {
-            wrote.set(true);
-            std::fs::write(p, b"img").map_err(Into::into)
-        })
+        let path = provision_image(
+            root.path(),
+            "aa07",
+            [0xCD; 16],
+            99,
+            DEFAULT_SIZE_BYTES,
+            |_plan, p| {
+                wrote.set(true);
+                std::fs::write(p, b"img").map_err(Into::into)
+            },
+        )
         .unwrap();
         assert!(wrote.get(), "writer was invoked");
         assert_eq!(
@@ -52,11 +60,28 @@ mod tests {
     }
 
     #[test]
+    fn provision_image_sizes_the_disk_the_run_asked_for() {
+        let root = tempfile::TempDir::new().unwrap();
+        let sized = Cell::new(0u64);
+        provision_image(root.path(), "aa08", [0; 16], 0, 40 << 30, |plan, _| {
+            sized.set(plan.layout.image_size_bytes());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sized.get(), 40 << 30);
+    }
+
+    #[test]
     fn provision_image_propagates_writer_failure() {
         let root = tempfile::TempDir::new().unwrap();
-        let err = provision_image(root.path(), "aa01", [0; 16], 0, |_, _| {
-            Err(anyhow::anyhow!("write boom"))
-        })
+        let err = provision_image(
+            root.path(),
+            "aa01",
+            [0; 16],
+            0,
+            DEFAULT_SIZE_BYTES,
+            |_, _| Err(anyhow::anyhow!("write boom")),
+        )
         .unwrap_err();
         assert!(err.to_string().contains("write boom"));
     }
@@ -65,7 +90,15 @@ mod tests {
     fn provision_image_errors_when_run_dir_cannot_be_created() {
         // A regular file as the cache root makes create_dir_all under it fail.
         let file = tempfile::NamedTempFile::new().unwrap();
-        let err = provision_image(file.path(), "aa01", [0; 16], 0, |_, _| Ok(())).unwrap_err();
+        let err = provision_image(
+            file.path(),
+            "aa01",
+            [0; 16],
+            0,
+            DEFAULT_SIZE_BYTES,
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
         assert!(
             err.downcast_ref::<std::io::Error>().is_some(),
             "io error from create_dir_all: {err}"

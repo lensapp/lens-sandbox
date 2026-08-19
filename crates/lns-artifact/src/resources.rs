@@ -6,11 +6,13 @@ use crate::spec::{Quantity, Resources};
 pub struct VmSize {
     pub cpus: u8,
     pub mem_mib: usize,
+    pub disk_bytes: u64,
 }
 
 pub const DEFAULT_VM_SIZE: VmSize = VmSize {
     cpus: 1,
     mem_mib: 512,
+    disk_bytes: 10 * 1024 * 1024 * 1024,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub struct ResourceOverrides {
 pub struct DeclaredSize {
     pub cpus: Option<u8>,
     pub mem_mib: Option<usize>,
+    pub disk_bytes: Option<u64>,
 }
 
 /// The size a run boots with, from the same expression wherever it is asked — a flag beats the definition, which beats the built-in default.
@@ -38,6 +41,7 @@ pub fn resolve_declared(
             .mem_mib
             .or(declared.mem_mib)
             .unwrap_or(defaults.mem_mib),
+        disk_bytes: declared.disk_bytes.unwrap_or(defaults.disk_bytes),
     }
 }
 
@@ -61,16 +65,23 @@ impl DeclaredSize {
         let mem_mib = read(resources.and_then(|r| r.memory.as_ref()), |q| {
             quantity_to_mib(q, host)
         });
+        let disk_bytes = read(resources.and_then(|r| r.disk.as_ref()), |q| {
+            crate::disk::parse_bytes(q).ok()
+        });
         if cpus.asked_and_refused {
             ignored.push("cpu");
         }
         if mem_mib.asked_and_refused {
             ignored.push("memory");
         }
+        if disk_bytes.asked_and_refused {
+            ignored.push("disk");
+        }
         (
             Self {
                 cpus: cpus.value,
                 mem_mib: mem_mib.value,
+                disk_bytes: disk_bytes.value,
             },
             ignored,
         )
@@ -175,16 +186,51 @@ mod tests {
     }
 
     #[test]
+    fn a_definition_sizes_the_disk_the_run_writes_to() {
+        let res = Resources {
+            cpu: None,
+            memory: None,
+            disk: Some(Quantity::Text("40Gi".into())),
+        };
+        let size = resolve(Some(&res), &ResourceOverrides::default(), DEFAULT_VM_SIZE);
+        assert_eq!(size.disk_bytes, 40 << 30);
+    }
+
+    #[test]
+    fn a_silent_definition_gets_the_default_disk() {
+        let size = resolve(None, &ResourceOverrides::default(), DEFAULT_VM_SIZE);
+        assert_eq!(size.disk_bytes, 10 << 30);
+    }
+
+    #[test]
+    fn a_disk_outside_the_legal_range_is_named_and_replaced_by_the_default() {
+        let res = Resources {
+            cpu: None,
+            memory: None,
+            disk: Some(Quantity::Text("15Mi".into())),
+        };
+        let (declared, ignored) = DeclaredSize::from_resources(Some(&res), None);
+        assert_eq!(declared.disk_bytes, None);
+        assert_eq!(ignored, vec!["disk"]);
+        assert_eq!(
+            resolve_declared(declared, &ResourceOverrides::default(), DEFAULT_VM_SIZE).disk_bytes,
+            10 << 30
+        );
+    }
+
+    #[test]
     fn a_flag_outranks_the_definition_which_outranks_the_default() {
         let declared = DeclaredSize {
             cpus: Some(3),
             mem_mib: Some(6144),
+            disk_bytes: None,
         };
         assert_eq!(
             resolve_declared(declared, &ResourceOverrides::default(), DEFAULT_VM_SIZE),
             VmSize {
                 cpus: 3,
-                mem_mib: 6144
+                mem_mib: 6144,
+                disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
             }
         );
         assert_eq!(
@@ -198,7 +244,8 @@ mod tests {
             ),
             VmSize {
                 cpus: 2,
-                mem_mib: 6144
+                mem_mib: 6144,
+                disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
             },
             "a flag must win without dragging the other field down to the default"
         );
@@ -224,7 +271,8 @@ mod tests {
             size,
             VmSize {
                 cpus: 2,
-                mem_mib: 2048
+                mem_mib: 2048,
+                disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
             }
         );
     }
@@ -241,7 +289,8 @@ mod tests {
             size,
             VmSize {
                 cpus: 2,
-                mem_mib: 768
+                mem_mib: 768,
+                disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
             }
         );
 
@@ -391,7 +440,8 @@ mod tests {
             declared,
             DeclaredSize {
                 cpus: Some(8),
-                mem_mib: Some(13107)
+                mem_mib: Some(13107),
+                disk_bytes: None,
             }
         );
         assert!(ignored.is_empty());
@@ -414,7 +464,8 @@ mod tests {
             declared,
             DeclaredSize {
                 cpus: Some(DEFAULT_VM_SIZE.cpus),
-                mem_mib: Some(DEFAULT_VM_SIZE.mem_mib)
+                mem_mib: Some(DEFAULT_VM_SIZE.mem_mib),
+                disk_bytes: None,
             },
             "a share is a request, and must never leave the guest too small to boot"
         );
@@ -496,7 +547,8 @@ mod tests {
             declared,
             DeclaredSize {
                 cpus: Some(2),
-                mem_mib: Some(2048)
+                mem_mib: Some(2048),
+                disk_bytes: None,
             }
         );
         assert!(ignored.is_empty());

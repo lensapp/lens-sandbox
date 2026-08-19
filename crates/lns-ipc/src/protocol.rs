@@ -400,6 +400,8 @@ pub struct SandboxView {
     pub cpus: Option<u8>,
     #[serde(default)]
     pub mem_mib: Option<usize>,
+    #[serde(default)]
+    pub disk_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1589,6 +1591,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: Some(3),
             mem_mib: Some(6144),
+            disk_bytes: Some(40 << 30),
         };
         let response = Response::ImageInspected {
             inspection: ArtifactInspection::Sandbox(Box::new(view)),

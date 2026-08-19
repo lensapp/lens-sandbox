@@ -126,6 +126,7 @@ pub(crate) fn project_inspection(
                     digest,
                     cpus: declared_size.cpus,
                     mem_mib: declared_size.mem_mib,
+                    disk_bytes: declared_size.disk_bytes,
                     image: resolved.base_image,
                     workdir: def.spec.workdir.clone(),
                     user: def.spec.user.clone(),
@@ -285,6 +286,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus,
             mem_mib,
+            disk_bytes: None,
         }))
     }
 
@@ -308,6 +310,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            disk_bytes: None,
         }))
     }
 
@@ -331,6 +334,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            disk_bytes: None,
         }))
     }
 
@@ -461,6 +465,21 @@ mod tests {
             .unwrap(),
             bare_sandbox_view(Some(3), Some(6144), None),
             "without this the summary of a pulled run falls back to the default size"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_projects_the_disk_it_declared_so_the_disclosure_can_name_it() {
+        let ArtifactInspection::Sandbox(view) = project_sandbox(
+            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","resources":{"disk":"40Gi"}}}"#,
+        )
+        .unwrap() else {
+            panic!("a sandbox document projects a sandbox view");
+        };
+        assert_eq!(
+            view.disk_bytes,
+            Some(40 << 30),
+            "without this a pulled run discloses the default disk while booting the declared one"
         );
     }
 
@@ -615,6 +634,7 @@ mod tests {
                 ],
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             }))
         );
     }
@@ -654,6 +674,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             }))
         );
     }
@@ -685,6 +706,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             }))
         );
     }
@@ -716,6 +738,7 @@ mod tests {
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             }))
         );
     }

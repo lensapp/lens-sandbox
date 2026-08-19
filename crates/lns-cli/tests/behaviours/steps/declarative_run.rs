@@ -100,6 +100,11 @@ fn declares_resources(world: &mut BehaviourWorld) {
     install_definition(world, "  resources:\n    cpu: 3\n    memory: 6Gi\n");
 }
 
+#[given(regex = r"^an lns.yaml declaring a 40Gi disk$")]
+fn declares_a_disk(world: &mut BehaviourWorld) {
+    install_definition(world, "  resources:\n    disk: 40Gi\n");
+}
+
 #[given(regex = r"^an lns.yaml declaring 80% of this host$")]
 fn declares_a_share(world: &mut BehaviourWorld) {
     install_definition(world, "  resources:\n    cpu: 80%\n    memory: 80%\n");
@@ -213,6 +218,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         policy_flags: Vec::new(),
         cpus: declared.cpus,
         mem_mib: declared.mem_mib,
+        disk_bytes: declared.disk_bytes,
     }
 }
 

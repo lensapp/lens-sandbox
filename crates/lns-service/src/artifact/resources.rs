@@ -105,7 +105,8 @@ mod tests {
                 ),
                 VmSize {
                     cpus: 3,
-                    mem_mib: 6144
+                    mem_mib: 6144,
+                    disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
                 }
             );
         });

@@ -92,7 +92,7 @@ which policy applies:
 ```text
 lns run
   Image:     alpine:3.20 (resolving…)
-  Resources: 1 vCPU · 512 MiB
+  Resources: 1 vCPU · 512 MiB · 10 GiB disk
   Flags:     -i -t
   Ports:     (none)
   Policy:

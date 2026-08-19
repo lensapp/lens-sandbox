@@ -286,7 +286,14 @@ pub fn format_summary(
     if let Some(dir) = &args.workdir {
         writeln!(s, "  Workdir:   {dir}").unwrap();
     }
-    writeln!(s, "  Resources: {} vCPU · {} MiB", size.cpus, size.mem_mib).unwrap();
+    writeln!(
+        s,
+        "  Resources: {} vCPU · {} MiB · {} disk",
+        size.cpus,
+        size.mem_mib,
+        crate::volume::format_size(size.disk_bytes)
+    )
+    .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
     if !args.declared_unpublished.is_empty() {
@@ -700,6 +707,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
+            disk_bytes: None,
         };
 
         assert_eq!(
@@ -1548,12 +1556,29 @@ mod tests {
             VmSize {
                 cpus: 3,
                 mem_mib: 6144,
+                disk_bytes: 40 << 30,
             },
             &Policy::default(),
             Path::new("/x/lns-local-mixin.yaml"),
             &PolicySource::Found,
         );
         assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
+    }
+
+    #[test]
+    fn resources_line_discloses_the_disk_the_run_gets() {
+        let s = format_summary(
+            &run_args(Some("ubuntu")),
+            VmSize {
+                cpus: 1,
+                mem_mib: 512,
+                disk_bytes: 40 << 30,
+            },
+            &Policy::default(),
+            Path::new("/x/lns-local-mixin.yaml"),
+            &PolicySource::Found,
+        );
+        assert!(s.contains("40 GiB disk"), "resources line wrong: {s}");
     }
 
     #[test]
