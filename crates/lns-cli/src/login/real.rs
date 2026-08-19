@@ -72,7 +72,11 @@ impl WebLoginFlow for RealWebLoginFlow {
         out: &'a mut dyn std::io::Write,
     ) -> LocalBoxFuture<'a, Result<WebLoginOutcome>> {
         Box::pin(async move {
-            let client = super::RealDeviceAuthClient::for_registry(registry)?;
+            let client = super::RealDeviceAuthClient::for_registry(
+                registry,
+                env!("CARGO_PKG_VERSION"),
+                &crate::platform::detect(),
+            )?;
             let flow = super::WebLogin::new(client, RealBrowserOpener);
             flow.login(registry, out).await
         })
