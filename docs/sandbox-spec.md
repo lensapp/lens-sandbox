@@ -284,7 +284,7 @@ tool, guest path, or port repeats.
 | [`workdir`](#312-command-and-workdir) | optional | Absolute guest working directory. |
 | [`user`](#313-user) | optional | The user the workload runs as. |
 | [`env`](#314-env) | optional | Non-secret environment variables. |
-| [`resources`](#315-resources) | optional | vCPUs and memory, absolute or as a share of the host. |
+| [`resources`](#315-resources) | optional | vCPUs, memory, and the sandbox's own disk. |
 | [`egress`](#316-egress) | optional | Where the workload may reach. |
 | [`credentials`](#317-credentials) | optional | The secrets the workload needs and the domains they may reach. |
 | [`tools`](#318-tools) | optional | Portable `name@version` toolchain declarations. |
@@ -368,21 +368,46 @@ credential-shaped placeholder — see [§3.1.7](#317-credentials) and
 
 #### 3.1.5 `resources`
 
-A size is absolute or a **share of the host**.
+A `cpu` or `memory` size is absolute or a **share of the host**. A `disk` size is
+absolute only.
 
 ```yaml
 resources:
   cpu: 80%        # or 4, or "500m"
   memory: 50%     # or 512Mi
+  disk: 40Gi
 ```
 
 | Field | Type | Rules |
 |---|---|---|
 | `cpu` | int \| string | optional. An integer MUST be ≥ 1. A string is a positive count with an optional suffix (`500m`) or a share (`80%`). |
-| `memory` | int \| string | optional. An integer MUST be ≥ 1. A string is a byte size (`512Mi`, `2Gi`) or a share (`50%`). |
+| `memory` | int \| string | optional. An integer is a MiB count, and MUST be ≥ 1. A string is a byte size (`512Mi`, `2Gi`) or a share (`50%`). |
+| `disk` | int \| string | optional. The sandbox's own writable disk. An integer is a MiB count. A string is a byte size (`40Gi`). A share is REFUSED. Default `10Gi`. |
+
+**`disk` — the sandbox's own disk, not a volume.** Everything the workload
+writes outside a volume or a bind lands here, and the service discards it when
+the run ends. A named volume sizes itself with
+[`volumes[].size`](#3110-volumes) and outlives the run.
+
+`disk` takes no share. A share of the host's total cores or RAM names a size the
+host can honour, because nothing keeps them spent — a run returns them when it
+ends. Disk bytes stay spent. Total disk is already committed — to images, to
+volumes, and to the user's own files — so "80% of the disk" names a size the host
+does not have. A disk is also sparse, so an author gains nothing by asking for a
+share of a machine they cannot see.
+
+| Rule | Detail |
+|---|---|
+| Minimum | `16Mi`. A smaller disk cannot hold its own filesystem metadata. The service REFUSES it rather than lifting it: unlike a share, an absolute size is a statement, not a request. |
+| Ceiling | Less than `16Ti`. The guest filesystem addresses its blocks in 32 bits, and one block is 4 KiB. |
+| Sparse | The disk costs what the workload writes, not what the document declares. A large disk is cheap. |
+
+Neither a per-run flag nor a mixin can change `disk`: a mixin carries no
+`resources` ([§3.3](#33-kind-mixin)), and there is no `--disk`. The document
+that owns the workload owns the size of the disk it writes to.
 
 A share lets one published artifact size itself sensibly on whatever machine
-runs it. Its rules:
+runs it. It applies to `cpu` and `memory` only. Its rules:
 
 | Rule | Detail |
 |---|---|
@@ -515,6 +540,7 @@ volumes:
     name: cache
     target: /home/agent/.cache
     readOnly: false
+    size: 100Gi
 ```
 
 | Field | Type | Rules |
@@ -526,6 +552,38 @@ volumes:
 | `readOnly` | bool | optional. Default `false`. |
 | `exclude` | list<string> | optional. Bind only. Subpaths of `source` the guest MUST NOT see. |
 | `optional` | bool | optional. Default `false`. Bind only. A `source` the running machine does not have is skipped instead of refusing the run. |
+| `size` | int \| string | optional. Named volume only; REJECTED on a bind. An integer is a MiB count. A string is a byte size (`100Gi`). A share is REFUSED. Default `10Gi`. |
+
+**`size` — a floor, not a fixed size.** A named volume outlives the run that
+made it, so `size` states the capacity the volume MUST have before the run
+starts, not the capacity it was created with:
+
+| The volume | What the service does |
+|---|---|
+| Does not exist | Creates it at `size`. |
+| Is smaller than `size` | Grows it in place to `size`, and keeps its contents. |
+| Is `size` or larger | Nothing. The floor is already met. |
+
+The service never shrinks a volume. A shrink must choose which data to drop, and
+no document may make that choice on a machine it cannot see. Lowering the number
+is therefore not an error and not an instruction — the volume already satisfies
+the smaller floor. A developer who wants the space back removes the volume
+(`lns volume rm`) and lets the next run create it at the declared size.
+
+This is why the floor is a floor and not an equality. `size` defaults to `10Gi`,
+so a document that never mentions a size still declares one. If a smaller
+declaration refused the run, every such document would refuse every volume that
+had ever grown.
+
+One volume name may be mounted at more than one `target`, in one document or
+across merged sources, and each entry may declare its own `size`. **The volume's
+floor is the largest `size` any surviving entry declares.** Each entry states
+what that mount needs; the volume satisfies all of them at once.
+
+`size` takes no share, for the same reason [`resources.disk`](#315-resources)
+does not, and its minimum (`16Mi`) and ceiling (less than `16Ti`) are the same.
+A volume is sparse: it costs what the workload wrote, not what the document
+declared.
 
 The three legal shapes:
 
@@ -945,7 +1003,7 @@ What "wins" means per block:
 | `egress` | Union of entries, later sources placed ahead of earlier ones, so the latest entry matching a destination is the one that decides ([§4.2](#42-the-egress-definition)). |
 | `credentials` | Union by `envVar`. A later source redefining one replaces it whole — its `placeholder` and `injections` together, never half of each. |
 | `tools` | Union by name. The last version declared wins. |
-| `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace. The last source to claim a path owns it. |
+| `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace. The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
 | `ports` | Union by `container`. The last mapping wins. |
 
 Uniqueness is a **per-document** rule: one document may not name the same
@@ -1153,7 +1211,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   character, or quote.
 - **env**: every key is a legal environment-variable name.
 - **resources**: an absolute `cpu` is a positive count and an absolute `memory`
-  a parsable byte size; a share is a whole 1–100 with a `%` suffix.
+  a parsable byte size; a share is a whole 1–100 with a `%` suffix; `disk` is a
+  parsable byte size, at least `16Mi` and less than `16Ti`, and is not a share.
 - **egress**: every entry sets `match` and a `verdict` of `allow` or `deny`; an
   `http` entry declaring `rules` terminates TLS; every `binaries` filter is
   non-empty and names kernel-resolvable paths.
@@ -1166,7 +1225,8 @@ Offline validation (`lns sandbox validate`, and every load path including
   `type`/`source`/`name` combination is one of the three legal shapes; volume
   names use the allowed charset; no duplicate `target`; `exclude` appears only on a
   bind and every entry is a relative path with no empty, `.`, or `..` segment;
-  `optional` appears only on a bind.
+  `optional` appears only on a bind; `size` appears only on a named volume and is
+  a parsable byte size, at least `16Mi` and less than `16Ti`, and is not a share.
 - **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
   limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
   literal, and names one file; `optional` appears only on a `hostPath`;
