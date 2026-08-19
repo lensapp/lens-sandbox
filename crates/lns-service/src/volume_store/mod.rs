@@ -300,6 +300,11 @@ pub async fn remove_with<F: Fs>(
         bail!("no such volume: {name}");
     }
     fs.remove_file(&image_path).await?;
+    // A volume recreated under the same name must not inherit the marker that says an interrupted grow left the old one unclean.
+    let marker = image_path.with_extension("img.growing");
+    if fs.exists(&marker).await {
+        fs.remove_file(&marker).await?;
+    }
     Ok(())
 }
 
@@ -490,6 +495,18 @@ mod tests {
         assert_eq!(
             fs.created_images(),
             vec![PathBuf::from("/store/prism-data.img")]
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_volume_takes_the_marker_an_interrupted_grow_left_with_it() {
+        let fs = FakeFs::with(&["/store/prism-data.img", "/store/prism-data.img.growing"]);
+        remove_with(&fs, &reg(), Path::new("/store"), "prism-data")
+            .await
+            .unwrap();
+        assert!(
+            !fs.exists(Path::new("/store/prism-data.img.growing")).await,
+            "a volume recreated under this name would inherit a marker that excuses an unclean superblock it never made"
         );
     }
 

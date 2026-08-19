@@ -139,7 +139,7 @@ impl Superblock {
         b
     }
 
-    /// Reads back what a written image says about itself, refusing anything this writer did not produce rather than rewriting it on a guess.
+    /// Reads back what a written image says about itself, saying nothing about whether it may be written to.
     pub fn from_bytes(b: &[u8; 1024]) -> anyhow::Result<Self> {
         let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
         let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
@@ -168,22 +168,7 @@ impl Superblock {
 
         let feature_incompat = u32_at(0x60);
         let feature_ro_compat = u32_at(0x64);
-        anyhow::ensure!(
-            feature_incompat & !SB_FEATURE_INCOMPAT == 0,
-            "image sets incompatible features {:#010x} this writer cannot rewrite",
-            feature_incompat & !SB_FEATURE_INCOMPAT
-        );
-        anyhow::ensure!(
-            feature_ro_compat & !SB_FEATURE_RO_COMPAT == 0,
-            "image sets read-only features {:#010x} this writer cannot rewrite",
-            feature_ro_compat & !SB_FEATURE_RO_COMPAT
-        );
-
         let state = u16_at(0x3A);
-        anyhow::ensure!(
-            state == EXT2_VALID_FS,
-            "image was not unmounted cleanly; check it before resizing it, or a resize would erase the record of what it left unfinished"
-        );
 
         let inodes_count = u32_at(0x00);
         let blocks_count = u32_at(0x04);
@@ -238,6 +223,34 @@ impl Superblock {
             journal_inum: u32_at(0xE0),
             mkfs_time: u32_at(0x108),
         })
+    }
+
+    /// The features an in-place rewrite must be able to reproduce, checked whatever else is known about the image — `INCOMPAT_RECOVER` is one of them, so a guest's unreplayed journal is refused here.
+    pub fn ensure_rewritable_features(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.feature_incompat & FEATURE_INCOMPAT_RECOVER == 0,
+            "the volume's journal still holds writes this resize would overwrite; run the sandbox once to let the guest replay it, then ask for the larger size again"
+        );
+        let incompat = self.feature_incompat & !SB_FEATURE_INCOMPAT;
+        anyhow::ensure!(
+            incompat == 0,
+            "the volume sets features {incompat:#010x} this writer cannot rewrite"
+        );
+        let ro_compat = self.feature_ro_compat & !SB_FEATURE_RO_COMPAT;
+        anyhow::ensure!(
+            ro_compat == 0,
+            "the volume sets read-only features {ro_compat:#010x} this writer cannot rewrite"
+        );
+        Ok(())
+    }
+
+    /// Whether the filesystem is settled enough to rewrite; only a writer needs this, so it is checked when there is something to write and not before.
+    pub fn ensure_unmounted_cleanly(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.state == EXT2_VALID_FS,
+            "the volume was not unmounted cleanly, so its journal still holds writes this resize would overwrite; run the sandbox once to let the guest replay it, then ask for the larger size again"
+        );
+        Ok(())
     }
 
     pub fn for_backup_group(&self, g: u16) -> Self {
@@ -479,24 +492,72 @@ mod tests {
         );
     }
 
+    fn parsed(mut edit: impl FnMut(&mut Superblock)) -> Superblock {
+        let mut sb = Superblock::for_fresh_image(&small_layout(), [0; 16], "t", 0);
+        edit(&mut sb);
+        Superblock::from_bytes(&sb.to_bytes()).expect("a parsable superblock")
+    }
+
+    /// The guest mounts a volume read-write, so a killed run leaves it exactly like this — reading one must still work, or the volume becomes unusable rather than merely unresizable.
     #[test]
-    fn a_superblock_with_features_this_writer_cannot_rewrite_is_refused_and_says_which() {
-        let incompat = doctored(|b| {
-            let set = SB_FEATURE_INCOMPAT | 0x0000_0080;
-            b[0x60..0x64].copy_from_slice(&set.to_le_bytes());
+    fn a_superblock_a_killed_run_left_behind_still_parses() {
+        let sb = parsed(|sb| {
+            sb.state = 0;
+            sb.feature_incompat |= 0x0000_0004;
         });
+        assert_eq!(sb.state, 0);
+        assert_eq!(sb.blocks_count, 8192, "its geometry is still readable");
+    }
+
+    #[test]
+    fn a_volume_a_killed_run_left_dirty_is_not_safe_to_rewrite_and_says_what_to_do() {
+        let err = parsed(|sb| sb.state = 0)
+            .ensure_unmounted_cleanly()
+            .expect_err("an unclean volume must not be rewritten");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("not unmounted cleanly") && rendered.contains("run the sandbox once"),
+            "the refusal has to tell the developer how to get their volume back: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_volume_with_features_this_writer_cannot_rewrite_is_refused_and_says_which() {
+        let incompat = parsed(|sb| sb.feature_incompat |= 0x0000_0080)
+            .ensure_rewritable_features()
+            .expect_err("an unknown incompatible feature must not be rewritten");
         assert!(
             format!("{incompat:#}").contains("0x00000080"),
             "the refusal has to name the feature bits it cannot handle: {incompat:#}"
         );
 
-        let ro_compat = doctored(|b| {
-            let set = SB_FEATURE_RO_COMPAT | 0x0000_0400;
-            b[0x64..0x68].copy_from_slice(&set.to_le_bytes());
-        });
+        let ro_compat = parsed(|sb| sb.feature_ro_compat |= 0x0000_0400)
+            .ensure_rewritable_features()
+            .expect_err("an unknown read-only feature must not be rewritten");
         assert!(
             format!("{ro_compat:#}").contains("0x00000400"),
             "the refusal has to name the read-only bits it cannot handle: {ro_compat:#}"
+        );
+    }
+
+    #[test]
+    fn a_clean_volume_this_writer_produced_is_safe_to_rewrite() {
+        let sb = parsed(|_| {});
+        sb.ensure_rewritable_features()
+            .expect("the writer's own fresh image must be growable");
+        sb.ensure_unmounted_cleanly()
+            .expect("the writer's own fresh image is settled");
+    }
+
+    /// A guest that was killed mid-write leaves this flag set, and its journal still holds transactions that would replay over anything a resize wrote.
+    #[test]
+    fn a_volume_whose_guest_journal_needs_replay_is_never_rewritable() {
+        let err = parsed(|sb| sb.feature_incompat |= 0x0000_0004)
+            .ensure_rewritable_features()
+            .expect_err("an unreplayed journal must not be rewritten, marker or no marker");
+        assert!(
+            format!("{err:#}").contains("run the sandbox once"),
+            "the developer's way out is the same as any other dirty volume, so say so: {err:#}"
         );
     }
 
