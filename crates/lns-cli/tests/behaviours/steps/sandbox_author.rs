@@ -108,7 +108,7 @@ fn fileset_yaml(entries: &str) -> String {
 fn lns_yaml_with_path_fileset(w: &mut BehaviourWorld, path: String, mount: String) {
     seed(
         w,
-        &fileset_yaml(&format!("    - path: {path}\n      mountPath: {mount}\n")),
+        &fileset_yaml(&format!("    - path: {path}\n      guestPath: {mount}\n")),
     );
 }
 
@@ -119,14 +119,14 @@ fn lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String, mount
     seed(
         w,
         &fileset_yaml(&format!(
-            "    - hostPath: {source}\n      mountPath: {mount}\n      optional: true\n"
+            "    - hostPath: {source}\n      guestPath: {mount}\n      optional: true\n"
         )),
     );
 }
 
 #[given("an lns.yaml declaring a fileset entry with no source")]
 fn lns_yaml_with_sourceless_fileset(w: &mut BehaviourWorld) {
-    seed(w, &fileset_yaml("    - mountPath: /root/.agent/skills\n"));
+    seed(w, &fileset_yaml("    - guestPath: /root/.agent/skills\n"));
 }
 
 #[given("an lns.yaml declaring a fileset entry that names another artifact by ref")]
@@ -134,7 +134,7 @@ fn lns_yaml_with_a_ref_fileset(w: &mut BehaviourWorld) {
     seed(
         w,
         &fileset_yaml(
-            "    - ref: registry.example.test/team/skills@sha256:abc\n      mountPath: /root/.agent/skills\n",
+            "    - ref: registry.example.test/team/skills@sha256:abc\n      guestPath: /root/.agent/skills\n",
         ),
     );
 }
@@ -144,7 +144,7 @@ fn inline_fileset_yaml(path: &str, mount: &str, owner: Option<&str>, content: &s
         .map(|value| format!("      owner: {value}\n"))
         .unwrap_or_default();
     fileset_yaml(&format!(
-        "    - inline:\n        {path}: |-\n          {content}\n      mountPath: {mount}\n{owner}"
+        "    - inline:\n        {path}: |-\n          {content}\n      guestPath: {mount}\n{owner}"
     ))
 }
 
@@ -172,7 +172,7 @@ fn lns_yaml_with_inline_and_path(w: &mut BehaviourWorld) {
     seed(
         w,
         &fileset_yaml(
-            "    - path: ./skills\n      inline:\n        settings.json: '{}'\n      mountPath: /home/sandbox\n",
+            "    - path: ./skills\n      inline:\n        settings.json: '{}'\n      guestPath: /home/sandbox\n",
         ),
     );
 }
@@ -194,7 +194,7 @@ fn lns_yaml_with_two_inline_files(w: &mut BehaviourWorld, mount: String) {
     seed(
         w,
         &fileset_yaml(&format!(
-            "    - inline:\n        accepted.json: EXACT_CONTENT\n        oversized.json: OVERSIZED_CONTENT\n      mountPath: {mount}\n"
+            "    - inline:\n        accepted.json: EXACT_CONTENT\n        oversized.json: OVERSIZED_CONTENT\n      guestPath: {mount}\n"
         )),
     );
 }
@@ -216,7 +216,7 @@ fn lns_yaml_with_duplicate_filesets(w: &mut BehaviourWorld, mount: String) {
     seed(
         w,
         &fileset_yaml(&format!(
-            "    - path: ./a\n      mountPath: {mount}\n    - path: ./b\n      mountPath: {mount}\n"
+            "    - path: ./a\n      guestPath: {mount}\n    - path: ./b\n      guestPath: {mount}\n"
         )),
     );
 }

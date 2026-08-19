@@ -115,14 +115,14 @@ pub struct Carrier {
     pub layers: Vec<PackedLayer>,
 }
 
-/// Where one mount path's files are pulled from.
+/// Where one guest path's files are pulled from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackedSource {
     pub reference: String,
     pub layer: PackedLayer,
 }
 
-/// Every packed fileset a resolution reaches, keyed by the mount path it materializes at.
+/// Every packed fileset a resolution reaches, keyed by the guest path it materializes at.
 pub type PackedFilesets = std::collections::BTreeMap<String, PackedSource>;
 
 /// Read back the correlation the resolve answered with: a local run's mixins are pulled by the preflight, so the run carries their coordinates rather than resolving the graph twice.
@@ -131,7 +131,7 @@ pub fn packed_from_the_wire(sources: &[lns_ipc::PackedFilesetSource]) -> PackedF
         .iter()
         .map(|source| {
             (
-                source.mount_path.clone(),
+                source.guest_path.clone(),
                 PackedSource {
                     reference: source.reference.clone(),
                     layer: PackedLayer {
@@ -183,7 +183,7 @@ pub fn correlate_packed_filesets(
         match carrier.layers.get(origin.layer_index) {
             Some(layer) => {
                 packed.insert(
-                    origin.mount_path.clone(),
+                    origin.guest_path.clone(),
                     PackedSource {
                         reference: carrier.reference.clone(),
                         layer: layer.clone(),
@@ -192,7 +192,7 @@ pub fn correlate_packed_filesets(
             }
             None => problems.push(format!(
                 "{} carries no layer for the fileset mounted at {}",
-                carrier.reference, origin.mount_path
+                carrier.reference, origin.guest_path
             )),
         }
     }
@@ -215,11 +215,11 @@ pub fn resolved_from_sandbox(
             .spec
             .filesets
             .iter()
-            .filter(|fileset| !packed.contains_key(&fileset.mount_path))
+            .filter(|fileset| !packed.contains_key(&fileset.guest_path))
             .filter_map(|fileset| {
                 fileset.path.as_ref().map(|path| assembly::LocalFileset {
                     source: path.clone(),
-                    mount_path: fileset.mount_path.clone(),
+                    guest_path: fileset.guest_path.clone(),
                     owner: fileset.owner,
                 })
             })
@@ -234,7 +234,7 @@ pub fn resolved_from_sandbox(
                     .as_ref()
                     .map(|source| assembly::HostFileset {
                         source: source.clone(),
-                        mount_path: fileset.mount_path.clone(),
+                        guest_path: fileset.guest_path.clone(),
                         owner: fileset.owner,
                         optional: fileset.optional,
                     })
@@ -250,7 +250,7 @@ pub fn resolved_from_sandbox(
                     .as_ref()
                     .map(|files| assembly::InlineFileset {
                         files: files.clone(),
-                        mount_path: fileset.mount_path.clone(),
+                        guest_path: fileset.guest_path.clone(),
                         owner: fileset.owner,
                     })
             })
@@ -261,9 +261,9 @@ pub fn resolved_from_sandbox(
             .iter()
             .filter_map(|fileset| {
                 packed
-                    .get(&fileset.mount_path)
+                    .get(&fileset.guest_path)
                     .map(|source| assembly::PackedFileset {
-                        mount_path: fileset.mount_path.clone(),
+                        guest_path: fileset.guest_path.clone(),
                         source: source.clone(),
                         owner: fileset.owner,
                     })
@@ -357,9 +357,9 @@ mod tests {
         }
     }
 
-    fn origin(mount_path: &str, source: &str, layer_index: usize) -> merge::FilesetOrigin {
+    fn origin(guest_path: &str, source: &str, layer_index: usize) -> merge::FilesetOrigin {
         merge::FilesetOrigin {
-            mount_path: mount_path.to_string(),
+            guest_path: guest_path.to_string(),
             source: source.to_string(),
             layer_index,
         }
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn the_correlation_a_local_runs_preflight_answered_with_survives_the_wire() {
         let packed = packed_from_the_wire(&[lns_ipc::PackedFilesetSource {
-            mount_path: "/opt/skills".into(),
+            guest_path: "/opt/skills".into(),
             reference: "ghcr.io/acme/skills@sha256:cafe".into(),
             digest: layer("a").digest,
             size: 512,
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn resolved_from_sandbox_splits_packed_and_on_disk_path_filesets() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","mountPath":"/a"},{"path":"./shipped","mountPath":"/b","owner":"root"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"/work/skills","guestPath":"/a"},{"path":"./shipped","guestPath":"/b","owner":"root"}]}}"#,
         )
         .unwrap();
         let packed: PackedFilesets = [(
@@ -489,7 +489,7 @@ mod tests {
             resolved.local_filesets,
             [assembly::LocalFileset {
                 source: "/work/skills".into(),
-                mount_path: "/a".into(),
+                guest_path: "/a".into(),
                 owner: lns_artifact::sandbox::FilesetOwner::Workload,
             }],
             "an entry with no layer behind it is a local directory read at launch"
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(
             resolved.packed_filesets,
             [assembly::PackedFileset {
-                mount_path: "/b".into(),
+                guest_path: "/b".into(),
                 source: packed["/b"].clone(),
                 owner: lns_artifact::sandbox::FilesetOwner::Root,
             }],
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn published_fileset_problems_refuse_a_path_no_layer_carries() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/a"}]}}"#,
         )
         .unwrap();
         let problems =
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn published_fileset_problems_pass_a_path_its_artifact_carries() {
         let def = lns_artifact::sandbox::parse(
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/a"}]}}"#,
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/a"}]}}"#,
         )
         .unwrap();
         let packed: PackedFilesets = [(

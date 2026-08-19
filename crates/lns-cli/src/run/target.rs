@@ -271,7 +271,7 @@ mod tests {
         let fs = MapFs::with(&[
             (
                 "/other/lns.yaml",
-                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
             ),
             ("/other/skills/prompts.md", "p"),
         ]);
@@ -389,7 +389,7 @@ mod tests {
         let fs = MapFs::with(&[
             (
                 "/work/lns.yaml",
-                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
             ),
             ("/work/skills/prompts.md", "p"),
         ]);
@@ -411,7 +411,7 @@ mod tests {
     fn a_missing_fileset_directory_refuses_the_local_run() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
         );
         let err = resolve(None, None, &fs, cwd()).unwrap_err();
         assert!(format!("{err:#}").contains("./skills"), "got: {err:#}");

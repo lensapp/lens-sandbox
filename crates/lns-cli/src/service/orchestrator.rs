@@ -363,7 +363,7 @@ pub async fn run_image(
             .iter()
             .map(|fileset| crate::run::summary::FilesetSummary {
                 source: crate::run::summary::fileset_source_display(fileset),
-                mount_path: fileset.mount_path.clone(),
+                guest_path: fileset.guest_path.clone(),
                 owner: crate::run::summary::fileset_owner_display(fileset.owner).to_string(),
                 host_path: fileset.host_path.clone(),
                 optional: fileset.optional,
@@ -1337,7 +1337,7 @@ mod tests {
                     inline: false,
                     host_path: None,
                     optional: false,
-                    mount_path: "/root/.agent/skills".into(),
+                    guest_path: "/root/.agent/skills".into(),
                     owner: lns_ipc::SandboxFilesetOwner::Workload,
                 }],
                 connectors: Vec::new(),
@@ -1360,7 +1360,7 @@ mod tests {
             target.filesets,
             [crate::run::summary::FilesetSummary {
                 source: "./skills".to_string(),
-                mount_path: "/root/.agent/skills".to_string(),
+                guest_path: "/root/.agent/skills".to_string(),
                 owner: "workload".to_string(),
                 host_path: None,
                 optional: false,

@@ -353,7 +353,7 @@ mod tests {
         let entries: Vec<String> = mounts
             .iter()
             .enumerate()
-            .map(|(i, mount)| format!(r#"{{"path":"./dir{i}","mountPath":"{mount}"}}"#))
+            .map(|(i, mount)| format!(r#"{{"path":"./dir{i}","guestPath":"{mount}"}}"#))
             .collect();
         format!(
             r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"reg/base:1","filesets":[{}]}}}}"#,
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_mixin_carries_its_own_packed_filesets() {
-        let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"skills","spec":{"filesets":[{"path":"./skills","mountPath":"/skills"}]}}"#;
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"skills","spec":{"filesets":[{"path":"./skills","guestPath":"/skills"}]}}"#;
         let built = build_artifact(doc, &[vec![entry("a.md", "shared")]])
             .expect("sharing one directory across sandboxes is publishing a mixin that carries it");
         assert_eq!(built.fileset_layers().count(), 1);

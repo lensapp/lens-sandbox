@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileset {
     pub source: String,
-    pub mount_path: String,
+    pub guest_path: String,
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
@@ -12,7 +12,7 @@ pub struct LocalFileset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFileset {
     pub source: String,
-    pub mount_path: String,
+    pub guest_path: String,
     pub owner: lns_artifact::sandbox::FilesetOwner,
     pub optional: bool,
 }
@@ -20,7 +20,7 @@ pub struct HostFileset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineFileset {
     pub files: BTreeMap<String, String>,
-    pub mount_path: String,
+    pub guest_path: String,
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }
 
@@ -43,7 +43,7 @@ pub struct ResolvedSandbox {
 /// A `path` fileset that arrived packed into a layer of the artifact declaring it, materialized from that artifact rather than from this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackedFileset {
-    pub mount_path: String,
+    pub guest_path: String,
     pub source: super::PackedSource,
     pub owner: lns_artifact::sandbox::FilesetOwner,
 }

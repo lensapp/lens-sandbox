@@ -2,10 +2,10 @@ Feature: declared filesets ship files inside the sandbox artifact
   spec.filesets is how a sandbox ships files — agent settings, skills —
   inside the published artifact. An entry names either a directory beside
   the document (path — packed into a layer of the same artifact at push,
-  so the files and the declaration that mounts them share one digest), a
+  so the files and the declaration that places them share one digest), a
   small inline UTF-8 file map carried by the document itself, or one file
   read off the machine that runs it (hostPath). At launch the files are
-  materialized into the guest at mountPath as a snapshot: a local run of
+  materialized into the guest at guestPath as a snapshot: a local run of
   a path fileset sees exactly what a consumer of the published artifact
   would see — live files are spec.volumes' job. Trust is one digest plus
   disclosure, not signatures: inspect and the run summary name every

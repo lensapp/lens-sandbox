@@ -411,7 +411,7 @@ pub struct SandboxFileset {
     /// The host file the sandbox declared, verbatim — shape, never payload, so a consumer sees which of their files it reads.
     #[serde(default)]
     pub host_path: Option<String>,
-    pub mount_path: String,
+    pub guest_path: String,
     #[serde(default)]
     pub owner: SandboxFilesetOwner,
     #[serde(default)]
@@ -621,10 +621,10 @@ pub struct RunImageArgs {
     pub denied_host_paths: Vec<String>,
 }
 
-/// One packed fileset's coordinates: the mount path it lands at, the digest-pinned artifact whose layer carries it, and that layer.
+/// One packed fileset's coordinates: the guest path it lands at, the digest-pinned artifact whose layer carries it, and that layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackedFilesetSource {
-    pub mount_path: String,
+    pub guest_path: String,
     pub reference: String,
     pub digest: String,
     pub size: u64,
@@ -1016,7 +1016,7 @@ mod tests {
             definition_dir: None,
             authored_egress: None,
             packed_filesets: vec![PackedFilesetSource {
-                mount_path: "/root/.agent/skills".into(),
+                guest_path: "/root/.agent/skills".into(),
                 reference: format!("ghcr.io/acme/skills@sha256:{}", "b".repeat(64)),
                 digest: format!("sha256:{}", "c".repeat(64)),
                 size: 4096,
@@ -1571,7 +1571,7 @@ mod tests {
                 inline: false,
                 host_path: None,
                 optional: false,
-                mount_path: "/root/.agent/skills".into(),
+                guest_path: "/root/.agent/skills".into(),
                 owner: SandboxFilesetOwner::Workload,
             }],
             connectors: Vec::new(),

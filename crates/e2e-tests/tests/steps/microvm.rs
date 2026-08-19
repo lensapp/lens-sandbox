@@ -161,7 +161,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             std::fs::create_dir_all(&fileset_dir).expect("create fileset dir");
             std::fs::write(fileset_dir.join(file), "fileset payload\n")
                 .expect("write fileset file");
-            spec_tail.push_str(&format!("\n    - path: ./{dir}\n      mountPath: {mount}"));
+            spec_tail.push_str(&format!("\n    - path: ./{dir}\n      guestPath: {mount}"));
             if let Some(owner) = owner {
                 spec_tail.push_str(&format!("\n      owner: {owner}"));
             }
@@ -172,7 +172,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         for line in content.split('\n') {
             spec_tail.push_str(&format!("\n          {line}"));
         }
-        spec_tail.push_str(&format!("\n      mountPath: {mount}"));
+        spec_tail.push_str(&format!("\n      guestPath: {mount}"));
         if let Some(owner) = owner {
             spec_tail.push_str(&format!("\n      owner: {owner}"));
         }

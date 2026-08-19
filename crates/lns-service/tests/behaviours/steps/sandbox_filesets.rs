@@ -22,7 +22,7 @@ const SANDBOX_ARTIFACT: &str = "registry.example.test/team/sandbox@sha256:aaaaaa
 #[given(regex = r#"^a published sandbox declaring a path fileset at "([^"]+)"$"#)]
 fn published_with_path_fileset(world: &mut BehaviourWorld, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"path":"./skills","mountPath":"{mount}"}}"#
+        r#"{{"path":"./skills","guestPath":"{mount}"}}"#
     )));
 }
 
@@ -115,7 +115,7 @@ fn plan_pulls_fileset_from_its_own_artifact(
     if plan
         .packed_filesets
         .iter()
-        .any(|fileset| fileset.mount_path == mount && fileset.source.reference == SANDBOX_ARTIFACT)
+        .any(|fileset| fileset.guest_path == mount && fileset.source.reference == SANDBOX_ARTIFACT)
     {
         Ok(())
     } else {
@@ -165,7 +165,7 @@ impl SnapshotDir for OneFileDir {
 )]
 fn local_definition_with_path_fileset(world: &mut BehaviourWorld, file: String, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"path":"/consumer/project/skills","mountPath":"{mount}"}}"#
+        r#"{{"path":"/consumer/project/skills","guestPath":"{mount}"}}"#
     )));
     world.fileset_snapshot_file = Some(file);
 }
@@ -175,7 +175,7 @@ fn local_definition_with_path_fileset(world: &mut BehaviourWorld, file: String, 
 )]
 fn local_definition_with_root_fileset(world: &mut BehaviourWorld, file: String, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"path":"/consumer/project/skills","mountPath":"{mount}","owner":"root"}}"#
+        r#"{{"path":"/consumer/project/skills","guestPath":"{mount}","owner":"root"}}"#
     )));
     world.fileset_snapshot_file = Some(file);
 }
@@ -212,21 +212,21 @@ fn sandbox_with_inline_file(
     mount: String,
 ) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"inline":{{"{file}":{content:?}}},"mountPath":"{mount}"}}"#
+        r#"{{"inline":{{"{file}":{content:?}}},"guestPath":"{mount}"}}"#
     )));
 }
 
 #[given(regex = r#"^a sandbox declaring root-owned inline file \"([^\"]+)\" at \"([^\"]+)\"$"#)]
 fn sandbox_with_root_inline_file(world: &mut BehaviourWorld, file: String, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"inline":{{"{file}":"pinned"}},"mountPath":"{mount}","owner":"root"}}"#
+        r#"{{"inline":{{"{file}":"pinned"}},"guestPath":"{mount}","owner":"root"}}"#
     )));
 }
 
 #[given(regex = r#"^a published sandbox declaring an inline file at \"([^\"]+)\"$"#)]
 fn published_with_inline_file(world: &mut BehaviourWorld, mount: String) {
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"inline":{{"settings.json":"published"}},"mountPath":"{mount}"}}"#
+        r#"{{"inline":{{"settings.json":"published"}},"guestPath":"{mount}"}}"#
     )));
 }
 
@@ -334,7 +334,7 @@ fn definition_with_host_path_fileset(
 ) {
     let optional = !optional.is_empty();
     world.fileset_definition = Some(sandbox_json(&format!(
-        r#"{{"hostPath":"{source}","mountPath":"{mount}","optional":{optional}}}"#
+        r#"{{"hostPath":"{source}","guestPath":"{mount}","optional":{optional}}}"#
     )));
 }
 

@@ -236,7 +236,7 @@ fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut
         writeln!(
             out,
             "  fileset:      {source} -> {} (owner: {owner})",
-            fileset.mount_path
+            fileset.guest_path
         )?;
     }
     writeln!(
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn validate_file_selector_roots_filesets_at_the_files_directory_and_names_it() {
-        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n";
         let fs = MapFs::with(&[
             ("/other/lns.dev.yaml", yaml),
             ("/other/skills/prompts.md", "p"),
@@ -523,7 +523,7 @@ mod tests {
     fn validate_reports_a_broken_path_fileset_with_its_path() {
         let fs = fake(
             "/work/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
         );
         let mut out = Vec::new();
         let code = validate(&fs, cwd(), None, &mut out).unwrap();
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_path_and_inline_filesets() {
-        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n    - inline:\n        settings.json: '{}'\n      mountPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &[], &mut out).unwrap();

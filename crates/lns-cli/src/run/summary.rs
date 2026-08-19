@@ -259,9 +259,9 @@ pub fn format_summary(
             s,
             "  Fileset:   {} -> {} (owner: {}){}",
             fileset.source,
-            fileset.mount_path,
+            fileset.guest_path,
             fileset.owner,
-            attribution(args, mount, &fileset.mount_path)
+            attribution(args, mount, &fileset.guest_path)
         )
         .unwrap();
     }
@@ -404,7 +404,7 @@ pub fn fileset_view_owner_display(owner: lns_ipc::SandboxFilesetOwner) -> &'stat
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesetSummary {
     pub source: String,
-    pub mount_path: String,
+    pub guest_path: String,
     pub owner: String,
     pub host_path: Option<String>,
     pub optional: bool,
@@ -422,7 +422,7 @@ pub fn fileset_summaries_from_view(view: &lns_ipc::SandboxView) -> Vec<FilesetSu
         .iter()
         .map(|fileset| FilesetSummary {
             source: fileset_view_source_display(fileset),
-            mount_path: fileset.mount_path.clone(),
+            guest_path: fileset.guest_path.clone(),
             owner: fileset_view_owner_display(fileset.owner).to_string(),
             host_path: fileset.host_path.clone(),
             optional: fileset.optional,
@@ -603,7 +603,7 @@ mod tests {
             path: path.map(str::to_string),
             inline: None,
             host_path: None,
-            mount_path: "/s".into(),
+            guest_path: "/s".into(),
             owner: lns_artifact::sandbox::FilesetOwner::default(),
             optional: false,
         }
@@ -672,7 +672,7 @@ mod tests {
                 path: None,
                 inline: true,
                 host_path: None,
-                mount_path: "/etc/agent".into(),
+                guest_path: "/etc/agent".into(),
                 owner: lns_ipc::SandboxFilesetOwner::Root,
                 optional: false,
             }],
@@ -689,7 +689,7 @@ mod tests {
             fileset_summaries_from_view(&view),
             vec![FilesetSummary {
                 source: "inline".to_string(),
-                mount_path: "/etc/agent".to_string(),
+                guest_path: "/etc/agent".to_string(),
                 owner: "root".to_string(),
                 host_path: None,
                 optional: false,

@@ -171,7 +171,7 @@ mod tests {
     fn a_fileset_a_mixin_declares_is_rooted_where_that_mixin_lives() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
         );
         let fetched = read_path_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -185,7 +185,7 @@ mod tests {
     fn a_fileset_that_names_no_path_is_left_alone() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - inline:\n        notes.md: hello\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - inline:\n        notes.md: hello\n      guestPath: /root/.agent/skills\n",
         );
         let fetched = read_path_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -241,7 +241,7 @@ mod tests {
     fn an_absolute_fileset_path_is_left_as_the_author_wrote_it() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: /etc/agent/skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: /etc/agent/skills\n      guestPath: /root/.agent/skills\n",
         );
         let fetched = read_path_mixin(&dir, Path::new("/work/mixins/pg")).unwrap();
         assert!(
@@ -322,7 +322,7 @@ mod tests {
     fn a_path_the_decisions_file_writes_is_rooted_in_its_own_directory() {
         let dir = holding(
             "/work/lns-local-mixin.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  filesets:\n    - path: ./notes\n      mountPath: /home/agent/notes\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  filesets:\n    - path: ./notes\n      guestPath: /home/agent/notes\n",
         );
         let fetched = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
             .unwrap()
@@ -389,7 +389,7 @@ mod tests {
     fn a_path_that_names_the_document_roots_beside_that_document() {
         let dir = holding(
             "/work/mixins/pg/lns.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: ./skills\n      mountPath: /root/.agent/skills\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: pg\nspec:\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
         );
         let fetched = read_path_mixin(&dir, Path::new("/work/mixins/pg/lns.yaml")).unwrap();
         assert!(

@@ -187,7 +187,7 @@ fn definition_declares_a_tool_and_that_mixin(w: &mut BehaviourWorld, tool: Strin
 fn sandbox_layering_on_a_mixin_that_ships_files(w: &mut BehaviourWorld, mount: String) {
     install(
         w,
-        &format!(r#"{{"filesets":[{{"path":"./skills","mountPath":"{mount}"}}]}}"#),
+        &format!(r#"{{"filesets":[{{"path":"./skills","guestPath":"{mount}"}}]}}"#),
     );
     definition(
         w,

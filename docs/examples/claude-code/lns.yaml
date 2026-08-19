@@ -59,4 +59,4 @@ spec:
               "enabled": false
             }
           }
-      mountPath: /home/sandbox
+      guestPath: /home/sandbox

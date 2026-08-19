@@ -48,7 +48,7 @@ pub struct Displaced {
 /// Where a merged `path` fileset came from: the source document that declared it, and its index among that document's own `path` entries — the coordinates §7 addresses its layer by, since a merged document's own order says nothing about any one artifact's layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesetOrigin {
-    pub mount_path: String,
+    pub guest_path: String,
     pub source: String,
     pub layer_index: usize,
 }
@@ -272,7 +272,7 @@ pub fn egress_of(sources: &[Source]) -> lns_policy::Egress {
 pub fn own_fileset_origins(spec: &SandboxSpec) -> Vec<FilesetOrigin> {
     path_filesets(spec)
         .map(|(layer_index, fileset)| FilesetOrigin {
-            mount_path: fileset.mount_path.clone(),
+            guest_path: fileset.guest_path.clone(),
             source: ROOT_LABEL.to_string(),
             layer_index,
         })
@@ -372,7 +372,7 @@ fn fold_mounts(
             claim(
                 &mut order,
                 &mut winners,
-                fileset.mount_path.clone(),
+                fileset.guest_path.clone(),
                 Mount::Fileset(fileset.clone(), layer_index),
                 source.label,
                 Mount::summary,
@@ -392,7 +392,7 @@ fn fold_mounts(
             Mount::Fileset(fileset, layer_index) => {
                 if let Some(layer_index) = layer_index {
                     origins.push(FilesetOrigin {
-                        mount_path: fileset.mount_path.clone(),
+                        guest_path: fileset.guest_path.clone(),
                         source,
                         layer_index,
                     });
@@ -810,7 +810,7 @@ mod tests {
                 ),
                 (
                     "obs",
-                    r#"{"filesets":[{"inline":{"a.md":"x"},"mountPath":"/cache"}]}"#,
+                    r#"{"filesets":[{"inline":{"a.md":"x"},"guestPath":"/cache"}]}"#,
                 ),
             ]),
             Block::Mount,
@@ -965,28 +965,28 @@ mod tests {
         let found = origins(&sources(&[
             (
                 ROOT_LABEL,
-                r#"{"image":"x:1","filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"},{"path":"./skills","mountPath":"/skills"},{"path":"./hooks","mountPath":"/hooks"}]}"#,
+                r#"{"image":"x:1","filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"},{"path":"./skills","guestPath":"/skills"},{"path":"./hooks","guestPath":"/hooks"}]}"#,
             ),
             (
                 "obs",
-                r#"{"filesets":[{"path":"./tools","mountPath":"/tools"}]}"#,
+                r#"{"filesets":[{"path":"./tools","guestPath":"/tools"}]}"#,
             ),
         ]));
         assert_eq!(
             found,
             [
                 FilesetOrigin {
-                    mount_path: "/skills".into(),
+                    guest_path: "/skills".into(),
                     source: ROOT_LABEL.into(),
                     layer_index: 0
                 },
                 FilesetOrigin {
-                    mount_path: "/hooks".into(),
+                    guest_path: "/hooks".into(),
                     source: ROOT_LABEL.into(),
                     layer_index: 1
                 },
                 FilesetOrigin {
-                    mount_path: "/tools".into(),
+                    guest_path: "/tools".into(),
                     source: "obs".into(),
                     layer_index: 0
                 },
@@ -1000,17 +1000,17 @@ mod tests {
         let found = origins(&sources(&[
             (
                 ROOT_LABEL,
-                r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+                r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/skills"}]}"#,
             ),
             (
                 "obs",
-                r#"{"filesets":[{"path":"./better-skills","mountPath":"/skills"}]}"#,
+                r#"{"filesets":[{"path":"./better-skills","guestPath":"/skills"}]}"#,
             ),
         ]));
         assert_eq!(
             found,
             [FilesetOrigin {
-                mount_path: "/skills".into(),
+                guest_path: "/skills".into(),
                 source: "obs".into(),
                 layer_index: 0
             }],
@@ -1024,7 +1024,7 @@ mod tests {
             origins(&sources(&[
                 (
                     ROOT_LABEL,
-                    r#"{"image":"x:1","filesets":[{"path":"./skills","mountPath":"/skills"}]}"#,
+                    r#"{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/skills"}]}"#,
                 ),
                 (
                     "obs",
@@ -1039,12 +1039,12 @@ mod tests {
     #[test]
     fn a_document_that_layers_on_nothing_still_addresses_its_own_packed_filesets() {
         let spec = spec(
-            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","mountPath":"/g"},{"path":"./skills","mountPath":"/skills"}]}"#,
+            r#"{"image":"x:1","filesets":[{"hostPath":"~/.gitconfig","guestPath":"/g"},{"path":"./skills","guestPath":"/skills"}]}"#,
         );
         assert_eq!(
             own_fileset_origins(&spec),
             [FilesetOrigin {
-                mount_path: "/skills".into(),
+                guest_path: "/skills".into(),
                 source: ROOT_LABEL.into(),
                 layer_index: 0
             }],
@@ -1086,11 +1086,11 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"volumes":[{"type":"volume","name":"base","target":"/cache"}],"filesets":[{"inline":{"a.md":"base"},"mountPath":"/notes"}]}"#,
+                r#"{"volumes":[{"type":"volume","name":"base","target":"/cache"}],"filesets":[{"inline":{"a.md":"base"},"guestPath":"/notes"}]}"#,
             ),
             (
                 "later",
-                r#"{"volumes":[{"type":"volume","name":"later","target":"/cache"}],"filesets":[{"inline":{"a.md":"later"},"mountPath":"/notes"}]}"#,
+                r#"{"volumes":[{"type":"volume","name":"later","target":"/cache"}],"filesets":[{"inline":{"a.md":"later"},"guestPath":"/notes"}]}"#,
             ),
         ]));
         assert_eq!(merged.volumes.len(), 1);
@@ -1108,7 +1108,7 @@ mod tests {
             ),
             (
                 "later",
-                r#"{"filesets":[{"inline":{"a.md":"later"},"mountPath":"/notes"}]}"#,
+                r#"{"filesets":[{"inline":{"a.md":"later"},"guestPath":"/notes"}]}"#,
             ),
         ]));
         assert!(
@@ -1127,7 +1127,7 @@ mod tests {
         let merged = merged(&sources(&[
             (
                 "base",
-                r#"{"filesets":[{"inline":{"a.md":"base"},"mountPath":"/notes"}]}"#,
+                r#"{"filesets":[{"inline":{"a.md":"base"},"guestPath":"/notes"}]}"#,
             ),
             (
                 "later",
@@ -1340,7 +1340,7 @@ mod tests {
     fn a_merged_document_round_trips_through_its_own_serialization() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"mountPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
+            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
         )]));
         let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(
