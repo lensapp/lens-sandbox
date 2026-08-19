@@ -9,6 +9,8 @@ pub struct Layout {
     pub inodes_per_group: u32,
     pub inodes_count: u32,
     pub inode_table_blocks: u32,
+    pub gdt_blocks: u32,
+    pub reserved_gdt_blocks: u32,
     pub backup_groups: Vec<u32>,
 }
 
@@ -27,6 +29,18 @@ impl Layout {
         let inode_table_blocks = inodes_per_group * INODE_SIZE as u32 / BLOCK_SIZE;
 
         let backup_groups = compute_backup_groups(num_groups);
+        let gdt_blocks = num_groups.div_ceil(DESCS_PER_BLOCK);
+        let blocks_in_group_0 = if num_groups == 1 {
+            last_group_blocks
+        } else {
+            blocks_per_group
+        };
+        let reserved_gdt_blocks = reserved_gdt_blocks(
+            num_groups,
+            gdt_blocks,
+            blocks_in_group_0,
+            inode_table_blocks,
+        );
 
         Self {
             block_count,
@@ -36,6 +50,8 @@ impl Layout {
             inodes_per_group,
             inodes_count,
             inode_table_blocks,
+            gdt_blocks,
+            reserved_gdt_blocks,
             backup_groups,
         }
     }
@@ -55,6 +71,29 @@ impl Layout {
             self.blocks_per_group
         }
     }
+}
+
+/// Blocks held back after the GDT so a later grow can extend it without moving the bitmaps and inode tables that follow it in every group.
+fn reserved_gdt_blocks(
+    num_groups: u32,
+    gdt_blocks: u32,
+    blocks_in_group_0: u32,
+    inode_table_blocks: u32,
+) -> u32 {
+    let grown_gdt =
+        (u64::from(num_groups) * u64::from(GROWTH_FACTOR)).div_ceil(u64::from(DESCS_PER_BLOCK));
+    // One double-indirect block addresses the live table and the reserved run together, so the two share its 1024 slots.
+    let addressable = ADDRS_PER_BLOCK.saturating_sub(gdt_blocks);
+    let wanted = grown_gdt
+        .saturating_sub(u64::from(gdt_blocks))
+        .min(u64::from(addressable)) as u32;
+
+    let group_zero_fixed =
+        1 + gdt_blocks + 2 + inode_table_blocks + 1 + LOST_FOUND_BLOCKS + RESIZE_DIND_BLOCKS;
+    let spare = blocks_in_group_0
+        .saturating_sub(group_zero_fixed)
+        .saturating_sub(JBD2_MIN_JOURNAL_BLOCKS * 4);
+    wanted.min(spare)
 }
 
 fn compute_backup_groups(num_groups: u32) -> Vec<u32> {
@@ -87,6 +126,8 @@ mod tests {
         assert_eq!(l.inodes_per_group, 2048);
         assert_eq!(l.inodes_count, 2048);
         assert_eq!(l.inode_table_blocks, 128);
+        assert_eq!(l.gdt_blocks, 1);
+        assert_eq!(l.reserved_gdt_blocks, 7);
         assert_eq!(l.backup_groups, vec![0]);
     }
 
@@ -99,7 +140,69 @@ mod tests {
         assert_eq!(l.inodes_per_group, 8192);
         assert_eq!(l.inodes_count, 655_360);
         assert_eq!(l.inode_table_blocks, 512);
+        assert_eq!(l.gdt_blocks, 1);
+        assert_eq!(l.reserved_gdt_blocks, 639);
         assert_eq!(l.backup_groups, vec![0, 1, 3, 5, 7, 9, 25, 27, 49]);
+    }
+
+    #[test]
+    fn the_reserved_run_holds_room_for_a_thousandfold_growth() {
+        let l = Layout::from_image_size(10 * 1024 * 1024 * 1024);
+        let reachable_groups = (l.gdt_blocks + l.reserved_gdt_blocks) * DESCS_PER_BLOCK;
+        assert!(
+            reachable_groups >= l.num_groups * GROWTH_FACTOR,
+            "a volume must be able to grow without ever moving the bitmaps that follow its descriptor table"
+        );
+    }
+
+    #[test]
+    fn the_reserved_run_never_crowds_out_the_journal() {
+        for mib in [17u64, 18, 20, 24, 32, 48, 64, 128, 256] {
+            let l = Layout::from_image_size(mib * 1024 * 1024);
+            let group_zero = 1
+                + l.gdt_blocks
+                + l.reserved_gdt_blocks
+                + 2
+                + l.inode_table_blocks
+                + 1
+                + LOST_FOUND_BLOCKS
+                + RESIZE_DIND_BLOCKS;
+            assert!(
+                l.blocks_in_group(0) >= group_zero + JBD2_MIN_JOURNAL_BLOCKS * 4,
+                "{mib} MiB: reserving growth room must never cost the journal its blocks"
+            );
+        }
+    }
+
+    /// 16 MiB cannot hold a recoverable journal even with nothing reserved, so `Plan::new` refuses it; every larger size must survive the reservation.
+    #[test]
+    fn the_reservation_never_turns_a_formattable_size_into_an_unformattable_one() {
+        for mib in [17u64, 18, 19, 20, 33, 129, 1025] {
+            let l = Layout::from_image_size(mib * 1024 * 1024);
+            let group_zero = 1
+                + l.gdt_blocks
+                + l.reserved_gdt_blocks
+                + 2
+                + l.inode_table_blocks
+                + 1
+                + LOST_FOUND_BLOCKS
+                + RESIZE_DIND_BLOCKS;
+            assert!(
+                l.blocks_in_group(0) >= group_zero + JBD2_MIN_JOURNAL_BLOCKS * 4,
+                "{mib} MiB formats without a reserved run, so it must still format with one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_table_and_the_reserved_run_share_one_block_of_addresses() {
+        for gib in [1u64, 8, 16, 17, 20, 64, 256, 1024, 4096, 8192, 16383] {
+            let l = Layout::from_image_size(gib * 1024 * 1024 * 1024);
+            assert!(
+                l.gdt_blocks + l.reserved_gdt_blocks <= ADDRS_PER_BLOCK,
+                "{gib} GiB: one double-indirect block addresses the descriptor table and its reserved run together, so the two cannot outgrow a block of addresses"
+            );
+        }
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub struct GroupBlockLayout {
     pub sb_block: Option<u32>,
     pub gdt_first_block: Option<u32>,
     pub gdt_blocks: u32,
+    pub reserved_gdt_first_block: Option<u32>,
+    pub reserved_gdt_blocks: u32,
     pub bbmp_block: u32,
     pub ibmp_block: u32,
     pub itab_first_block: u32,
@@ -18,7 +20,7 @@ pub struct GroupBlockLayout {
 pub fn group_block_layout(layout: &Layout, g: u32) -> GroupBlockLayout {
     let group_base = g * layout.blocks_per_group;
     let has_backup = layout.group_has_backup(g);
-    let gdt_blocks = layout.num_groups.div_ceil(BLOCK_SIZE / GROUP_DESC_SIZE);
+    let gdt_blocks = layout.gdt_blocks;
 
     let mut off = 0u32;
     let sb_block = if has_backup {
@@ -31,6 +33,13 @@ pub fn group_block_layout(layout: &Layout, g: u32) -> GroupBlockLayout {
     let gdt_first_block = if has_backup {
         let b = group_base + off;
         off += gdt_blocks;
+        Some(b)
+    } else {
+        None
+    };
+    let reserved_gdt_first_block = if has_backup && layout.reserved_gdt_blocks > 0 {
+        let b = group_base + off;
+        off += layout.reserved_gdt_blocks;
         Some(b)
     } else {
         None
@@ -48,6 +57,8 @@ pub fn group_block_layout(layout: &Layout, g: u32) -> GroupBlockLayout {
         sb_block,
         gdt_first_block,
         gdt_blocks,
+        reserved_gdt_first_block,
+        reserved_gdt_blocks: layout.reserved_gdt_blocks,
         bbmp_block,
         ibmp_block,
         itab_first_block,
@@ -72,6 +83,11 @@ pub fn block_bitmap(layout: &Layout, g: u32) -> Vec<u8> {
             mark(&mut bm, gdt + i);
         }
     }
+    if let Some(reserved) = gbl.reserved_gdt_first_block {
+        for i in 0..gbl.reserved_gdt_blocks {
+            mark(&mut bm, reserved + i);
+        }
+    }
     mark(&mut bm, gbl.bbmp_block);
     mark(&mut bm, gbl.ibmp_block);
     for i in 0..layout.inode_table_blocks {
@@ -86,6 +102,9 @@ pub fn block_bitmap(layout: &Layout, g: u32) -> Vec<u8> {
         let journal_first = journal_first_block(layout);
         for i in 0..journal_blocks(layout) {
             mark(&mut bm, journal_first + i);
+        }
+        if layout.reserved_gdt_blocks > 0 {
+            mark(&mut bm, resize_dind_block(layout));
         }
     }
 
@@ -102,11 +121,15 @@ pub fn journal_first_block(layout: &Layout) -> u32 {
     group_block_layout(layout, 0).data_first_block + 1 + LOST_FOUND_BLOCKS
 }
 
+pub fn resize_dind_block(layout: &Layout) -> u32 {
+    journal_first_block(layout) + journal_blocks(layout)
+}
+
 fn group_zero_free_blocks(layout: &Layout) -> u32 {
     let gbl = group_block_layout(layout, 0);
     layout
         .blocks_in_group(0)
-        .saturating_sub(gbl.data_first_block + 1 + LOST_FOUND_BLOCKS)
+        .saturating_sub(gbl.data_first_block + 1 + LOST_FOUND_BLOCKS + RESIZE_DIND_BLOCKS)
 }
 
 pub fn journal_blocks(layout: &Layout) -> u32 {
@@ -167,8 +190,59 @@ pub struct Plan {
     pub root_inode: Inode,
     pub lost_found_inode: Inode,
     pub journal_inode: Inode,
+    pub resize_inode: Inode,
     pub root_dir_block: Vec<u8>,
     pub lost_found_blocks: Vec<Vec<u8>>,
+}
+
+/// The double-indirect block and the reserved GDT blocks it points at, each of which is itself the indirect block listing its own backup copies.
+pub struct ResizeBlocks {
+    pub dind_block: u32,
+    pub dind_contents: Vec<u8>,
+    pub indirect: Vec<(u32, Vec<u8>)>,
+}
+
+fn backup_groups_above_zero(layout: &Layout) -> Vec<u32> {
+    layout
+        .backup_groups
+        .iter()
+        .copied()
+        .filter(|g| *g > 0)
+        .collect()
+}
+
+/// The resize inode's block tree, laid out exactly as e2fsck walks it: DIND slot `gdt_blocks + k` names reserved block `k`, and that block lists its copy in every backup group above 0.
+pub fn resize_blocks(layout: &Layout) -> Option<ResizeBlocks> {
+    if layout.reserved_gdt_blocks == 0 {
+        return None;
+    }
+    let first_reserved = group_block_layout(layout, 0)
+        .reserved_gdt_first_block
+        .expect("group 0 always carries a backup, so it holds the primary reserved run");
+    let backups = backup_groups_above_zero(layout);
+
+    let mut dind_contents = vec![0u8; BLOCK_SIZE as usize];
+    let dind_slot_base = layout.gdt_blocks % ADDRS_PER_BLOCK;
+    let mut indirect = Vec::with_capacity(layout.reserved_gdt_blocks as usize);
+
+    for k in 0..layout.reserved_gdt_blocks {
+        let primary = first_reserved + k;
+        let slot = (dind_slot_base + k) as usize;
+        dind_contents[slot * 4..slot * 4 + 4].copy_from_slice(&primary.to_le_bytes());
+
+        let mut contents = vec![0u8; BLOCK_SIZE as usize];
+        for (i, g) in backups.iter().enumerate() {
+            let copy = primary + g * layout.blocks_per_group;
+            contents[i * 4..i * 4 + 4].copy_from_slice(&copy.to_le_bytes());
+        }
+        indirect.push((primary, contents));
+    }
+
+    Some(ResizeBlocks {
+        dind_block: resize_dind_block(layout),
+        dind_contents,
+        indirect,
+    })
 }
 
 impl Plan {
@@ -216,6 +290,13 @@ impl Plan {
             lost_found_blocks.push(DirBlock::sentinel(BLOCK_SIZE));
         }
 
+        let resize_inode = Inode::resize(
+            mkfs_time,
+            resize_dind_block(&layout),
+            layout.reserved_gdt_blocks,
+            backup_groups_above_zero(&layout).len() as u32,
+        );
+
         let mut superblock = Superblock::for_fresh_image(&layout, uuid, volume_name, mkfs_time);
         let (free_blocks, free_inodes) = total_free_counts(&layout);
         superblock.free_blocks_count = free_blocks;
@@ -227,6 +308,7 @@ impl Plan {
             root_inode,
             lost_found_inode,
             journal_inode,
+            resize_inode,
             root_dir_block,
             lost_found_blocks,
         })
@@ -292,10 +374,12 @@ mod tests {
         assert_eq!(gbl.sb_block, Some(0));
         assert_eq!(gbl.gdt_first_block, Some(1));
         assert_eq!(gbl.gdt_blocks, 1);
-        assert_eq!(gbl.bbmp_block, 2);
-        assert_eq!(gbl.ibmp_block, 3);
-        assert_eq!(gbl.itab_first_block, 4);
-        assert_eq!(gbl.data_first_block, 4 + 512);
+        assert_eq!(gbl.reserved_gdt_first_block, Some(2));
+        assert_eq!(gbl.reserved_gdt_blocks, 639);
+        assert_eq!(gbl.bbmp_block, 641);
+        assert_eq!(gbl.ibmp_block, 642);
+        assert_eq!(gbl.itab_first_block, 643);
+        assert_eq!(gbl.data_first_block, 643 + 512);
     }
 
     #[test]
@@ -305,10 +389,11 @@ mod tests {
         assert_eq!(gbl.group_base, 32768);
         assert_eq!(gbl.sb_block, Some(32768));
         assert_eq!(gbl.gdt_first_block, Some(32769));
-        assert_eq!(gbl.bbmp_block, 32770);
-        assert_eq!(gbl.ibmp_block, 32771);
-        assert_eq!(gbl.itab_first_block, 32772);
-        assert_eq!(gbl.data_first_block, 32772 + 512);
+        assert_eq!(gbl.reserved_gdt_first_block, Some(32770));
+        assert_eq!(gbl.bbmp_block, 33409);
+        assert_eq!(gbl.ibmp_block, 33410);
+        assert_eq!(gbl.itab_first_block, 33411);
+        assert_eq!(gbl.data_first_block, 33411 + 512);
     }
 
     #[test]
@@ -318,6 +403,7 @@ mod tests {
         assert_eq!(gbl.group_base, 65536);
         assert_eq!(gbl.sb_block, None);
         assert_eq!(gbl.gdt_first_block, None);
+        assert_eq!(gbl.reserved_gdt_first_block, None);
         assert_eq!(gbl.bbmp_block, 65536);
         assert_eq!(gbl.ibmp_block, 65537);
         assert_eq!(gbl.itab_first_block, 65538);
@@ -331,10 +417,11 @@ mod tests {
         assert_eq!(gbl.group_base, 0);
         assert_eq!(gbl.sb_block, Some(0));
         assert_eq!(gbl.gdt_first_block, Some(1));
-        assert_eq!(gbl.bbmp_block, 2);
-        assert_eq!(gbl.ibmp_block, 3);
-        assert_eq!(gbl.itab_first_block, 4);
-        assert_eq!(gbl.data_first_block, 4 + 128);
+        assert_eq!(gbl.reserved_gdt_blocks, 7);
+        assert_eq!(gbl.bbmp_block, 9);
+        assert_eq!(gbl.ibmp_block, 10);
+        assert_eq!(gbl.itab_first_block, 11);
+        assert_eq!(gbl.data_first_block, 11 + 128);
     }
 
     #[test]
@@ -342,16 +429,17 @@ mod tests {
         let l = ten_gib();
         let bm = block_bitmap(&l, 0);
 
-        for bit in 0..=515 {
+        for bit in 0..=1154 {
             assert!(get_bit(&bm, bit), "bit {bit} should be set (metadata)");
         }
-        for bit in 516..=520 {
+        for bit in 1155..=1159 {
             assert!(get_bit(&bm, bit), "bit {bit} should be set (root/l+f)");
         }
-        for bit in 521..=4616 {
+        for bit in 1160..=5255 {
             assert!(get_bit(&bm, bit), "bit {bit} should be set (journal)");
         }
-        for bit in 4617..32768 {
+        assert!(get_bit(&bm, 5256), "bit 5256 should be set (resize dind)");
+        for bit in 5257..32768 {
             assert!(!get_bit(&bm, bit), "bit {bit} should be clear (free)");
         }
     }
@@ -360,10 +448,10 @@ mod tests {
     fn block_bitmap_backup_group_marks_only_metadata() {
         let l = ten_gib();
         let bm = block_bitmap(&l, 1);
-        for bit in 0..=515 {
+        for bit in 0..=1154 {
             assert!(get_bit(&bm, bit), "bit {bit} should be set");
         }
-        for bit in 516..32768 {
+        for bit in 1155..32768 {
             assert!(!get_bit(&bm, bit), "bit {bit} should be clear");
         }
     }
@@ -498,7 +586,7 @@ mod tests {
             assert!(get_bit(&bm, bit), "journal bit {bit} should be set");
         }
         assert!(
-            !get_bit(&bm, first + len),
+            !get_bit(&bm, first + len + RESIZE_DIND_BLOCKS as usize),
             "a journal that runs past its reservation would be overwritten by the first file written"
         );
     }
@@ -520,33 +608,33 @@ mod tests {
     fn group_zero_free_blocks_drop_by_exactly_the_journal_size() {
         let l = ten_gib();
         let gd = group_descriptor(&l, 0);
-        assert_eq!(gd.free_blocks_count, 32247 - 4096);
+        assert_eq!(gd.free_blocks_count, 31607 - 4096);
     }
 
     #[test]
     fn the_journal_does_not_move_the_root_or_lost_and_found_data_blocks() {
         let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
-        assert_eq!(p.root_data_block(), 516);
-        assert_eq!(p.lost_found_first_block(), 517);
+        assert_eq!(p.root_data_block(), 1155);
+        assert_eq!(p.lost_found_first_block(), 1156);
     }
 
     #[test]
     fn group_descriptor_group_0_10_gib() {
         let l = ten_gib();
         let gd = group_descriptor(&l, 0);
-        assert_eq!(gd.free_blocks_count, 28151);
+        assert_eq!(gd.free_blocks_count, 27511);
         assert_eq!(gd.free_inodes_count, 8181);
         assert_eq!(gd.used_dirs_count, 2);
-        assert_eq!(gd.block_bitmap, 2);
-        assert_eq!(gd.inode_bitmap, 3);
-        assert_eq!(gd.inode_table, 4);
+        assert_eq!(gd.block_bitmap, 641);
+        assert_eq!(gd.inode_bitmap, 642);
+        assert_eq!(gd.inode_table, 643);
     }
 
     #[test]
     fn group_descriptor_backup_group_10_gib() {
         let l = ten_gib();
         let gd = group_descriptor(&l, 1);
-        assert_eq!(gd.free_blocks_count, 32252);
+        assert_eq!(gd.free_blocks_count, 31613);
         assert_eq!(gd.free_inodes_count, 8192);
         assert_eq!(gd.used_dirs_count, 0);
     }
@@ -565,7 +653,7 @@ mod tests {
         let p = Plan::new(32 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         assert_eq!(
             p.superblock.free_blocks_count,
-            8055 - JBD2_MIN_JOURNAL_BLOCKS
+            8047 - JBD2_MIN_JOURNAL_BLOCKS
         );
         assert_eq!(p.superblock.free_inodes_count, 2048 - 11);
     }
@@ -575,11 +663,12 @@ mod tests {
         let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
         let backup_groups = 9u32;
         let other_groups = 80 - 9;
-        let expected_metadata = backup_groups * 516
+        let expected_metadata = backup_groups * (516 + 639)
             + other_groups * 514
             + 1 /*root dir*/
             + 4 /*l+f*/
-            + JOURNAL_TARGET_BLOCKS;
+            + JOURNAL_TARGET_BLOCKS
+            + RESIZE_DIND_BLOCKS;
         let expected_free = 2_621_440 - expected_metadata;
         assert_eq!(p.superblock.free_blocks_count, expected_free);
         assert_eq!(p.superblock.free_inodes_count, 655_360 - 11);
@@ -597,21 +686,21 @@ mod tests {
     #[test]
     fn plan_root_inode_points_to_correct_block() {
         let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
-        assert_eq!(p.root_data_block(), 516);
+        assert_eq!(p.root_data_block(), 1155);
         let (logical, length, physical) = first_extent(&p.root_inode);
         assert_eq!(logical, 0);
         assert_eq!(length, 1);
-        assert_eq!(physical, 516);
+        assert_eq!(physical, 1155);
     }
 
     #[test]
     fn plan_lost_found_inode_points_to_4_consecutive_blocks() {
         let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
-        assert_eq!(p.lost_found_first_block(), 517);
+        assert_eq!(p.lost_found_first_block(), 1156);
         let (logical, length, physical) = first_extent(&p.lost_found_inode);
         assert_eq!(logical, 0);
         assert_eq!(length, 4);
-        assert_eq!(physical, 517);
+        assert_eq!(physical, 1156);
     }
 
     #[test]
@@ -666,6 +755,115 @@ mod tests {
             let b = &p.lost_found_blocks[i];
             assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0);
             assert_eq!(u16::from_le_bytes([b[4], b[5]]), BLOCK_SIZE as u16);
+        }
+    }
+
+    fn slot(block: &[u8], i: usize) -> u32 {
+        u32::from_le_bytes([
+            block[i * 4],
+            block[i * 4 + 1],
+            block[i * 4 + 2],
+            block[i * 4 + 3],
+        ])
+    }
+
+    #[test]
+    fn the_dind_block_names_every_reserved_gdt_block_at_the_slot_e2fsck_reads() {
+        let l = ten_gib();
+        let r = resize_blocks(&l).unwrap();
+        assert_eq!(r.dind_block, 5256);
+        assert_eq!(
+            slot(&r.dind_contents, 0),
+            0,
+            "the slots below gdt_blocks belong to the live table, not the reserved run"
+        );
+        for k in 0..l.reserved_gdt_blocks {
+            assert_eq!(
+                slot(&r.dind_contents, (l.gdt_blocks + k) as usize),
+                2 + k,
+                "reserved block {k} must sit at the slot e2fsck computes from gdt_blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn each_reserved_gdt_block_lists_its_own_copy_in_every_backup_group() {
+        let l = ten_gib();
+        let r = resize_blocks(&l).unwrap();
+        let backups = backup_groups_above_zero(&l);
+        assert_eq!(backups, vec![1, 3, 5, 7, 9, 25, 27, 49]);
+
+        let (primary, contents) = &r.indirect[0];
+        assert_eq!(*primary, 2);
+        for (i, g) in backups.iter().enumerate() {
+            assert_eq!(
+                slot(contents, i),
+                2 + g * l.blocks_per_group,
+                "backup {g} of reserved block 2"
+            );
+        }
+        assert_eq!(
+            slot(contents, backups.len()),
+            0,
+            "a trailing entry would be walked as a block and refused as out of range"
+        );
+    }
+
+    #[test]
+    fn the_resize_inode_counts_every_block_pass_1_will_visit() {
+        let l = ten_gib();
+        let p = Plan::new(10 * 1024 * 1024 * 1024, [0; 16], "test", 0).unwrap();
+        let backups = backup_groups_above_zero(&l).len() as u32;
+        let visited = 1 + l.reserved_gdt_blocks + l.reserved_gdt_blocks * backups;
+        assert_eq!(
+            p.resize_inode.blocks,
+            visited * 8,
+            "e2fsck counts the dind block, every reserved block, and every backup entry, and refuses any other i_blocks"
+        );
+        assert_eq!(
+            p.resize_inode.flags, 0,
+            "the resize inode is block-mapped; an extents flag makes e2fsck read the dind pointer as an extent header"
+        );
+    }
+
+    #[test]
+    fn an_image_with_no_room_to_grow_reserves_nothing_and_writes_no_resize_tree() {
+        let mut l = ten_gib();
+        l.reserved_gdt_blocks = 0;
+        assert!(
+            resize_blocks(&l).is_none(),
+            "reserved blocks and the resize inode arrive together or not at all"
+        );
+    }
+
+    #[test]
+    fn an_image_with_no_room_to_grow_does_not_advertise_a_resize_inode_it_never_wrote() {
+        let mut l = ten_gib();
+        l.reserved_gdt_blocks = 0;
+        let sb = Superblock::for_fresh_image(&l, [0; 16], "test", 0);
+        assert_eq!(
+            sb.feature_compat & FEATURE_COMPAT_RESIZE_INODE,
+            0,
+            "e2fsck reads the feature bit as a promise that inode 7 holds a block tree, and refuses a zeroed one"
+        );
+    }
+
+    #[test]
+    fn a_volume_past_one_descriptor_block_still_addresses_its_reserved_run() {
+        for gib in [17u64, 20, 64, 1024] {
+            let l = Layout::from_image_size(gib * 1024 * 1024 * 1024);
+            assert!(l.gdt_blocks > 1, "{gib} GiB needs more than one GDT block");
+            let r = resize_blocks(&l).expect("a volume this size still reserves room to grow");
+            let highest = (l.gdt_blocks + l.reserved_gdt_blocks - 1) as usize;
+            assert!(
+                highest < ADDRS_PER_BLOCK as usize,
+                "{gib} GiB: slot {highest} would be written past the end of the double-indirect block"
+            );
+            assert_eq!(
+                slot(&r.dind_contents, highest),
+                r.indirect.last().expect("a reserved run").0,
+                "{gib} GiB: the last reserved block must sit at the last slot the tree uses"
+            );
         }
     }
 

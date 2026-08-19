@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::upperfs::constants::*;
 use crate::upperfs::journal;
 use crate::upperfs::plan::{
-    Plan, block_bitmap, group_block_layout, group_descriptor, inode_bitmap,
+    Plan, block_bitmap, group_block_layout, group_descriptor, inode_bitmap, resize_blocks,
 };
 
 pub fn write_ext4(plan: &Plan, path: &Path) -> Result<()> {
@@ -87,6 +87,13 @@ fn write_metadata(f: &mut File, plan: &Plan) -> Result<()> {
                 itab_off + (JOURNAL_INO as u64 - 1) * INODE_SIZE as u64,
                 &plan.journal_inode.to_bytes(),
             )?;
+            if plan.layout.reserved_gdt_blocks > 0 {
+                write_at(
+                    f,
+                    itab_off + (RESIZE_INO as u64 - 1) * INODE_SIZE as u64,
+                    &plan.resize_inode.to_bytes(),
+                )?;
+            }
         }
     }
 
@@ -107,15 +114,22 @@ fn write_metadata(f: &mut File, plan: &Plan) -> Result<()> {
         write_at(f, abs as u64 * BLOCK_SIZE as u64, block)?;
     }
 
+    if let Some(resize) = resize_blocks(&plan.layout) {
+        write_at(
+            f,
+            resize.dind_block as u64 * BLOCK_SIZE as u64,
+            &resize.dind_contents,
+        )?;
+        for (block, contents) in &resize.indirect {
+            write_at(f, *block as u64 * BLOCK_SIZE as u64, contents)?;
+        }
+    }
+
     Ok(())
 }
 
 fn gdt_bytes(plan: &Plan) -> Vec<u8> {
-    let gdt_blocks = plan
-        .layout
-        .num_groups
-        .div_ceil(BLOCK_SIZE / GROUP_DESC_SIZE);
-    let padded_size = gdt_blocks as usize * BLOCK_SIZE as usize;
+    let padded_size = plan.layout.gdt_blocks as usize * BLOCK_SIZE as usize;
     let mut out = Vec::with_capacity(padded_size);
     for g in 0..plan.layout.num_groups {
         out.extend_from_slice(&group_descriptor(&plan.layout, g).to_bytes());
@@ -193,29 +207,29 @@ mod tests {
     #[test]
     fn gdt_at_block_1_for_group_0() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        assert_eq!(read_u32(&bytes, 4096), 2, "bg_block_bitmap");
-        assert_eq!(read_u32(&bytes, 4096 + 0x04), 3, "bg_inode_bitmap");
-        assert_eq!(read_u32(&bytes, 4096 + 0x08), 4, "bg_inode_table");
+        assert_eq!(read_u32(&bytes, 4096), 9, "bg_block_bitmap");
+        assert_eq!(read_u32(&bytes, 4096 + 0x04), 10, "bg_inode_bitmap");
+        assert_eq!(read_u32(&bytes, 4096 + 0x08), 11, "bg_inode_table");
         assert_eq!(read_u16(&bytes, 4096 + 0x10), 2);
     }
 
     #[test]
-    fn block_bitmap_at_block_2_for_group_0() {
+    fn block_bitmap_for_group_0_marks_every_allocated_block() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let bbmp = &bytes[4096 * 2..4096 * 3];
-        for bit in 0..=1160 {
+        let bbmp = &bytes[4096 * 9..4096 * 10];
+        for bit in 0..=1168 {
             let set = (bbmp[bit / 8] >> (bit % 8)) & 1 == 1;
             assert!(set, "block bitmap bit {bit} should be set");
         }
-        let bit = 1161;
+        let bit = 1169;
         let set = (bbmp[bit / 8] >> (bit % 8)) & 1 == 1;
-        assert!(!set, "bit 1161 should be clear (first free block)");
+        assert!(!set, "bit 1169 should be clear (first free block)");
     }
 
     #[test]
-    fn inode_bitmap_at_block_3_for_group_0() {
+    fn inode_bitmap_for_group_0_marks_the_reserved_inodes() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let ibmp = &bytes[4096 * 3..4096 * 4];
+        let ibmp = &bytes[4096 * 10..4096 * 11];
         assert_eq!(ibmp[0], 0xFF);
         assert_eq!(ibmp[1] & 0b0000_0111, 0b0000_0111);
         assert_eq!(ibmp[1] & 0b0000_1000, 0);
@@ -224,7 +238,7 @@ mod tests {
     #[test]
     fn root_inode_at_table_offset_256() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let off = 4096 * 4 + 256;
+        let off = 4096 * 11 + 256;
         assert_eq!(read_u16(&bytes, off), S_IFDIR | 0o755);
         assert_eq!(read_u16(&bytes, off + 0x1A), 3);
         assert_eq!(read_u32(&bytes, off + 0x1C), 8);
@@ -236,13 +250,13 @@ mod tests {
         assert_eq!(read_u16(&bytes, off + 0x2A), 1);
         assert_eq!(read_u32(&bytes, off + 0x34), 0);
         assert_eq!(read_u16(&bytes, off + 0x38), 1);
-        assert_eq!(read_u32(&bytes, off + 0x3C), 132);
+        assert_eq!(read_u32(&bytes, off + 0x3C), 139);
     }
 
     #[test]
     fn lost_found_inode_at_table_offset_2560() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let off = 4096 * 4 + 2560;
+        let off = 4096 * 11 + 2560;
         assert_eq!(read_u16(&bytes, off), S_IFDIR | 0o700);
         assert_eq!(read_u16(&bytes, off + 0x1A), 2);
         assert_eq!(read_u32(&bytes, off + 0x1C), 8 * LOST_FOUND_BLOCKS);
@@ -254,7 +268,7 @@ mod tests {
         assert_eq!(read_u16(&bytes, off + 0x2A), 1, "one extent of length 4");
         assert_eq!(read_u32(&bytes, off + 0x34), 0, "ee_block");
         assert_eq!(read_u16(&bytes, off + 0x38), 4, "ee_len");
-        assert_eq!(read_u32(&bytes, off + 0x3C), 133, "ee_start_lo");
+        assert_eq!(read_u32(&bytes, off + 0x3C), 140, "ee_start_lo");
     }
 
     fn inode_table_offset(plan: &Plan) -> usize {
@@ -309,7 +323,7 @@ mod tests {
     #[test]
     fn root_dir_block_byte_layout() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let off = 4096 * 132;
+        let off = 4096 * 139;
         assert_eq!(read_u32(&bytes, off), ROOT_INO);
         assert_eq!(read_u16(&bytes, off + 4), 12);
         assert_eq!(bytes[off + 6], 1);
@@ -324,7 +338,7 @@ mod tests {
     #[test]
     fn lost_found_first_block_byte_layout() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
-        let off = 4096 * 133;
+        let off = 4096 * 140;
         assert_eq!(read_u32(&bytes, off), LOST_FOUND_INO);
         assert_eq!(read_u16(&bytes, off + 4), 12);
         assert_eq!(read_u32(&bytes, off + 12), ROOT_INO);
@@ -335,7 +349,7 @@ mod tests {
     fn lost_found_trailing_blocks_are_sentinels() {
         let (_d, _p, bytes) = build_and_read(32 * 1024 * 1024);
         for i in 1..LOST_FOUND_BLOCKS as usize {
-            let off = 4096 * (133 + i);
+            let off = 4096 * (140 + i);
             assert_eq!(read_u32(&bytes, off), 0);
             assert_eq!(read_u16(&bytes, off + 4), BLOCK_SIZE as u16);
         }

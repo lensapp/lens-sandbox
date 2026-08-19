@@ -101,6 +101,74 @@ mod host_validation {
         );
     }
 
+    /// e2fsck refuses reserved GDT blocks unless the resize inode backs them, and it walks that inode block by block — so this is the only check that proves a fresh volume can be grown later.
+    #[test]
+    #[ignore]
+    fn e2fsck_accepts_the_reserved_gdt_run_and_the_inode_that_owns_it() {
+        let Some(e2fsck) = find_tool("e2fsck") else {
+            eprintln!("SKIP: e2fsck not found on host");
+            return;
+        };
+        let Some(dumpe2fs) = find_tool("dumpe2fs") else {
+            eprintln!("SKIP: dumpe2fs not found on host");
+            return;
+        };
+        for size in [32 * 1024 * 1024, 10 * 1024 * 1024 * 1024] {
+            let (_dir, path, plan) = produce_image(size);
+
+            let dump = Command::new(&dumpe2fs)
+                .arg("-h")
+                .arg(&path)
+                .output()
+                .expect("run dumpe2fs");
+            let stdout = String::from_utf8_lossy(&dump.stdout).to_string();
+            let reserved = parse_field(&stdout, "Reserved GDT blocks").expect("reserved gdt line");
+            assert_eq!(
+                reserved.parse::<u32>().expect("a block count"),
+                plan.layout.reserved_gdt_blocks,
+                "{size} bytes: the image must reserve exactly what the layout planned"
+            );
+            assert!(
+                plan.layout.reserved_gdt_blocks > 0,
+                "{size} bytes: a volume with no reserved run can never grow"
+            );
+
+            let out = Command::new(&e2fsck)
+                .args(["-f", "-n"])
+                .arg(&path)
+                .output()
+                .expect("run e2fsck");
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(
+                out.status.success(),
+                "{size} bytes: e2fsck exit {:?}\n{stdout}",
+                out.status.code()
+            );
+        }
+    }
+
+    /// `e2fsck -f -n` reads only the primary superblock, so nothing else catches a backup copy that disagrees with it.
+    #[test]
+    #[ignore]
+    fn e2fsck_accepts_the_image_read_through_a_backup_superblock() {
+        let Some(e2fsck) = find_tool("e2fsck") else {
+            eprintln!("SKIP: e2fsck not found on host");
+            return;
+        };
+        let (_dir, path, _plan) = produce_image(10 * 1024 * 1024 * 1024);
+        let out = Command::new(&e2fsck)
+            .args(["-f", "-n", "-b", "32768", "-B", "4096"])
+            .arg(&path)
+            .output()
+            .expect("run e2fsck");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "e2fsck through the group 1 backup exit {:?}\n{stdout}",
+            out.status.code()
+        );
+    }
+
     #[test]
     #[ignore]
     fn tune2fs_lists_expected_features() {
@@ -129,6 +197,7 @@ mod host_validation {
         for required in [
             "has_journal",
             "ext_attr",
+            "resize_inode",
             "filetype",
             "extent",
             "sparse_super",
@@ -144,7 +213,6 @@ mod host_validation {
             "metadata_csum",
             "huge_file",
             "flex_bg",
-            "resize_inode",
             "dir_index",
             "extra_isize",
             "inline_data",
@@ -263,9 +331,9 @@ mod host_validation {
                 "-I",
                 "256",
                 "-O",
-                "sparse_super,filetype,extents,ext_attr,large_file,has_journal,\
+                "sparse_super,filetype,extents,ext_attr,large_file,has_journal,resize_inode,\
                  ^64bit,^huge_file,^flex_bg,^metadata_csum,\
-                 ^dir_index,^resize_inode,^inline_data,^extra_isize",
+                 ^dir_index,^inline_data,^extra_isize",
                 "-J",
                 "size=4",
                 "-U",
