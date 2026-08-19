@@ -21,7 +21,8 @@ Read this before changing anything that parses, validates, publishes, resolves, 
 | Question | Authority |
 |---|---|
 | What *should* the format be? | `docs/sandbox-spec.md`. It is the decision, not a proposal. |
-| What does `lns` accept *today*? | The code, and the guides in `docs/` that describe it. |
+| What *should* the CLI surface be? | `docs/cli-spec.md`. Same standing, for the command grammar, output, exit codes, and prompts. |
+| What does `lns` accept *today*? | The code, and the guides in `docs/` (including `docs/cli-reference.md`) that describe it. |
 
 Never edit the specification to match the code. A divergence is work to be done, not a doc bug. If the specification is genuinely wrong — the code encodes a constraint the spec did not know about — say so and change the spec deliberately, as a decision, in its own commit.
 
