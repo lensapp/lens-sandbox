@@ -64,6 +64,9 @@ pub struct Volume {
     /// A bind source the running machine does not have is skipped instead of refusing the run.
     #[serde(default)]
     optional: bool,
+    /// The capacity a named volume must have before the run starts; the service grows a smaller one and never shrinks a larger one.
+    #[serde(default)]
+    pub size: Option<spec::Quantity>,
 }
 
 impl Volume {
@@ -296,7 +299,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
                 volume.target
             );
         }
-        validate_volume(volume)?;
+        validate_volume(volume).with_context(|| format!("volume targeting {}", volume.target))?;
         if !targets.insert(&volume.target) {
             bail!("duplicate volume target {}", volume.target);
         }
@@ -520,6 +523,9 @@ fn validate_resources(resources: &Resources) -> Result<()> {
         }
         _ => {}
     }
+    if let Some(disk) = &resources.disk {
+        crate::disk::parse_bytes(disk).context("resources.disk")?;
+    }
     Ok(())
 }
 
@@ -531,6 +537,14 @@ fn validate_volume(volume: &Volume) -> Result<()> {
         bail!(
             "optional applies to a bind volume only; a named volume is created on demand, never absent"
         );
+    }
+    if let Some(size) = &volume.size {
+        if volume.is_bind() {
+            bail!(
+                "size applies to a named volume only; a bind is whatever the host path already holds"
+            );
+        }
+        crate::disk::parse_bytes(size).context("volumes[].size")?;
     }
     for entry in &volume.exclude {
         validate_bind_relative_path(entry)?;
@@ -1205,6 +1219,84 @@ mod tests {
             let rendered = format!("{err:#}");
             assert!(
                 rendered.contains("resources.memory") && rendered.contains(expected),
+                "spec {spec}: got: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_reads_the_disk_a_sandbox_asks_for() {
+        let def = parse(&def_json(r#"{"image":"x:1","resources":{"disk":"40Gi"}}"#)).unwrap();
+        let disk = def.spec.resources.unwrap().disk.unwrap();
+        assert_eq!(crate::disk::parse_bytes(&disk).unwrap(), 40 << 30);
+    }
+
+    #[test]
+    fn parse_rejects_a_disk_the_service_could_not_provision() {
+        for (spec, expected) in [
+            (
+                r#"{"image":"x:1","resources":{"disk":"50%"}}"#,
+                "is a share",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"disk":"15Mi"}}"#,
+                "at least 16Mi",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"disk":"16Ti"}}"#,
+                "less than 16Ti",
+            ),
+            (
+                r#"{"image":"x:1","resources":{"disk":"40parsecs"}}"#,
+                "unknown unit `parsecs`",
+            ),
+        ] {
+            let err = parse(&def_json(spec)).unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("resources.disk") && rendered.contains(expected),
+                "spec {spec}: got: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_reads_the_size_a_named_volume_asks_for() {
+        let def = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"cache","target":"/c","size":"100Gi"}]}"#,
+        ))
+        .unwrap();
+        let size = def.spec.volumes[0].size.clone().unwrap();
+        assert_eq!(crate::disk::parse_bytes(&size).unwrap(), 100 << 30);
+    }
+
+    #[test]
+    fn parse_rejects_a_size_on_a_bind_because_the_host_already_decided_it() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":".","target":"/w","size":"10Gi"}]}"#,
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("size applies to a named volume only"),
+            "got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_volume_size_the_service_could_not_provision() {
+        for (spec, expected) in [
+            (r#""50%""#, "is a share"),
+            (r#""15Mi""#, "at least 16Mi"),
+            (r#""16Ti""#, "less than 16Ti"),
+        ] {
+            let json = format!(
+                r#"{{"image":"x:1","volumes":[{{"name":"cache","target":"/c","size":{spec}}}]}}"#
+            );
+            let err = parse(&def_json(&json)).unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("volumes[].size") && rendered.contains(expected),
                 "spec {spec}: got: {rendered}"
             );
         }

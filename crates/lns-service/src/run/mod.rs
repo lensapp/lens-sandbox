@@ -263,6 +263,7 @@ mod tests {
         lns_artifact::spec::Resources {
             cpu: Some(lns_artifact::spec::Quantity::Int(cpu)),
             memory: Some(lns_artifact::spec::Quantity::Int(mem_mib)),
+            disk: None,
         }
     }
 

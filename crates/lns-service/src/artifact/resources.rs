@@ -65,6 +65,7 @@ mod tests {
         let over_ceiling = Resources {
             cpu: Some(Quantity::Int(9000)),
             memory: Some(Quantity::Text("999999Gi".into())),
+            disk: None,
         };
         let messages = captured_messages(|| {
             assert_eq!(
@@ -92,6 +93,7 @@ mod tests {
         let honoured = Resources {
             cpu: Some(Quantity::Int(3)),
             memory: Some(Quantity::Text("6Gi".into())),
+            disk: None,
         };
         let messages = captured_messages(|| {
             assert_eq!(
