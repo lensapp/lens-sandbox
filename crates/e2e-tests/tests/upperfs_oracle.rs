@@ -169,6 +169,102 @@ mod host_validation {
         );
     }
 
+    fn grown_image(from: u64, to: u64) -> (tempfile::TempDir, PathBuf) {
+        let (dir, path, _plan) = produce_image(from);
+        lns_service::upperfs::grow_ext4(&path, to).expect("grow_ext4");
+        (dir, path)
+    }
+
+    fn fsck_clean(e2fsck: &PathBuf, path: &PathBuf, extra: &[&str], label: &str) {
+        let mut cmd = Command::new(e2fsck);
+        cmd.args(["-f", "-n"]).args(extra).arg(path);
+        let out = cmd.output().expect("run e2fsck");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "{label}: e2fsck exit {:?}\n{stdout}",
+            out.status.code()
+        );
+    }
+
+    /// Every shape a grow can take: inside one group, filling a short tail, appending groups, and consuming reserved descriptor blocks.
+    #[test]
+    #[ignore]
+    fn e2fsck_reports_a_grown_image_clean() {
+        let Some(e2fsck) = find_tool("e2fsck") else {
+            eprintln!("SKIP: e2fsck not found on host");
+            return;
+        };
+        const MIB: u64 = 1024 * 1024;
+        for (from, to, has_backups) in [
+            (32 * MIB, 64 * MIB, false),
+            (32 * MIB, 160 * MIB, true),
+            (130 * MIB, 140 * MIB, true),
+            (130 * MIB, 400 * MIB, true),
+            (256 * MIB, 2048 * MIB, true),
+            (10240 * MIB, 16384 * MIB, true),
+            (10240 * MIB, 102400 * MIB, true),
+            // The largest size the refusal message advertises: the grow must stop one reserved block short rather than orphan the resize inode's tree.
+            (32 * MIB, 7 * 128 * 128 * MIB, true),
+        ] {
+            let (_dir, path) = grown_image(from, to);
+            let label = format!("{from} -> {to}");
+            fsck_clean(&e2fsck, &path, &[], &label);
+            if has_backups {
+                // `e2fsck -f -n` never reads a backup, so nothing else catches a stale copy.
+                fsck_clean(
+                    &e2fsck,
+                    &path,
+                    &["-b", "32768", "-B", "4096"],
+                    &format!("{label} through the group 1 backup"),
+                );
+            }
+        }
+    }
+
+    /// e2fsck proves the metadata is consistent; only writing and reading proves the volume still holds what it held, and that the blocks the grow added can actually be allocated.
+    #[test]
+    #[ignore]
+    fn a_grown_volume_keeps_its_contents_and_lends_out_its_new_space() {
+        let Some(e2fsck) = find_tool("e2fsck") else {
+            eprintln!("SKIP: e2fsck not found on host");
+            return;
+        };
+        let Some(debugfs) = find_tool("debugfs") else {
+            eprintln!("SKIP: debugfs not found on host");
+            return;
+        };
+        let run = |cmd: &str, path: &PathBuf| {
+            Command::new(&debugfs)
+                .args(["-w", "-R", cmd])
+                .arg(path)
+                .output()
+                .expect("run debugfs");
+        };
+
+        let (dir, path, _plan) = produce_image(32 * 1024 * 1024);
+        let payload = dir.path().join("payload");
+        std::fs::write(&payload, vec![0x5A; 3 * 1024 * 1024]).expect("write payload");
+        run(&format!("write {} payload", payload.display()), &path);
+
+        lns_service::upperfs::grow_ext4(&path, 400 * 1024 * 1024).expect("grow_ext4");
+        fsck_clean(&e2fsck, &path, &[], "after the grow");
+
+        let recovered = dir.path().join("recovered");
+        run(&format!("dump payload {}", recovered.display()), &path);
+        assert_eq!(
+            std::fs::read(&recovered).expect("read back"),
+            vec![0x5A; 3 * 1024 * 1024],
+            "a grow must not disturb a single byte the volume already held"
+        );
+
+        // More than the whole original image, so it can only fit in blocks the grow added.
+        let big = dir.path().join("big");
+        std::fs::write(&big, vec![0x33; 60 * 1024 * 1024]).expect("write big");
+        run(&format!("write {} big", big.display()), &path);
+        fsck_clean(&e2fsck, &path, &[], "after filling the new space");
+    }
+
     #[test]
     #[ignore]
     fn tune2fs_lists_expected_features() {

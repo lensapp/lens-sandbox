@@ -15,7 +15,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn from_image_size(image_size_bytes: u64) -> Self {
+    pub fn for_fresh_image(image_size_bytes: u64) -> Self {
         let block_count = (image_size_bytes / BLOCK_SIZE as u64) as u32;
         let blocks_per_group = BLOCKS_PER_GROUP;
         let num_groups = block_count.div_ceil(blocks_per_group);
@@ -53,6 +53,29 @@ impl Layout {
             gdt_blocks,
             reserved_gdt_blocks,
             backup_groups,
+        }
+    }
+
+    /// The geometry an image already has, which a grow MUST use: re-deriving it from the new size would move every inode.
+    pub fn for_existing(
+        block_count: u32,
+        inodes_per_group: u32,
+        gdt_blocks: u32,
+        reserved_gdt_blocks: u32,
+    ) -> Self {
+        let blocks_per_group = BLOCKS_PER_GROUP;
+        let num_groups = block_count.div_ceil(blocks_per_group);
+        Self {
+            block_count,
+            num_groups,
+            blocks_per_group,
+            last_group_blocks: block_count - (num_groups - 1) * blocks_per_group,
+            inodes_per_group,
+            inodes_count: inodes_per_group * num_groups,
+            inode_table_blocks: inodes_per_group * INODE_SIZE as u32 / BLOCK_SIZE,
+            gdt_blocks,
+            reserved_gdt_blocks,
+            backup_groups: compute_backup_groups(num_groups),
         }
     }
 
@@ -118,7 +141,7 @@ mod tests {
 
     #[test]
     fn layout_32_mib() {
-        let l = Layout::from_image_size(32 * 1024 * 1024);
+        let l = Layout::for_fresh_image(32 * 1024 * 1024);
         assert_eq!(l.block_count, 8192);
         assert_eq!(l.blocks_per_group, 32768);
         assert_eq!(l.num_groups, 1);
@@ -133,7 +156,7 @@ mod tests {
 
     #[test]
     fn layout_10_gib() {
-        let l = Layout::from_image_size(10 * 1024 * 1024 * 1024);
+        let l = Layout::for_fresh_image(10 * 1024 * 1024 * 1024);
         assert_eq!(l.block_count, 2_621_440);
         assert_eq!(l.num_groups, 80);
         assert_eq!(l.last_group_blocks, 32768);
@@ -147,7 +170,7 @@ mod tests {
 
     #[test]
     fn the_reserved_run_holds_room_for_a_thousandfold_growth() {
-        let l = Layout::from_image_size(10 * 1024 * 1024 * 1024);
+        let l = Layout::for_fresh_image(10 * 1024 * 1024 * 1024);
         let reachable_groups = (l.gdt_blocks + l.reserved_gdt_blocks) * DESCS_PER_BLOCK;
         assert!(
             reachable_groups >= l.num_groups * GROWTH_FACTOR,
@@ -158,7 +181,7 @@ mod tests {
     #[test]
     fn the_reserved_run_never_crowds_out_the_journal() {
         for mib in [17u64, 18, 20, 24, 32, 48, 64, 128, 256] {
-            let l = Layout::from_image_size(mib * 1024 * 1024);
+            let l = Layout::for_fresh_image(mib * 1024 * 1024);
             let group_zero = 1
                 + l.gdt_blocks
                 + l.reserved_gdt_blocks
@@ -178,7 +201,7 @@ mod tests {
     #[test]
     fn the_reservation_never_turns_a_formattable_size_into_an_unformattable_one() {
         for mib in [17u64, 18, 19, 20, 33, 129, 1025] {
-            let l = Layout::from_image_size(mib * 1024 * 1024);
+            let l = Layout::for_fresh_image(mib * 1024 * 1024);
             let group_zero = 1
                 + l.gdt_blocks
                 + l.reserved_gdt_blocks
@@ -197,7 +220,7 @@ mod tests {
     #[test]
     fn the_live_table_and_the_reserved_run_share_one_block_of_addresses() {
         for gib in [1u64, 8, 16, 17, 20, 64, 256, 1024, 4096, 8192, 16383] {
-            let l = Layout::from_image_size(gib * 1024 * 1024 * 1024);
+            let l = Layout::for_fresh_image(gib * 1024 * 1024 * 1024);
             assert!(
                 l.gdt_blocks + l.reserved_gdt_blocks <= ADDRS_PER_BLOCK,
                 "{gib} GiB: one double-indirect block addresses the descriptor table and its reserved run together, so the two cannot outgrow a block of addresses"
@@ -207,21 +230,21 @@ mod tests {
 
     #[test]
     fn image_size_rounds_down_to_block() {
-        let l = Layout::from_image_size(32 * 1024 * 1024 + 1);
+        let l = Layout::for_fresh_image(32 * 1024 * 1024 + 1);
         assert_eq!(l.block_count, 8192);
         assert_eq!(l.image_size_bytes(), 32 * 1024 * 1024);
     }
 
     #[test]
     fn backup_groups_omits_1_for_single_group_image() {
-        let l = Layout::from_image_size(32 * 1024 * 1024);
+        let l = Layout::for_fresh_image(32 * 1024 * 1024);
         assert_eq!(l.num_groups, 1);
         assert_eq!(l.backup_groups, vec![0]);
     }
 
     #[test]
     fn backup_groups_includes_1_for_multi_group_image() {
-        let l = Layout::from_image_size(256 * 1024 * 1024);
+        let l = Layout::for_fresh_image(256 * 1024 * 1024);
         assert_eq!(l.num_groups, 2);
         assert!(l.group_has_backup(0));
         assert!(l.group_has_backup(1));
@@ -229,7 +252,7 @@ mod tests {
 
     #[test]
     fn blocks_in_group_handles_short_tail() {
-        let l = Layout::from_image_size(130 * 1024 * 1024);
+        let l = Layout::for_fresh_image(130 * 1024 * 1024);
         assert_eq!(l.num_groups, 2);
         assert_eq!(l.blocks_in_group(0), 32768);
         assert_eq!(l.blocks_in_group(1), 512);
@@ -237,7 +260,7 @@ mod tests {
 
     #[test]
     fn group_has_backup_uses_binary_search() {
-        let l = Layout::from_image_size(10 * 1024 * 1024 * 1024);
+        let l = Layout::for_fresh_image(10 * 1024 * 1024 * 1024);
         for g in [0, 1, 3, 5, 7, 9, 25, 27, 49] {
             assert!(l.group_has_backup(g), "group {g} should have backup");
         }
