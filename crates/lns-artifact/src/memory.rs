@@ -5,6 +5,12 @@ const MIB: u128 = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(String);
 
+impl ParseError {
+    pub fn new(message: String) -> Self {
+        Self(message)
+    }
+}
+
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -22,7 +28,7 @@ pub fn parse_mib(spec: &str) -> Result<usize, ParseError> {
     let (digits, unit) = lower.split_at(digits_end);
     let value: u128 = digits.parse().map_err(|_| {
         ParseError(format!(
-            "invalid memory size `{spec}`: expected MiB, e.g. `512`, or `2g`"
+            "invalid size `{spec}`: expected MiB, e.g. `512`, or `2g`"
         ))
     })?;
     let mib = match unit {
@@ -30,22 +36,25 @@ pub fn parse_mib(spec: &str) -> Result<usize, ParseError> {
         "b" => value.div_ceil(MIB),
         "k" | "kb" | "ki" | "kib" => value.div_ceil(1024),
         "g" | "gb" | "gi" | "gib" => value.checked_mul(1024).ok_or_else(|| out_of_range(spec))?,
+        "t" | "tb" | "ti" | "tib" => value
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| out_of_range(spec))?,
         _ => {
             return Err(ParseError(format!(
-                "invalid memory size `{spec}`: unknown unit `{unit}` (use b, k, m, or g; `Mi`/`Gi` also work)"
+                "invalid size `{spec}`: unknown unit `{unit}` (use b, k, m, g, or t; `Mi`/`Gi` also work)"
             )));
         }
     };
     if mib == 0 {
         return Err(ParseError(format!(
-            "invalid memory size `{spec}`: must be at least 1 MiB"
+            "invalid size `{spec}`: must be at least 1 MiB"
         )));
     }
     usize::try_from(mib).map_err(|_| out_of_range(spec))
 }
 
 fn out_of_range(spec: &str) -> ParseError {
-    ParseError(format!("memory size `{spec}` is out of range"))
+    ParseError(format!("size `{spec}` is out of range"))
 }
 
 #[cfg(test)]
@@ -88,8 +97,15 @@ mod tests {
     }
 
     #[test]
+    fn a_disk_sized_document_can_say_terabytes() {
+        for spec in ["4t", "4tb", "4ti", "4tib", "4T", "4Ti", "4TiB"] {
+            assert_eq!(parse_mib(spec).unwrap(), 4 * 1024 * 1024, "spec: {spec}");
+        }
+    }
+
+    #[test]
     fn an_unknown_unit_is_named_back_to_the_author() {
-        for (spec, unit) in [("12parsecs", "parsecs"), ("38gg", "gg"), ("4t", "t")] {
+        for (spec, unit) in [("12parsecs", "parsecs"), ("38gg", "gg"), ("4p", "p")] {
             let err = parse_mib(spec).unwrap_err().to_string();
             assert!(
                 err.contains(&format!("unknown unit `{unit}`")),

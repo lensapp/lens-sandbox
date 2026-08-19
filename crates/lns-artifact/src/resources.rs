@@ -217,6 +217,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Text("2".into())),
             memory: Some(Quantity::Text("2Gi".into())),
+            disk: None,
         };
         let size = resolve(Some(&res), &ResourceOverrides::default(), DEFAULT_VM_SIZE);
         assert_eq!(
@@ -233,6 +234,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Text("1500m".into())),
             memory: Some(Quantity::Text("768Mi".into())),
+            disk: None,
         };
         let size = resolve(Some(&res), &ResourceOverrides::default(), DEFAULT_VM_SIZE);
         assert_eq!(
@@ -246,6 +248,7 @@ mod tests {
         let plain = Resources {
             cpu: None,
             memory: Some(Quantity::Text("640".into())),
+            disk: None,
         };
         assert_eq!(
             resolve(Some(&plain), &ResourceOverrides::default(), DEFAULT_VM_SIZE).mem_mib,
@@ -269,6 +272,7 @@ mod tests {
             let res = Resources {
                 cpu: None,
                 memory: Some(Quantity::Text(text.into())),
+                disk: None,
             };
             assert_eq!(
                 resolve(Some(&res), &ResourceOverrides::default(), DEFAULT_VM_SIZE).mem_mib,
@@ -283,6 +287,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Int(0)),
             memory: Some(Quantity::Text("lots".into())),
+            disk: None,
         };
         let size = resolve(Some(&res), &ResourceOverrides::default(), DEFAULT_VM_SIZE);
         assert_eq!(size, DEFAULT_VM_SIZE);
@@ -290,6 +295,7 @@ mod tests {
         let too_many = Resources {
             cpu: Some(Quantity::Int(9000)),
             memory: Some(Quantity::Int(-4)),
+            disk: None,
         };
         assert_eq!(
             resolve(
@@ -306,6 +312,7 @@ mod tests {
         let over_ceiling = Resources {
             cpu: None,
             memory: Some(Quantity::Text("999999Gi".into())),
+            disk: None,
         };
         assert_eq!(
             resolve(
@@ -321,6 +328,7 @@ mod tests {
         let overflowing = Resources {
             cpu: None,
             memory: Some(Quantity::Text(format!("{}Gi", usize::MAX))),
+            disk: None,
         };
         assert_eq!(
             resolve(
@@ -336,6 +344,7 @@ mod tests {
         let huge_int = Resources {
             cpu: None,
             memory: Some(Quantity::Int(i64::MAX)),
+            disk: None,
         };
         assert_eq!(
             resolve(
@@ -350,6 +359,7 @@ mod tests {
         let at_ceiling = Resources {
             cpu: None,
             memory: Some(Quantity::Int(MAX_MEM_MIB as i64)),
+            disk: None,
         };
         assert_eq!(
             resolve(
@@ -373,6 +383,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Text("80%".into())),
             memory: Some(Quantity::Text("80%".into())),
+            disk: None,
         };
         let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(TEN_CORE_16G));
 
@@ -395,6 +406,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Text("80%".into())),
             memory: Some(Quantity::Text("80%".into())),
+            disk: None,
         };
         let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(tiny));
 
@@ -421,6 +433,7 @@ mod tests {
         let res = Resources {
             cpu: None,
             memory: Some(Quantity::Text("100%".into())),
+            disk: None,
         };
         let (declared, _) = DeclaredSize::from_resources(Some(&res), Some(huge));
 
@@ -436,6 +449,7 @@ mod tests {
         let res = Resources {
             cpu: Some(Quantity::Text("80%".into())),
             memory: Some(Quantity::Text("80%".into())),
+            disk: None,
         };
         let (declared, ignored) = DeclaredSize::from_resources(Some(&res), None);
 
@@ -453,6 +467,7 @@ mod tests {
             let res = Resources {
                 cpu: Some(Quantity::Text(pct.into())),
                 memory: Some(Quantity::Text(pct.into())),
+                disk: None,
             };
             let (declared, ignored) = DeclaredSize::from_resources(Some(&res), Some(TEN_CORE_16G));
             assert_eq!(declared, DeclaredSize::default(), "pct {pct}");
@@ -465,6 +480,7 @@ mod tests {
         let refused = Resources {
             cpu: Some(Quantity::Int(9000)),
             memory: Some(Quantity::Text("999999Gi".into())),
+            disk: None,
         };
         let (declared, ignored) = DeclaredSize::from_resources(Some(&refused), None);
         assert_eq!(declared, DeclaredSize::default());
@@ -473,6 +489,7 @@ mod tests {
         let honoured = Resources {
             cpu: Some(Quantity::Int(2)),
             memory: Some(Quantity::Text("2Gi".into())),
+            disk: None,
         };
         let (declared, ignored) = DeclaredSize::from_resources(Some(&honoured), None);
         assert_eq!(

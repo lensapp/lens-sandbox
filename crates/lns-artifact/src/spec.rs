@@ -56,6 +56,8 @@ pub struct Resources {
     pub cpu: Option<Quantity>,
     #[serde(default)]
     pub memory: Option<Quantity>,
+    #[serde(default)]
+    pub disk: Option<Quantity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
