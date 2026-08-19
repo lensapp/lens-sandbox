@@ -242,8 +242,19 @@ async fn orchestrate(
         log::debug!("kernel ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(kernel_path)
     };
+    let vm_size = super::sandbox_vm_size(
+        sandbox_plan
+            .as_ref()
+            .and_then(|p| p.workload.resources.as_ref()),
+        args.cpus,
+        args.cpus_explicit,
+        args.mem,
+        args.mem_explicit,
+        lns_artifact::resources::host::probe(),
+    );
+
     let upper_fut = async {
-        let upper_disk_path = upperfs::provision(&run_id).await?;
+        let upper_disk_path = upperfs::provision(&run_id, vm_size.disk_bytes).await?;
         log::debug!("upper disk ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(upper_disk_path)
     };
@@ -439,16 +450,7 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
-    let (cpus, memory_mib) = super::sandbox_vm_size(
-        sandbox_plan
-            .as_ref()
-            .and_then(|p| p.workload.resources.as_ref()),
-        args.cpus,
-        args.cpus_explicit,
-        args.mem,
-        args.mem_explicit,
-        lns_artifact::resources::host::probe(),
-    );
+    let (cpus, memory_mib) = (vm_size.cpus, vm_size.mem_mib);
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 
     let spec = vm::VmSpec {

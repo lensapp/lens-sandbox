@@ -70,6 +70,7 @@ impl Defaults {
             size: lns_artifact::resources::DeclaredSize {
                 cpus: view.cpus,
                 mem_mib: view.mem_mib,
+                disk_bytes: view.disk_bytes,
             },
             workdir: view.workdir.clone(),
             mounts: view

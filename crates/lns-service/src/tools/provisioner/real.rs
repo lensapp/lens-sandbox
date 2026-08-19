@@ -126,7 +126,7 @@ async fn run_provisioner(
             image::pull,
         ),
         kernel::ensure(),
-        upperfs::provision(scratch_id),
+        upperfs::provision(scratch_id, upperfs::DEFAULT_SIZE_BYTES),
     );
     let (guest_tools, initrd) = tools_res?;
     let mut rootfs = image_res.context("pulling the provisioner rootfs")?;

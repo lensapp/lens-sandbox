@@ -67,6 +67,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -103,6 +104,7 @@ fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -163,6 +165,7 @@ fn inspects_sandbox_with_a_pinned_flag_mixin(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -194,6 +197,7 @@ fn inspects_sandbox_resolved_from_a_mixin(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -228,6 +232,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -253,6 +258,7 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -293,6 +299,7 @@ fn inspects_sandbox_credential(
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -322,6 +329,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
         ],
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }
@@ -347,6 +355,7 @@ fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: St
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     }));
     cached_artifact(world, &reference, inspection);
 }

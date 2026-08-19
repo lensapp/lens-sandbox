@@ -21,6 +21,21 @@ Feature: lns run resource limits — vCPU count and memory size flags
     When the published run summary is composed with no resource flags
     Then the run summary shows "Resources: 3 vCPU · 6144 MiB"
 
+  Scenario: The summary discloses the disk the definition asked for
+    Given an lns.yaml declaring a 40Gi disk
+    When the local run summary is composed with no resource flags
+    Then the run summary shows "Resources: 1 vCPU · 512 MiB · 40 GiB disk"
+
+  Scenario: A published sandbox's declared disk reaches the summary
+    Given an lns.yaml declaring a 40Gi disk
+    When the published run summary is composed with no resource flags
+    Then the run summary shows "Resources: 1 vCPU · 512 MiB · 40 GiB disk"
+
+  Scenario: A definition that declares no disk still shows the built-in default
+    Given an lns.yaml declaring no resources
+    When the local run summary is composed with no resource flags
+    Then the run summary shows "Resources: 1 vCPU · 512 MiB · 10 GiB disk"
+
   Scenario: A definition sized in percent boots that share of this host
     Given an lns.yaml declaring 80% of this host
     When the local run summary is composed with no resource flags

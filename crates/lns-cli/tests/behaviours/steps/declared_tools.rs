@@ -84,6 +84,7 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
         policy_flags: Vec::new(),
         cpus: None,
         mem_mib: None,
+        disk_bytes: None,
     };
     w.sandbox.response = Some(Response::Error {
         message: format!("no active run with id {TOOLS_REFERENCE}"),

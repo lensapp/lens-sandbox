@@ -1355,6 +1355,7 @@ mod tests {
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             })),
         )
         .unwrap();
@@ -1423,6 +1424,7 @@ mod tests {
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             })),
         )
         .unwrap_err();

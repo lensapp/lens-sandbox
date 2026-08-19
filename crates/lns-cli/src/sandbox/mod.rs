@@ -1350,6 +1350,7 @@ mod tests {
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
+                disk_bytes: None,
             })),
         }
     }
@@ -2136,6 +2137,7 @@ mod tests {
                     policy_flags: Vec::new(),
                     cpus: None,
                     mem_mib: None,
+                    disk_bytes: None,
                 })),
             },
         );
