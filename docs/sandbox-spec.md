@@ -398,7 +398,7 @@ share of a machine they cannot see.
 
 | Rule | Detail |
 |---|---|
-| Minimum | `16Mi`. A smaller disk cannot hold its own filesystem metadata. The service REFUSES it rather than lifting it: unlike a share, an absolute size is a statement, not a request. |
+| Minimum | `20Mi`. Near that size the disk runs out of room for its own metadata and a journal the guest can recover, and a disk without that journal does not mount after a crash. The exact boundary follows internal geometry, so the minimum keeps a margin above it. The service REFUSES a smaller size rather than lifting it: unlike a share, an absolute size is a statement, not a request. |
 | Ceiling | Less than `16Ti`. The guest filesystem addresses its blocks in 32 bits, and one block is 4 KiB. |
 | Sparse | The disk costs what the workload writes, not what the document declares. A large disk is cheap. |
 
@@ -581,7 +581,7 @@ floor is the largest `size` any surviving entry declares.** Each entry states
 what that mount needs; the volume satisfies all of them at once.
 
 `size` takes no share, for the same reason [`resources.disk`](#315-resources)
-does not, and its minimum (`16Mi`) and ceiling (less than `16Ti`) are the same.
+does not, and its minimum (`20Mi`) and ceiling (less than `16Ti`) are the same.
 A volume is sparse: it costs what the workload wrote, not what the document
 declared.
 
@@ -1212,7 +1212,7 @@ Offline validation (`lns sandbox validate`, and every load path including
 - **env**: every key is a legal environment-variable name.
 - **resources**: an absolute `cpu` is a positive count and an absolute `memory`
   a parsable byte size; a share is a whole 1–100 with a `%` suffix; `disk` is a
-  parsable byte size, at least `16Mi` and less than `16Ti`, and is not a share.
+  parsable byte size, at least `20Mi` and less than `16Ti`, and is not a share.
 - **egress**: every entry sets `match` and a `verdict` of `allow` or `deny`; an
   `http` entry declaring `rules` terminates TLS; every `binaries` filter is
   non-empty and names kernel-resolvable paths.
@@ -1226,7 +1226,7 @@ Offline validation (`lns sandbox validate`, and every load path including
   names use the allowed charset; no duplicate `target`; `exclude` appears only on a
   bind and every entry is a relative path with no empty, `.`, or `..` segment;
   `optional` appears only on a bind; `size` appears only on a named volume and is
-  a parsable byte size, at least `16Mi` and less than `16Ti`, and is not a share.
+  a parsable byte size, at least `20Mi` and less than `16Ti`, and is not a share.
 - **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
   limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
   literal, and names one file; `optional` appears only on a `hostPath`;
