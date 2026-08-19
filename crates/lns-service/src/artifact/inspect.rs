@@ -262,11 +262,26 @@ mod tests {
         sandbox_view_with(cpus, mem_mib, user, Vec::new())
     }
 
+    /// The same projection with a declared disk, so a test can compare whole values rather than reach into the enum.
+    fn sandbox_view_with_disk(disk_bytes: u64) -> ArtifactInspection {
+        sandbox_view_of(None, None, None, Vec::new(), Some(disk_bytes))
+    }
+
     fn sandbox_view_with(
         cpus: Option<u8>,
         mem_mib: Option<usize>,
         user: Option<&str>,
         mounts: Vec<SandboxMount>,
+    ) -> ArtifactInspection {
+        sandbox_view_of(cpus, mem_mib, user, mounts, None)
+    }
+
+    fn sandbox_view_of(
+        cpus: Option<u8>,
+        mem_mib: Option<usize>,
+        user: Option<&str>,
+        mounts: Vec<SandboxMount>,
+        disk_bytes: Option<u64>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
             mixins: Vec::new(),
@@ -287,7 +302,7 @@ mod tests {
             policy_flags: Vec::new(),
             cpus,
             mem_mib,
-            disk_bytes: None,
+            disk_bytes,
         }))
     }
 
@@ -471,30 +486,37 @@ mod tests {
 
     #[test]
     fn a_sandbox_projects_the_disk_it_declared_so_the_disclosure_can_name_it() {
-        let ArtifactInspection::Sandbox(view) = project_sandbox(
-            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","resources":{"disk":"40Gi"}}}"#,
-        )
-        .unwrap() else {
-            panic!("a sandbox document projects a sandbox view");
-        };
         assert_eq!(
-            view.disk_bytes,
-            Some(40 << 30),
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","resources":{"disk":"40Gi"}}}"#
+            )
+            .unwrap(),
+            sandbox_view_with_disk(40 << 30),
             "without this a pulled run discloses the default disk while booting the declared one"
         );
     }
 
     #[test]
     fn a_sandbox_projects_the_size_its_volume_declared_so_a_pulled_run_provisions_it() {
-        let ArtifactInspection::Sandbox(view) = project_sandbox(
-            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","volumes":[{"name":"cache","target":"/cache","size":"40Gi"}]}}"#,
-        )
-        .unwrap() else {
-            panic!("a sandbox document projects a sandbox view");
-        };
         assert_eq!(
-            view.mounts[0].size_bytes,
-            Some(40 << 30),
+            project_sandbox(
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","volumes":[{"name":"cache","target":"/cache","size":"40Gi"}]}}"#
+            )
+            .unwrap(),
+            sandbox_view_with(
+                None,
+                None,
+                None,
+                vec![SandboxMount {
+                    kind: SandboxMountKind::Volume,
+                    source: "cache".into(),
+                    target: "/cache".into(),
+                    read_only: false,
+                    exclude: Vec::new(),
+                    optional: false,
+                    size_bytes: Some(40 << 30),
+                }]
+            ),
             "without this a pulled sandbox's volume is created at the default, not the size its author declared"
         );
     }

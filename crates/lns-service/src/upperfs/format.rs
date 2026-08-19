@@ -464,6 +464,42 @@ mod tests {
         Layout::for_fresh_image(32 * 1024 * 1024)
     }
 
+    fn doctored(mut edit: impl FnMut(&mut [u8; 1024])) -> anyhow::Error {
+        let mut bytes = Superblock::for_fresh_image(&small_layout(), [0; 16], "t", 0).to_bytes();
+        edit(&mut bytes);
+        Superblock::from_bytes(&bytes).expect_err("a doctored superblock must be refused")
+    }
+
+    #[test]
+    fn a_superblock_naming_another_block_size_is_refused_and_says_which() {
+        let err = doctored(|b| b[0x18..0x1C].copy_from_slice(&1u32.to_le_bytes()));
+        assert!(
+            format!("{err:#}").contains("2048-byte blocks"),
+            "the refusal has to name the size it read: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_superblock_with_features_this_writer_cannot_rewrite_is_refused_and_says_which() {
+        let incompat = doctored(|b| {
+            let set = SB_FEATURE_INCOMPAT | 0x0000_0080;
+            b[0x60..0x64].copy_from_slice(&set.to_le_bytes());
+        });
+        assert!(
+            format!("{incompat:#}").contains("0x00000080"),
+            "the refusal has to name the feature bits it cannot handle: {incompat:#}"
+        );
+
+        let ro_compat = doctored(|b| {
+            let set = SB_FEATURE_RO_COMPAT | 0x0000_0400;
+            b[0x64..0x68].copy_from_slice(&set.to_le_bytes());
+        });
+        assert!(
+            format!("{ro_compat:#}").contains("0x00000400"),
+            "the refusal has to name the read-only bits it cannot handle: {ro_compat:#}"
+        );
+    }
+
     #[test]
     fn superblock_bytes_are_1024() {
         let sb = Superblock::for_fresh_image(&small_layout(), [0; 16], "test", 0);
