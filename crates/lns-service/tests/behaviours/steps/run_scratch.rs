@@ -67,7 +67,10 @@ async fn upper_gone(w: &mut BehaviourWorld) {
 async fn console_kept(w: &mut BehaviourWorld) {
     let id = last_exited(w);
     let console = w.scratch().run_dir(&id).join("console.log");
-    assert!(console.exists(), "console.log stays for post-mortem: {console:?}");
+    assert!(
+        console.exists(),
+        "console.log stays for post-mortem: {console:?}"
+    );
 }
 
 #[then("the run's scratch dir no longer exists")]
@@ -91,7 +94,10 @@ async fn both_dirs_gone(w: &mut BehaviourWorld) {
 #[then("the prune reports the reclaimed bytes")]
 async fn prune_reports_bytes(w: &mut BehaviourWorld) {
     let reclaimed = w.scratch().reclaimed.expect("a prune ran");
-    assert!(reclaimed > 0, "reclaimed bytes must be reported, got {reclaimed}");
+    assert!(
+        reclaimed > 0,
+        "reclaimed bytes must be reported, got {reclaimed}"
+    );
 }
 
 #[then("only the exited run's scratch dir is gone")]
@@ -113,5 +119,8 @@ async fn only_exited_gone(w: &mut BehaviourWorld) {
 async fn audit_kept(w: &mut BehaviourWorld) {
     let id = last_exited(w);
     let audit = w.scratch().audit_path(&id);
-    assert!(audit.exists(), "the audit chain must outlive the scratch dir");
+    assert!(
+        audit.exists(),
+        "the audit chain must outlive the scratch dir"
+    );
 }

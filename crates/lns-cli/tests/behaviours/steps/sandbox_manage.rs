@@ -154,7 +154,9 @@ fn output_lists_removed_runs(w: &mut BehaviourWorld) -> Result<(), String> {
     let out = &w.result.as_ref().ok_or("no CLI run captured")?.output;
     for id in [hexid(1), hexid(2)] {
         if !out.contains(&format!("removed run {id}")) {
-            return Err(format!("expected a removed-run line for {id}, got: {out:?}"));
+            return Err(format!(
+                "expected a removed-run line for {id}, got: {out:?}"
+            ));
         }
     }
     Ok(())

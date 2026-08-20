@@ -881,7 +881,11 @@ async fn prune<W: std::io::Write>(
             for reference in &removed {
                 writeln!(out, "removed {reference}")?;
             }
-            writeln!(out, "reclaimed {}", format_bytes(runs_bytes + reclaimed_bytes))?;
+            writeln!(
+                out,
+                "reclaimed {}",
+                format_bytes(runs_bytes + reclaimed_bytes)
+            )?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),

@@ -37,11 +37,15 @@ impl ScratchFs for RealScratchFs {
 
 fn allocated_under(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
     if !meta.is_dir() {
         return meta.blocks() * 512;
     }
-    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
     entries
         .flatten()
         .map(|entry| allocated_under(&entry.path()))
@@ -79,10 +83,7 @@ pub fn remove_dir_with<F: ScratchFs>(fs: &F, root: &Path, run_id: &str) -> u64 {
 }
 
 pub fn prune_with<F: ScratchFs>(fs: &F, root: &Path, run_ids: &[String]) -> u64 {
-    run_ids
-        .iter()
-        .map(|id| remove_dir_with(fs, root, id))
-        .sum()
+    run_ids.iter().map(|id| remove_dir_with(fs, root, id)).sum()
 }
 
 pub fn sweep_orphans_with<F: ScratchFs>(fs: &F, root: &Path, live: &[String]) {
@@ -97,7 +98,9 @@ pub fn sweep_orphans_with<F: ScratchFs>(fs: &F, root: &Path, live: &[String]) {
         }
     };
     for dir in dirs {
-        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if live.iter().any(|id| id == name) {
             continue;
         }
@@ -113,22 +116,30 @@ pub fn sweep_orphans_with<F: ScratchFs>(fs: &F, root: &Path, live: &[String]) {
 }
 
 pub fn reclaim_upper(run_id: &str) {
-    let Ok(root) = crate::cache::root() else { return };
+    let Ok(root) = crate::cache::root() else {
+        return;
+    };
     reclaim_upper_with(&RealScratchFs, &root, run_id);
 }
 
 pub fn remove_dir(run_id: &str) -> u64 {
-    let Ok(root) = crate::cache::root() else { return 0 };
+    let Ok(root) = crate::cache::root() else {
+        return 0;
+    };
     remove_dir_with(&RealScratchFs, &root, run_id)
 }
 
 pub fn prune(run_ids: &[String]) -> u64 {
-    let Ok(root) = crate::cache::root() else { return 0 };
+    let Ok(root) = crate::cache::root() else {
+        return 0;
+    };
     prune_with(&RealScratchFs, &root, run_ids)
 }
 
 pub fn sweep_orphans() {
-    let Ok(root) = crate::cache::root() else { return };
+    let Ok(root) = crate::cache::root() else {
+        return;
+    };
     let live: Vec<String> = crate::run_registry::snapshot()
         .into_iter()
         .map(|run| run.id)
@@ -373,7 +384,10 @@ mod tests {
             .remove_file(&runs.join("a").join("upper.img"))
             .unwrap();
         assert!(!runs.join("a").join("upper.img").exists());
-        assert_eq!(RealScratchFs.list_dirs(&runs).unwrap(), vec![runs.join("a")]);
+        assert_eq!(
+            RealScratchFs.list_dirs(&runs).unwrap(),
+            vec![runs.join("a")]
+        );
     }
 
     #[test]
@@ -385,7 +399,10 @@ mod tests {
         std::fs::write(dir.join("sub").join("console.log"), b"boot").unwrap();
         let bytes = RealScratchFs.allocated_bytes(&dir);
         assert!(bytes >= 8192, "written data must be accounted, got {bytes}");
-        assert_eq!(RealScratchFs.allocated_bytes(&base.path().join("missing")), 0);
+        assert_eq!(
+            RealScratchFs.allocated_bytes(&base.path().join("missing")),
+            0
+        );
     }
 
     #[test]
@@ -415,7 +432,10 @@ mod tests {
     #[test]
     fn an_already_gone_dir_is_a_silent_no_op() {
         let fs = FakeFs::with(|s| s.remove_dir_err = Some(ErrorKind::NotFound));
-        drop(RunScratchGuard::new(PathBuf::from("/cache/runs/7"), fs.clone()));
+        drop(RunScratchGuard::new(
+            PathBuf::from("/cache/runs/7"),
+            fs.clone(),
+        ));
         assert_eq!(
             fs.removed_dirs().len(),
             1,
@@ -426,7 +446,10 @@ mod tests {
     #[test]
     fn a_removal_failure_is_logged_not_panicked() {
         let fs = FakeFs::with(|s| s.remove_dir_err = Some(ErrorKind::PermissionDenied));
-        drop(RunScratchGuard::new(PathBuf::from("/cache/runs/7"), fs.clone()));
+        drop(RunScratchGuard::new(
+            PathBuf::from("/cache/runs/7"),
+            fs.clone(),
+        ));
         assert_eq!(fs.removed_dirs().len(), 1);
     }
 
@@ -448,7 +471,10 @@ mod tests {
         assert!(!exited.join("upper.img").exists());
         assert!(exited.join("console.log").exists());
 
-        assert!(remove_dir("exited1") > 0, "removal reports the bytes it freed");
+        assert!(
+            remove_dir("exited1") > 0,
+            "removal reports the bytes it freed"
+        );
         assert!(!exited.exists());
 
         std::fs::create_dir_all(&exited).unwrap();
