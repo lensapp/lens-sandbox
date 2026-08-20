@@ -132,7 +132,7 @@ async fn orchestrate(
     let run_scratch_dir = cache_dir.join("runs").join(&run_id);
     let descriptor_builder = composefs::descriptor::DescriptorBuilder::new(cache_dir.clone());
     let mut run_scratch =
-        super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealRemoveDir);
+        super::scratch::RunScratchGuard::new(run_scratch_dir, super::scratch::RealScratchFs);
     let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
 
     // A local definition plans directly; a published sandbox reference boots what it resolved to; a plain image passes through unchanged.

@@ -197,6 +197,7 @@ pub enum Response {
     },
     RunsPruned {
         removed: Vec<String>,
+        reclaimed_bytes: u64,
     },
     OauthVerification {
         verification_uri: String,
@@ -1439,6 +1440,7 @@ mod tests {
                 "1a2b3c4d0000000000000000000000aa".into(),
                 "5e6f7a8b0000000000000000000000bb".into(),
             ],
+            reclaimed_bytes: 10_485_760,
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();

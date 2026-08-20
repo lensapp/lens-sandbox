@@ -58,6 +58,14 @@ Feature: managing cached sandboxes
     And the output contains "provisioned tool cache"
     And the service received no request
 
+  Scenario: prune also removes exited runs and reports the reclaimed bytes
+    Given two exited runs holding scratch space and one running sandbox
+    When the user runs sandbox command "prune --force"
+    Then the exit code is 0
+    And the service received a PruneRuns request
+    And the output lists the removed runs
+    And the output reports reclaimed bytes
+
   Scenario: prune never removes a named volume
     Given a cached sandbox that names a volume "claude-home"
     When the user runs sandbox command "prune --force"

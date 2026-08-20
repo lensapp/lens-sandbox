@@ -432,6 +432,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         },
         Request::PruneRuns => Response::RunsPruned {
             removed: crate::run_registry::prune_exited(),
+            reclaimed_bytes: 0,
         },
         Request::RunLogs { .. } => {
             unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
@@ -2205,7 +2206,7 @@ mod tests {
         let resp = handle_request(&Request::PruneRuns, Instant::now()).await;
 
         match resp {
-            Response::RunsPruned { removed } => {
+            Response::RunsPruned { removed, .. } => {
                 assert!(
                     removed.contains(&id),
                     "{id} should be pruned, got {removed:?}"

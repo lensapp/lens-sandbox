@@ -4,7 +4,7 @@ use lns_policy::grants::WorkloadIdentity;
 use tokio::sync::mpsc::Sender;
 
 mod orchestrator;
-mod scratch;
+pub mod scratch;
 mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 

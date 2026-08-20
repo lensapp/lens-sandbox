@@ -18,6 +18,8 @@ mod image_rig;
 mod policy_rig;
 #[path = "behaviours/runner.rs"]
 mod runner;
+#[path = "behaviours/scratch_rig.rs"]
+mod scratch_rig;
 #[path = "behaviours/steps/mod.rs"]
 mod steps;
 #[path = "behaviours/tools_rig.rs"]

@@ -12,6 +12,7 @@ use crate::declared_rig::DeclaredRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
 use crate::policy_rig::PolicyRig;
+use crate::scratch_rig::ScratchRig;
 use crate::volume_rig::VolumeRig;
 use lns_ipc::PortPublish;
 use lns_service::forward::ForwardGuard;
@@ -53,6 +54,8 @@ pub struct BehaviourWorld {
     pub forward_error: Option<String>,
 
     pub volume: Option<VolumeRig>,
+
+    pub scratch: Option<ScratchRig>,
 
     pub bind: Option<BindRig>,
 
@@ -168,6 +171,13 @@ impl BehaviourWorld {
             self.volume = Some(VolumeRig::new());
         }
         self.volume.as_mut().expect("volume rig must exist")
+    }
+
+    pub fn scratch(&mut self) -> &mut ScratchRig {
+        if self.scratch.is_none() {
+            self.scratch = Some(ScratchRig::new());
+        }
+        self.scratch.as_mut().expect("scratch rig must exist")
     }
 
     pub fn bind(&mut self) -> &mut BindRig {
