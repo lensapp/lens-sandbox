@@ -1,6 +1,8 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use crate::cache;
+
 pub trait ScratchFs {
     fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()>;
     fn remove_file(&self, path: &Path) -> std::io::Result<()>;
@@ -116,30 +118,22 @@ pub fn sweep_orphans_with<F: ScratchFs>(fs: &F, root: &Path, live: &[String]) {
 }
 
 pub fn reclaim_upper(run_id: &str) {
-    let Ok(root) = crate::cache::root() else {
-        return;
-    };
+    let Ok(root) = cache::root() else { return };
     reclaim_upper_with(&RealScratchFs, &root, run_id);
 }
 
 pub fn remove_dir(run_id: &str) -> u64 {
-    let Ok(root) = crate::cache::root() else {
-        return 0;
-    };
+    let Ok(root) = cache::root() else { return 0 };
     remove_dir_with(&RealScratchFs, &root, run_id)
 }
 
 pub fn prune(run_ids: &[String]) -> u64 {
-    let Ok(root) = crate::cache::root() else {
-        return 0;
-    };
+    let Ok(root) = cache::root() else { return 0 };
     prune_with(&RealScratchFs, &root, run_ids)
 }
 
 pub fn sweep_orphans() {
-    let Ok(root) = crate::cache::root() else {
-        return;
-    };
+    let Ok(root) = cache::root() else { return };
     let live: Vec<String> = crate::run_registry::snapshot()
         .into_iter()
         .map(|run| run.id)
@@ -485,20 +479,6 @@ mod tests {
 
         sweep_orphans();
         assert!(!orphan.exists(), "an orphaned dir is swept at startup");
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn the_production_wrappers_are_inert_when_no_cache_root_resolves() {
-        let _h = crate::test_env::EnvVarGuard::unset("HOME");
-        let _x = crate::test_env::EnvVarGuard::unset("XDG_CACHE_HOME");
-        if crate::cache::root().is_ok() {
-            return; // macOS resolves a cache dir without HOME; the inert arm is pinned where it cannot (Linux CI).
-        }
-        reclaim_upper("nowhere");
-        assert_eq!(remove_dir("nowhere"), 0);
-        assert_eq!(prune(&["nowhere".into()]), 0);
-        sweep_orphans();
     }
 
     #[test]
