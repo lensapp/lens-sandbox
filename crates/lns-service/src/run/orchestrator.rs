@@ -86,9 +86,14 @@ pub async fn handle(
         .instrument(tracing::Span::current())
         .await;
     let code = emit_completion(&frame_tx, result).await;
+    super::scratch::reclaim_upper(&finished_run_id);
     if auto_remove {
         crate::run_registry::set_exit_code(&finished_run_id, code);
-        let _ = crate::run_registry::remove_if_exited(&finished_run_id);
+        if crate::run_registry::remove_if_exited(&finished_run_id)
+            == crate::run_registry::RemoveOutcome::Removed
+        {
+            super::scratch::remove_dir(&finished_run_id);
+        }
     }
 }
 

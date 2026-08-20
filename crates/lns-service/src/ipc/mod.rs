@@ -430,10 +430,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             Ok(()) => Response::Acknowledged,
             Err(message) => Response::Error { message },
         },
-        Request::PruneRuns => Response::RunsPruned {
-            removed: crate::run_registry::prune_exited(),
-            reclaimed_bytes: 0,
-        },
+        Request::PruneRuns => {
+            let removed = crate::run_registry::prune_exited();
+            let reclaimed_bytes = crate::run::scratch::prune(&removed);
+            Response::RunsPruned {
+                removed,
+                reclaimed_bytes,
+            }
+        }
         Request::RunLogs { .. } => {
             unreachable!("Request::RunLogs must be dispatched via handle_logs, not handle_request")
         }
@@ -515,7 +519,10 @@ fn remove_run_request(run: &str) -> Response {
 
 fn remove_resolved_run(id: &str) -> Response {
     match crate::run_registry::remove_if_exited(id) {
-        crate::run_registry::RemoveOutcome::Removed => Response::Acknowledged,
+        crate::run_registry::RemoveOutcome::Removed => {
+            crate::run::scratch::remove_dir(id);
+            Response::Acknowledged
+        }
         crate::run_registry::RemoveOutcome::Running => Response::Error {
             message: format!(
                 "run {id} is still running; stop it first with `lns sandbox stop {id}`"
@@ -2194,6 +2201,53 @@ mod tests {
             other => unreachable!("expected RunInspect, got {other:?}"),
         }
         crate::run_registry::deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn remove_and_prune_reclaim_the_runs_scratch_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let now = Instant::now();
+        let root = crate::cache::root().unwrap();
+        let stage_exited = |id: &str| {
+            register_running(id);
+            crate::run_registry::set_exit_code(id, 0);
+            let dir = root.join("runs").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("upper.img"), vec![7u8; 4096]).unwrap();
+            dir
+        };
+
+        let removed_id = crate::run_registry::allocate_run_id();
+        let removed_dir = stage_exited(&removed_id);
+        let resp = handle_request(
+            &Request::RemoveRun {
+                run: removed_id.clone(),
+            },
+            now,
+        )
+        .await;
+        assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
+        assert!(!removed_dir.exists(), "rm must reclaim the scratch dir");
+
+        let pruned_id = crate::run_registry::allocate_run_id();
+        let pruned_dir = stage_exited(&pruned_id);
+        let resp = as_json(handle_request(&Request::PruneRuns, now).await);
+        assert_eq!(resp["type"], "RunsPruned", "got {resp}");
+        assert!(
+            resp["removed"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(pruned_id)),
+            "got {resp}"
+        );
+        assert!(
+            resp["reclaimed_bytes"].as_u64().expect("reclaimed bytes") > 0,
+            "prune must report what it freed, got {resp}"
+        );
+        assert!(!pruned_dir.exists(), "prune must reclaim the scratch dirs");
     }
 
     #[tokio::test]
