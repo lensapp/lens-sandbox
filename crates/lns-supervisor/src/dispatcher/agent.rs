@@ -16,7 +16,7 @@ use lens_sandbox_core::lifecycle::OrphanReaper;
 use lens_sandbox_core::privilege::SandboxCredentials;
 
 use super::runtime::RealAgentRunner;
-use super::{DIM, RESET};
+use super::{DIM, RED, RESET};
 use crate::config::AgentConfig;
 
 /// Spawns the agent workload for a started session.
@@ -44,7 +44,16 @@ pub(crate) struct AgentDispatcher {
     /// Shared across WS sessions so the running agent's output reaches the current session after a reconnect.
     activity: ActivityStream,
     runner: Arc<dyn AgentRunner>,
+    steps: Arc<dyn crate::scripts::StepRunner>,
+    passwd: Arc<dyn crate::scripts::ids::Passwd>,
+    abort: Arc<dyn crate::scripts::Abort>,
+    /// Held only so a test can await the launch it started; production drops the handle, which detaches the task.
+    #[cfg(test)]
+    launch: LaunchSlot,
 }
+
+#[cfg(test)]
+type LaunchSlot = Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>;
 
 impl AgentDispatcher {
     pub fn new(
@@ -52,7 +61,15 @@ impl AgentDispatcher {
         sandbox_creds: Option<SandboxCredentials>,
         reaper: Arc<OrphanReaper>,
     ) -> Self {
-        Self::with_runner(config, sandbox_creds, reaper, Arc::new(RealAgentRunner))
+        Self::with_runner(
+            config,
+            sandbox_creds,
+            reaper,
+            Arc::new(RealAgentRunner),
+            Arc::new(super::runtime::RealStepRunner),
+            Arc::new(crate::scripts::ids::GuestPasswd),
+            Arc::new(super::runtime::ExitBeforeWorkload),
+        )
     }
 
     pub(crate) fn with_runner(
@@ -60,6 +77,9 @@ impl AgentDispatcher {
         sandbox_creds: Option<SandboxCredentials>,
         reaper: Arc<OrphanReaper>,
         runner: Arc<dyn AgentRunner>,
+        steps: Arc<dyn crate::scripts::StepRunner>,
+        passwd: Arc<dyn crate::scripts::ids::Passwd>,
+        abort: Arc<dyn crate::scripts::Abort>,
     ) -> Self {
         let exec_manager = ExecManager::new(
             crate::run_as::setuid_creds(sandbox_creds.as_ref()),
@@ -77,6 +97,24 @@ impl AgentDispatcher {
             exec_manager,
             activity,
             runner,
+            steps,
+            passwd,
+            abort,
+            #[cfg(test)]
+            launch: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Await the launch a policy frame started, when it went to a task; a run with no scripts launches inline and has nothing to wait for.
+    #[cfg(test)]
+    pub(crate) async fn await_launch(&self) {
+        let launch = self
+            .launch
+            .lock()
+            .expect("the launch slot is uncontended")
+            .take();
+        if let Some(handle) = launch {
+            let _ = handle.await;
         }
     }
 
@@ -97,6 +135,11 @@ impl SandboxDispatcher for AgentDispatcher {
             activity: self.activity.clone(),
             exec_manager: self.exec_manager.clone(),
             runner: self.runner.clone(),
+            steps: self.steps.clone(),
+            passwd: self.passwd.clone(),
+            abort: self.abort.clone(),
+            #[cfg(test)]
+            launch: self.launch.clone(),
         })
     }
 }
@@ -145,6 +188,11 @@ struct AgentSession {
     activity: ActivityStream,
     exec_manager: ExecManager,
     runner: Arc<dyn AgentRunner>,
+    steps: Arc<dyn crate::scripts::StepRunner>,
+    passwd: Arc<dyn crate::scripts::ids::Passwd>,
+    abort: Arc<dyn crate::scripts::Abort>,
+    #[cfg(test)]
+    launch: LaunchSlot,
 }
 
 #[async_trait]
@@ -179,8 +227,41 @@ impl SessionHandler for AgentSession {
         let creds = self.sandbox_creds.clone();
         let activity = self.activity.clone();
         let reaper = self.reaper.clone();
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
-        self.runner.spawn_run(config, creds, env, activity, reaper);
+        let runner = self.runner.clone();
+        let steps = self.steps.clone();
+        let passwd = self.passwd.clone();
+        let abort = self.abort.clone();
+        if config.scripts.is_empty() {
+            self.spawn_count.fetch_add(1, Ordering::SeqCst);
+            runner.spawn_run(config, creds, env, activity, reaper);
+            return;
+        }
+        let spawned = self.spawn_count.clone();
+        // Spawned rather than awaited: a script's own traffic can raise an approval card, and only the read loop that called us can deliver the answer.
+        let launch = tokio::spawn(async move {
+            if let Err(failure) = run_scripts_before(
+                &config,
+                creds.as_ref(),
+                &env,
+                passwd.as_ref(),
+                steps.as_ref(),
+                &activity,
+            )
+            .await
+            {
+                activity.emit(format!("{RED}[scripts]{RESET} {failure}\r\n"));
+                abort.refuse(&failure).await;
+                return;
+            }
+            spawned.fetch_add(1, Ordering::SeqCst);
+            runner.spawn_run(config, creds, env, activity, reaper);
+        });
+        #[cfg(test)]
+        {
+            *self.launch.lock().expect("the launch slot is uncontended") = Some(launch);
+        }
+        #[cfg(not(test))]
+        drop(launch);
     }
 
     async fn shutdown(&self) {
@@ -250,6 +331,36 @@ fn resolve_cwd(workspace_path: Option<&str>, creds_home: Option<&str>) -> String
         return h.to_string();
     }
     ".".to_string()
+}
+
+/// A script gets the layering the workload gets, so a step reaching a mirror sees the same proxy and CA env; without it a TLS failure would look like a broken package index.
+pub(crate) fn build_script_env(
+    config: &AgentConfig,
+    creds: Option<&SandboxCredentials>,
+    env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    build_agent_env(config, creds, env)
+}
+
+/// A script runs in its own user's home, not the workload's workdir: the workdir may be a bind the script is meant to prepare rather than sit inside.
+pub(crate) fn resolve_script_cwd(creds: Option<&SandboxCredentials>) -> String {
+    creds
+        .map(SandboxCredentials::home)
+        .filter(|home| !home.is_empty())
+        .unwrap_or("/")
+        .to_string()
+}
+
+async fn run_scripts_before(
+    config: &AgentConfig,
+    creds: Option<&SandboxCredentials>,
+    env: &HashMap<String, String>,
+    passwd: &dyn crate::scripts::ids::Passwd,
+    steps: &dyn crate::scripts::StepRunner,
+    activity: &ActivityStream,
+) -> Result<(), crate::scripts::ScriptFailure> {
+    let scripts = crate::scripts::prepare(config, creds, env, passwd)?;
+    crate::scripts::run_all(&scripts, steps, activity).await
 }
 
 /// Assemble the agent `ChildSpec` with agent-specific env layering atop the shared `child_spawner` hardening.
@@ -383,6 +494,7 @@ mod tests {
             },
             agent_command: "echo hello".into(),
             workspace_path: Some("/tmp".into()),
+            scripts: Vec::new(),
         }
     }
 
@@ -600,6 +712,9 @@ mod tests {
             None,
             Arc::new(OrphanReaper::spawn()),
             runner,
+            Arc::new(NoScripts),
+            Arc::new(NoPasswd),
+            Arc::new(RecordingAbort::default()),
         );
 
         dispatcher.new_session().on_policy(HashMap::new()).await;
@@ -1009,5 +1124,287 @@ mod tests {
             std::env::remove_var("LENS_SANDBOX_WS_URL");
             std::env::remove_var("AGENT_KEEP_ME");
         }
+    }
+
+    /// A step runner a scenario reaches only when it declares scripts; recording the calls is how a test proves the ordering.
+    #[derive(Default)]
+    struct RecordingSteps {
+        ran: Arc<std::sync::Mutex<Vec<String>>>,
+        fail_with: Option<i32>,
+    }
+
+    #[async_trait]
+    impl crate::scripts::StepRunner for RecordingSteps {
+        async fn run(
+            &self,
+            script: &crate::scripts::PreparedScript,
+            _position: &str,
+            _activity: ActivityStream,
+        ) -> Result<i32, String> {
+            self.ran
+                .lock()
+                .expect("uncontended")
+                .push(script.label.clone());
+            Ok(self.fail_with.unwrap_or(0))
+        }
+    }
+
+    struct NoScripts;
+
+    #[async_trait]
+    impl crate::scripts::StepRunner for NoScripts {
+        async fn run(
+            &self,
+            _script: &crate::scripts::PreparedScript,
+            _position: &str,
+            _activity: ActivityStream,
+        ) -> Result<i32, String> {
+            unreachable!("a run declaring no scripts must never reach a step runner")
+        }
+    }
+
+    /// Records the refusal instead of exiting, so a test can see that the workload stayed unspawned.
+    #[derive(Default)]
+    struct RecordingAbort {
+        refused: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl crate::scripts::Abort for RecordingAbort {
+        async fn refuse(&self, failure: &crate::scripts::ScriptFailure) {
+            self.refused
+                .lock()
+                .expect("uncontended")
+                .push(failure.to_string());
+        }
+    }
+
+    struct NoPasswd;
+
+    impl crate::scripts::ids::Passwd for NoPasswd {
+        fn uid_of(&self, _name: &str) -> Option<u32> {
+            None
+        }
+        fn primary_gid_of(&self, _name: &str) -> Option<u32> {
+            None
+        }
+        fn gid_of_group(&self, _group: &str) -> Option<u32> {
+            None
+        }
+    }
+
+    fn config_with_scripts(labels: &[&str]) -> AgentConfig {
+        let mut config = make_agent_config();
+        config.scripts = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| lns_session::ScriptManifestStep {
+                script: format!("/.lens/scripts/{i:03}.sh"),
+                user: None,
+                label: (*label).to_string(),
+            })
+            .collect();
+        config
+    }
+
+    #[tokio::test]
+    async fn a_run_declaring_no_scripts_reaches_its_workload_exactly_as_before() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = AgentDispatcher::with_runner(
+            Arc::new(make_agent_config()),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeRunner {
+                calls: calls.clone(),
+            }),
+            Arc::new(NoScripts),
+            Arc::new(NoPasswd),
+            Arc::new(RecordingAbort::default()),
+        );
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the block is optional, so the overwhelmingly common run must launch inline with nothing new between the policy frame and the workload"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_scripts_run_in_order_and_the_workload_follows_them() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let steps = Arc::new(RecordingSteps::default());
+        let dispatcher = AgentDispatcher::with_runner(
+            Arc::new(config_with_scripts(&["install psql", "seed the cache"])),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeRunner {
+                calls: calls.clone(),
+            }),
+            steps.clone(),
+            Arc::new(NoPasswd),
+            Arc::new(RecordingAbort::default()),
+        );
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        dispatcher.await_launch().await;
+        assert_eq!(
+            *steps.ran.lock().expect("uncontended"),
+            ["install psql", "seed the cache"],
+            "the manifest's order is the merge's order, and the workload is what the scripts prepare for"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the workload still starts once every script succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_script_means_the_workload_never_starts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let steps = Arc::new(RecordingSteps {
+            fail_with: Some(100),
+            ..Default::default()
+        });
+        let abort = Arc::new(RecordingAbort::default());
+        let dispatcher = AgentDispatcher::with_runner(
+            Arc::new(config_with_scripts(&["install psql"])),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeRunner {
+                calls: calls.clone(),
+            }),
+            steps.clone(),
+            Arc::new(NoPasswd),
+            abort.clone(),
+        );
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        dispatcher.await_launch().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the scripts are the environment the workload was promised, so a workload started without them would fail in ways nobody could trace back here"
+        );
+        let refused = abort.refused.lock().expect("uncontended").clone();
+        assert_eq!(refused.len(), 1);
+        assert!(
+            refused[0].contains("install psql") && refused[0].contains("100"),
+            "the refusal identifies the script and the status it exited with; got: {:?}",
+            refused[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_does_not_run_the_scripts_a_second_time() {
+        let steps = Arc::new(RecordingSteps::default());
+        let dispatcher = AgentDispatcher::with_runner(
+            Arc::new(config_with_scripts(&["install psql"])),
+            None,
+            Arc::new(OrphanReaper::spawn()),
+            Arc::new(FakeRunner {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            steps.clone(),
+            Arc::new(NoPasswd),
+            Arc::new(RecordingAbort::default()),
+        );
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        dispatcher.await_launch().await;
+        dispatcher.new_session().on_policy(HashMap::new()).await;
+        dispatcher.await_launch().await;
+        assert_eq!(
+            steps.ran.lock().expect("uncontended").len(),
+            1,
+            "the latch sits ahead of the spawn, so a dropped websocket cannot make a run install its packages twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_naming_a_user_the_guest_cannot_resolve_never_reaches_a_step() {
+        let mut config = config_with_scripts(&["install psql"]);
+        config.scripts[0].user = Some("postgres".into());
+        let steps = Arc::new(RecordingSteps::default());
+        let failure = run_scripts_before(
+            &config,
+            None,
+            &HashMap::new(),
+            &NoPasswd,
+            steps.as_ref(),
+            &ActivityStream::new(),
+        )
+        .await
+        .expect_err("an unresolvable user refuses the run");
+        assert!(
+            steps.ran.lock().expect("uncontended").is_empty(),
+            "every user resolves before the first script runs, so a run naming an identity this guest lacks fails before it has half-prepared itself"
+        );
+        assert!(matches!(
+            failure,
+            crate::scripts::ScriptFailure::UnresolvableUser { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_script_gets_the_proxy_env_the_workload_gets_and_runs_under_dash_e() {
+        let mut config = config_with_scripts(&["install psql"]);
+        config.core.is_root = true;
+        let scripts = crate::scripts::prepare(&config, None, &HashMap::new(), &NoPasswd)
+            .expect("a script naming no user needs no lookup");
+        assert_eq!(
+            scripts[0].spec.env.get("HTTPS_PROXY").map(String::as_str),
+            Some(format!("http://{}", config.core.proxy_listen_addr).as_str()),
+            "a script that reached a mirror without the proxy would fail against the cage with a TLS error nobody could debug"
+        );
+        assert_eq!(
+            scripts[0].spec.argv,
+            ["sh", "-e", "/.lens/scripts/000.sh"],
+            "§3.1.13 runs the body under -e, so the first failing command ends the script instead of a later one succeeding over it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_naming_a_group_the_guest_lacks_refuses_before_any_step() {
+        let mut config = config_with_scripts(&["install psql"]);
+        config.scripts[0].user = Some("1500:staff".into());
+        let steps = Arc::new(RecordingSteps::default());
+        let failure = run_scripts_before(
+            &config,
+            None,
+            &HashMap::new(),
+            &NoPasswd,
+            steps.as_ref(),
+            &ActivityStream::new(),
+        )
+        .await
+        .expect_err("a group this guest cannot resolve refuses the run");
+        assert!(
+            steps.ran.lock().expect("uncontended").is_empty(),
+            "a group is resolved with the rest of the identity before the first script spawns, so the run fails before it has half-prepared itself"
+        );
+        assert!(
+            failure.to_string().contains("staff"),
+            "the author needs to know which half of USER:GROUP this guest could not answer for; got: {failure}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_numeric_script_user_resolves_without_any_passwd_line() {
+        let mut config = config_with_scripts(&["install psql", "seed the cache"]);
+        config.scripts[0].user = Some("1500".into());
+        config.scripts[1].user = Some("1500:77".into());
+        let scripts = crate::scripts::prepare(&config, None, &HashMap::new(), &NoPasswd)
+            .expect("a numeric identity needs no passwd line");
+        let ids: Vec<(u32, u32)> = scripts
+            .iter()
+            .map(|s| {
+                let creds = s.spec.creds.as_ref().expect("a non-root script setuids");
+                let (uid, gid) = creds.uid_gid();
+                (uid.as_raw(), gid.as_raw())
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [(1500, 1500), (1500, 77)],
+            "an image with a numeric USER and no matching passwd line must still be able to run a script, and a declared group still outranks the fallback"
+        );
     }
 }

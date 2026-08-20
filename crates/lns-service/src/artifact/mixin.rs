@@ -603,6 +603,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_script_reaches_the_wire_attributed_to_the_source_that_asked_for_it() {
+        let (spec, documents) = resolve_named(
+            r#"{"image":"x:1","mixins":["obs"]}"#,
+            &[(
+                "obs",
+                r#"{"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y psql"}]}"#,
+            )],
+        );
+        let refs: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None)
+            .await
+            .expect("a declared mixin resolves");
+        let script = on_the_wire(&resolution.contributions)
+            .into_iter()
+            .find(|c| c.block == lns_ipc::ContributionBlock::Script)
+            .expect("the mixin's script is attributed");
+        assert_eq!(
+            (script.key.as_str(), script.source.as_str()),
+            ("apt-get install -y psql", pinned("obs").as_str()),
+            "a pulled script asking for root is the most consequential thing a mixin contributes, so the disclosure has to say which document asked"
+        );
+    }
+
+    #[tokio::test]
     async fn a_resolution_carries_which_source_decided_each_entry() {
         let (spec, documents) = resolve_named(
             r#"{"image":"x:1","tools":["node@20"],"mixins":["obs"]}"#,
