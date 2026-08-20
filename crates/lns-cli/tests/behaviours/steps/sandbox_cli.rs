@@ -255,18 +255,30 @@ impl author::Fs for StepFs {
 
 struct StepProducer {
     outcome: Result<String, String>,
-    uploaded: RefCell<Vec<lns_artifact::build::BuiltArtifact>>,
+    uploaded: RefCell<Vec<(String, lns_artifact::build::BuiltArtifact)>>,
+    /// A mixin push that must succeed even while the sandbox push is scripted to fail, so a partial-publish scenario can assert what landed.
+    fail_after: Option<usize>,
 }
 
 impl distribute::Producer for StepProducer {
     fn push_built<'a>(
         &'a self,
         built: &'a lns_artifact::build::BuiltArtifact,
-        _reference: &'a str,
+        reference: &'a str,
     ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
-        self.uploaded.borrow_mut().push(built.clone());
-        let outcome = self.outcome.clone().map_err(|m| anyhow::anyhow!(m));
-        Box::pin(async move { outcome.map(|_| ()) })
+        self.uploaded
+            .borrow_mut()
+            .push((reference.to_string(), built.clone()));
+        let landed = self.uploaded.borrow().len();
+        let outcome = match self.fail_after {
+            Some(limit) if landed > limit => Err(anyhow::anyhow!("registry refused the upload")),
+            _ => self
+                .outcome
+                .clone()
+                .map_err(|m| anyhow::anyhow!(m))
+                .map(|_| ()),
+        };
+        Box::pin(async move { outcome })
     }
 }
 
@@ -360,6 +372,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
                 "the push must refuse before reaching the producer".into(),
             )),
             uploaded: RefCell::new(Vec::new()),
+            fail_after: w.push_fails_after,
         };
         let mut out: Vec<u8> = Vec::new();
         let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
@@ -373,13 +386,27 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
                     versions: w.tool_index.clone(),
                     unlisted: w.unlisted_pins.clone(),
                 };
+                let mut input = std::io::Cursor::new(
+                    w.sandbox
+                        .prompt_answer
+                        .clone()
+                        .unwrap_or_default()
+                        .into_bytes(),
+                );
                 distribute::push(
-                    &fs,
-                    &project_dir,
-                    &producer,
-                    &resolver,
+                    distribute::PushPorts {
+                        fs: &fs,
+                        cwd: &project_dir,
+                        producer: &producer,
+                        resolver: &resolver,
+                    },
                     &doc,
                     &push_args.reference,
+                    distribute::Confirm {
+                        assume_yes: push_args.assume_yes,
+                        interactive: w.sandbox.stdin_is_tty,
+                        input: &mut input,
+                    },
                     &mut out,
                 )
                 .await
@@ -387,11 +414,15 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             Err(e) => Err(e),
         };
         let uploaded = producer.uploaded.into_inner();
+        w.pushed_refs = uploaded
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect();
         w.pushed_layers = uploaded
-            .first()
-            .map(|built| built.fileset_layers().map(|l| l.digest.clone()).collect())
+            .last()
+            .map(|(_, built)| built.fileset_layers().map(|l| l.digest.clone()).collect())
             .unwrap_or_default();
-        w.pushed_doc = uploaded.first().and_then(|built| {
+        w.pushed_doc = uploaded.last().and_then(|(_, built)| {
             built
                 .blobs
                 .iter()

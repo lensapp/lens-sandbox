@@ -145,3 +145,131 @@ Feature: distributing a sandbox
     When the user runs sandbox command "pull ghcr.io/acme/obs-tools:2"
     Then the exit code is 1
     And the output contains "did not provide a digest"
+
+  Scenario: push publishes a local mixin before the sandbox that names it
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 0
+    And the mixin "ghcr.io/team/postgres-tools" was published before the sandbox
+    And the mixin "ghcr.io/team/postgres-tools" was published under its own digest as a tag
+    And the published sandbox pins mixin "ghcr.io/team/postgres-tools" by digest
+    And the output contains "published mixin ./mixins/pg/"
+
+  Scenario: push lists the mixins it would publish and asks before uploading
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    And the user will answer "y" to the sandbox prompt
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "./mixins/pg/"
+    And the output contains "ghcr.io/team/postgres-tools"
+    And the output contains "Continue?"
+
+  Scenario: declining the mixin publication uploads nothing
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    And the user will answer "n" to the sandbox prompt
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 1
+    And nothing is pushed
+    And the output contains "nothing was published"
+
+  Scenario: push refuses to publish a mixin with no terminal to confirm
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    And sandbox input is non-interactive
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 1
+    And nothing is pushed
+    And the output contains "--yes"
+
+  Scenario: a mixin that layers on another local mixin publishes deepest first
+    Given an lns.yaml layering on the local mixin "./mixins/outer/"
+    And the local mixin at "./mixins/outer/" is named "outer" and layers on "./inner/"
+    And the local mixin at "./mixins/outer/inner/" is named "inner"
+    And the registry accepts the push
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 0
+    And exactly 3 artifact(s) were uploaded
+    And the mixin "ghcr.io/team/inner" was published before the sandbox
+    And the published sandbox pins mixin "ghcr.io/team/outer" by digest
+
+  Scenario: a sandbox naming no local mixin still publishes one artifact and asks nothing
+    Given a valid lns.yaml in the current directory
+    And the registry accepts the push
+    And sandbox input is non-interactive
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And exactly 1 artifact(s) were uploaded
+    And the output does not contain "Continue?"
+
+  Scenario: a push that fails partway says its mixins are safe to re-push
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts 1 upload(s) then refuses
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 1
+    And the output contains "retrying is safe"
+
+  Scenario: push --dry-run previews every artifact it would publish and asks nothing
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --dry-run"
+    Then the exit code is 0
+    And the output contains "would publish mixin ./mixins/pg/"
+    And the output contains "ghcr.io/team/postgres-tools"
+    And the output contains "nothing uploaded"
+    And the output does not contain "Continue?"
+    And nothing is pushed
+
+  Scenario: an unpinned remote mixin still refuses the push
+    Given an lns.yaml layering on the local mixin "ghcr.io/team/observability:2"
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 1
+    And nothing is pushed
+    And the output contains "digest-pinned"
+
+  Scenario: a mixin the registry refuses names the mixin that failed
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts 0 upload(s) then refuses
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 1
+    And the output contains "publishing mixin ./mixins/pg/"
+    And the output contains "retrying is safe"
+    And the published sandbox was not uploaded
+
+  Scenario: a mixin that fails after another mixin already pinned one does not claim the uploads are unreferenced
+    Given an lns.yaml layering on the local mixins "./mixins/outer/" and "./mixins/other/"
+    And the local mixin at "./mixins/outer/" is named "outer" and layers on "./inner/"
+    And the local mixin at "./mixins/outer/inner/" is named "inner"
+    And the local mixin at "./mixins/other/" is named "other"
+    And the registry accepts 2 upload(s) then refuses
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 1
+    And the output contains "retrying is safe"
+    And the output does not contain "no document references"
+    And the published sandbox was not uploaded
+
+  Scenario: a sandbox that fails after its mixins landed does not call them unreferenced
+    Given an lns.yaml layering on the local mixin "./mixins/outer/"
+    And the local mixin at "./mixins/outer/" is named "outer" and layers on "./inner/"
+    And the local mixin at "./mixins/outer/inner/" is named "inner"
+    And the registry accepts 2 upload(s) then refuses
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 1
+    And the output contains "retrying is safe"
+    And the output does not contain "unreferenced"
+
+  Scenario: a fuzzy tool a mixin declares makes the dry-run say the digest may differ
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools" and declares tool "node@22"
+    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --dry-run"
+    Then the exit code is 0
+    And the output contains "may differ"
+    And nothing is pushed

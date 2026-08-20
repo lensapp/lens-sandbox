@@ -627,9 +627,12 @@ so a rule you add or delete mid-run applies or stops applying at once.
 
 A local entry is read from this machine, relative to the document that names it.
 It may name the directory — whose `lns.yaml` is read — or the document itself,
-the same two spellings `lns run` takes. A published sandbox may not name one — a consumer has no copy of your
-working directory — so `spec.mixins` in a document you `lns push` must be
-digest-pinned. `lns validate` reports a path that holds no document.
+the same two spellings `lns run` takes. Published bytes may not name one — a
+consumer has no copy of your working directory — so `lns push` publishes each
+local mixin as its own artifact and pins its digest in what it uploads. Your own
+document keeps the path. Push lists the mixins it will publish and asks first;
+`--yes` accepts without prompting. `lns validate` reports a path that holds no
+document.
 
 You can add your own for a single run:
 
@@ -664,9 +667,9 @@ After the reference, `lns` claims a short flag written apart from its value
 spelling is `lns`'s, as usual. Anything after `--` is the workload's, always.
 
 `--mixin ./dir` works on any run, published or not — you typed it on this
-machine. A **document** may not name one: `spec.mixins` in something you `lns
-push` must be digest-pinned, because whoever pulls it has no copy of your
-directory.
+machine. A document may name one too, and `lns push` resolves it by publishing
+that mixin and pinning its digest, because whoever pulls the result has no copy
+of your directory.
 
 A `--mixin` may be a tag, where a document's entry may not. The run pins it
 before it reports it, so the summary names the exact bytes you approved:

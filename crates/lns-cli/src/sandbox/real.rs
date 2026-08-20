@@ -24,7 +24,17 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         if let super::SandboxCommand::Push(push_args) = &args.command {
             let reference = push_args.reference.clone();
             let file = push_args.file.clone();
-            return push_local(&reference, push_args.dry_run, file.as_deref(), ctx.cwd()?).await;
+            let (dry_run, assume_yes) = (push_args.dry_run, push_args.assume_yes);
+            let cwd = ctx.cwd()?;
+            return push_local(
+                &reference,
+                dry_run,
+                assume_yes,
+                file.as_deref(),
+                cwd,
+                ctx.input,
+            )
+            .await;
         }
         crate::service::require_running().await;
         dispatch(args, ctx.input).await
@@ -123,8 +133,10 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
         push_local(
             &qualified_reference(&args.reference)?,
             args.dry_run,
+            args.assume_yes,
             args.file.as_deref(),
             ctx.cwd()?,
+            ctx.input,
         )
         .await
     })
@@ -148,8 +160,10 @@ pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<
 async fn push_local(
     reference: &str,
     dry_run: bool,
+    assume_yes: bool,
     file: Option<&std::path::Path>,
     cwd: PathBuf,
+    input: &mut dyn std::io::BufRead,
 ) -> Result<i32> {
     let path = super::author::selected_definition_path(file, &cwd);
     let project_dir = path.parent().unwrap_or(&cwd).to_path_buf();
@@ -159,12 +173,19 @@ async fn push_local(
         return super::distribute::push_dry_run(&RealFs, &project_dir, &doc, reference, &mut out);
     }
     super::distribute::push(
-        &RealFs,
-        &project_dir,
-        &RealProducer,
-        &RealToolResolver,
+        super::distribute::PushPorts {
+            fs: &RealFs,
+            cwd: &project_dir,
+            producer: &RealProducer,
+            resolver: &RealToolResolver,
+        },
         &doc,
         reference,
+        super::distribute::Confirm {
+            assume_yes,
+            interactive: crate::raw_mode::stdin_is_tty(),
+            input,
+        },
         &mut out,
     )
     .await

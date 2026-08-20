@@ -40,6 +40,10 @@ pub struct BehaviourWorld {
     pub sandbox_run: SandboxRunRig,
     /// Scripted `lns push` producer outcome: Ok(digest) or Err(message).
     pub push_outcome: Option<Result<String, String>>,
+    /// How many uploads succeed before the registry refuses, so a partial publish can be asserted.
+    pub push_fails_after: Option<usize>,
+    /// Every reference the push uploaded to, in order, so a mixin's repository and tag can be asserted.
+    pub pushed_refs: Vec<String>,
     /// The digest of each packed fileset layer the push uploaded, in declaration order.
     pub pushed_layers: Vec<String>,
     /// The definition JSON a prepared local run would send to the service.
