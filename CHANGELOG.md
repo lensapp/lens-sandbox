@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.20.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.19.0...lns-v0.20.0) (2026-08-20)
+
+
+### Features
+
+* address IPC controls by session ([7278971](https://github.com/lensapp/lens-sandbox/commit/72789715bd45611f2ac6eb161e4dc559a6c15b97))
+* route exec session controls independently ([1ac54ac](https://github.com/lensapp/lens-sandbox/commit/1ac54acf6219065105f85cdac89635f7f788e18b))
+* support interactive exec sessions ([0381c2a](https://github.com/lensapp/lens-sandbox/commit/0381c2abf0907ce904f790258bf5c0e2221a54e9))
+
+
+### Bug Fixes
+
+* construct the termination probe before the task can be aborted ([ec28997](https://github.com/lensapp/lens-sandbox/commit/ec289979aed54fc4807c5ef0577b5d542a68eb28))
+* **exec:** give confined sessions the workload user's HOME, USER, and cwd ([6a65c4b](https://github.com/lensapp/lens-sandbox/commit/6a65c4b98805f542ae8f9cd5b33015e02d69baa3))
+* **exec:** harden the exec identity against hostile passwd data and image env ([a3d09c5](https://github.com/lensapp/lens-sandbox/commit/a3d09c53002c944a70230bdacb0afe9f8e879a54))
+* hang up a confined session's child when its host stream vanishes ([6cf9190](https://github.com/lensapp/lens-sandbox/commit/6cf9190f1b89744c25abe7f8e645020647d5c7ec))
+* isolate exec client lifecycle ([7a97194](https://github.com/lensapp/lens-sandbox/commit/7a97194bb70e090f51765972e989b5378501910b))
+* **lns-cli:** do not lock stdin twice while resolving host binds ([a8c16e0](https://github.com/lensapp/lens-sandbox/commit/a8c16e08aaec6e8537e6305cccddc6c8cc956599))
+* **lns-cli:** drop the stdin guard before the session reads the tty ([7047a3b](https://github.com/lensapp/lens-sandbox/commit/7047a3b4fe448a3ea2491ee3fa4e843757610586))
+* restore the detach chord for sessions opened without stdin forwarding ([0ce7e20](https://github.com/lensapp/lens-sandbox/commit/0ce7e20ce30a8255c0333641b3f465449a6aa4d4))
+* surface cancel-client construction failure instead of a dead Ctrl-C ([17978ec](https://github.com/lensapp/lens-sandbox/commit/17978ec3a0c8ac686891a04c98d11352e35f8737))
+
 ## [0.19.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.18.0...lns-v0.19.0) (2026-08-19)
 
 
