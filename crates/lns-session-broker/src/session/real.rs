@@ -14,9 +14,9 @@ const PTY_DRAIN_GRACE: Duration = Duration::from_millis(500);
 const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
-    Confinement, LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close,
-    confinement, dispatch_frame, eof_action, identity_env, keys_to_scrub, read_client_frame,
-    session_cwd, signal_target, validate_argv, validate_open_session,
+    Confinement, LoopAction, RunIdentity, SessionCwd, SessionError, SessionOutcome, SharedFd,
+    WorkloadSpec, build_workload_spec, close, dispatch_frame, eof_action, read_client_frame,
+    signal_target, validate_argv, validate_open_session,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
@@ -166,29 +166,22 @@ pub fn handle_session(
     else {
         unreachable!("validate_open_session guarantees OpenSession");
     };
-    let confinement = confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID"));
+    let identity = RunIdentity {
+        uid: env_u32("LENS_RUN_UID"),
+        gid: env_u32("LENS_RUN_GID"),
+        home: std::env::var("LENS_RUN_HOME").ok(),
+        user: std::env::var("SANDBOX_USER").ok(),
+    };
     let inherited: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
-    let mut env = env;
-    env.extend(identity_env(
-        &confinement,
-        &env,
-        std::env::var("LENS_RUN_HOME").ok().as_deref(),
-        std::env::var("SANDBOX_USER").ok().as_deref(),
-    ));
-    let effective_home = env
-        .iter()
-        .find_map(|kv| kv.strip_prefix("HOME="))
-        .filter(|h| !h.is_empty() && *h != "/")
-        .map(str::to_string);
-    let cwd = session_cwd(cwd, &confinement, effective_home.as_deref());
-    let spec = WorkloadSpec {
+    let spec = build_workload_spec(
         argv,
         env,
         cwd,
         hostname,
-        scrub: keys_to_scrub(inherited.iter().map(String::as_str), &confinement),
-        confinement,
-    };
+        confine,
+        &identity,
+        inherited.iter().map(String::as_str),
+    );
     if tty {
         run_tty_session(conn, spec, winsize, stdin, dies_with_client, pid_tx, forker)
     } else {
@@ -554,7 +547,7 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
             0 as c_long,
         )
     };
-    enter_workdir(spec.cwd.as_deref());
+    enter_workdir(spec.cwd.as_ref());
     set_guest_hostname(spec.hostname.as_deref());
     for key in &spec.scrub {
         if let Ok(c) = CString::new(key.as_str()) {
@@ -613,12 +606,20 @@ fn set_guest_hostname(hostname: Option<&str>) {
     }
 }
 
-fn enter_workdir(cwd: Option<&str>) {
-    let Some(dir) = cwd else { return };
-    let entered = std::fs::create_dir_all(dir).and_then(|()| std::env::set_current_dir(dir));
-    if let Err(e) = entered {
-        let _ = writeln_stderr(&format!("workdir {dir:?}: {e}"));
-        child_exit(126);
+fn enter_workdir(cwd: Option<&SessionCwd>) {
+    match cwd {
+        None => {}
+        Some(SessionCwd::Declared(dir)) => {
+            let entered =
+                std::fs::create_dir_all(dir).and_then(|()| std::env::set_current_dir(dir));
+            if let Err(e) = entered {
+                let _ = writeln_stderr(&format!("workdir {dir:?}: {e}"));
+                child_exit(126);
+            }
+        }
+        Some(SessionCwd::Fallback(dir)) => {
+            let _ = std::env::set_current_dir(dir);
+        }
     }
 }
 

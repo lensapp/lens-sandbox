@@ -45,6 +45,8 @@ pub struct ExecEnvironment {
     pub placeholders: Vec<(String, String)>,
     /// The workload's working directory; `docker exec` inherits it, and an exec in `/` makes `sh -lc` write to the wrong place.
     pub workdir: Option<String>,
+    /// Which identity vars (`HOME`, `USER`) the author declared, so an exec keeps them the way the supervisor honors `LENS_SANDBOX_WORKLOAD_*` — an image's own ENV must not outrank the run-as identity.
+    pub declared_identity_keys: Vec<String>,
 }
 
 pub fn allocate_run_id() -> String {
@@ -716,6 +718,7 @@ mod tests {
                 "some-provider_LNSPLACEHOLDER0000".to_string(),
             )],
             workdir: Some("/workspace".to_string()),
+            declared_identity_keys: vec!["HOME".to_string()],
         }
     }
 
