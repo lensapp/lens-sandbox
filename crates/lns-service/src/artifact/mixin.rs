@@ -293,7 +293,10 @@ pub async fn resolve<S: MixinSource>(
             document: config_json.to_vec(),
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
-            contributions: lns_artifact::merge::own_egress(&def.spec),
+            contributions: lns_artifact::merge::own_egress(&def.spec)
+                .into_iter()
+                .chain(lns_artifact::merge::own_scripts(&def.spec))
+                .collect(),
             authored_egress: def.spec.egress.clone(),
             fileset_origins: lns_artifact::merge::own_fileset_origins(&def.spec),
             declared_path_filesets: declared_path_filesets(&[Source {
@@ -384,6 +387,7 @@ pub fn on_the_wire(
                 lns_artifact::merge::Block::Mount => lns_ipc::ContributionBlock::Mount,
                 lns_artifact::merge::Block::Port => lns_ipc::ContributionBlock::Port,
                 lns_artifact::merge::Block::Egress => lns_ipc::ContributionBlock::Egress,
+                lns_artifact::merge::Block::Script => lns_ipc::ContributionBlock::Script,
             },
             key: c.key.clone(),
             source: c.source.clone(),
@@ -445,7 +449,7 @@ pub fn require_pinned_extras(extra: &[String]) -> Result<()> {
 /// The resolved document is what boots, so it has to be one an author could have written — an override is normal, but its result still has to hold.
 fn refuse_what_no_sandbox_could_be(document: &[u8], sources: &[Source]) -> Result<()> {
     let contributors = sources.len().saturating_sub(1);
-    lns_artifact::sandbox::parse(document).with_context(|| {
+    lns_artifact::sandbox::parse_resolved(document).with_context(|| {
         format!("the {contributors} mixin(s) this sandbox layers on merge into a document that is not a valid sandbox")
     })?;
     Ok(())

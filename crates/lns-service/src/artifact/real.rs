@@ -319,6 +319,7 @@ async fn materialize_filesets(
         out.absorb(fileset.owner, &fileset.guest_path, specs);
     }
     crate::artifact::fileset::inline_fileset_specs(&resolved.inline_filesets, &mut out);
+    crate::artifact::scripts::absorb(&resolved.scripts, &mut out)?;
     Ok(out)
 }
 

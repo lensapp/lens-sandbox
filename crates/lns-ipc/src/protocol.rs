@@ -349,6 +349,8 @@ pub struct MixinView {
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
+    pub scripts: Vec<SandboxScript>,
+    #[serde(default)]
     pub policy_flags: Vec<String>,
 }
 
@@ -361,6 +363,18 @@ pub enum ContributionBlock {
     Mount,
     Port,
     Egress,
+    Script,
+}
+
+/// One `pre-start` script of a resolved sandbox, carried whole because a consumer approving a script has to be able to read it (`docs/sandbox-spec.md` §1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxScript {
+    pub when: String,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One entry of a resolved sandbox, named by the source that decided it and by whatever that decision replaced (`docs/sandbox-spec.md` §1.5).
@@ -415,6 +429,8 @@ pub struct SandboxView {
     pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub scripts: Vec<SandboxScript>,
     #[serde(default)]
     pub policy_flags: Vec<String>,
     /// What the sandbox declared, not what it resolves to — `None` must stay distinguishable from "declared exactly the default", or a flag can no longer outrank a declaration.
@@ -894,6 +910,47 @@ pub enum LogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_survives_the_wire_with_its_body_slot_user_and_description() {
+        let step = SandboxScript {
+            when: "pre-start".to_string(),
+            run: "apt-get install -y psql".to_string(),
+            user: Some("root".to_string()),
+            description: Some("the psql the prompts assume".to_string()),
+        };
+        let round_tripped: SandboxScript =
+            serde_json::from_str(&serde_json::to_string(&step).expect("a script encodes"))
+                .expect("a script decodes");
+        assert_eq!(
+            round_tripped, step,
+            "the disclosure shows the body, the user it asks for, and what it says about itself, so none of the three may be lost on the way to the CLI"
+        );
+    }
+
+    #[test]
+    fn a_view_that_predates_scripts_decodes_as_declaring_none() {
+        let view: SandboxView = serde_json::from_value(serde_json::json!({
+            "reference": "ghcr.io/acme/reviewer",
+            "image": "ghcr.io/acme/base@sha256:abc",
+        }))
+        .expect("every added block defaults");
+        assert!(view.scripts.is_empty());
+        let mixin: MixinView = serde_json::from_value(serde_json::json!({
+            "reference": "ghcr.io/acme/postgres-tools",
+        }))
+        .expect("every added block defaults");
+        assert!(mixin.scripts.is_empty());
+    }
+
+    #[test]
+    fn the_script_contribution_block_names_itself_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&ContributionBlock::Script).expect("a block encodes"),
+            "\"script\"",
+            "a renderer picks the line to attribute by this name, so it is part of the contract rather than an internal spelling"
+        );
+    }
 
     #[test]
     fn exec_image_args_terminal_flags_default_to_false_when_missing() {
@@ -1687,6 +1744,12 @@ mod tests {
                 }],
             }],
             tools: vec!["node@22.11.0".into()],
+            scripts: vec![SandboxScript {
+                when: "pre-start".into(),
+                run: "apt-get install -y --no-install-recommends jq".into(),
+                user: Some("root".into()),
+                description: Some("the jq the prompts assume".into()),
+            }],
             policy_flags: Vec::new(),
             cpus: Some(3),
             mem_mib: Some(6144),

@@ -212,6 +212,12 @@ fn published_target(
     }
 }
 
+/// The document the preflight resolved, read the way §3.3.2 produced it: appending scripts across sources can carry a merged document past the ceilings one author is held to, and refusing here would throw away a launch the service already accepted.
+fn read_resolved_definition(definition: &str) -> Result<lns_artifact::sandbox::Definition> {
+    lns_artifact::sandbox::parse_resolved(definition.as_bytes())
+        .context("reading the resolved definition")
+}
+
 /// A local run sends the merged document, so the mixins that produced it are already in it; a published one sends the pins its preflight showed, because the service merges them itself.
 /// What a run request says about mixins: the boot merges `to_merge`, and a connector grant keys on `composed`.
 struct RunMixins {
@@ -345,8 +351,7 @@ pub async fn run_image(
     {
         let resolved =
             preflight_local(client.socket(), json, project_dir, &args.mixins, &decisions).await?;
-        **def = lns_artifact::sandbox::parse(resolved.definition.as_bytes())
-            .context("reading the resolved definition")?;
+        **def = read_resolved_definition(&resolved.definition)?;
         *json = resolved.definition;
         authored_egress = Some(resolved.authored_egress);
         packed_filesets = resolved.packed_filesets;
@@ -1494,6 +1499,41 @@ fn phrase_for_verb(verb: &str) -> String {
 mod tests {
     use super::*;
 
+    fn resolved_definition_with_scripts(count: usize) -> String {
+        let entries: Vec<String> = (0..count)
+            .map(|n| format!(r#"{{"when":"pre-start","run":"echo {n}"}}"#))
+            .collect();
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"registry.example.test/runtime:1","scripts":[{}]}}}}"#,
+            entries.join(",")
+        )
+    }
+
+    #[test]
+    fn the_resolved_definition_keeps_every_script_the_merge_appended() {
+        let beyond = lns_artifact::sandbox::MAX_SCRIPT_STEPS + 1;
+        let def = read_resolved_definition(&resolved_definition_with_scripts(beyond)).expect(
+            "the service already accepted this merge, so reading it back must not refuse the launch",
+        );
+        assert_eq!(
+            def.spec.scripts.len(),
+            beyond,
+            "the ceiling bounds what one author may declare; a sum produced by appending across sources is nobody's mistake to correct, and refusing it here would discard a launch the preflight approved"
+        );
+    }
+
+    #[test]
+    fn a_resolved_definition_that_is_not_a_sandbox_is_still_refused() {
+        let err = read_resolved_definition(
+            r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{}}"#,
+        )
+        .expect_err("the document that boots still needs the block that names what boots");
+        assert!(
+            format!("{err:#}").contains("image"),
+            "relaxing the authoring ceilings must not relax everything else; got: {err:#}"
+        );
+    }
+
     #[test]
     fn exec_started_handshake_preserves_the_service_assigned_session_target() {
         let frame = encode_frame(&Response::ExecStarted {
@@ -1581,6 +1621,7 @@ mod tests {
                 env: Vec::new(),
                 credentials: Vec::new(),
                 tools: Vec::new(),
+                scripts: Vec::new(),
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
@@ -1650,6 +1691,7 @@ mod tests {
                 env: Vec::new(),
                 credentials: Vec::new(),
                 tools: Vec::new(),
+                scripts: Vec::new(),
                 policy_flags: Vec::new(),
                 cpus: None,
                 mem_mib: None,
