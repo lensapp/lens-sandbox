@@ -108,6 +108,11 @@ pub struct SandboxPushArgs {
     )]
     pub dry_run: bool,
     #[arg(
+        long = "yes",
+        help = "Publish the local mixins this document names without prompting."
+    )]
+    pub assume_yes: bool,
+    #[arg(
         short = 'f',
         long = "file",
         value_name = "FILE",
@@ -1526,6 +1531,7 @@ mod tests {
         let cmd = SandboxCommand::Push(SandboxPushArgs {
             reference: "ghcr.io/team/hermes:1.4.0".into(),
             dry_run: false,
+            assume_yes: false,
             file: None,
         });
         let mut out = Vec::new();

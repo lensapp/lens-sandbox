@@ -196,3 +196,155 @@ fn published_config_keeps_host_path(w: &mut BehaviourWorld) -> Result<(), String
         ))
     }
 }
+
+#[given(regex = r#"^an lns\.yaml layering on the local mixin "([^"]+)"$"#)]
+fn lns_yaml_layering_on(w: &mut BehaviourWorld, path: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  mixins:\n    - {path}\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^an lns\.yaml layering on the local mixins "([^"]+)" and "([^"]+)"$"#)]
+fn lns_yaml_layering_on_two(w: &mut BehaviourWorld, first: String, second: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  mixins:\n    - {first}\n    - {second}\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^the local mixin at "([^"]+)" is named "([^"]+)"$"#)]
+fn local_mixin_named(w: &mut BehaviourWorld, dir: String, name: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from(format!(
+            "/work/{}/lns.yaml",
+            dir.trim_start_matches("./").trim_end_matches('/')
+        )),
+        format!(
+            "apiVersion: lns.run/v1\nkind: mixin\nname: {name}\nspec:\n  env:\n    MODE: research\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^the local mixin at "([^"]+)" is named "([^"]+)" and layers on "([^"]+)"$"#)]
+fn local_mixin_layering(w: &mut BehaviourWorld, dir: String, name: String, on: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from(format!(
+            "/work/{}/lns.yaml",
+            dir.trim_start_matches("./").trim_end_matches('/')
+        )),
+        format!(
+            "apiVersion: lns.run/v1\nkind: mixin\nname: {name}\nspec:\n  mixins:\n    - {on}\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^the registry accepts (\d+) upload\(s\) then refuses$"#)]
+fn registry_accepts_then_refuses(w: &mut BehaviourWorld, count: usize) {
+    w.push_outcome = Some(Ok(format!("sha256:{}", "a".repeat(64))));
+    w.push_fails_after = Some(count);
+}
+
+#[then(regex = r#"^the published sandbox pins mixin "([^"]+)" by digest$"#)]
+fn published_sandbox_pins_mixin(w: &mut BehaviourWorld, repository: String) {
+    let doc = w
+        .pushed_doc
+        .clone()
+        .expect("the sandbox config travels with the artifact");
+    let value: serde_json::Value = serde_json::from_slice(&doc).expect("the config blob is json");
+    let mixins = value["spec"]["mixins"]
+        .as_array()
+        .expect("the published document declares its mixins")
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        mixins
+            .iter()
+            .any(|entry| entry.starts_with(&format!("{repository}@sha256:"))),
+        "a consumer has no copy of the author's directory, so the published entry has to be a digest in {repository}; got {mixins:?}"
+    );
+    assert!(
+        !mixins.iter().any(|entry| entry.starts_with('.')),
+        "no local path may reach the published bytes; got {mixins:?}"
+    );
+}
+
+#[then(regex = r#"^the mixin "([^"]+)" was published before the sandbox$"#)]
+fn mixin_published_before_sandbox(w: &mut BehaviourWorld, repository: String) {
+    let position = w
+        .pushed_refs
+        .iter()
+        .position(|reference| reference.starts_with(&format!("{repository}:")))
+        .unwrap_or_else(|| {
+            panic!(
+                "the mixin has to publish under its own repository; uploads were {:?}",
+                w.pushed_refs
+            )
+        });
+    assert!(
+        position + 1 < w.pushed_refs.len(),
+        "a digest cannot be pinned before it exists, so the sandbox uploads after its mixins; uploads were {:?}",
+        w.pushed_refs
+    );
+}
+
+#[then(regex = r#"^the mixin "([^"]+)" was published under its own digest as a tag$"#)]
+fn mixin_published_under_digest_tag(w: &mut BehaviourWorld, repository: String) {
+    let reference = w
+        .pushed_refs
+        .iter()
+        .find(|reference| reference.starts_with(&format!("{repository}:")))
+        .unwrap_or_else(|| {
+            panic!(
+                "nothing published to {repository}; uploads were {:?}",
+                w.pushed_refs
+            )
+        });
+    let tag = reference
+        .rsplit_once(':')
+        .expect("the reference carries a tag")
+        .1;
+    assert!(
+        tag.starts_with("sha256-") && tag.len() == "sha256-".len() + 64,
+        "an untagged manifest can be pruned while a sandbox still pins it, and the tag is derived from the content so it cannot move; got {tag}"
+    );
+}
+
+#[then(regex = r#"^exactly (\d+) artifact\(s\) were uploaded$"#)]
+fn exactly_n_uploaded(w: &mut BehaviourWorld, count: usize) {
+    assert_eq!(
+        w.pushed_refs.len(),
+        count,
+        "uploads were {:?}",
+        w.pushed_refs
+    );
+}
+
+#[then("the published sandbox was not uploaded")]
+fn sandbox_not_uploaded(w: &mut BehaviourWorld) {
+    assert!(
+        !w.pushed_refs
+            .iter()
+            .any(|reference| reference.contains("hermes")),
+        "a sandbox that pins a digest which never landed would be unresolvable for every consumer; uploads were {:?}",
+        w.pushed_refs
+    );
+}
+
+#[given(regex = r#"^the local mixin at "([^"]+)" is named "([^"]+)" and declares tool "([^"]+)"$"#)]
+fn local_mixin_declaring_tool(w: &mut BehaviourWorld, dir: String, name: String, tool: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from(format!(
+            "/work/{}/lns.yaml",
+            dir.trim_start_matches("./").trim_end_matches('/')
+        )),
+        format!(
+            "apiVersion: lns.run/v1\nkind: mixin\nname: {name}\nspec:\n  tools:\n    - {tool}\n"
+        ),
+    );
+}

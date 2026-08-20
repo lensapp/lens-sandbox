@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use lns_artifact::build::BuiltArtifact;
 
 use super::author::Fs;
@@ -98,7 +98,6 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
 ) -> Result<Vec<PackedDirectory>> {
     let def = lns_artifact::sandbox::parse_document(doc)
         .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
-    refuse_local_mixins(&def)?;
     def.spec
         .filesets
         .iter()
@@ -146,14 +145,102 @@ fn report_packed<W: Write>(
     Ok(())
 }
 
-/// A local directory means nothing on the machine that pulls the published document, so publish refuses what authoring accepts — an unpinned *remote* entry is already refused by `parse_document`, one caller up.
-fn refuse_local_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
-    for reference in &def.spec.mixins {
-        if lns_artifact::sandbox::names_a_local_path(reference) {
-            bail!(
-                "mixin {reference} names a local directory, which the machine that pulls this document does not have; publish it first, then pin the digest its push prints"
-            );
-        }
+/// The four ports one push drives: the author's files, the directory that roots them, the registry, and the version index.
+pub struct PushPorts<'a, F: Fs + ?Sized, P: Producer + ?Sized, R: ToolResolver + ?Sized> {
+    pub fs: &'a F,
+    pub cwd: &'a Path,
+    pub producer: &'a P,
+    pub resolver: &'a R,
+}
+
+/// How a push may accept publishing the local mixins a document names.
+pub struct Confirm<'a> {
+    pub assume_yes: bool,
+    pub interactive: bool,
+    pub input: &'a mut dyn std::io::BufRead,
+}
+
+/// What each local mixin published as, keyed by its document so every entry naming it pins the same digest.
+type PublishedMixins = Vec<(std::path::PathBuf, String)>;
+
+/// Publish each planned mixin under its own repository, children first, so every digest exists before the document that pins it is built.
+async fn publish_planned_mixins<F, P, R, W>(
+    fs: &F,
+    producer: &P,
+    resolver: &R,
+    plan: &super::mixin_plan::MixinPlan,
+    out: &mut W,
+) -> Result<PublishedMixins>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    W: Write,
+{
+    let mut published: PublishedMixins = Vec::new();
+    for node in &plan.nodes {
+        let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
+        let (doc, _) = pin_declared_tools(resolver, &doc).await?;
+        let (built, packed) = build(fs, &node.root, &doc)?;
+        report_packed(out, "packed", &built, &packed)?;
+        let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
+        producer
+            .push_built(&built, &format!("{}:{tag}", node.repository))
+            .await
+            .with_context(|| {
+                format!(
+                    "publishing mixin {}; the sandbox was not published, and re-running the push re-derives the same digests, so retrying is safe",
+                    node.declared
+                )
+            })?;
+        writeln!(
+            out,
+            "published mixin {} → {}@{}",
+            node.declared, node.repository, built.manifest_digest
+        )?;
+        published.push((
+            node.document.clone(),
+            format!("{}@{}", node.repository, built.manifest_digest),
+        ));
+    }
+    Ok(published)
+}
+
+/// The same walk offline: each digest is computable without the network, so the preview names what every artifact would publish as.
+fn preview_planned_mixins<F, W>(
+    fs: &F,
+    plan: &super::mixin_plan::MixinPlan,
+    out: &mut W,
+) -> Result<PublishedMixins>
+where
+    F: Fs + ?Sized,
+    W: Write,
+{
+    let mut published: PublishedMixins = Vec::new();
+    for node in &plan.nodes {
+        let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
+        let (built, packed) = build(fs, &node.root, &doc)?;
+        report_packed(out, "would pack", &built, &packed)?;
+        writeln!(
+            out,
+            "would publish mixin {} → {}@{} ({})",
+            node.declared,
+            node.repository,
+            built.manifest_digest,
+            blob_bytes(&built)
+        )?;
+        published.push((
+            node.document.clone(),
+            format!("{}@{}", node.repository, built.manifest_digest),
+        ));
+    }
+    Ok(published)
+}
+
+/// A mixin rides along as its own artifact, so it faces the same gate as the document that names it — otherwise a tool no consumer can provision publishes just by being layered on.
+fn refuse_unpushable_planned_tools(plan: &super::mixin_plan::MixinPlan) -> Result<()> {
+    for node in &plan.nodes {
+        refuse_unpushable_tools(&node.bytes).with_context(|| format!("mixin {}", node.declared))?;
     }
     Ok(())
 }
@@ -166,12 +253,10 @@ fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
 
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
-    fs: &F,
-    cwd: &Path,
-    producer: &P,
-    resolver: &R,
+    ports: PushPorts<'_, F, P, R>,
     doc: &[u8],
     reference: &str,
+    confirm: Confirm<'_>,
     out: &mut W,
 ) -> Result<i32>
 where
@@ -180,10 +265,33 @@ where
     R: ToolResolver + ?Sized,
     W: Write,
 {
+    let PushPorts {
+        fs,
+        cwd,
+        producer,
+        resolver,
+    } = ports;
+    let Confirm {
+        assume_yes,
+        interactive,
+        input,
+    } = confirm;
     refuse_unpushable_tools(doc)?;
-    // Packing before resolution reads the directories offline, so a broken fileset refuses the push without consulting the index.
+    // Packing first reads the directories offline, so a broken document or fileset refuses the push before it consults the index or uploads a mixin.
     pack_path_filesets(fs, cwd, doc)?;
-    let (doc, pinned_tools) = pin_declared_tools(resolver, doc).await?;
+    let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
+    refuse_unpushable_planned_tools(&plan)?;
+    super::mixin_plan::confirm_mixin_publication(
+        &plan,
+        reference,
+        assume_yes,
+        interactive,
+        input,
+        out,
+    )?;
+    let published = publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
+    let doc = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
+    let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     let (built, packed) = build(fs, cwd, &doc)?;
     report_packed(out, "packed", &built, &packed)?;
     for tool in &pinned_tools {
@@ -196,7 +304,15 @@ where
         }
         writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
-    producer.push_built(&built, reference).await?;
+    producer
+        .push_built(&built, reference)
+        .await
+        .map_err(|e| match plan.nodes.len() {
+            0 => e,
+            published => e.context(format!(
+                "the sandbox was not published; its {published} mixin(s) are already uploaded under their own digests, and re-running the push re-derives the same digests, so retrying is safe"
+            )),
+        })?;
     writeln!(
         out,
         "built and pushed {reference}@{}",
@@ -218,21 +334,16 @@ where
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
-    let (built, packed) = build(fs, cwd, doc)?;
+    pack_path_filesets(fs, cwd, doc)?;
+    let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
+    refuse_unpushable_planned_tools(&plan)?;
+    let published = preview_planned_mixins(fs, &plan, out)?;
+    let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
+    let (built, packed) = build(fs, cwd, &pinned)?;
     report_packed(out, "would pack", &built, &packed)?;
-    // Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
-    let unresolved_tools = serde_json::from_slice::<serde_json::Value>(doc)
-        .ok()
-        .and_then(|value| value["spec"]["tools"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .as_str()
-                .and_then(|entry| lns_artifact::tools::parse(entry).ok())
-        })
-        .filter(|tool| !lns_artifact::tools::is_exact_version(&tool.version))
-        .count();
+    let mut docs: Vec<&[u8]> = vec![&pinned];
+    docs.extend(plan.nodes.iter().map(|node| node.bytes.as_slice()));
+    let unresolved_tools = unresolved_tool_count(&docs);
     if unresolved_tools > 0 {
         writeln!(
             out,
@@ -249,6 +360,21 @@ where
     Ok(0)
 }
 
+/// Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
+fn unresolved_tool_count(docs: &[&[u8]]) -> usize {
+    docs.iter()
+        .filter_map(|doc| serde_json::from_slice::<serde_json::Value>(doc).ok())
+        .filter_map(|value| value["spec"]["tools"].as_array().cloned())
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .and_then(|entry| lns_artifact::tools::parse(entry).ok())
+        })
+        .filter(|tool| !lns_artifact::tools::is_exact_version(&tool.version))
+        .count()
+}
+
 fn blob_bytes(built: &BuiltArtifact) -> String {
     let bytes: usize = built.blobs.iter().map(|blob| blob.data.len()).sum();
     format!("{bytes} bytes")
@@ -256,6 +382,41 @@ fn blob_bytes(built: &BuiltArtifact) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Every scenario below predates local-mixin publication, so its plan is empty and the prompt never fires; this keeps the call sites reading as the push they are about.
+    async fn push_no_prompt<F, P, R, W>(
+        fs: &F,
+        cwd: &Path,
+        producer: &P,
+        resolver: &R,
+        doc: &[u8],
+        reference: &str,
+        out: &mut W,
+    ) -> Result<i32>
+    where
+        F: Fs + ?Sized,
+        P: Producer + ?Sized,
+        R: ToolResolver + ?Sized,
+        W: Write,
+    {
+        push(
+            PushPorts {
+                fs,
+                cwd,
+                producer,
+                resolver,
+            },
+            doc,
+            reference,
+            Confirm {
+                assume_yes: false,
+                interactive: true,
+                input: &mut std::io::Cursor::new(Vec::new()),
+            },
+            out,
+        )
+        .await
+    }
+
     use super::*;
     use std::cell::RefCell;
 
@@ -402,11 +563,62 @@ mod tests {
         (tool, doc)
     }
 
+    /// A sandbox layering on a local mixin whose own tool no consumer could provision.
+    fn fs_with_unprovisionable_mixin() -> (MapFs, Vec<u8>) {
+        let tool = lns_artifact::tools::registry::backends()
+            .find(|(_, backend)| !lns_artifact::tools::registry::is_supported_backend(backend))
+            .map(|(name, _)| name.to_string())
+            .expect("the snapshot carries at least one unsupported-backend entry");
+        let fs = MapFs::with(&[(
+            "/work/mixins/pg/lns.yaml",
+            &format!(
+                "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  tools:\n    - {tool}@1\n"
+            ),
+        )]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg/"]}}"#.to_vec();
+        (fs, doc)
+    }
+
+    #[tokio::test]
+    async fn push_refuses_a_mixin_declaring_a_tool_no_consumer_could_provision() {
+        let (fs, doc) = fs_with_unprovisionable_mixin();
+        let producer = FakeProducer::err("must not reach the producer");
+        let mut out = Vec::new();
+        let err = push_no_prompt(
+            &fs,
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &doc,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no consumer can start") && text.contains("./mixins/pg/"),
+            "a mixin publishes as its own artifact, so layering on it must not smuggle past the gate the same document faces when pushed directly; got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_refuses_a_mixin_declaring_a_tool_no_consumer_could_provision() {
+        let (fs, doc) = fs_with_unprovisionable_mixin();
+        let mut out = Vec::new();
+        let err =
+            push_dry_run(&fs, cwd(), &doc, "ghcr.io/team/hermes:1.4.0", &mut out).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no consumer can start"),
+            "a preview that reports a graph the real push would refuse is worse than no preview; got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn push_builds_then_reports_the_pushed_reference() {
         let producer = FakeProducer::ok();
         let mut out = Vec::new();
-        let code = push(
+        let code = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -432,7 +644,7 @@ mod tests {
     async fn push_surfaces_a_producer_failure_naming_the_host() {
         let producer = FakeProducer::err("credential for ghcr.io lacks push scope");
         let mut out = Vec::new();
-        let err = push(
+        let err = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -452,7 +664,7 @@ mod tests {
     async fn push_refuses_an_invalid_sandbox_before_uploading() {
         let producer = FakeProducer::err("must not reach the producer");
         let mut out = Vec::new();
-        let err = push(
+        let err = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -473,7 +685,7 @@ mod tests {
     async fn push_packs_a_path_fileset_into_a_layer_of_the_same_artifact() {
         let producer = FakeProducer::ok();
         let mut out = Vec::new();
-        let code = push(
+        let code = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -533,7 +745,7 @@ mod tests {
         let producer = FakeProducer::ok();
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/opt/skills","owner":"root"}]}}"#;
         let mut out = Vec::new();
-        push(
+        push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -555,7 +767,7 @@ mod tests {
     async fn push_publishes_a_mixin_rather_than_refusing_a_kind_it_does_not_run() {
         let producer = FakeProducer::ok();
         let mut out = Vec::new();
-        let code = push(
+        let code = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -574,32 +786,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn push_refuses_a_mixin_reference_a_consumer_could_not_resolve() {
-        let producer = FakeProducer::err("must not reach the producer");
-        let mut out = Vec::new();
-        let err = push(
-            &fs_with_skills(),
-            cwd(),
-            &producer,
-            &unconsultable(),
-            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","mixins":["./mixins/postgres-tools/"]}}"#,
-            "ghcr.io/team/hermes:1.4.0",
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("mixin ./mixins/postgres-tools/ names a local directory"),
-            "a directory beside the author's file means nothing to a consumer, so publishing one would ship a reference nobody else can resolve; got: {text}"
-        );
-        assert!(
-            !text.contains("is not digest-pinned"),
-            "a directory cannot be given a digest, so advising one sends the author after a fix that does not exist; got: {text}"
-        );
-    }
-
     const WITH_TOOLS: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22","python@latest"]}}"#;
 
     #[tokio::test]
@@ -607,7 +793,7 @@ mod tests {
         let producer = FakeProducer::ok();
         let resolver = FakeResolver::with(&[("node@22", "22.11.0"), ("python@latest", "3.12.6")]);
         let mut out = Vec::new();
-        let code = push(
+        let code = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -638,7 +824,7 @@ mod tests {
         let producer = FakeProducer::ok();
         let (unsupported, doc) = unsupported_backend_doc(false);
         let mut out = Vec::new();
-        let err = push(
+        let err = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -693,7 +879,7 @@ mod tests {
         let producer = FakeProducer::ok();
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
         let mut out = Vec::new();
-        push(
+        push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -724,7 +910,7 @@ mod tests {
             FakeResolver::with(&[]).verifying("java@temurin-9.9.9+9", IndexVerification::Absent);
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-9.9.9+9"]}}"#;
         let mut out = Vec::new();
-        let code = push(
+        let code = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -754,7 +940,7 @@ mod tests {
             .verifying("java@temurin-21.0.5+11.0.LTS", IndexVerification::Confirmed);
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
-        push(
+        push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -775,7 +961,7 @@ mod tests {
         let producer = FakeProducer::ok();
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
-        push(
+        push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -801,7 +987,7 @@ mod tests {
         let producer = FakeProducer::err("must not reach the producer");
         let resolver = FakeResolver::with(&[]);
         let mut out = Vec::new();
-        let err = push(
+        let err = push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
@@ -824,7 +1010,7 @@ mod tests {
     async fn push_without_tools_never_consults_the_resolver() {
         let producer = FakeProducer::ok();
         let mut out = Vec::new();
-        push(
+        push_no_prompt(
             &fs_with_skills(),
             cwd(),
             &producer,
