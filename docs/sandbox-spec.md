@@ -1428,7 +1428,8 @@ Offline validation (`lns sandbox validate`, and every load path including
 - **scripts**: every entry sets a `when` this grammar defines and a `run` that is
   non-empty and free of NUL; a `user`, where present, follows the `user` rule; at
   most 32 entries, each `run` at most 128 KiB, and 512 KiB across the block — the
-  last three bound one document, not a resolved one.
+  entry count and the block total bound one document rather than a resolved one,
+  while the per-script size holds for both, since merging cannot grow a script.
 - **Connector**: at least one method; each method carries the block its
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
   placeholder self-identifies as fake and is at least 16 characters.
