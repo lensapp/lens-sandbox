@@ -1,7 +1,7 @@
 {
-  ".": "0.19.0",
-  "crates/lns-cli": "0.19.0",
-  "crates/lns-service": "0.19.0",
-  "crates/e2e-tests": "0.19.0",
+  ".": "0.20.0",
+  "crates/lns-cli": "0.20.0",
+  "crates/lns-service": "0.20.0",
+  "crates/e2e-tests": "0.20.0",
   "scripts/lns-install": "0.6.0"
 }
