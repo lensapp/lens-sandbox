@@ -108,27 +108,66 @@ fn host_binds_interactive(detached: bool, stdin_is_tty: bool) -> bool {
     !detached && stdin_is_tty
 }
 
+/// Takes the caller's input because the caller holds the process-wide stdin lock, which is not reentrant.
 fn resolve_host_binds(
     specs: &[lns_ipc::BindSpec],
     interactive: bool,
+    input: &mut dyn std::io::BufRead,
+    store: &lns_policy::host_bind_decisions::HostBindDecisionStore,
 ) -> Result<Vec<crate::run::host_bind::ResolvedBind>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
     let scan = crate::run::host_bind::RealDirScan;
-    let store = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
-        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
-    );
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     crate::run::host_bind::resolve_binds(
         specs,
         &scan,
-        &store,
+        store,
         interactive,
-        &mut input,
+        input,
         &mut std::io::stderr(),
     )
+}
+
+/// Every question a run asks before it boots, and the stores that remember the answers.
+struct PreBootQuestions<'a> {
+    pulled: Option<crate::run::pull_confirm::PulledEffects<'a>>,
+    origin: crate::run::host_path_consent::DocumentOrigin,
+    filesets: &'a [crate::run::summary::FilesetSummary],
+    host_paths: &'a lns_policy::host_path_decisions::HostPathDecisionStore,
+    bind_specs: &'a [lns_ipc::BindSpec],
+    bind_decisions: &'a lns_policy::host_bind_decisions::HostBindDecisionStore,
+    assume_yes: bool,
+    interactive: bool,
+}
+
+/// Asks all of them under one stdin guard and drops it before returning: an attached session reads the tty through tokio's stdin, whose blocking thread takes this same lock, so a guard that outlives the questions leaves the session with no keyboard.
+fn ask_before_boot(
+    q: &PreBootQuestions,
+) -> Result<(Vec<String>, Vec<crate::run::host_bind::ResolvedBind>)> {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    if let Some(effects) = q.pulled.as_ref() {
+        crate::run::pull_confirm::confirm_pulled_effects(
+            effects,
+            q.assume_yes,
+            q.interactive,
+            &mut input,
+            &mut std::io::stderr(),
+        )?;
+    }
+    let denied = crate::run::host_path_consent::decide_host_paths(
+        &q.origin,
+        q.filesets,
+        q.host_paths,
+        q.assume_yes,
+        q.interactive,
+        &mut input,
+        &mut std::io::stderr(),
+    )?
+    .denied;
+    let binds = resolve_host_binds(q.bind_specs, q.interactive, &mut input, q.bind_decisions)?;
+    Ok((denied, binds))
 }
 
 #[derive(Debug)]
@@ -410,28 +449,9 @@ pub async fn run_image(
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let interactive = host_binds_interactive(args.detach, crate::raw_mode::stdin_is_tty());
     let reference = target.image();
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
-    if published.is_some() {
-        let (declared_volumes, declared_binds) = crate::run::pull_confirm::artifact_declared_mounts(
-            &args.mounts,
-            &consumer_mount_targets,
-        );
-        let effects = crate::run::pull_confirm::PulledEffects {
-            reference: &reference,
-            binds: &declared_binds,
-            volumes: &declared_volumes,
-            filesets: &args.filesets,
-            tools: &args.tools,
-        };
-        crate::run::pull_confirm::confirm_pulled_effects(
-            &effects,
-            args.assume_yes,
-            interactive,
-            &mut input,
-            &mut std::io::stderr(),
-        )?;
-    }
+    let declared_mounts = published.is_some().then(|| {
+        crate::run::pull_confirm::artifact_declared_mounts(&args.mounts, &consumer_mount_targets)
+    });
     // A mixin is an artifact from a registry whichever document layered it in, so a local run reaches this too.
     let origin = if published.is_some() {
         crate::run::host_path_consent::DocumentOrigin::Pulled {
@@ -440,19 +460,28 @@ pub async fn run_image(
     } else {
         crate::run::host_path_consent::DocumentOrigin::OwnDirectory
     };
-    let denied_host_paths = crate::run::host_path_consent::decide_host_paths(
-        &origin,
-        &args.filesets,
-        &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
+    let (denied_host_paths, resolved_binds) = ask_before_boot(&PreBootQuestions {
+        pulled: declared_mounts.as_ref().map(|(volumes, binds)| {
+            crate::run::pull_confirm::PulledEffects {
+                reference: &reference,
+                binds,
+                volumes,
+                filesets: &args.filesets,
+                tools: &args.tools,
+            }
+        }),
+        origin,
+        filesets: &args.filesets,
+        host_paths: &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
             lns_policy::host_path_decisions::default_host_path_decisions_path(),
         ),
-        args.assume_yes,
+        bind_specs: &bind_specs,
+        bind_decisions: &lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
+            lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
+        ),
+        assume_yes: args.assume_yes,
         interactive,
-        &mut input,
-        &mut std::io::stderr(),
-    )?
-    .denied;
-    let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
+    })?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
         if !dispositions.is_empty() {
@@ -2169,6 +2198,111 @@ mod tests {
     fn lf_to_crlf_expands_every_newline_and_leaves_other_bytes() {
         assert_eq!(lf_to_crlf(b"a\nb\n"), b"a\r\nb\r\n");
         assert_eq!(lf_to_crlf(b"no newline"), b"no newline");
+    }
+
+    struct EmptyDecisions;
+    impl
+        lns_policy::decision_store::DecisionStore<
+            lns_policy::host_bind_decisions::SecretDisposition,
+        > for EmptyDecisions
+    {
+        fn load(&self) -> std::io::Result<lns_policy::host_bind_decisions::HostBindDecisionFile> {
+            Ok(Default::default())
+        }
+        fn save(
+            &self,
+            _state: &lns_policy::host_bind_decisions::HostBindDecisionFile,
+        ) -> std::io::Result<()> {
+            panic!("a run with nothing to ask must record no decision")
+        }
+    }
+
+    struct NoHostPathDecisions;
+    impl
+        lns_policy::decision_store::DecisionStore<lns_policy::host_path_decisions::HostPathDecision>
+        for NoHostPathDecisions
+    {
+        fn load(&self) -> std::io::Result<lns_policy::host_path_decisions::HostPathDecisionFile> {
+            Ok(Default::default())
+        }
+        fn save(
+            &self,
+            _state: &lns_policy::host_path_decisions::HostPathDecisionFile,
+        ) -> std::io::Result<()> {
+            panic!("a run with no hostPath fileset must record no decision")
+        }
+    }
+
+    /// The stdin guard the questions need must not reach the attached session: tokio's stdin takes the same lock from a blocking thread, so a leaked guard leaves the run with a dead keyboard.
+    #[test]
+    fn the_questions_before_boot_leave_stdin_lockable_for_the_session() {
+        let dir = tempfile::tempdir().expect("a temp dir for the bind source");
+        std::fs::write(dir.path().join("Cargo.toml"), b"").expect("a file with no secret shape");
+        let bind_specs = vec![lns_ipc::BindSpec {
+            host_source: dir.path().to_string_lossy().into_owned(),
+            target: "/work".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+        }];
+
+        let (denied, binds) = ask_before_boot(&PreBootQuestions {
+            pulled: None,
+            origin: crate::run::host_path_consent::DocumentOrigin::OwnDirectory,
+            filesets: &[],
+            host_paths: &NoHostPathDecisions,
+            bind_specs: &bind_specs,
+            bind_decisions: &EmptyDecisions,
+            assume_yes: false,
+            interactive: false,
+        })
+        .expect("a local run with one clean bind asks nothing");
+        assert!(denied.is_empty(), "no hostPath fileset can be denied");
+        assert_eq!(binds.len(), 1, "the bind survives the questions");
+
+        // What the stdin pump's blocking thread does once the run is attached.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let _held = stdin.lock();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the questions must drop the stdin guard before the session reads the tty");
+    }
+
+    /// A resolve that locks stdin itself deadlocks every run that declares a bind, because the caller's guard is already held and stdin is not reentrant.
+    #[test]
+    fn resolving_host_binds_while_the_caller_holds_stdin_does_not_deadlock() {
+        let dir = tempfile::tempdir().expect("a temp dir for the bind source");
+        std::fs::write(dir.path().join("Cargo.toml"), b"").expect("a file with no secret shape");
+        let specs = vec![lns_ipc::BindSpec {
+            host_source: dir.path().to_string_lossy().into_owned(),
+            target: "/work".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+        }];
+
+        // Off the test thread, so a deadlock times out here instead of hanging the suite.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut held = stdin.lock();
+            let _ = tx.send(
+                resolve_host_binds(&specs, false, &mut held, &EmptyDecisions)
+                    .expect("a clean bind resolves"),
+            );
+        });
+
+        let resolved = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("resolve_host_binds must return while the caller holds stdin, not block on it");
+        assert_eq!(resolved.len(), 1, "the bind survives the resolve");
+        assert!(
+            resolved[0].dropped.is_empty(),
+            "nothing here is secret-shaped"
+        );
     }
 
     #[test]
