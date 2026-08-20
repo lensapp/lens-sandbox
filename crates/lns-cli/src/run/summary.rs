@@ -178,6 +178,107 @@ fn short_source(source: &str) -> String {
 /// Where every value in this summary starts, so a label too long to fit still lines its entries up under one another.
 const COLUMN: usize = 13;
 
+/// How much of a script's first line the summary shows before it elides; the hash names the exact bytes, and `lns sandbox inspect` prints the body whole.
+const SCRIPT_HEAD_CHARS: usize = 44;
+
+/// One `pre-start` script as the approval reads it: what it does, who runs it, and enough of an identity to tell two apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptSummary {
+    pub head: String,
+    pub user: String,
+    pub lines: usize,
+    pub digest: String,
+    /// What the author wrote to justify the script; §3.1.13 shows it here, the way an egress rule's own description is shown.
+    pub description: Option<String>,
+}
+
+/// A local definition's own scripts in the shape the view carries, so one summarizer answers for both run paths.
+pub fn scripts_of(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<lns_ipc::SandboxScript> {
+    spec.scripts
+        .iter()
+        .map(|script| lns_ipc::SandboxScript {
+            when: script.when.as_str().to_string(),
+            run: script.run.clone(),
+            user: script.user.clone(),
+            description: script.description.clone(),
+        })
+        .collect()
+}
+
+/// Summarize a resolved sandbox's scripts for the approval; the full body stays on the view, since a long script would bury everything else the developer is approving.
+pub fn script_summaries(scripts: &[lns_ipc::SandboxScript]) -> Vec<ScriptSummary> {
+    scripts
+        .iter()
+        .map(|script| ScriptSummary {
+            head: head_of(&script.run),
+            // A script naming no user runs as whatever the workload does, and saying so beats an empty column.
+            user: script
+                .user
+                .clone()
+                .unwrap_or_else(|| "workload".to_string()),
+            lines: script.run.lines().filter(|l| !l.trim().is_empty()).count(),
+            digest: short_digest(&script.run),
+            description: script.description.clone(),
+        })
+        .collect()
+}
+
+fn head_of(body: &str) -> String {
+    let first = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    match first.char_indices().nth(SCRIPT_HEAD_CHARS) {
+        Some((cut, _)) => format!("{}…", &first[..cut]),
+        None => first.to_string(),
+    }
+}
+
+fn short_digest(body: &str) -> String {
+    let full = <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes());
+    let hex: String = full.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{}…", &hex[..12])
+}
+
+/// Attribution here is by position, not by key: two scripts can read alike, and neither overrides the other.
+fn write_scripts(s: &mut String, args: &RunArgs) {
+    let entries: Vec<&lns_ipc::SourceContribution> = args
+        .contributions
+        .iter()
+        .filter(|c| c.block == lns_ipc::ContributionBlock::Script)
+        .collect();
+    let composed = !args.resolved_mixins.is_empty();
+    let heading = "  Scripts:";
+    let pad = COLUMN.saturating_sub(heading.len()).max(1);
+    let value_column = heading.len() + pad;
+    for (index, script) in args.scripts.iter().enumerate() {
+        let from = entries
+            .get(index)
+            .filter(|_| composed)
+            .map(|entry| format!("  [from {}]", short_source(&entry.source)))
+            .unwrap_or_default();
+        let note = script
+            .description
+            .as_deref()
+            .map(|note| format!("  {note}"))
+            .unwrap_or_default();
+        let line = format!(
+            "{}  runs as {}  ({} line{}, {}){from}{note}",
+            script.head,
+            script.user,
+            script.lines,
+            if script.lines == 1 { "" } else { "s" },
+            script.digest
+        );
+        if index == 0 {
+            writeln!(s, "{heading}{:pad$}{line}", "").unwrap();
+        } else {
+            writeln!(s, "{:value_column$}{line}", "").unwrap();
+        }
+    }
+}
+
 /// The blocks §1.5 names. A run that resolved no mixin still lists its rules — §4.2 lets a pulled entry outrank this directory only because the merged table is disclosed first — but names no source for them, since one author is not an attribution question.
 fn write_disclosed_blocks(s: &mut String, args: &RunArgs) {
     let listed = |block| -> Vec<&lns_ipc::SourceContribution> {
@@ -279,6 +380,7 @@ pub fn format_summary(
             .collect();
         writeln!(s, "  Tools:     {}", tools.join(", ")).unwrap();
     }
+    write_scripts(&mut s, args);
     if !args.resolved_mixins.is_empty() {
         writeln!(s, "  Mixins:    {}", args.resolved_mixins.join(", ")).unwrap();
     }
@@ -565,8 +667,170 @@ mod tests {
         format_summary(args, DEFAULT_VM_SIZE, policy, policy_path, source)
     }
 
+    fn spec_with_scripts(entries: &str) -> lns_artifact::sandbox::SandboxSpec {
+        serde_json::from_str(&format!(r#"{{"image":"x:1","scripts":[{entries}]}}"#))
+            .expect("a valid fixture")
+    }
+
+    #[test]
+    fn a_local_definitions_scripts_summarize_the_way_a_pulled_ones_do() {
+        let spec = spec_with_scripts(
+            r#"{"when":"pre-start","user":"root","run":"apt-get install -y psql","description":"the psql the prompts assume"}"#,
+        );
+        let summarized = script_summaries(&scripts_of(&spec));
+        assert_eq!(
+            summarized,
+            vec![ScriptSummary {
+                head: "apt-get install -y psql".into(),
+                user: "root".into(),
+                lines: 1,
+                digest: summarized[0].digest.clone(),
+                description: Some("the psql the prompts assume".into()),
+            }],
+            "one summarizer answers for both run paths, so a local run discloses exactly what a pulled one does"
+        );
+    }
+
+    #[test]
+    fn a_script_too_long_to_show_is_elided_rather_than_wrapped() {
+        let body = format!("echo {}", "x".repeat(200));
+        let spec = spec_with_scripts(&format!(
+            r#"{{"when":"pre-start","run":{}}}"#,
+            serde_json::to_string(&body).expect("a str encodes")
+        ));
+        let summarized = script_summaries(&scripts_of(&spec));
+        let head = summarized[0].head.clone();
+        assert!(
+            head.ends_with('…') && head.chars().count() < 60,
+            "a long first line would push the rest of the approval off the screen; got {head:?}"
+        );
+        assert_eq!(
+            summarized[0].user, "workload",
+            "a script naming no user runs as the workload does, and saying so beats an empty column"
+        );
+    }
+
+    #[test]
+    fn two_scripts_with_the_same_body_summarize_alike_and_are_both_listed() {
+        let spec = spec_with_scripts(
+            r#"{"when":"pre-start","run":"npm ci"},{"when":"pre-start","run":"npm ci"}"#,
+        );
+        let summarized = script_summaries(&scripts_of(&spec));
+        assert_eq!(summarized.len(), 2);
+        assert_eq!(
+            summarized[0], summarized[1],
+            "the block has no key, so identical entries are two real scripts rather than one duplicated"
+        );
+    }
+
+    #[test]
+    fn the_summary_lists_each_script_in_run_order_with_its_user_and_hash() {
+        let mut args = run_args(Some("ghcr.io/acme/reviewer:1"));
+        let spec = spec_with_scripts(
+            r#"{"when":"pre-start","user":"root","run":"apt-get install -y psql"},{"when":"pre-start","run":"npm ci"}"#,
+        );
+        args.scripts = script_summaries(&scripts_of(&spec));
+        let mut rendered = String::new();
+        write_scripts(&mut rendered, &args);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2, "got:\n{rendered}");
+        let first = lines[0].to_string();
+        assert!(
+            first.contains("Scripts:")
+                && first.contains("apt-get install -y psql")
+                && first.contains("runs as root")
+                && first.contains("sha256:"),
+            "a pulled script asking for root is why this line exists, so it names the body, the user and the exact bytes; got: {first}"
+        );
+        let second = lines[1].to_string();
+        assert!(
+            second.contains("npm ci") && second.contains("runs as workload"),
+            "the second script lines up under the first without repeating the label; got: {second}"
+        );
+    }
+
+    #[test]
+    fn a_script_a_mixin_contributed_names_that_mixin() {
+        let mut args = run_args(Some("ghcr.io/acme/reviewer:1"));
+        args.scripts = script_summaries(&scripts_of(&spec_with_scripts(
+            r#"{"when":"pre-start","run":"apt-get install -y psql"}"#,
+        )));
+        args.resolved_mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a9".into()];
+        args.contributions = vec![lns_ipc::SourceContribution {
+            block: lns_ipc::ContributionBlock::Script,
+            key: "apt-get install -y psql".into(),
+            source: "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a9".into(),
+            note: None,
+            displaced: Vec::new(),
+        }];
+        let mut rendered = String::new();
+        write_scripts(&mut rendered, &args);
+        assert!(
+            rendered.contains("postgres-tools"),
+            "a script nobody can trace to a document is one nobody can refuse; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_layered_on_nothing_names_no_source_for_its_own_scripts() {
+        let mut args = run_args(Some("ghcr.io/acme/reviewer:1"));
+        args.scripts = script_summaries(&scripts_of(&spec_with_scripts(
+            r#"{"when":"pre-start","run":"npm ci"}"#,
+        )));
+        let mut rendered = String::new();
+        write_scripts(&mut rendered, &args);
+        assert!(
+            !rendered.contains("[from"),
+            "one author is not an attribution question, exactly as the other disclosed blocks treat it; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_scripts_own_description_is_what_the_approval_reads() {
+        let mut args = run_args(Some("ghcr.io/acme/reviewer:1"));
+        args.scripts = script_summaries(&scripts_of(&spec_with_scripts(
+            r#"{"when":"pre-start","user":"root","run":"apt-get install -y psql","description":"the psql the prompts assume"}"#,
+        )));
+        let mut rendered = String::new();
+        write_scripts(&mut rendered, &args);
+        assert!(
+            rendered.contains("the psql the prompts assume"),
+            "§3.1.13 shows a script's description here the way an egress rule's is shown — it is the author's own justification, on the one screen the developer approves; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_digest_identifies_the_body_rather_than_the_line_it_starts_with() {
+        let one = script_summaries(&scripts_of(&spec_with_scripts(
+            r#"{"when":"pre-start","run":"apt-get update"}"#,
+        )));
+        let two = script_summaries(&scripts_of(&spec_with_scripts(
+            r#"{"when":"pre-start","run":"apt-get update\nrm -rf /"}"#,
+        )));
+        assert_eq!(
+            one[0].head, two[0].head,
+            "the fixture is only meaningful while both share a first line"
+        );
+        assert_ne!(
+            one[0].digest, two[0].digest,
+            "the hash is what tells an approver that the elided remainder is the same bytes they saw last time, so it has to cover the whole body rather than the line on screen"
+        );
+    }
+
+    #[test]
+    fn a_run_declaring_no_scripts_says_nothing_about_them() {
+        let args = run_args(Some("ghcr.io/acme/reviewer:1"));
+        let mut rendered = String::new();
+        write_scripts(&mut rendered, &args);
+        assert!(
+            rendered.is_empty(),
+            "a heading with nothing under it is noise in the one summary the developer has to read; got:\n{rendered}"
+        );
+    }
+
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
+            scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
             contributions: Vec::new(),

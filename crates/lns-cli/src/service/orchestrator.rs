@@ -176,6 +176,7 @@ struct PublishedTarget {
     defaults: crate::run::declarative::Defaults,
     filesets: Vec<crate::run::summary::FilesetSummary>,
     tools: Vec<String>,
+    scripts: Vec<lns_ipc::SandboxScript>,
     mixins: Vec<String>,
     pinned_mixins: Vec<String>,
     contributions: Vec<lns_ipc::SourceContribution>,
@@ -198,6 +199,7 @@ fn published_target(
                 defaults: crate::run::declarative::Defaults::from_view(&view),
                 filesets: crate::run::summary::fileset_summaries_from_view(&view),
                 tools: crate::run::summary::tools_from_view(&view),
+                scripts: view.scripts.clone(),
                 mixins: view.mixins.clone(),
                 pinned_mixins: view.pinned_mixins.clone(),
                 contributions: view.contributions.clone(),
@@ -431,6 +433,13 @@ pub async fn run_image(
         (_, Some(published)) => published.tools.clone(),
         _ => Vec::new(),
     };
+    args.scripts = match (&target, &published) {
+        (crate::run::target::RunTarget::Local { def, .. }, _) => {
+            crate::run::summary::script_summaries(&crate::run::summary::scripts_of(&def.spec))
+        }
+        (_, Some(published)) => crate::run::summary::script_summaries(&published.scripts),
+        _ => Vec::new(),
+    };
     // A local run resolved before this point; a published one resolves in its preflight.
     if let Some(published) = published.as_ref() {
         crate::run::summary::adopt_pinned_mixins(
@@ -473,6 +482,7 @@ pub async fn run_image(
                 volumes,
                 filesets: &args.filesets,
                 tools: &args.tools,
+                scripts: &args.scripts,
             }
         }),
         origin,
