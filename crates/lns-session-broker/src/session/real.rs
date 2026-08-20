@@ -15,8 +15,8 @@ const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 use super::{
     Confinement, LoopAction, SessionError, SessionOutcome, SharedFd, WorkloadSpec, close,
-    confinement, dispatch_frame, eof_action, keys_to_scrub, read_client_frame, signal_target,
-    validate_argv, validate_open_session,
+    confinement, dispatch_frame, eof_action, identity_env, keys_to_scrub, read_client_frame,
+    session_cwd, signal_target, validate_argv, validate_open_session,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
@@ -168,6 +168,19 @@ pub fn handle_session(
     };
     let confinement = confinement(confine, env_u32("LENS_RUN_UID"), env_u32("LENS_RUN_GID"));
     let inherited: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    let mut env = env;
+    env.extend(identity_env(
+        &confinement,
+        &env,
+        std::env::var("LENS_RUN_HOME").ok().as_deref(),
+        std::env::var("SANDBOX_USER").ok().as_deref(),
+    ));
+    let effective_home = env
+        .iter()
+        .find_map(|kv| kv.strip_prefix("HOME="))
+        .filter(|h| !h.is_empty() && *h != "/")
+        .map(str::to_string);
+    let cwd = session_cwd(cwd, &confinement, effective_home.as_deref());
     let spec = WorkloadSpec {
         argv,
         env,

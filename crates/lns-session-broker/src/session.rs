@@ -68,6 +68,46 @@ pub(crate) fn keys_to_scrub<'a>(
         .collect()
 }
 
+/// A confined session adopts the run-as identity's HOME and USER unless the session env already declares them — runc fills HOME the same way, landing on `/` when the lookup failed.
+pub(crate) fn identity_env(
+    confinement: &Confinement,
+    session_env: &[String],
+    home: Option<&str>,
+    user: Option<&str>,
+) -> Vec<String> {
+    if matches!(confinement, Confinement::Inherit) {
+        return Vec::new();
+    }
+    let declares = |key: &str| {
+        session_env
+            .iter()
+            .any(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))
+    };
+    let mut extra = Vec::new();
+    if !declares("HOME") {
+        let home = home.filter(|h| !h.is_empty()).unwrap_or("/");
+        extra.push(format!("HOME={home}"));
+    }
+    if let Some(user) = user.filter(|u| !u.is_empty())
+        && !declares("USER")
+    {
+        extra.push(format!("USER={user}"));
+    }
+    extra
+}
+
+/// Mirrors the supervisor's workdir → home → stay-put fallback so an exec starts where its workload did.
+pub(crate) fn session_cwd(
+    cwd: Option<String>,
+    confinement: &Confinement,
+    home: Option<&str>,
+) -> Option<String> {
+    if cwd.is_some() || matches!(confinement, Confinement::Inherit) {
+        return cwd;
+    }
+    home.map(str::to_string)
+}
+
 #[derive(Debug)]
 pub enum SessionError {
     Io(io::Error),
@@ -204,6 +244,89 @@ mod tests {
     use super::*;
     use lns_session::{SignalKind, encode_frame};
     use std::os::fd::{AsRawFd, IntoRawFd};
+
+    #[test]
+    fn a_confined_session_adopts_the_run_as_home_and_user() {
+        let extra = identity_env(
+            &Confinement::Setuid {
+                uid: 1000,
+                gid: 1000,
+            },
+            &["PATH=/bin".into()],
+            Some("/home/node"),
+            Some("node"),
+        );
+        assert_eq!(
+            extra,
+            vec!["HOME=/home/node".to_string(), "USER=node".to_string()],
+            "an exec must land in the workload user's home the way its workload did, not in the broker's kernel-given HOME=/"
+        );
+    }
+
+    #[test]
+    fn a_session_declared_home_and_user_outrank_the_run_as_identity() {
+        let extra = identity_env(
+            &Confinement::Setuid {
+                uid: 1000,
+                gid: 1000,
+            },
+            &["HOME=/srv".into(), "USER=svc".into()],
+            Some("/home/node"),
+            Some("node"),
+        );
+        assert!(
+            extra.is_empty(),
+            "an image ENV or `-e` HOME/USER is the author's decision; the identity only fills the gap"
+        );
+    }
+
+    #[test]
+    fn a_confined_session_without_a_resolved_home_falls_back_to_the_root_dir() {
+        let extra = identity_env(&Confinement::CapsOnly, &[], None, None);
+        assert_eq!(
+            extra,
+            vec!["HOME=/".to_string()],
+            "runc lands on '/' when the passwd lookup fails; a confined exec matches it rather than inheriting broker state"
+        );
+    }
+
+    #[test]
+    fn the_primary_sessions_identity_stays_the_supervisors_business() {
+        let extra = identity_env(&Confinement::Inherit, &[], Some("/home/node"), Some("node"));
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn a_confined_session_without_a_workdir_starts_in_the_effective_home() {
+        let cwd = session_cwd(None, &Confinement::CapsOnly, Some("/home/node"));
+        assert_eq!(
+            cwd.as_deref(),
+            Some("/home/node"),
+            "the supervisor starts a workdir-less workload in its home, so an exec joining it must land there too"
+        );
+    }
+
+    #[test]
+    fn a_declared_workdir_outranks_the_home_fallback() {
+        let cwd = session_cwd(
+            Some("/app".into()),
+            &Confinement::CapsOnly,
+            Some("/home/node"),
+        );
+        assert_eq!(cwd.as_deref(), Some("/app"));
+    }
+
+    #[test]
+    fn the_primary_sessions_cwd_stays_the_supervisors_business() {
+        let cwd = session_cwd(None, &Confinement::Inherit, Some("/home/node"));
+        assert_eq!(cwd, None);
+    }
+
+    #[test]
+    fn a_confined_session_with_no_home_keeps_the_brokers_cwd() {
+        let cwd = session_cwd(None, &Confinement::CapsOnly, None);
+        assert_eq!(cwd, None);
+    }
 
     #[test]
     fn session_error_display_covers_each_variant() {

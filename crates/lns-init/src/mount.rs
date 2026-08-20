@@ -286,6 +286,17 @@ pub(crate) fn resolve_workload_ids(
     Ok((uid, gid))
 }
 
+/// Read after `resolve_workload_ids` has seeded any missing user, so the seeded `/home/<name>` line resolves like an image-shipped one.
+fn passwd_home(newroot: &str, name: &str) -> Option<String> {
+    let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == name).then_some(())?;
+        let home = fields.nth(4)?;
+        (!home.is_empty()).then(|| home.to_string())
+    })
+}
+
 fn resolve_group_gid(newroot: &str, spec: &str) -> Option<u32> {
     spec.parse::<u32>()
         .ok()
@@ -839,9 +850,12 @@ fn mount_composefs_and_exec_broker_inner(
         None => None,
     };
 
-    if let Some((uid, gid)) = run_ids {
+    if let (Some((uid, gid)), Some(user)) = (run_ids, sandbox_user) {
         sys.export_env("LENS_RUN_UID", &uid.to_string());
         sys.export_env("LENS_RUN_GID", &gid.to_string());
+        if let Some(home) = passwd_home(newroot, &user.name) {
+            sys.export_env("LENS_RUN_HOME", &home);
+        }
     }
 
     chown_fileset_owned(sys, newroot, run_ids);
@@ -3004,6 +3018,61 @@ mod tests {
                 Call::Lchown { path, uid: 33, gid: 50 } if path == &run_target
             )),
             "/run must be group-owned by the workload's passwd gid, not by the uid"
+        );
+    }
+
+    #[test]
+    fn boot_exports_the_passwd_resolved_home_for_exec_sessions_to_adopt() {
+        let dir = newroot_with_passwd(
+            "root:x:0:0:root:/root:/bin/sh\n\
+             www-data:x:33:50:www-data:/var/www:/usr/sbin/nologin\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "www-data".into(),
+            uid: None,
+            group: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            sys.calls().iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/var/www"
+            )),
+            "an exec session adopts the workload user's home, so the broker needs the passwd home lns-init already read"
+        );
+    }
+
+    #[test]
+    fn boot_exports_the_seeded_users_home_when_the_image_passwd_lacks_the_user() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "1001".into(),
+            uid: Some(1001),
+            group: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            sys.calls().iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/home/1001"
+            )),
+            "a seeded user's home is the /home/<name> lns-init creates, and an exec must land there too"
         );
     }
 

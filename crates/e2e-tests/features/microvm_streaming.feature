@@ -35,6 +35,16 @@ Feature: session streaming verbs reach a real guest without wedging the terminal
     And the output does not contain "exec-out"
     And the output does not contain "exec-err"
 
+  Scenario: an exec adopts the workload user's identity instead of the broker's
+    Given the Lens Sandbox service is running
+    When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
+    Then the exit code is 0
+    When the user execs "/bin/sh -c 'echo home=$HOME user=$USER cwd=$(pwd)end'" in that run
+    Then the exit code is 0
+    And the output contains "home=/home/sandbox"
+    And the output contains "user=sandbox"
+    And the output contains "cwd=/end"
+
   Scenario: logs without follow replays captured output and returns through the top level
     Given the Lens Sandbox service is running
     When the user starts a detached microVM command "/bin/sh -c 'echo hello-logs && /.lens/guest-tools/bin/busybox sleep 60'"
