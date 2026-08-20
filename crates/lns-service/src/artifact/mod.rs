@@ -10,6 +10,7 @@ pub mod mixin_dir;
 pub mod policy;
 pub mod real;
 pub mod resources;
+pub mod scripts;
 
 pub use lns_artifact::{merge, spec};
 
@@ -211,6 +212,7 @@ pub fn resolved_from_sandbox(
     ResolvedSandbox {
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
+        scripts: def.spec.scripts.clone(),
         local_filesets: def
             .spec
             .filesets
@@ -298,7 +300,7 @@ pub fn plan_published_sandbox(
     image_ref: &str,
     packed: &PackedFilesets,
 ) -> Result<ResolvedSandbox> {
-    let def = lns_artifact::sandbox::parse(config_json)
+    let def = lns_artifact::sandbox::parse_resolved(config_json)
         .with_context(|| format!("parsing published sandbox {image_ref}"))?;
     if !def.spec.mixins.is_empty() {
         anyhow::bail!(
@@ -322,7 +324,7 @@ pub fn refuse_unresolved_local_mixins(def: &lns_artifact::sandbox::Definition) -
 
 /// Plan a local `lns.yaml` definition through the same path a published sandbox takes, so its policy, connectors, and resources apply identically. A published mixin it layers on still brings its filesets packed, so `packed` decides which entries read a directory on this machine.
 pub fn plan_local_sandbox(config_json: &[u8], packed: &PackedFilesets) -> Result<ResolvedSandbox> {
-    let def = lns_artifact::sandbox::parse(config_json)
+    let def = lns_artifact::sandbox::parse_resolved(config_json)
         .context("parsing the local sandbox definition")?;
     refuse_unresolved_local_mixins(&def)?;
     Ok(resolved_from_sandbox(&def, packed))
@@ -673,6 +675,42 @@ mod tests {
             resolved_from_sandbox(&def, &PackedFilesets::new()).policy,
             None,
             "a plain definition must leave the directory overlay governing verbatim"
+        );
+    }
+
+    /// A resolved document carrying more scripts than one author may declare — the shape a 20 + 20 merge produces.
+    fn resolved_beyond_one_documents_script_limit() -> Vec<u8> {
+        let entries: Vec<String> = (0..=lns_artifact::sandbox::MAX_SCRIPT_STEPS)
+            .map(|n| format!(r#"{{"when":"pre-start","run":"echo {n}"}}"#))
+            .collect();
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"registry.example.test/runtime:1","scripts":[{}]}}}}"#,
+            entries.join(",")
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_published_plan_runs_every_script_the_merge_appended() {
+        let resolved = plan_published_sandbox_for_tests(
+            &resolved_beyond_one_documents_script_limit(),
+            "registry.example.test/team/sandbox:1",
+        )
+        .expect("appending across sources is the merge rule, so a sum neither author could see must reach the boot");
+        assert_eq!(
+            resolved.scripts.len(),
+            lns_artifact::sandbox::MAX_SCRIPT_STEPS + 1,
+            "§3.3.2 promises every source's scripts run, so the boot path must not re-apply a ceiling that only bounds what one author may write"
+        );
+    }
+
+    #[test]
+    fn a_local_plan_runs_every_script_the_merge_appended() {
+        let resolved = plan_local_sandbox_for_tests(&resolved_beyond_one_documents_script_limit())
+            .expect("the CLI hands the merged document back for the local boot, so this path sees the sum too");
+        assert_eq!(
+            resolved.scripts.len(),
+            lns_artifact::sandbox::MAX_SCRIPT_STEPS + 1
         );
     }
 

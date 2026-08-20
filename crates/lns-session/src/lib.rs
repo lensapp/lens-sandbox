@@ -12,6 +12,29 @@ pub const STAGED_CA_BUNDLE_PATH: &str = "/.lens/ca-certificates.crt";
 /// The store every workload env var names, the broker seeds, and the supervisor appends the proxy CA to; one spelling, or TLS falls back to no roots with no error.
 pub const SYSTEM_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
+/// Where the service stages each `pre-start` script and the supervisor reads them from; one spelling, or the guest runs nothing and reports success.
+pub const SCRIPTS_DIR: &str = "/.lens/scripts";
+
+/// The manifest naming every staged script in the order it runs; absent means the run declared none.
+pub const SCRIPTS_MANIFEST_PATH: &str = "/.lens/scripts/steps.json";
+
+/// The staged `pre-start` scripts in run order. Encoded as JSON by whichever side writes it, because this pair does not share the session channel's codec.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScriptManifest {
+    pub steps: Vec<ScriptManifestStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptManifestStep {
+    /// The staged script's guest path, which the supervisor hands to `sh`.
+    pub script: String,
+    /// Who runs it, resolved in the guest; `None` defers to the run's own run-as identity.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// How a failure and the console identify this script, since a script has no name of its own.
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwardHeader {
     pub container_port: u16,

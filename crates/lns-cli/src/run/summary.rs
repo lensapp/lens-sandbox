@@ -704,6 +704,7 @@ mod tests {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,

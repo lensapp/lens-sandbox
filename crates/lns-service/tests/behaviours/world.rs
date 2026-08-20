@@ -79,6 +79,10 @@ pub struct BehaviourWorld {
     pub fileset_manifest: Option<String>,
     /// How many packed layers the scenario's own artifact carries, when it is a published one.
     pub fileset_artifact_layers: Option<usize>,
+    /// The pre-start scripts a scenario declares, before they become a document.
+    pub script_declaration: Option<crate::steps::guest_scripts::ScriptDeclaration>,
+    /// The runtime-layer specs a planned run stages for its pre-start scripts.
+    pub script_specs: Option<Vec<lns_service::runtime_layer::RuntimeFileSpec>>,
     /// Host files a hostPath scenario stages, by resolved absolute path, with the mode a probe reports.
     pub host_files: std::collections::HashMap<std::path::PathBuf, u32>,
     /// The home this scenario's machine reports; `None` means the machine has none.

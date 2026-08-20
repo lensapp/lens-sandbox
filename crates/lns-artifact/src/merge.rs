@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
-use crate::sandbox::{FilesetEntry, SandboxSpec, Volume};
+use crate::sandbox::{FilesetEntry, SandboxSpec, ScriptStep, Volume};
 use crate::spec::Port;
 
 /// One layer of a resolved sandbox, labelled with where it came from so a disclosure can attribute every entry it shows. It borrows the document the walk already holds, because a source list names an order rather than owning a copy of every spec in it.
@@ -25,6 +25,7 @@ pub enum Block {
     Mount,
     Port,
     Egress,
+    Script,
 }
 
 /// What one source decided, and what deciding it replaced, so a reader sees where every line of a resolved sandbox came from.
@@ -249,6 +250,11 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         }
     }
 
+    spec.scripts = scripts_of(sources);
+    for source in sources {
+        contributions.extend(script_contributions(source.spec, source.label));
+    }
+
     // The mixins are what produced this document, so the resolved one declares none of its own.
     spec.mixins = Vec::new();
     Ok(Merged {
@@ -266,6 +272,33 @@ pub fn egress_of(sources: &[Source]) -> lns_policy::Egress {
         egress.tcp.extend(source.spec.egress.tcp.iter().cloned());
     }
     egress
+}
+
+/// The scripts an ordered source list decides: a concatenation in source order, because two scripts answer no shared question and so nothing here can displace anything (§3.3.2). Order is the whole of what resolution decides about them.
+pub fn scripts_of(sources: &[Source]) -> Vec<ScriptStep> {
+    sources
+        .iter()
+        .flat_map(|source| source.spec.scripts.iter().cloned())
+        .collect()
+}
+
+/// What a document's own scripts contribute when nothing merges into it, so a run that layered on nothing still discloses every script it will run (§1.5).
+pub fn own_scripts(spec: &SandboxSpec) -> Vec<Contribution> {
+    script_contributions(spec, ROOT_LABEL)
+}
+
+/// One contribution per script, in run order — the pairing a renderer attributing by position depends on.
+fn script_contributions(spec: &SandboxSpec, source: &str) -> Vec<Contribution> {
+    spec.scripts
+        .iter()
+        .map(|script| Contribution {
+            block: Block::Script,
+            key: script.label(),
+            source: source.to_string(),
+            note: script.description.clone(),
+            displaced: Vec::new(),
+        })
+        .collect()
 }
 
 /// Where a document's own `path` filesets came from when nothing merges into it, so a run that layered on nothing still addresses each one's layer by its source.
@@ -883,6 +916,180 @@ mod tests {
         );
     }
 
+    fn script_bodies(spec: &SandboxSpec) -> Vec<&str> {
+        spec.scripts.iter().map(|s| s.run.as_str()).collect()
+    }
+
+    fn scripts_body(bodies: &[&str]) -> String {
+        let entries: Vec<String> = bodies
+            .iter()
+            .map(|body| {
+                format!(
+                    r#"{{"when":"pre-start","run":{}}}"#,
+                    serde_json::to_string(body).expect("a str encodes")
+                )
+            })
+            .collect();
+        format!(r#""scripts":[{}]"#, entries.join(","))
+    }
+
+    fn scripts_spec(bodies: &[&str]) -> String {
+        format!("{{{}}}", scripts_body(bodies))
+    }
+
+    #[test]
+    fn scripts_append_in_source_order_rather_than_the_last_source_winning() {
+        let owned = sources(&[
+            (ROOT_LABEL, &scripts_spec(&["npm ci"])),
+            ("pg", &scripts_spec(&["apt-get install -y psql"])),
+        ]);
+        assert_eq!(
+            script_bodies(&merged(&owned)),
+            ["npm ci", "apt-get install -y psql"],
+            "two scripts state no shared question, so keeping only the later one would not be an override — it would be a missing dependency the workload discovers as a command not found"
+        );
+    }
+
+    #[test]
+    fn two_sources_whose_scripts_read_alike_both_survive() {
+        let owned = sources(&[
+            (ROOT_LABEL, &scripts_spec(&["apt-get install -y jq"])),
+            ("obs", &scripts_spec(&["apt-get install -y jq"])),
+        ]);
+        assert_eq!(
+            script_bodies(&merged(&owned)).len(),
+            2,
+            "the block has no key, so nothing may fold two entries together on the strength of them looking similar"
+        );
+    }
+
+    #[test]
+    fn a_mixins_scripts_run_after_the_sandboxs_own() {
+        let root = spec(&format!(
+            r#"{{"image":"x:1","mixins":["pg"],{}}}"#,
+            scripts_body(&["own"])
+        ));
+        let graph = graph(&[("pg", &scripts_spec(&["from-pg"]))]);
+        let sources = flatten(&root, &[], None, &graph).expect("the graph resolves");
+        assert_eq!(
+            script_bodies(&merge(&sources).expect("these sources resolve").spec),
+            ["own", "from-pg"],
+            "the sandbox prepares its own environment first, then each mixin in the order it named them"
+        );
+    }
+
+    #[test]
+    fn the_local_mixins_scripts_run_last_because_it_is_the_last_source() {
+        let root = spec(&format!(
+            r#"{{"image":"x:1","mixins":["pg"],{}}}"#,
+            scripts_body(&["own"])
+        ));
+        let graph = graph(&[("pg", &scripts_spec(&["from-pg"]))]);
+        let local = spec(&scripts_spec(&["decided-here"]));
+        let sources = flatten(
+            &root,
+            &[],
+            Some(Source {
+                label: "lns-local-mixin.yaml",
+                spec: &local,
+            }),
+            &graph,
+        )
+        .expect("the graph resolves");
+        assert_eq!(
+            script_bodies(&merge(&sources).expect("these sources resolve").spec),
+            ["own", "from-pg", "decided-here"],
+            "nothing the developer pulled can run after what they decided themselves (§8.1)"
+        );
+    }
+
+    #[test]
+    fn a_flag_added_mixins_scripts_run_after_the_ones_the_document_named() {
+        let root = spec(&format!(
+            r#"{{"image":"x:1","mixins":["pg"],{}}}"#,
+            scripts_body(&["own"])
+        ));
+        let graph = graph(&[
+            ("pg", &scripts_spec(&["from-pg"])),
+            ("obs", &scripts_spec(&["from-flag"])),
+        ]);
+        let extra = ["obs".to_string()];
+        let sources = flatten(&root, &extra, None, &graph).expect("the graph resolves");
+        assert_eq!(
+            script_bodies(&merge(&sources).expect("these sources resolve").spec),
+            ["own", "from-pg", "from-flag"],
+            "a --mixin is appended last of the pulled sources, so what the user added prepares on top of what the document did"
+        );
+    }
+
+    #[test]
+    fn every_script_is_attributed_in_the_order_it_will_run_and_none_displaces_another() {
+        let found = contributions(&sources(&[
+            (ROOT_LABEL, &scripts_spec(&["npm ci", "npm run build"])),
+            ("pg", &scripts_spec(&["apt-get install -y psql"])),
+        ]));
+        let scripts: Vec<(&str, &str, usize)> = found
+            .iter()
+            .filter(|c| c.block == Block::Script)
+            .map(|c| (c.key.as_str(), c.source.as_str(), c.displaced.len()))
+            .collect();
+        assert_eq!(
+            scripts,
+            [
+                ("npm ci", ROOT_LABEL, 0),
+                ("npm run build", ROOT_LABEL, 0),
+                ("apt-get install -y psql", "pg", 0)
+            ],
+            "a renderer attributes a script by its position, so one contribution per script in exactly run order is the invariant it depends on; and appending replaces nothing"
+        );
+    }
+
+    #[test]
+    fn a_script_carries_what_its_own_description_says_about_it() {
+        let found = contribution(
+            &sources(&[(
+                ROOT_LABEL,
+                r#"{"scripts":[{"when":"pre-start","run":"apt-get install -y psql","description":"the psql the prompts assume"}]}"#,
+            )]),
+            Block::Script,
+            "the psql the prompts assume",
+        );
+        assert_eq!(
+            found.note.as_deref(),
+            Some("the psql the prompts assume"),
+            "a script explains itself the way an egress rule does, because the disclosure is where a reader meets it"
+        );
+    }
+
+    #[test]
+    fn a_script_with_no_description_is_named_by_its_first_line() {
+        let found = contributions(&sources(&[(
+            ROOT_LABEL,
+            r#"{"scripts":[{"when":"pre-start","run":"\n  apt-get update\napt-get install -y psql"}]}"#,
+        )]));
+        let script = found
+            .iter()
+            .find(|c| c.block == Block::Script)
+            .expect("the script is attributed");
+        assert_eq!(
+            script.key, "apt-get update",
+            "with no description to show, the first line is what tells a reader what they are approving"
+        );
+    }
+
+    #[test]
+    fn a_document_that_layers_on_nothing_still_discloses_its_own_scripts() {
+        let disclosed: Vec<(String, String)> = own_scripts(&spec(&scripts_spec(&["npm ci"])))
+            .into_iter()
+            .map(|c| (c.key, c.source))
+            .collect();
+        assert_eq!(
+            disclosed,
+            [("npm ci".to_string(), ROOT_LABEL.to_string())],
+            "an uncomposed run reports through own_scripts rather than the merge, so a script dropped here is one no reader of that run ever sees"
+        );
+    }
+
     #[test]
     fn every_egress_entry_is_attributed_and_none_displaces_another() {
         let found = contributions(&sources(&[
@@ -1340,7 +1547,7 @@ mod tests {
     fn a_merged_document_round_trips_through_its_own_serialization() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}"#,
+            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]},"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y jq","description":"the jq the prompts assume"}]}"#,
         )]));
         let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(

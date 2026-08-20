@@ -85,6 +85,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
@@ -112,6 +113,7 @@ fn registry_serves_mixin(w: &mut BehaviourWorld, reference: String) {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: vec!["some-tool@1.2.3".into()],
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
         })),
     });
@@ -130,6 +132,7 @@ fn registry_serves_a_digestless_mixin(w: &mut BehaviourWorld, reference: String)
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
         })),
     });
