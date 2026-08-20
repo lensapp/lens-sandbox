@@ -20,4 +20,4 @@ Feature: a real OCI image is pulled and booted end to end
     Given the Lens Sandbox service is running
     When I run lns "pull public.ecr.aws/docker/library/alpine:3.20" against the service
     Then the exit code is non-zero
-    And the output contains "not a Lens Sandbox artifact"
+    And the output contains "is an OCI image, not a published sandbox"
