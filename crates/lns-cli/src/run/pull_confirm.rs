@@ -9,6 +9,7 @@ pub struct PulledEffects<'a> {
     pub volumes: &'a [lns_ipc::VolumeMount],
     pub filesets: &'a [crate::run::summary::FilesetSummary],
     pub tools: &'a [String],
+    pub scripts: &'a [crate::run::summary::ScriptSummary],
 }
 
 impl PulledEffects<'_> {
@@ -17,6 +18,7 @@ impl PulledEffects<'_> {
             && self.volumes.is_empty()
             && self.filesets.is_empty()
             && self.tools.is_empty()
+            && self.scripts.is_empty()
     }
 }
 
@@ -120,12 +122,64 @@ fn disclosure(effects: &PulledEffects) -> String {
         )
         .unwrap();
     }
+    for script in effects.scripts {
+        writeln!(
+            s,
+            "  Script:    {} — runs as {} inside the sandbox before the workload, under this run's egress policy ({})",
+            script.head, script.user, script.digest
+        )
+        .unwrap();
+    }
     s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn script(head: &str, user: &str) -> crate::run::summary::ScriptSummary {
+        crate::run::summary::ScriptSummary {
+            head: head.to_string(),
+            user: user.to_string(),
+            lines: 1,
+            digest: "sha256:9f2c1a0b3d4e…".to_string(),
+            description: None,
+        }
+    }
+
+    fn effects_with_scripts<'a>(
+        scripts: &'a [crate::run::summary::ScriptSummary],
+    ) -> PulledEffects<'a> {
+        PulledEffects {
+            reference: "ghcr.io/acme/reviewer@sha256:abc",
+            binds: &[],
+            volumes: &[],
+            filesets: &[],
+            tools: &[],
+            scripts,
+        }
+    }
+
+    #[test]
+    fn a_pulled_script_is_disclosed_with_the_user_it_asks_for() {
+        let scripts = [script("apt-get install -y psql", "root")];
+        let text = disclosure(&effects_with_scripts(&scripts));
+        assert!(
+            text.contains("apt-get install -y psql")
+                && text.contains("runs as root")
+                && text.contains("before the workload"),
+            "this line is the only thing standing in front of a stranger's root script, so it has to say what runs, as whom, and when; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_whose_only_effect_is_a_script_still_asks() {
+        let scripts = [script("npm ci", "workload")];
+        assert!(
+            !effects_with_scripts(&scripts).is_empty(),
+            "a script is an effect: skipping the prompt because nothing is mounted would run pulled code with no consent at all"
+        );
+    }
 
     fn bind(host_source: &str, read_only: bool) -> lns_ipc::BindSpec {
         lns_ipc::BindSpec {
@@ -187,6 +241,7 @@ mod tests {
             volumes,
             filesets,
             tools: &[],
+            scripts: &[],
         }
     }
 
@@ -392,6 +447,7 @@ mod tests {
             volumes: &[],
             filesets: &[],
             tools: &tools,
+            scripts: &[],
         };
 
         let mut input = std::io::Cursor::new("n\n");
@@ -416,6 +472,7 @@ mod tests {
             volumes: &[],
             filesets: &[],
             tools: &[],
+            scripts: &[],
         };
 
         let mut input = std::io::Cursor::new("");

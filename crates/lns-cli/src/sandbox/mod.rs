@@ -516,6 +516,8 @@ where
             volumes: &[],
             filesets: &[],
             tools: &tools,
+            // A pull runs no script: scripts run at boot, and `lns run` discloses them there.
+            scripts: &[],
         },
         args.assume_yes,
         term.stdin_is_tty,
@@ -980,6 +982,7 @@ fn render_cached_inspect<W: std::io::Write>(
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
+            render_scripts(out, &view.scripts)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
@@ -1005,6 +1008,7 @@ fn render_cached_inspect<W: std::io::Write>(
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
+            render_scripts(out, &view.scripts)?;
             render_policy_flags(out, &view.policy_flags)?;
         }
         lns_ipc::ArtifactInspection::Image(view) => {
@@ -1076,6 +1080,24 @@ pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String
 fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
     for id in connectors {
         writeln!(out, "connector: {id}")?;
+    }
+    Ok(())
+}
+
+/// Inspect is where a script's body is printed whole; the launch summary elides it so a long one cannot bury the rest of the approval.
+fn render_scripts<W: std::io::Write>(
+    out: &mut W,
+    scripts: &[lns_ipc::SandboxScript],
+) -> Result<()> {
+    for script in scripts {
+        let user = script.user.as_deref().unwrap_or("the workload user");
+        writeln!(out, "script: {} (runs as {user})", script.when)?;
+        if let Some(description) = &script.description {
+            writeln!(out, "  {description}")?;
+        }
+        for line in script.run.lines() {
+            writeln!(out, "  | {line}")?;
+        }
     }
     Ok(())
 }
@@ -2133,7 +2155,20 @@ mod tests {
                     env: Vec::new(),
                     credentials: Vec::new(),
                     tools: vec!["node@22.11.0".into()],
-                    scripts: Vec::new(),
+                    scripts: vec![
+                        lns_ipc::SandboxScript {
+                            when: "pre-start".into(),
+                            run: "apt-get update\napt-get install -y psql".into(),
+                            user: Some("root".into()),
+                            description: Some("the psql the prompts assume".into()),
+                        },
+                        lns_ipc::SandboxScript {
+                            when: "pre-start".into(),
+                            run: "npm ci".into(),
+                            user: None,
+                            description: None,
+                        },
+                    ],
                     policy_flags: Vec::new(),
                     cpus: None,
                     mem_mib: None,
@@ -2152,6 +2187,17 @@ mod tests {
         );
         assert!(text.contains("connector: some-provider"), "got: {text}");
         assert!(text.contains("tool: node@22.11.0"), "got: {text}");
+        assert!(
+            text.contains("script: pre-start (runs as root)")
+                && text.contains("  the psql the prompts assume")
+                && text.contains("  | apt-get update")
+                && text.contains("  | apt-get install -y psql"),
+            "inspect answers \"so what does it actually do\", so every line of the body has to appear; got: {text}"
+        );
+        assert!(
+            text.contains("script: pre-start (runs as the workload user)"),
+            "a script naming no user runs as the workload does, and a reader should not have to infer that from a blank; got: {text}"
+        );
     }
 
     #[tokio::test]

@@ -689,6 +689,7 @@ mod tests {
 
     fn bare_run_args() -> RunArgs {
         RunArgs {
+            scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
             contributions: Vec::new(),

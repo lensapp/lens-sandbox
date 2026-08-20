@@ -324,6 +324,7 @@ fn pulled_effects_confirmed(world: &mut BehaviourWorld) {
         volumes: &[],
         filesets: &filesets,
         tools: &[],
+        scripts: &[],
     };
     let mut input = std::io::Cursor::new(String::new());
     let mut out = Vec::new();

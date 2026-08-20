@@ -216,6 +216,9 @@ pub struct RunArgs {
     #[arg(skip)]
     pub tools: Vec<String>,
 
+    #[arg(skip)]
+    pub scripts: Vec<crate::run::summary::ScriptSummary>,
+
     /// Merge a mixin into this run, after the ones the document declares. Repeatable; a tag is pinned before the run reports it, and the pin is what the run carries.
     #[arg(long = "mixin", value_name = "REF")]
     pub mixins: Vec<String>,
@@ -240,7 +243,7 @@ pub struct RunArgs {
     #[arg(
         long = "yes",
         default_value_t = false,
-        help = "Accept without prompting the tool installers, host binds, named volumes, and filesets declared by a pulled sandbox. Required for non-interactive runs that declare any of them."
+        help = "Accept without prompting the tool installers, pre-start scripts, host binds, named volumes, and filesets declared by a pulled sandbox. Required for non-interactive runs that declare any of them."
     )]
     pub assume_yes: bool,
 
