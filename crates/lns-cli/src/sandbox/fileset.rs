@@ -110,6 +110,20 @@ pub fn path_fileset_problems<F: Fs + ?Sized>(
         .collect()
 }
 
+/// The document a local mixin reference names: a directory is read as the `lns.yaml` inside it, and a path naming the document is that document.
+pub fn local_mixin_document<F: Fs + ?Sized>(
+    fs: &F,
+    project_dir: &Path,
+    reference: &str,
+) -> std::path::PathBuf {
+    let named = lns_artifact::sandbox::fold_path(&project_dir.join(reference));
+    if fs.is_dir(&named) {
+        named.join("lns.yaml")
+    } else {
+        named
+    }
+}
+
 /// A directory mixin is a file on this machine, so `validate` can say the document names one that is not there rather than leaving it to the run.
 pub fn directory_mixin_problems<F: Fs + ?Sized>(
     fs: &F,
@@ -122,12 +136,7 @@ pub fn directory_mixin_problems<F: Fs + ?Sized>(
         .iter()
         .filter(|reference| lns_artifact::sandbox::names_a_local_path(reference))
         .filter_map(|reference| {
-            let named = lns_artifact::sandbox::fold_path(&project_dir.join(reference));
-            let document = if fs.is_dir(&named) {
-                named.join("lns.yaml")
-            } else {
-                named
-            };
+            let document = local_mixin_document(fs, project_dir, reference);
             fs.read_to_string(&document)
                 .err()
                 .map(|e| format!("mixin {reference}: reading {}: {e}", document.display()))
