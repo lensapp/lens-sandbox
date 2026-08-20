@@ -98,7 +98,7 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
 ) -> Result<Vec<PackedDirectory>> {
     let def = lns_artifact::sandbox::parse_document(doc)
         .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
-    refuse_unpinned_mixins(&def)?;
+    refuse_local_mixins(&def)?;
     def.spec
         .filesets
         .iter()
@@ -146,12 +146,12 @@ fn report_packed<W: Write>(
     Ok(())
 }
 
-/// A local directory means nothing on the machine that pulls the published document, and §3.3.1 pins a published `spec.mixins` entry by digest — so publish refuses what authoring accepts, exactly as it does for a fileset `path`.
-fn refuse_unpinned_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
+/// A local directory means nothing on the machine that pulls the published document, so publish refuses what authoring accepts — an unpinned *remote* entry is already refused by `parse_document`, one caller up.
+fn refuse_local_mixins(def: &lns_artifact::sandbox::Definition) -> Result<()> {
     for reference in &def.spec.mixins {
-        if !lns_artifact::spec::is_digest_pinned_image(reference) {
+        if lns_artifact::sandbox::names_a_local_path(reference) {
             bail!(
-                "mixin {reference} is not digest-pinned; a published document pins every mixin by digest so every consumer resolves the same one"
+                "mixin {reference} names a local directory, which the machine that pulls this document does not have; publish it first, then pin the digest its push prints"
             );
         }
     }
@@ -589,9 +589,14 @@ mod tests {
         )
         .await
         .unwrap_err();
+        let text = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("mixin ./mixins/postgres-tools/ is not digest-pinned"),
-            "a directory beside the author's file means nothing to a consumer, so publishing one would ship a reference nobody else can resolve; got: {err:#}"
+            text.contains("mixin ./mixins/postgres-tools/ names a local directory"),
+            "a directory beside the author's file means nothing to a consumer, so publishing one would ship a reference nobody else can resolve; got: {text}"
+        );
+        assert!(
+            !text.contains("is not digest-pinned"),
+            "a directory cannot be given a digest, so advising one sends the author after a fix that does not exist; got: {text}"
         );
     }
 
