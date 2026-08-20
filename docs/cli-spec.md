@@ -175,7 +175,7 @@ Author, publish, fetch, and cache documents of any kind.
 ```bash
 lns artifact init [--kind <sandbox|mixin|connector>] [-f <FILE>]
 lns artifact validate [--kind <KIND>] [-f <FILE>]
-lns artifact push <REF> [--dry-run] [-f <FILE>]
+lns artifact push <REF> [--dry-run] [--yes] [-f <FILE>]
 lns artifact pull <REF> [--yes]
 lns artifact tag <SOURCE> <TARGET>
 lns artifact ls [--kind <KIND>] [--format <table|json>]
@@ -188,7 +188,7 @@ lns artifact prune [-f]
 |---|---|---|
 | `init` | `lns init` | Scaffolds a document in this directory. `--kind` chooses which — `sandbox` (the default), `mixin`, or `connector`; the file is `./lns.yaml` unless `-f` names another. Refuses to overwrite. |
 | `validate` | | Checks the document named by `-f`, or `./lns.yaml`, offline — schema, cross-field, and secret checks — and lists every problem it found, not just the first. Exits non-zero when the document is broken. `--kind <KIND>` also requires the document to be that kind. |
-| `push` | `lns push` | Publishes the document as one OCI artifact at `<REF>`. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, so the files and the declaration that mounts them share one digest; each fuzzy `spec.tools` version is resolved and published as an exact pin. `--dry-run` does everything except the upload, stays offline, prints the digests that would publish, and says when a declared tool means the real digest may differ. |
+| `push` | `lns push` | Publishes the document as one OCI artifact at `<REF>`. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, so the files and the declaration that mounts them share one digest; each fuzzy `spec.tools` version is resolved and published as an exact pin. A `spec.mixins` entry naming a local path publishes as its own artifact first, beside `<REF>` and under the mixin's own `name`, tagged with its own digest, and the entry is pinned to that digest — the command lists those mixins and asks before it uploads anything, which `--yes` accepts without prompting. `--dry-run` does everything except the upload, stays offline, prints the digests that would publish for every artifact, and says when a declared tool means a real digest may differ. |
 | `pull` | `lns pull` | Shows you what the reference resolves to, then fetches it and its base image into the local store. A sandbox that declares tools asks before running their installers in a disposable provisioning guest; `--yes` accepts that without prompting. The fetch is bound to the digest you were shown, so a tag that moves in between is refused. |
 | `tag` | `lns tag` | Re-references a cached artifact under a new tag, in its own registry and repository. |
 | `ls` | | Lists cached artifacts: reference, kind, digest, size, and what holds each. `--kind` filters. |

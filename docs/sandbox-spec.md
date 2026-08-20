@@ -555,11 +555,14 @@ mixins:
 |---|---|---|
 | `mixins` | list<string> | optional. A local path or an OCI reference. A remote reference MUST be digest-pinned. |
 
-The list **publishes as written** — `lns push` does not merge it. Each mixin is
-pulled and merged at startup, and the run presents the resolved sandbox for
-approval before it boots ([§1.5](#15-one-disclosure)). A user can add more for one
-run with `--mixin` ([§3.3.1](#331-how-a-mixin-enters-a-run)); the merge rules are
-in [§3.3.2](#332-merge-rules).
+`lns push` **does not merge** the list. A digest-pinned entry publishes as
+written; a local entry publishes the document it names and is rewritten to its
+digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
+Either way each mixin is pulled and merged at startup, and the run presents the
+resolved sandbox for approval before it boots ([§1.5](#15-one-disclosure)). A user
+can add more for one run with `--mixin`
+([§3.3.1](#331-how-a-mixin-enters-a-run)); the merge rules are in
+[§3.3.2](#332-merge-rules).
 
 #### 3.1.10 `volumes`
 
@@ -1119,9 +1122,12 @@ path a document writes roots at the directory the document sits in either way.
 
 A published sandbox MUST NOT name a local path — a consumer has no copy of the
 author's working directory, so the reference resolves to nothing, or worse to
-something else. A `--mixin` may name one on any run, published or not: the user
-typed it on the machine the run happens on, and the preflight shows them what it
-resolved to.
+something else. This is a rule about the **published bytes**, and `lns push`
+satisfies it by publishing the mixin the path names and pinning its digest
+([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)); the
+author's own document keeps the path. A `--mixin` may name one on any run,
+published or not: the user typed it on the machine the run happens on, and the
+preflight shows them what it resolved to.
 A declared entry roots at the directory of the document that named it; a
 `--mixin` roots where the user typed it, since no document names one. Either
 way the folded absolute path of the **document** it resolved to is its identity —
@@ -1435,7 +1441,13 @@ Offline validation (`lns sandbox validate`, and every load path including
   placeholder self-identifies as fake and is at least 16 characters.
 - **Mixin**: no `image`, `command`, `workdir`, `user`, or `resources`; every
   entry in a document's `mixins` is a local path or a digest-pinned OCI
-  reference, and a document that publishes carries no local path.
+  reference; and a document **loaded from a registry** names no local path,
+  which is refused rather than resolved — a pulled document that carries one was
+  not produced by `lns push`, and resolving it against the consumer's own
+  directory is the "or worse, something else" of
+  [§3.3.1](#331-how-a-mixin-enters-a-run). Whether a local entry is *publishable*
+  is not an offline check on one document: it depends on the document that entry
+  names ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
 
 Offline validation checks one document in isolation. Five checks cannot run
 there, because they depend on state no document carries — they run at launch:
@@ -1455,25 +1467,20 @@ document: `lns sandbox validate` cannot see it.
 
 ## 6. Publish-time transforms
 
-`lns push` publishes the document with two resolutions applied, so a consumer
+`lns push` publishes the document with three resolutions applied, so a consumer
 runs exactly what the author tested:
 
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
+| `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 
 Each transform pins something that means one thing on the author's machine and
 another on the consumer's: a directory that exists only beside the author's file,
-and a version that moves next week. Three surfaces stay unresolved, on purpose:
+a version that moves next week, and a document only the author has a copy of. Two
+surfaces stay unresolved, on purpose:
 
-- **`mixins[]` publishes as written.** Resolution is a startup concern
-  ([§1.5](#15-one-disclosure)), and the reference is already digest-pinned, so
-  there is nothing for publish to pin. A directory entry is the one thing publish
-  refuses outright ([§3.3.1](#331-how-a-mixin-enters-a-run)): unlike a fileset
-  `path`, there is nothing to pack — it names a document the consumer resolves
-  for themselves, and no transform can make that mean the same thing on their
-  machine.
 - **A `%` share stays a share.** It resolves against the consumer's host, which
   is the entire point of writing one ([§3.1.5](#315-resources)).
 - **A `hostPath` stays a `hostPath`.** There is nothing to pack: it names a file
@@ -1483,9 +1490,45 @@ and a version that moves next week. Three surfaces stay unresolved, on purpose:
 `workdir`, every volume, every fileset, and every other field publish unchanged.
 
 `lns push --dry-run` performs everything short of the upload and prints the
-digests that would publish. It stays offline, so it does **not** resolve tool
-versions, and it says when declared tools mean the real digest may differ from
-the preview.
+digests that would publish, for every artifact the push would create. It stays
+offline, so it does **not** resolve tool versions — in any of them — and it says
+when declared tools mean the real digest may differ from the preview.
+
+### 6.1 A local mixin publishes with the document that names it
+
+A published document MUST NOT carry a local path
+([§3.3.1](#331-how-a-mixin-enters-a-run)). Publish makes that true by publishing,
+not by refusing: the mixin the entry names becomes its own artifact, and the entry
+becomes that artifact's digest. The author writes one document and runs one
+command; the consumer receives a digest-pinned graph.
+
+**The repository is not invented.** Two things the author already wrote decide it:
+the `<REF>` they typed, up to but not including its last path segment, and the
+mixin's own [`name`](#2-common-top-level-fields). Any tag or digest on the
+`<REF>` is dropped first, and a bare `<REF>` is qualified against the machine's
+registry default before the rule runs — so the mixin always lands in the same
+registry as the document that names it. Nothing derives a name from a directory,
+because a repository is a publishing decision and a directory name is not one.
+
+| `<REF>` | The mixin `postgres-tools` publishes at |
+|---|---|
+| `ghcr.io/acme/dev:1.4` | `ghcr.io/acme/postgres-tools` |
+| `ghcr.io/acme/dev@sha256:<64 hex>` | `ghcr.io/acme/postgres-tools` |
+| `ghcr.io/acme/team/dev:1.4` | `ghcr.io/acme/team/postgres-tools` |
+| `hub.lns.run/dev` | `hub.lns.run/postgres-tools` |
+
+| Rule | |
+|---|---|
+| Order | Children publish before the documents that pin them, so every digest exists before it is referenced. A mixin MAY name mixins of its own; the depth limit is [§3.3.2](#332-merge-rules)'s, measured the same way — by shortest path, so publish never refuses a graph a run would resolve. |
+| Identity | The folded absolute path of the resolved **document**, as in [§3.3.1](#331-how-a-mixin-enters-a-run). Two entries that resolve to one document publish once, and **every** entry naming it is pinned to that one digest. |
+| Tag | `sha256-<the child's manifest digest>`, derived from the content it names. The parent resolves the child by digest and never reads the tag; the tag exists so a registry that prunes untagged manifests cannot reclaim a mixin a published sandbox still pins. Deriving it from the digest keeps it immutable in practice — the same bytes always claim the same tag, and different bytes never collide — so it is a durable name, not a moving one. It is **not a release**, so [§7](#7-distribution)'s `org.opencontainers.image.version` rule does not apply to it: that annotation sits inside the bytes this tag's name derives from, so recording it there is impossible. Only the tag the author types on `<REF>` is a release. |
+| Source | The author's document is **not** rewritten. Only the published bytes carry the digest, exactly as a resolved `tools[]` entry does. |
+| Cycle | Refused, naming the trail. A document reachable from itself has no digest to pin, because its digest would depend on itself. |
+| The local mixin | Refused. [§8.1](#81-what-it-is) makes `lns-local-mixin.yaml` never published, and an entry naming it cannot be honoured by publishing it. |
+
+The author keeps a working directory they can edit, and the consumer gets a graph
+they can resolve. Startup resolution is unaffected: the consumer's run pulls each
+pinned mixin and merges it exactly as [§1.5](#15-one-disclosure) describes.
 
 ---
 
@@ -1581,7 +1624,9 @@ spec:
   its author can see it.
 - **Local, and never published.** The one exception to
   [§1.1](#11-one-distribution-mechanism): every other artifact is addressed by
-  digest, and this one is a working file on disk.
+  digest, and this one is a working file on disk. It holds one machine's answers,
+  so a `mixins` entry that names it is refused rather than published
+  ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
 - **Last in the merge.** It is the developer's own, so it sits after every other
   source in [§3.3.2](#332-merge-rules) — including a `--mixin`. Nothing they pulled
   can overrule what they decided, and that includes what this file itself pulls: a
