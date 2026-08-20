@@ -102,25 +102,23 @@ fn host_binds_interactive(detached: bool, stdin_is_tty: bool) -> bool {
     !detached && stdin_is_tty
 }
 
+/// Takes the caller's input because the caller holds the process-wide stdin lock, which is not reentrant.
 fn resolve_host_binds(
     specs: &[lns_ipc::BindSpec],
     interactive: bool,
+    input: &mut dyn std::io::BufRead,
+    store: &lns_policy::host_bind_decisions::HostBindDecisionStore,
 ) -> Result<Vec<crate::run::host_bind::ResolvedBind>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
     let scan = crate::run::host_bind::RealDirScan;
-    let store = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
-        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
-    );
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     crate::run::host_bind::resolve_binds(
         specs,
         &scan,
-        &store,
+        store,
         interactive,
-        &mut input,
+        input,
         &mut std::io::stderr(),
     )
 }
@@ -446,7 +444,10 @@ pub async fn run_image(
         &mut std::io::stderr(),
     )?
     .denied;
-    let resolved_binds = resolve_host_binds(&bind_specs, interactive)?;
+    let bind_decisions = lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
+        lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
+    );
+    let resolved_binds = resolve_host_binds(&bind_specs, interactive, &mut input, &bind_decisions)?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
         if !dispositions.is_empty() {
@@ -1970,6 +1971,57 @@ mod tests {
     fn lf_to_crlf_expands_every_newline_and_leaves_other_bytes() {
         assert_eq!(lf_to_crlf(b"a\nb\n"), b"a\r\nb\r\n");
         assert_eq!(lf_to_crlf(b"no newline"), b"no newline");
+    }
+
+    struct EmptyDecisions;
+    impl
+        lns_policy::decision_store::DecisionStore<
+            lns_policy::host_bind_decisions::SecretDisposition,
+        > for EmptyDecisions
+    {
+        fn load(&self) -> std::io::Result<lns_policy::host_bind_decisions::HostBindDecisionFile> {
+            Ok(Default::default())
+        }
+        fn save(
+            &self,
+            _state: &lns_policy::host_bind_decisions::HostBindDecisionFile,
+        ) -> std::io::Result<()> {
+            panic!("a run with nothing to ask must record no decision")
+        }
+    }
+
+    /// A resolve that locks stdin itself deadlocks every run that declares a bind, because the caller's guard is already held and stdin is not reentrant.
+    #[test]
+    fn resolving_host_binds_while_the_caller_holds_stdin_does_not_deadlock() {
+        let dir = tempfile::tempdir().expect("a temp dir for the bind source");
+        std::fs::write(dir.path().join("Cargo.toml"), b"").expect("a file with no secret shape");
+        let specs = vec![lns_ipc::BindSpec {
+            host_source: dir.path().to_string_lossy().into_owned(),
+            target: "/work".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+        }];
+
+        // Off the test thread, so a deadlock times out here instead of hanging the suite.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut held = stdin.lock();
+            let _ = tx.send(
+                resolve_host_binds(&specs, false, &mut held, &EmptyDecisions)
+                    .expect("a clean bind resolves"),
+            );
+        });
+
+        let resolved = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("resolve_host_binds must return while the caller holds stdin, not block on it");
+        assert_eq!(resolved.len(), 1, "the bind survives the resolve");
+        assert!(
+            resolved[0].dropped.is_empty(),
+            "nothing here is secret-shaped"
+        );
     }
 
     #[test]
