@@ -857,8 +857,20 @@ async fn prune<W: std::io::Write>(
 ) -> Result<i32> {
     if !args.force {
         bail!(
-            "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
+            "this removes every exited run's scratch space, every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
         );
+    }
+    let (mut removed_runs, runs_bytes) = match svc.one_shot(Request::PruneRuns).await? {
+        Response::RunsPruned {
+            removed,
+            reclaimed_bytes,
+        } => (removed, reclaimed_bytes),
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    };
+    removed_runs.sort_unstable();
+    for run in &removed_runs {
+        writeln!(out, "removed run {run}")?;
     }
     match svc.one_shot(Request::PruneImages).await? {
         Response::ImagesPruned {
@@ -869,7 +881,7 @@ async fn prune<W: std::io::Write>(
             for reference in &removed {
                 writeln!(out, "removed {reference}")?;
             }
-            writeln!(out, "reclaimed {}", format_bytes(reclaimed_bytes))?;
+            writeln!(out, "reclaimed {}", format_bytes(runs_bytes + reclaimed_bytes))?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -1270,6 +1282,7 @@ mod tests {
         inspect_image_response: Option<Response>,
         remove_image_response: Option<Response>,
         remove_run_response: Option<Response>,
+        prune_runs_response: Option<Response>,
         frames: Vec<Vec<u8>>,
         requests: Arc<Mutex<Vec<Request>>>,
     }
@@ -1282,6 +1295,7 @@ mod tests {
                 inspect_image_response: None,
                 remove_image_response: None,
                 remove_run_response: None,
+                prune_runs_response: None,
                 frames: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -1312,6 +1326,13 @@ mod tests {
             Self {
                 remove_run_response: Some(remove_response),
                 ..Self::new(run_response)
+            }
+        }
+
+        fn with_prune_runs(images_response: Response, runs_response: Response) -> Self {
+            Self {
+                prune_runs_response: Some(runs_response),
+                ..Self::new(images_response)
             }
         }
 
@@ -1385,6 +1406,10 @@ mod tests {
                     .unwrap_or_else(|| self.response.clone()),
                 Request::RemoveRun { .. } => self
                     .remove_run_response
+                    .clone()
+                    .unwrap_or_else(|| self.response.clone()),
+                Request::PruneRuns => self
+                    .prune_runs_response
                     .clone()
                     .unwrap_or_else(|| self.response.clone()),
                 _ => self.response.clone(),
@@ -2430,11 +2455,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_with_force_lists_removed_sandboxes_and_reclaimed_bytes() {
-        let svc = CannedService::new(Response::ImagesPruned {
-            removed: vec!["b:2".into(), "a:1".into()],
-            reclaimed_bytes: 64 * 1024 * 1024,
-        });
+    async fn prune_with_force_lists_removed_runs_and_sandboxes_with_combined_bytes() {
+        let svc = CannedService::with_prune_runs(
+            Response::ImagesPruned {
+                removed: vec!["b:2".into(), "a:1".into()],
+                reclaimed_bytes: 64 * 1024 * 1024,
+            },
+            Response::RunsPruned {
+                removed: vec!["ffee0000".into(), "aabb0000".into()],
+                reclaimed_bytes: 16 * 1024 * 1024,
+            },
+        );
         let mut out = Vec::new();
         let code = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
             .await
@@ -2442,10 +2473,17 @@ mod tests {
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(
+            text.contains("removed run aabb0000") && text.contains("removed run ffee0000"),
+            "got: {text}"
+        );
+        assert!(
             text.contains("removed a:1") && text.contains("removed b:2"),
             "got: {text}"
         );
-        assert!(text.contains("reclaimed 64.0 MiB"), "got: {text}");
+        assert!(
+            text.contains("reclaimed 80.0 MiB"),
+            "runs and images must be summed, got: {text}"
+        );
     }
 
     #[tokio::test]
@@ -2463,6 +2501,33 @@ mod tests {
 
         let err = prune(
             &CannedService::new(Response::Pong),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+
+        let empty_runs = || Response::RunsPruned {
+            removed: Vec::new(),
+            reclaimed_bytes: 0,
+        };
+        let err = prune(
+            &CannedService::with_prune_runs(
+                Response::Error {
+                    message: "image store poisoned".into(),
+                },
+                empty_runs(),
+            ),
+            &SandboxPruneArgs { force: true },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("image store poisoned"));
+
+        let err = prune(
+            &CannedService::with_prune_runs(Response::Pong, empty_runs()),
             &SandboxPruneArgs { force: true },
             &mut Vec::new(),
         )

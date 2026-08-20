@@ -195,6 +195,8 @@ pub struct SandboxCliRig {
     pub inspect_image_response: Option<lns_ipc::Response>,
     /// Response the fake returns for a `RemoveImage` request, so `rm` can resolve running-vs-cached then remove.
     pub remove_image_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `PruneRuns` request, so `prune` can canned-serve its runs pass and its images pass.
+    pub prune_runs_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,

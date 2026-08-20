@@ -76,6 +76,22 @@ fn two_cached_one_running(w: &mut BehaviourWorld) {
         removed: vec!["hermes:1.0".into(), "scribe:1.0".into()],
         reclaimed_bytes: 64 * 1024 * 1024,
     });
+    w.sandbox.prune_runs_response = Some(Response::RunsPruned {
+        removed: Vec::new(),
+        reclaimed_bytes: 0,
+    });
+}
+
+#[given("two exited runs holding scratch space and one running sandbox")]
+fn two_exited_runs_one_running(w: &mut BehaviourWorld) {
+    w.sandbox.prune_runs_response = Some(Response::RunsPruned {
+        removed: vec![hexid(1), hexid(2)],
+        reclaimed_bytes: 48 * 1024 * 1024,
+    });
+    w.sandbox.response = Some(Response::ImagesPruned {
+        removed: Vec::new(),
+        reclaimed_bytes: 0,
+    });
 }
 
 #[given(regex = r#"^a cached sandbox that names a volume "([^"]+)"$"#)]
@@ -83,6 +99,10 @@ fn cached_sandbox_names_a_volume(w: &mut BehaviourWorld, _volume: String) {
     w.sandbox.response = Some(Response::ImagesPruned {
         removed: vec!["hermes:1.0".into()],
         reclaimed_bytes: 32 * 1024 * 1024,
+    });
+    w.sandbox.prune_runs_response = Some(Response::RunsPruned {
+        removed: Vec::new(),
+        reclaimed_bytes: 0,
     });
 }
 
@@ -117,6 +137,27 @@ fn running_sandbox_kept(w: &mut BehaviourWorld) -> Result<(), String> {
             "prune must remove only the two cached sandboxes, got: {out:?}"
         ))
     }
+}
+
+#[then("the service received a PruneRuns request")]
+fn service_received_prune_runs(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::PruneRuns) {
+        Ok(())
+    } else {
+        Err(format!("expected PruneRuns among {requests:?}"))
+    }
+}
+
+#[then("the output lists the removed runs")]
+fn output_lists_removed_runs(w: &mut BehaviourWorld) -> Result<(), String> {
+    let out = &w.result.as_ref().ok_or("no CLI run captured")?.output;
+    for id in [hexid(1), hexid(2)] {
+        if !out.contains(&format!("removed run {id}")) {
+            return Err(format!("expected a removed-run line for {id}, got: {out:?}"));
+        }
+    }
+    Ok(())
 }
 
 #[then("the service received a PruneImages request")]

@@ -22,6 +22,7 @@ pub(crate) struct FakeSandboxService {
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
+    prune_runs_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -43,6 +44,10 @@ impl SandboxService for FakeSandboxService {
                 .or_else(|| self.response.clone()),
             Request::RemoveImage { .. } => self
                 .remove_image_response
+                .clone()
+                .or_else(|| self.response.clone()),
+            Request::PruneRuns => self
+                .prune_runs_response
                 .clone()
                 .or_else(|| self.response.clone()),
             _ => self.response.clone(),
@@ -546,6 +551,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         stats_response: w.sandbox.stats_response.clone(),
         inspect_image_response: w.sandbox.inspect_image_response.clone(),
         remove_image_response: w.sandbox.remove_image_response.clone(),
+        prune_runs_response: w.sandbox.prune_runs_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
