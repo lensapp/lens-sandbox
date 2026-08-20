@@ -126,7 +126,7 @@ pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
     Ok(0)
 }
 
-pub fn load_definition_json_at<F: Fs>(fs: &F, path: &Path) -> Result<Vec<u8>> {
+pub fn load_definition_json_at<F: Fs + ?Sized>(fs: &F, path: &Path) -> Result<Vec<u8>> {
     let hint = if path.file_name() == Some(LNS_YAML.as_ref()) {
         "; run `lns init` to scaffold one"
     } else {
