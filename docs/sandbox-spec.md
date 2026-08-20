@@ -1513,7 +1513,6 @@ because a repository is a publishing decision and a directory name is not one.
 | `<REF>` | The mixin `postgres-tools` publishes at |
 |---|---|
 | `ghcr.io/acme/dev:1.4` | `ghcr.io/acme/postgres-tools` |
-| `ghcr.io/acme/dev@sha256:<64 hex>` | `ghcr.io/acme/postgres-tools` |
 | `ghcr.io/acme/team/dev:1.4` | `ghcr.io/acme/team/postgres-tools` |
 | `hub.lns.run/dev` | `hub.lns.run/postgres-tools` |
 
@@ -1521,10 +1520,21 @@ because a repository is a publishing decision and a directory name is not one.
 |---|---|
 | Order | Children publish before the documents that pin them, so every digest exists before it is referenced. A mixin MAY name mixins of its own; the depth limit is [§3.3.2](#332-merge-rules)'s, measured the same way — by shortest path, so publish never refuses a graph a run would resolve. |
 | Identity | The folded absolute path of the resolved **document**, as in [§3.3.1](#331-how-a-mixin-enters-a-run). Two entries that resolve to one document publish once, and **every** entry naming it is pinned to that one digest. |
-| Tag | `sha256-<the child's manifest digest>`, derived from the content it names. The parent resolves the child by digest and never reads the tag; the tag exists so a registry that prunes untagged manifests cannot reclaim a mixin a published sandbox still pins. Deriving it from the digest keeps it immutable in practice — the same bytes always claim the same tag, and different bytes never collide — so it is a durable name, not a moving one. It is **not a release**, so [§7](#7-distribution)'s `org.opencontainers.image.version` rule does not apply to it: that annotation sits inside the bytes this tag's name derives from, so recording it there is impossible. Only the tag the author types on `<REF>` is a release. |
+| Tag | `sha256-<64 hex>`, where the hex is the child's manifest digest. It is **not a release**; only the tag the author types on `<REF>` is a release. |
 | Source | The author's document is **not** rewritten. Only the published bytes carry the digest, exactly as a resolved `tools[]` entry does. |
 | Cycle | Refused, naming the trail. A document reachable from itself has no digest to pin, because its digest would depend on itself. |
 | The local mixin | Refused. [§8.1](#81-what-it-is) makes `lns-local-mixin.yaml` never published, and an entry naming it cannot be honoured by publishing it. |
+
+**Why the child carries a tag at all.** The parent resolves it by digest and
+never reads the tag. The tag exists because a registry that prunes untagged
+manifests could otherwise reclaim a mixin a published sandbox still pins.
+Deriving the tag from the digest keeps it immutable in practice: the same bytes
+always claim the same tag, and different bytes never collide, so it is a durable
+name rather than a moving one. Because it is not a release, it carries no
+`org.opencontainers.image.version` annotation
+([§7](#7-distribution)) — and it could not carry one even if it were: that
+annotation sits inside the bytes the tag's own name derives from, so recording it
+there is impossible.
 
 The author keeps a working directory they can edit, and the consumer gets a graph
 they can resolve. Startup resolution is unaffected: the consumer's run pulls each
