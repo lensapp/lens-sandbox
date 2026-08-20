@@ -486,4 +486,43 @@ mod tests {
         sweep_orphans();
         assert!(!orphan.exists(), "an orphaned dir is swept at startup");
     }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_production_wrappers_are_inert_when_no_cache_root_resolves() {
+        let _h = crate::test_env::EnvVarGuard::unset("HOME");
+        let _x = crate::test_env::EnvVarGuard::unset("XDG_CACHE_HOME");
+        if crate::cache::root().is_ok() {
+            return; // macOS resolves a cache dir without HOME; the inert arm is pinned where it cannot (Linux CI).
+        }
+        reclaim_upper("nowhere");
+        assert_eq!(remove_dir("nowhere"), 0);
+        assert_eq!(prune(&["nowhere".into()]), 0);
+        sweep_orphans();
+    }
+
+    #[test]
+    fn sweep_skips_a_dir_whose_name_no_run_id_could_have() {
+        use std::os::unix::ffi::OsStringExt;
+        let undecodable = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xFF, 0xFE]));
+        let fs = FakeFs::with(|s| s.dirs = vec![undecodable]);
+        sweep_orphans_with(&fs, Path::new(ROOT), &[]);
+        assert!(
+            fs.removed_dirs().is_empty(),
+            "a name that cannot be a run id is left alone",
+        );
+    }
+
+    #[test]
+    fn an_unreadable_dir_counts_as_holding_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let locked = base.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("upper.img"), vec![7u8; 4096]).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let bytes = RealScratchFs.allocated_bytes(&locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(bytes, 0, "usage of a dir we cannot read is not guessed");
+    }
 }
