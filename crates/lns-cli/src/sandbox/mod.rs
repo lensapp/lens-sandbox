@@ -14,6 +14,7 @@ use crate::service::client::BoxFuture;
 pub mod author;
 pub mod distribute;
 pub mod fileset;
+pub mod mixin_plan;
 pub mod real;
 #[cfg(test)]
 pub(crate) mod test_support;
