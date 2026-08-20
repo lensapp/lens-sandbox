@@ -108,6 +108,7 @@ pub fn exec_session_env(
         .session_env
         .iter()
         .filter(|entry| !is_session_only(entry))
+        .filter(|entry| keeps_identity(entry, &exec_environment.declared_identity_keys))
         .cloned()
         .collect();
     let caller: Vec<String> = exec_env
@@ -124,6 +125,22 @@ pub fn exec_session_env(
         overwrite(&mut env, key, value);
     }
     env
+}
+
+pub const IDENTITY_ENV_KEYS: [&str; 2] = ["HOME", "USER"];
+
+/// Which identity vars the author set via `-e`/spec env — the same test that gates `LENS_SANDBOX_WORKLOAD_*` on the primary.
+pub fn declared_identity_keys(user_env: &[String]) -> Vec<String> {
+    IDENTITY_ENV_KEYS
+        .iter()
+        .filter(|key| declared(user_env, key).is_some())
+        .map(|key| key.to_string())
+        .collect()
+}
+
+fn keeps_identity(entry: &str, declared_keys: &[String]) -> bool {
+    let key = entry.split_once('=').map(|(k, _)| k).unwrap_or(entry);
+    !IDENTITY_ENV_KEYS.contains(&key) || declared_keys.iter().any(|d| d == key)
 }
 
 fn overwrite(env: &mut Vec<String>, key: &str, value: &str) {
@@ -488,6 +505,7 @@ mod tests {
                 "HOME=/workspace".into(),
                 "SOME_TOOL_CACHE=/workspace/mine".into(),
             ],
+            declared_identity_keys: vec!["HOME".into()],
             tools: ToolRuntime {
                 bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
                 env: vec![
@@ -522,6 +540,63 @@ mod tests {
             )),
             "the run's tool dirs still come first: {env:?}"
         );
+    }
+
+    #[test]
+    fn an_image_declared_home_does_not_outrank_the_run_as_identity_in_an_exec_either() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec![
+                "HOME=/srv".into(),
+                "USER=svc".into(),
+                "MODE=research".into(),
+            ],
+            declared_identity_keys: Vec::new(),
+            ..Default::default()
+        };
+
+        let env = exec_session_env(&run, &[]);
+
+        assert!(
+            !env.iter()
+                .any(|kv| kv.starts_with("HOME=") || kv.starts_with("USER=")),
+            "an image ENV HOME/USER the author never declared must leave the slot to the guest identity, as the supervisor does: {env:?}"
+        );
+        assert!(env.contains(&"MODE=research".to_string()), "got: {env:?}");
+    }
+
+    #[test]
+    fn an_author_declared_home_survives_into_an_exec_session() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["HOME=/srv".into(), "USER=svc".into()],
+            declared_identity_keys: vec!["HOME".into()],
+            ..Default::default()
+        };
+
+        let env = exec_session_env(&run, &[]);
+
+        assert!(
+            env.contains(&"HOME=/srv".to_string()),
+            "a `-e HOME` is the author's decision, exactly like LENS_SANDBOX_WORKLOAD_HOME on the primary: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|kv| kv.starts_with("USER=")),
+            "USER stays identity-owned when only HOME was declared: {env:?}"
+        );
+    }
+
+    #[test]
+    fn the_exec_callers_own_env_declares_identity_like_any_dash_e() {
+        let env = exec_session_env(&Default::default(), &["HOME=/x".to_string()]);
+        assert!(env.contains(&"HOME=/x".to_string()), "got: {env:?}");
+    }
+
+    #[test]
+    fn declared_identity_keys_reports_only_the_identity_vars_the_author_set() {
+        assert_eq!(
+            declared_identity_keys(&["HOME=/h".into(), "A=1".into()]),
+            vec!["HOME".to_string()]
+        );
+        assert!(declared_identity_keys(&["A=1".into()]).is_empty());
     }
 
     #[test]

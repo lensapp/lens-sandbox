@@ -525,6 +525,7 @@ async fn orchestrate(
         tools: tool_runtime,
         placeholders: session.placeholder_env.clone(),
         workdir: workdir.clone(),
+        declared_identity_keys: crate::workload_env::declared_identity_keys(&env),
     };
     let env: Vec<String> = composed.env;
 

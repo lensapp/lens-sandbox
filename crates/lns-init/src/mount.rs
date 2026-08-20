@@ -251,26 +251,40 @@ pub(crate) fn resolve_sandbox_user(
     Some(SandboxUser { name, uid, group })
 }
 
-fn passwd_uid_gid(newroot: &str, name: &str) -> Option<(u32, u32)> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct WorkloadIdentity {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) home: Option<String>,
+}
+
+impl WorkloadIdentity {
+    pub(crate) fn ids(&self) -> (u32, u32) {
+        (self.uid, self.gid)
+    }
+}
+
+fn passwd_entry(newroot: &str, name: &str) -> Option<(u32, u32, Option<String>)> {
     let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).ok()?;
     passwd.lines().find_map(|line| {
         let mut fields = line.split(':');
         (fields.next()? == name).then_some(())?;
         let uid = fields.nth(1)?.parse().ok()?;
         let gid = fields.next()?.parse().ok()?;
-        Some((uid, gid))
+        let home = fields.nth(1).filter(|h| !h.is_empty()).map(str::to_string);
+        Some((uid, gid, home))
     })
 }
 
-/// Resolve the (uid, gid) the workload runs as: the user's uid comes from passwd or its seeded numeric id, the gid honors an explicit `USER` group (numeric or resolved against `/etc/group`) and otherwise tracks the user's primary group, and a user or group that resolves to neither an `/etc/{passwd,group}` entry nor a numeric id is unresolvable — the caller refuses to boot rather than let it fall through to root.
+/// Resolve the identity the workload runs as, all from the one passwd line that supplies the uid — a home read from a sibling line would hand an exec a different identity's home. The uid comes from passwd or the seeded numeric id, the gid honors an explicit `USER` group and otherwise tracks the user's primary group, and a user or group that resolves to nothing is unresolvable — the caller refuses to boot rather than fall through to root.
 pub(crate) fn resolve_workload_ids(
     newroot: &str,
     user: &SandboxUser,
     sys: &dyn Syscalls,
-) -> Result<(u32, u32), MountError> {
-    let in_passwd = passwd_uid_gid(newroot, &user.name);
-    let uid = match in_passwd {
-        Some((uid, _)) => uid,
+) -> Result<WorkloadIdentity, MountError> {
+    let in_passwd = passwd_entry(newroot, &user.name);
+    let uid = match &in_passwd {
+        Some((uid, _, _)) => *uid,
         None => user
             .uid
             .ok_or_else(|| MountError::UnresolvableUser(user.name.clone()))?,
@@ -278,23 +292,21 @@ pub(crate) fn resolve_workload_ids(
     let gid = match &user.group {
         Some(spec) => resolve_group_gid(newroot, spec)
             .ok_or_else(|| MountError::UnresolvableGroup(spec.clone()))?,
-        None => in_passwd.map(|(_, gid)| gid).unwrap_or(uid),
+        None => in_passwd.as_ref().map(|(_, gid, _)| *gid).unwrap_or(uid),
     };
-    if in_passwd.is_none() {
-        seed_sandbox_user(newroot, &user.name, uid, gid, sys);
-    }
-    Ok((uid, gid))
+    let home = match in_passwd {
+        Some((_, _, home)) => home,
+        None => {
+            seed_sandbox_user(newroot, &user.name, uid, gid, sys);
+            Some(format!("/home/{}", user.name))
+        }
+    };
+    Ok(WorkloadIdentity { uid, gid, home })
 }
 
-/// Read after `resolve_workload_ids` has seeded any missing user, so the seeded `/home/<name>` line resolves like an image-shipped one.
-fn passwd_home(newroot: &str, name: &str) -> Option<String> {
-    let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).ok()?;
-    passwd.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        (fields.next()? == name).then_some(())?;
-        let home = fields.nth(4)?;
-        (!home.is_empty()).then(|| home.to_string())
-    })
+/// `std::env::set_var` panics on interior NUL, and this is the one export whose bytes an image controls.
+fn exportable_home(home: &str) -> bool {
+    home.bytes().all(|b| b >= 0x20)
 }
 
 fn resolve_group_gid(newroot: &str, spec: &str) -> Option<u32> {
@@ -845,16 +857,17 @@ fn mount_composefs_and_exec_broker_inner(
         Some(&opts),
     )?;
 
-    let run_ids = match sandbox_user {
+    let identity = match sandbox_user {
         Some(user) => Some(resolve_workload_ids(newroot, user, sys)?),
         None => None,
     };
+    let run_ids = identity.as_ref().map(WorkloadIdentity::ids);
 
-    if let (Some((uid, gid)), Some(user)) = (run_ids, sandbox_user) {
-        sys.export_env("LENS_RUN_UID", &uid.to_string());
-        sys.export_env("LENS_RUN_GID", &gid.to_string());
-        if let Some(home) = passwd_home(newroot, &user.name) {
-            sys.export_env("LENS_RUN_HOME", &home);
+    if let Some(identity) = &identity {
+        sys.export_env("LENS_RUN_UID", &identity.uid.to_string());
+        sys.export_env("LENS_RUN_GID", &identity.gid.to_string());
+        if let Some(home) = identity.home.as_deref().filter(|h| exportable_home(h)) {
+            sys.export_env("LENS_RUN_HOME", home);
         }
     }
 
@@ -1168,18 +1181,22 @@ mod tests {
              good:x:1000:2000:::\n",
         );
         let newroot = dir.path().to_str().unwrap();
-        assert_eq!(passwd_uid_gid(newroot, "good"), Some((1000, 2000)));
-        assert_eq!(passwd_uid_gid(newroot, "absent"), None);
-        assert_eq!(passwd_uid_gid(newroot, "trunc"), None);
-        assert_eq!(passwd_uid_gid(newroot, "baduid"), None);
-        assert_eq!(passwd_uid_gid(newroot, "badgid"), None);
-        assert_eq!(passwd_uid_gid(newroot, "nogid"), None);
+        assert_eq!(passwd_entry(newroot, "good"), Some((1000, 2000, None)));
+        assert_eq!(
+            passwd_entry(newroot, "root"),
+            Some((0, 0, Some("/root".to_string())))
+        );
+        assert_eq!(passwd_entry(newroot, "absent"), None);
+        assert_eq!(passwd_entry(newroot, "trunc"), None);
+        assert_eq!(passwd_entry(newroot, "baduid"), None);
+        assert_eq!(passwd_entry(newroot, "badgid"), None);
+        assert_eq!(passwd_entry(newroot, "nogid"), None);
     }
 
     #[test]
     fn passwd_lookup_is_none_when_the_image_has_no_passwd_file() {
         let dir = tempfile::TempDir::new().unwrap();
-        assert_eq!(passwd_uid_gid(dir.path().to_str().unwrap(), "anyone"), None);
+        assert_eq!(passwd_entry(dir.path().to_str().unwrap(), "anyone"), None);
     }
 
     #[test]
@@ -1196,7 +1213,7 @@ mod tests {
             group: None,
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            resolve_workload_ids(newroot, &user, &sys).unwrap().ids(),
             (1000, 2000)
         );
         assert!(
@@ -1222,7 +1239,7 @@ mod tests {
             group: None,
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            resolve_workload_ids(newroot, &user, &sys).unwrap().ids(),
             (65534, 65534)
         );
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
@@ -1252,7 +1269,7 @@ mod tests {
             group: None,
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            resolve_workload_ids(newroot, &user, &sys).unwrap().ids(),
             (65534, 65534)
         );
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
@@ -1300,7 +1317,7 @@ mod tests {
             group: Some("0".into()),
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            resolve_workload_ids(newroot, &user, &sys).unwrap().ids(),
             (1001, 0),
             "a numeric USER uid:gid must seed at the requested gid, not gid == uid"
         );
@@ -1335,7 +1352,7 @@ mod tests {
             group: Some("staff".into()),
         };
         assert_eq!(
-            resolve_workload_ids(newroot, &user, &sys).unwrap(),
+            resolve_workload_ids(newroot, &user, &sys).unwrap().ids(),
             (1000, 50),
             "an explicitly named group must win over the user's passwd primary gid"
         );
@@ -3047,6 +3064,84 @@ mod tests {
                 Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/var/www"
             )),
             "an exec session adopts the workload user's home, so the broker needs the passwd home lns-init already read"
+        );
+    }
+
+    #[test]
+    fn the_exported_home_comes_from_the_same_passwd_line_as_the_run_ids() {
+        let dir = newroot_with_passwd(
+            "sandbox:x:notanum:0:decoy:/opt/attacker:/bin/sh\n\
+             sandbox:x:1000:1000::/home/sandbox:/bin/sh\n",
+        );
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "sandbox".into(),
+            uid: None,
+            group: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_UID" && value == "1000"
+            )),
+            "the malformed first line must not satisfy the uid lookup"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/home/sandbox"
+            )),
+            "the home must come from the line that supplied the run ids, never from a sibling line the id parse rejected"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, value } if key == "LENS_RUN_HOME" && value == "/opt/attacker"
+            )),
+            "a decoy line must not hand the exec a different identity's home"
+        );
+    }
+
+    #[test]
+    fn a_passwd_home_with_control_bytes_is_never_exported() {
+        let dir = newroot_with_passwd("sandbox:x:1000:1000::/ho\u{0}me:/bin/sh\n");
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let user = SandboxUser {
+            name: "sandbox".into(),
+            uid: None,
+            group: None,
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            Some(&user),
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, .. } if key == "LENS_RUN_UID"
+            )),
+            "the run ids still export; only the poisoned home is dropped"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                Call::ExportEnv { key, .. } if key == "LENS_RUN_HOME"
+            )),
+            "a NUL in the home field would panic std::env::set_var in PID 1 — the export must be skipped"
         );
     }
 

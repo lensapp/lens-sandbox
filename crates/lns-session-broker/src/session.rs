@@ -25,10 +25,25 @@ pub struct SessionOutcome {
 pub(crate) struct WorkloadSpec {
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<String>,
-    pub(crate) cwd: Option<String>,
+    pub(crate) cwd: Option<SessionCwd>,
     pub(crate) hostname: Option<String>,
     pub(crate) confinement: Confinement,
     pub(crate) scrub: Vec<String>,
+}
+
+/// A declared workdir keeps `-w`'s create-if-missing contract; the identity-home fallback is chdir-only, because creating it would run mkdir as guest root on a passwd-controlled path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionCwd {
+    Declared(String),
+    Fallback(String),
+}
+
+/// The run-as identity lns-init resolved at boot, read off the broker's own environment.
+pub(crate) struct RunIdentity {
+    pub(crate) uid: Option<u32>,
+    pub(crate) gid: Option<u32>,
+    pub(crate) home: Option<String>,
+    pub(crate) user: Option<String>,
 }
 
 const ROOT_UID: u32 = 0;
@@ -68,7 +83,39 @@ pub(crate) fn keys_to_scrub<'a>(
         .collect()
 }
 
-/// A confined session adopts the run-as identity's HOME and USER unless the session env already declares them — runc fills HOME the same way, landing on `/` when the lookup failed.
+/// One place turns an OpenSession plus the boot-resolved identity into the child's spec, so the identity, scrub, and cwd decisions cannot drift apart across session modes.
+pub(crate) fn build_workload_spec<'a>(
+    argv: Vec<String>,
+    mut env: Vec<String>,
+    cwd: Option<String>,
+    hostname: Option<String>,
+    confine: bool,
+    identity: &RunIdentity,
+    inherited: impl Iterator<Item = &'a str>,
+) -> WorkloadSpec {
+    let confinement = confinement(confine, identity.uid, identity.gid);
+    env.extend(identity_env(
+        &confinement,
+        &env,
+        identity.home.as_deref(),
+        identity.user.as_deref(),
+    ));
+    let effective_home = env
+        .iter()
+        .find_map(|kv| kv.strip_prefix("HOME="))
+        .filter(|h| !h.is_empty() && *h != "/")
+        .map(str::to_string);
+    WorkloadSpec {
+        argv,
+        cwd: session_cwd(cwd, &confinement, effective_home.as_deref()),
+        hostname,
+        scrub: keys_to_scrub(inherited, &confinement),
+        confinement,
+        env,
+    }
+}
+
+/// A confined session adopts the run-as identity's HOME (runc's rule, `/` when the lookup failed) and, matching the supervisor rather than runc, its USER — unless the session env already declares them.
 pub(crate) fn identity_env(
     confinement: &Confinement,
     session_env: &[String],
@@ -101,11 +148,14 @@ pub(crate) fn session_cwd(
     cwd: Option<String>,
     confinement: &Confinement,
     home: Option<&str>,
-) -> Option<String> {
-    if cwd.is_some() || matches!(confinement, Confinement::Inherit) {
-        return cwd;
+) -> Option<SessionCwd> {
+    if let Some(declared) = cwd.filter(|c| !c.is_empty()) {
+        return Some(SessionCwd::Declared(declared));
     }
-    home.map(str::to_string)
+    if matches!(confinement, Confinement::Inherit) {
+        return None;
+    }
+    home.map(|h| SessionCwd::Fallback(h.to_string()))
 }
 
 #[derive(Debug)]
@@ -297,23 +347,33 @@ mod tests {
     }
 
     #[test]
-    fn a_confined_session_without_a_workdir_starts_in_the_effective_home() {
+    fn a_confined_session_without_a_workdir_starts_in_the_effective_home_best_effort() {
         let cwd = session_cwd(None, &Confinement::CapsOnly, Some("/home/node"));
         assert_eq!(
-            cwd.as_deref(),
-            Some("/home/node"),
-            "the supervisor starts a workdir-less workload in its home, so an exec joining it must land there too"
+            cwd,
+            Some(SessionCwd::Fallback("/home/node".into())),
+            "the supervisor starts a workdir-less workload in its home, so an exec joining it must land there — but only chdir, never create a root-owned dir at a passwd-controlled path"
         );
     }
 
     #[test]
-    fn a_declared_workdir_outranks_the_home_fallback() {
+    fn a_declared_workdir_outranks_the_home_fallback_and_keeps_its_create_contract() {
         let cwd = session_cwd(
             Some("/app".into()),
             &Confinement::CapsOnly,
             Some("/home/node"),
         );
-        assert_eq!(cwd.as_deref(), Some("/app"));
+        assert_eq!(cwd, Some(SessionCwd::Declared("/app".into())));
+    }
+
+    #[test]
+    fn an_empty_declared_workdir_is_treated_as_absent() {
+        let cwd = session_cwd(Some(String::new()), &Confinement::CapsOnly, Some("/home/n"));
+        assert_eq!(
+            cwd,
+            Some(SessionCwd::Fallback("/home/n".into())),
+            "Some(\"\") must not reach create_dir_all and kill the session with 126"
+        );
     }
 
     #[test]
@@ -326,6 +386,93 @@ mod tests {
     fn a_confined_session_with_no_home_keeps_the_brokers_cwd() {
         let cwd = session_cwd(None, &Confinement::CapsOnly, None);
         assert_eq!(cwd, None);
+    }
+
+    fn open_fields(cwd: Option<String>) -> (Vec<String>, Vec<String>, Option<String>) {
+        (vec!["sh".to_string()], vec!["PATH=/bin".to_string()], cwd)
+    }
+
+    #[test]
+    fn a_confined_spec_carries_the_full_run_identity() {
+        let (argv, env, cwd) = open_fields(None);
+        let spec = build_workload_spec(
+            argv,
+            env,
+            cwd,
+            None,
+            true,
+            &RunIdentity {
+                uid: Some(1000),
+                gid: Some(1000),
+                home: Some("/home/node".into()),
+                user: Some("node".into()),
+            },
+            ["LENS_SANDBOX_TOKEN", "PATH"].into_iter(),
+        );
+        assert_eq!(
+            spec.confinement,
+            Confinement::Setuid {
+                uid: 1000,
+                gid: 1000
+            }
+        );
+        assert!(
+            spec.env.contains(&"HOME=/home/node".to_string())
+                && spec.env.contains(&"USER=node".to_string()),
+            "home and user must land in their own keys, not swapped: {:?}",
+            spec.env
+        );
+        assert_eq!(spec.cwd, Some(SessionCwd::Fallback("/home/node".into())));
+        assert_eq!(spec.scrub, vec!["LENS_SANDBOX_TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_home_lookup_yields_the_root_home_and_no_cwd_fallback() {
+        let (argv, env, cwd) = open_fields(None);
+        let spec = build_workload_spec(
+            argv,
+            env,
+            cwd,
+            None,
+            true,
+            &RunIdentity {
+                uid: Some(0),
+                gid: Some(0),
+                home: None,
+                user: None,
+            },
+            std::iter::empty(),
+        );
+        assert!(spec.env.contains(&"HOME=/".to_string()));
+        assert_eq!(
+            spec.cwd, None,
+            "the '/' sentinel means the lookup failed; chdir'ing to it would launder the failure into a decision"
+        );
+    }
+
+    #[test]
+    fn a_session_declared_home_steers_the_cwd_fallback_too() {
+        let (argv, mut env, cwd) = open_fields(None);
+        env.push("HOME=/srv".to_string());
+        let spec = build_workload_spec(
+            argv,
+            env,
+            cwd,
+            None,
+            true,
+            &RunIdentity {
+                uid: Some(1000),
+                gid: Some(1000),
+                home: Some("/home/node".into()),
+                user: Some("node".into()),
+            },
+            std::iter::empty(),
+        );
+        assert_eq!(
+            spec.cwd,
+            Some(SessionCwd::Fallback("/srv".into())),
+            "the supervisor's resolve_cwd follows the effective home, declared over identity"
+        );
     }
 
     #[test]

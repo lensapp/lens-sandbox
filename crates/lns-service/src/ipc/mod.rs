@@ -2655,6 +2655,7 @@ mod tests {
                 "SHELL=/bin/bash".into(),
                 "SOME_TOOL_HOME=/workspace/mine".into(),
             ],
+            declared_identity_keys: vec!["HOME".into()],
             workdir: Some("/workspace".into()),
             tools: crate::workload_env::ToolRuntime {
                 bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
