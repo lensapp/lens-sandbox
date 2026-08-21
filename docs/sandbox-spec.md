@@ -871,6 +871,13 @@ the half-prepared environment this block exists to prevent. An author who wants 
 command's failure tolerated says so where it is — `cmd || true`. Output streams to the run's own output as the
 script produces it.
 
+**A script has no stdin.** It reads `/dev/null`, so a tool that would ask a
+question reads an EOF instead of waiting. Nothing else would be answerable: the
+run's own console belongs to the workload that has not started, and a script is
+not attached to anyone. A script is not bounded by a timeout either, as this
+section states below, so an inherited stdin would hold a boot open forever with
+nothing to show for it.
+
 **A document that ships `apt-get install` ships the egress for its mirror too**,
 in the same document, because a script is not a way around the policy the
 consumer approved. A destination no rule decides is asked about the way any other
