@@ -396,6 +396,8 @@ impl StepRunner for RealStepRunner {
             script.label
         ));
         let mut cmd = child_spawner::build_command(&script.spec);
+        // A script has no stdin (`docs/sandbox-spec.md` §3.1.13): nothing answers the run's own stdin before the workload starts, and no timeout ends a read left waiting on it.
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;

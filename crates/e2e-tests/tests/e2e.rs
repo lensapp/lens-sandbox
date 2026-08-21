@@ -37,6 +37,8 @@ pub struct E2eWorld {
     pub project_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_inline_filesets: Vec<(String, String, String, Option<String>)>,
     pub project_tools: Vec<String>,
+    /// `pre-start` script bodies the project definition declares, in run order.
+    pub project_scripts: Vec<String>,
     pub project_image: Option<String>,
     /// Raises the per-run budget for a tool whose upstream payload is far larger than the usual one.
     pub run_budget: Option<std::time::Duration>,
