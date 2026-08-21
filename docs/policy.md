@@ -403,6 +403,13 @@ background service shows an approval window with the host and the action — for
   note `approved during a run`, so a destination you answered for reads
   differently from one somebody wrote by hand.
 
+A [`pre-start` script](running-workloads.md#pre-start-scripts--preparing-the-guest)
+raises the same card, before the workload has started. A script is gated exactly
+as the workload is — same rules, same proxy, same decisions file — so a document
+that installs from a package mirror ships that mirror's `egress` alongside the
+script, and a run whose first card names `deb.debian.org` is a script asking, not
+the workload.
+
 **Always** writes a rule only where the guest would reach it. If some rule already
 decides that destination — an earlier answer, or a rule you wrote — the gate stops
 there, so a second one behind it would never fire. Nothing is written and the

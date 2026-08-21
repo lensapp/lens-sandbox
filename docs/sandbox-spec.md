@@ -124,8 +124,8 @@ MUST preserve that.
 A mixin resolves into the sandbox at **startup**, so the document a consumer
 pulls is not yet the sandbox that boots. What the consumer approves is therefore
 the **resolved** sandbox: before boot, the run presents the merged result in full
-— every rule, mount, file, tool, and credential, each attributed to the mixin it
-came from. Whatever the reference looked like, the approval is against a resolved
+— every rule, mount, file, tool, script, and credential, each attributed to the
+mixin it came from. Whatever the reference looked like, the approval is against a resolved
 digest, so what boots is what was approved
 ([§3.3.1](#331-how-a-mixin-enters-a-run)).
 
@@ -225,6 +225,9 @@ spec:
           - /usr/local/bin/npm
       - match: "*.telemetry.example"
         verdict: deny
+      - match: deb.debian.org
+        verdict: allow
+        description: the mirror this sandbox's pre-start script installs from
     tcp:
       - match: db.example.com:5432
         verdict: allow
@@ -269,13 +272,25 @@ spec:
   ports:
     - container: 8080
       host: 18080
+
+  scripts:
+    - when: pre-start
+      user: root
+      description: the ripgrep this sandbox's prompts assume
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends ripgrep
+    - when: pre-start
+      description: seed the cache this run keeps, in the volume that outlives it
+      run: mkdir -p /home/node/.cache/reviewer
 ```
 
 Read against the rules below, that document is valid: the image is digest-pinned,
 `user: node` resolves in the guest's own `passwd`, both `egress` tables carry a
 `verdict` on every entry, each credential's `injections` name a destination the
-egress reaches, volumes and filesets claim distinct guest paths, and no `envVar`,
-tool, guest path, or port repeats.
+egress reaches, the mirror its `pre-start` script installs from is one the egress
+allows, volumes and filesets claim distinct guest paths, and no `envVar`, tool,
+guest path, or port repeats.
 
 | Field | Required | Summary |
 |---|---|---|
@@ -292,6 +307,7 @@ tool, guest path, or port repeats.
 | [`volumes`](#3110-volumes) | optional | Named volumes and host binds. |
 | [`filesets`](#3111-filesets) | optional | Files shipped inside the artifact, or read off the running machine. |
 | [`ports`](#3112-ports) | optional | Container ports the sandbox serves. |
+| [`scripts`](#3113-scripts) | optional | Shell scripts the guest runs before the workload starts. |
 
 #### 3.1.1 `image`
 
@@ -346,6 +362,20 @@ a local definition and for a pulled reference alike, so an artifact that wants
 root is visible before it boots. Root is root *inside the microVM*, and reaching
 anything of the host's takes a separate bind consent — so there is nothing here
 for a prompt to protect.
+
+**Root is bounded, and the bound is what makes that true.** A process running as
+root in the guest — the workload, or a [script](#3113-scripts) before it — can
+write anywhere the mounts allow and can change ownership, but it cannot
+administer the network, create a device node, or set a file capability. The
+network capability is the one that matters: without it, nothing inside the guest
+can take down the cage that enforces `egress`, so root inside the microVM stays a
+statement about the filesystem rather than about policy.
+
+Binding a port is not part of that bound. The guest lowers its own unprivileged
+port floor to zero, so any user can bind any port and an image that serves on
+`80` runs unchanged as its own unprivileged user. Nothing is exposed by binding:
+what leaves the sandbox is decided by [`ports`](#3112-ports), and that binds
+loopback on the host.
 
 The quote is excluded for a concrete reason: the value is passed to the guest on
 the kernel command line, which is space-joined and honours `"`. A quoted segment
@@ -506,6 +536,12 @@ tools:
 Validation is offline. The service provisions declared tools once per machine
 before boot, outside workload policy. `lns push` resolves fuzzy versions to an
 exact pin — see [§6](#6-publish-time-transforms).
+
+A provisioned tool lands read-only on the workload's `PATH`, **ahead of the base
+image's own copies**, so declaring `node@22` decides which `node` the workload
+runs even in an image that ships one. It is on the `PATH` a
+[`pre-start` script](#3113-scripts) sees too, which is what makes declaring a
+tool the alternative to installing one from a script.
 
 #### 3.1.9 `mixins`
 
@@ -768,6 +804,118 @@ Two properties bound what publishing can do:
   the developer reaches the service. Omit `host` to let the run report the port
   it chose.
 
+#### 3.1.13 `scripts`
+
+Shell scripts the guest runs before the workload starts, each under a user it
+names. This is where a document configures what it contributes: a package the
+image lacks, a generated config file, a seeded cache.
+
+```yaml
+scripts:
+  - when: pre-start
+    user: root
+    description: the psql this sandbox's prompts assume
+    run: |
+      apt-get update
+      apt-get install -y --no-install-recommends postgresql-client
+  - when: pre-start
+    run: psql --version > /tmp/psql-version
+```
+
+| Field | Type | Rules |
+|---|---|---|
+| `when` | string | REQUIRED. The slot the script runs in. `pre-start` is the only slot this grammar defines; any other value is refused. |
+| `run` | string | REQUIRED. The script body, run by `sh -e`. MUST be non-empty and MUST NOT contain a NUL, which would truncate the file the shell reads. At most 128 KiB. |
+| `user` | string | optional. `USER` or `USER:GROUP`, the same grammar and the same guest resolution as [`user`](#313-user). Absent means the user the workload itself runs as. |
+| `description` | string | optional. What this script is for, shown in the disclosure the way an [`egress`](#42-the-egress-definition) rule's own `description` is. |
+
+A document declares at most **32** scripts totalling at most **512 KiB** of `run`
+bodies. Each script becomes a file the run stages inside the guest, so the ceiling
+is stated here rather than discovered at boot. A script longer than that belongs
+in a [fileset](#3111-filesets) the document ships, with a short script to run it.
+The ceiling bounds **one document**: resolution appends across sources
+([§3.3.2](#332-merge-rules)), and the sum is nobody's authoring mistake to
+correct.
+
+A script has no name and no id. Entries are positional and they append rather
+than override, so there is no key for anything to merge on.
+
+**`when` exists so a later slot is not a format change.** One slot answers the
+need this block was added for, and naming it in every entry means a cleanup slot
+arrives as one more accepted value rather than as a second block.
+
+**`pre-start` is the last thing before the workload**, so everything else the
+sandbox promised is already in place when a script runs:
+
+| By the time a `pre-start` script runs | So a script can |
+|---|---|
+| The rootfs is composed, and `volumes`, binds, and `filesets` are mounted and materialized. | Read a fileset's files, and write into a volume. |
+| Declared [`tools`](#318-tools) are on `PATH` ahead of the image's own copies, as [§3.1.8](#318-tools) states. | Use a declared toolchain rather than installing one. |
+| The network cage is up and the run's `egress` is in force, with the proxy and the credential injection ([§4.1](#41-the-credential-definition)) behind it. | Reach exactly what the workload may reach, and no more. |
+| `env` is set, and each declared credential's `envVar` holds its placeholder. | Authenticate to a destination its `injections` name. |
+| The workload has not started. | Fail the run before anything the workload does can depend on it. |
+
+The script runs with `sh` from the guest's own filesystem, in the home directory
+of the user it runs as — `/` when that user has none. An image that ships no `sh`
+cannot run a script, which is a launch failure and not an authoring one: no
+offline check can see inside the image.
+
+**The body runs under `-e`, so the first command that fails ends the script.** A
+multi-line body is a sequence the author expects to complete, not a best-effort
+list: an `apt-get update` that fails followed by an `apt-get install` that
+succeeds off a stale cache would otherwise exit `0` and hand the workload exactly
+the half-prepared environment this block exists to prevent. An author who wants a
+command's failure tolerated says so where it is — `cmd || true`. Output streams to the run's own output as the
+script produces it.
+
+**A document that ships `apt-get install` ships the egress for its mirror too**,
+in the same document, because a script is not a way around the policy the
+consumer approved. A destination no rule decides is asked about the way any other
+is — before the workload has started.
+
+**A script's writes are as durable as where it writes.** Everything outside a
+volume or a bind lands on the sandbox's own disk
+([§3.1.5](#315-resources)), which the service discards when the run ends — so an
+installed package is installed again on the next boot. A write into a `volume`
+outlives the run, and a write into a read-write bind reaches the host, exactly as
+the same write from the workload would. This is the difference from
+[`tools`](#318-tools), which the service provisions once per machine and caches:
+a tool is portable and installed outside workload policy, while a script is
+specific to this image and re-done per run. Declare a tool where a tool fits.
+
+**A script running as root is bounded the way the workload's root is** — the same
+capability set, described in [§3.1.3](#313-user) — so a script cannot dismantle
+the cage it is about to hand the workload. That holds however the script arrived
+at root: by naming `user: root`, or by naming no user in a run that `-u root`
+promoted. A package whose installer sets a file capability or creates a device
+node fails partway through, so a script that installs one reports a failure
+rather than a working package.
+
+**A non-zero exit refuses the run.** Later scripts do not run, and the workload
+never starts. This is a failure before the workload started, so `lns run` exits
+`125`, identifying the script the way the disclosure does — its position in the
+run order and the document that contributed it — along with the status it exited
+with. The workload's own status codes stay reserved for the workload
+([`docs/cli-spec.md`](cli-spec.md) §5). A script is part of the environment the
+resolved sandbox promised; starting the workload without it would turn one clear
+failure into several confusing ones — the same reason a `user` the guest cannot
+resolve refuses the boot rather than falling back ([§3.1.3](#313-user)).
+
+**A script that names no user follows the effective run-as user**, not
+`spec.user` — so `-u root` promotes every such script to root, exactly as it
+promotes the workload.
+
+**A script is not bounded by a timeout.** A slow install and a hung one look the
+same from outside, and cutting one off would fail runs that were about to
+succeed; a script that waits forever holds the run the way a workload that waits
+forever does. Its output streams as it is produced, so a reader can tell the two
+apart, and `lns stop` ends the run.
+
+Script output is not recorded in the audit trail as output — it reaches the run's
+own output, which `lns logs` serves. What the run **records** is that each script
+ran: its position, the document that contributed it, the user it ran as, and the
+status it exited with, under the `launch` kind.
+
 ---
 
 ### 3.2 `kind: connector`
@@ -900,6 +1048,10 @@ spec:
   tools:
     - postgresql@17
   egress:
+    http:
+      - match: deb.debian.org
+        verdict: allow
+        description: the mirror this mixin's pre-start script installs from
     tcp:
       - match: db.example.com:5432
         verdict: allow
@@ -907,17 +1059,35 @@ spec:
     - inline:
         USING-POSTGRES.md: "Connect with $DATABASE_URL."
       guestPath: /home/agent/notes
+  scripts:
+    - when: pre-start
+      user: root
+      run: apt-get install -y --no-install-recommends postgresql-client
 ```
 
 | Block | In a mixin |
 |---|---|
-| `env`, `egress`, `credentials`, `tools`, `volumes`, `filesets`, `ports` | Allowed, with the same rules as [§3.1](#31-kind-sandbox). |
+| `env`, `egress`, `credentials`, `tools`, `volumes`, `filesets`, `ports`, `scripts` | Allowed, with the same rules as [§3.1](#31-kind-sandbox). |
 | `mixins` | Allowed. A mixin MAY build on other mixins, exactly as a sandbox does. |
 | `image`, `command`, `workdir`, `user`, `resources` | **FORBIDDEN.** These describe one launch, and the sandbox owns it. |
 
 A mixin ships agent-facing markdown as a `fileset`, so instructions land in the
 guest through the same mechanism as any other file and appear in the resolved
 disclosure like one.
+
+**`scripts` is why a mixin can carry a `user` per script while `user` itself is
+forbidden.** The two name different things. `spec.user` is the workload's
+identity — one launch, and the sandbox owns it, which is why a mixin may not
+answer for it. A `scripts[].user` names who runs one script that travels with the
+document that wrote it, and it settles nothing about the launch.
+
+What keeps that from being a way around the forbidden block is not the narrowness
+of the reach — a root script can write anywhere the mounts allow, and a
+[bounded root](#313-user) is still root. It is that the consumer approves the
+script. Every entry appears in the resolved sandbox before boot, attributed to the
+document that contributed it and showing the user it asks for
+([§1.5](#15-one-disclosure)) — so a mixin that wants root gets it by saying so to
+the person running it, which is exactly what `spec.user` would have had to do.
 
 One mixin is never authored: every directory has a [local one](#8-the-local-mixin)
 that the run writes as the developer answers prompts.
@@ -1005,6 +1175,29 @@ What "wins" means per block:
 | `tools` | Union by name. The last version declared wins. |
 | `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace. The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
 | `ports` | Union by `container`. The last mapping wins. |
+| `scripts` | **Append**, in source order. Not last-wins: every source's scripts run, the sandbox's own first and the local mixin's last. |
+
+**`scripts` is the one block nothing overrides**, and the reason is that it has
+no key. Every other block names what it decides — an `envVar`, a tool, a guest
+path — so a later source claiming that name is stating a newer answer to the same
+question. Two scripts state no question. Dropping one because another looked like
+it would not be an override; it would be a missing dependency, discovered as a
+command not found somewhere inside the workload. So every script survives, and
+order is the only thing resolution decides about them — the source order above,
+which puts the sandbox's own preparation first and the local mixin's last. Later
+still wins, in time rather than in precedence.
+
+Because a source many documents name merges at the last place the order names it,
+its scripts run there too — so a dependency two mixins share prepares **after**
+both of them rather than before, and no earlier mention can move it. For every
+other block that rule only decides precedence; for this one it decides sequence.
+An author who needs one document's preparation to come first therefore cannot get
+it by ordering alone: nothing later may name that document.
+
+It also means the merged document can carry more scripts than
+[§3.1.13](#3113-scripts) lets one author declare. That ceiling is authoring
+feedback, not a bound on a run: appending is the rule, so a sum neither author
+could see must not refuse the launch.
 
 Uniqueness is a **per-document** rule: one document may not name the same
 `envVar`, tool, guest path, or `container` port twice ([§3.1](#31-kind-sandbox)),
@@ -1232,6 +1425,11 @@ Offline validation (`lns sandbox validate`, and every load path including
   literal, and names one file; `optional` appears only on a `hostPath`;
   `guestPath` unique across volumes and filesets.
 - **ports**: `container` and `host` in range and each unique.
+- **scripts**: every entry sets a `when` this grammar defines and a `run` that is
+  non-empty and free of NUL; a `user`, where present, follows the `user` rule; at
+  most 32 entries, each `run` at most 128 KiB, and 512 KiB across the block — the
+  entry count and the block total bound one document rather than a resolved one,
+  while the per-script size holds for both, since merging cannot grow a script.
 - **Connector**: at least one method; each method carries the block its
   `authKind` names and, for `oauth`, the endpoint its `flow` needs; every
   placeholder self-identifies as fake and is at least 16 characters.

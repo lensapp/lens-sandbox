@@ -293,7 +293,10 @@ pub async fn resolve<S: MixinSource>(
             document: config_json.to_vec(),
             mixins: Vec::new(),
             pinned_extra: Vec::new(),
-            contributions: lns_artifact::merge::own_egress(&def.spec),
+            contributions: lns_artifact::merge::own_egress(&def.spec)
+                .into_iter()
+                .chain(lns_artifact::merge::own_scripts(&def.spec))
+                .collect(),
             authored_egress: def.spec.egress.clone(),
             fileset_origins: lns_artifact::merge::own_fileset_origins(&def.spec),
             declared_path_filesets: declared_path_filesets(&[Source {
@@ -384,6 +387,7 @@ pub fn on_the_wire(
                 lns_artifact::merge::Block::Mount => lns_ipc::ContributionBlock::Mount,
                 lns_artifact::merge::Block::Port => lns_ipc::ContributionBlock::Port,
                 lns_artifact::merge::Block::Egress => lns_ipc::ContributionBlock::Egress,
+                lns_artifact::merge::Block::Script => lns_ipc::ContributionBlock::Script,
             },
             key: c.key.clone(),
             source: c.source.clone(),
@@ -445,7 +449,7 @@ pub fn require_pinned_extras(extra: &[String]) -> Result<()> {
 /// The resolved document is what boots, so it has to be one an author could have written — an override is normal, but its result still has to hold.
 fn refuse_what_no_sandbox_could_be(document: &[u8], sources: &[Source]) -> Result<()> {
     let contributors = sources.len().saturating_sub(1);
-    lns_artifact::sandbox::parse(document).with_context(|| {
+    lns_artifact::sandbox::parse_resolved(document).with_context(|| {
         format!("the {contributors} mixin(s) this sandbox layers on merge into a document that is not a valid sandbox")
     })?;
     Ok(())
@@ -596,6 +600,33 @@ mod tests {
             .collect();
         let out = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None).await?;
         lns_artifact::sandbox::parse(&out.document)
+    }
+
+    #[tokio::test]
+    async fn a_script_reaches_the_wire_attributed_to_the_source_that_asked_for_it() {
+        let (spec, documents) = resolve_named(
+            r#"{"image":"x:1","mixins":["obs"]}"#,
+            &[(
+                "obs",
+                r#"{"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y psql"}]}"#,
+            )],
+        );
+        let refs: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
+        let resolution = resolve(&sandbox(&spec), &[], &published(), &Fake::new(&refs), None)
+            .await
+            .expect("a declared mixin resolves");
+        let script = on_the_wire(&resolution.contributions)
+            .into_iter()
+            .find(|c| c.block == lns_ipc::ContributionBlock::Script)
+            .expect("the mixin's script is attributed");
+        assert_eq!(
+            (script.key.as_str(), script.source.as_str()),
+            ("apt-get install -y psql", pinned("obs").as_str()),
+            "a pulled script asking for root is the most consequential thing a mixin contributes, so the disclosure has to say which document asked"
+        );
     }
 
     #[tokio::test]

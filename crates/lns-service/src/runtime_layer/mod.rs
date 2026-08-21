@@ -41,6 +41,16 @@ pub enum RuntimeSource {
     Symlink(String),
 }
 
+impl RuntimeSource {
+    /// The inline body, when this source has one; the other variants name content the layer resolves elsewhere.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            RuntimeSource::Bytes(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeLayer {
     pub digest: String,

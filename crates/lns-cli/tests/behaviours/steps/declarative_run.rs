@@ -228,6 +228,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         env: Vec::new(),
         credentials: Vec::new(),
         tools: Vec::new(),
+        scripts: Vec::new(),
         policy_flags: Vec::new(),
         cpus: declared.cpus,
         mem_mib: declared.mem_mib,

@@ -10,6 +10,10 @@ pub const MAX_INLINE_FILE_BYTES: usize = 128 * 1024;
 pub const MAX_INLINE_TOTAL_BYTES: usize = 1024 * 1024;
 pub const MAX_INLINE_FILES: usize = 256;
 pub const MAX_INLINE_PATH_BYTES: usize = 4096;
+pub const MAX_SCRIPT_STEPS: usize = 32;
+pub const MAX_SCRIPT_BYTES: usize = 128 * 1024;
+pub const MAX_SCRIPTS_TOTAL_BYTES: usize = 512 * 1024;
+const SCRIPT_LABEL_CHARS: usize = 60;
 
 const EXACT_SECRET_NAMES: &[&str] = &[
     ".npmrc",
@@ -134,6 +138,54 @@ pub struct SandboxSpec {
     pub filesets: Vec<FilesetEntry>,
     #[serde(default)]
     pub ports: Vec<Port>,
+    #[serde(default)]
+    pub scripts: Vec<ScriptStep>,
+}
+
+/// The slot a script runs in; naming it in every entry is what lets a later slot arrive as one more accepted value instead of a second block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScriptSlot {
+    PreStart,
+}
+
+impl ScriptSlot {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptSlot::PreStart => "pre-start",
+        }
+    }
+}
+
+/// One shell script the guest runs before the workload, under a user it names; the block appends across sources, so an entry has no key and no name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScriptStep {
+    pub when: ScriptSlot,
+    pub run: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl ScriptStep {
+    /// What the disclosure and a failure message call this script, since it has no name of its own to use.
+    pub fn label(&self) -> String {
+        if let Some(description) = &self.description {
+            return description.clone();
+        }
+        let first = self
+            .run
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        match first.char_indices().nth(SCRIPT_LABEL_CHARS) {
+            Some((cut, _)) => format!("{}…", &first[..cut]),
+            None => first.to_string(),
+        }
+    }
 }
 
 /// Files shipped inside the artifact: a directory beside this document packed into a layer of the same artifact at push (path), or content written in the document itself (inline), snapshot-mounted at guestPath. A hostPath instead names one file on the machine that runs it, snapshotted at launch and never packed.
@@ -177,8 +229,15 @@ struct Doc {
     spec: serde_json::Value,
 }
 
-/// Parse and cross-field-validate a `lns.run/v1` sandbox definition, offline.
+/// Parse and cross-field-validate a `lns.run/v1` sandbox definition as its author wrote it, offline.
 pub fn parse(config_json: &[u8]) -> Result<Definition> {
+    let doc = parse_resolved(config_json)?;
+    refuse_scripts_past_what_one_document_may_declare(&doc.spec.scripts)?;
+    Ok(doc)
+}
+
+/// Parse the document resolution produced (§3.3.2). Every rule an authored sandbox is held to applies, except the ceilings on how many scripts one document may declare: appending across sources is the merge rule, so the sum is not an authoring mistake anyone could correct.
+pub fn parse_resolved(config_json: &[u8]) -> Result<Definition> {
     let doc = parse_of_kind(config_json, spec::Kind::Sandbox)?;
     if doc.spec.image.trim().is_empty() {
         bail!("sandbox must carry an image; it is the base OCI image the sandbox runs");
@@ -188,7 +247,9 @@ pub fn parse(config_json: &[u8]) -> Result<Definition> {
 
 /// Parse and cross-field-validate a `lns.run/v1` mixin, offline. Its blocks follow the same rules as a sandbox's; what differs is that the five describing one launch are forbidden, and there is no image to require.
 pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
-    parse_of_kind(config_json, spec::Kind::Mixin)
+    let doc = parse_of_kind(config_json, spec::Kind::Mixin)?;
+    refuse_scripts_past_what_one_document_may_declare(&doc.spec.scripts)?;
+    Ok(doc)
 }
 
 /// Whether a mixin entry names a directory rather than a registry coordinate — the one predicate validation, rooting and resolution all read, so they cannot disagree about which entries are local.
@@ -328,6 +389,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             bail!("duplicate guest path {}", fileset.guest_path);
         }
     }
+    validate_scripts(&doc.spec.scripts)?;
     let mut container_ports = BTreeSet::new();
     let mut host_ports = BTreeSet::new();
     for port in &doc.spec.ports {
@@ -350,6 +412,49 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
         }
     }
     Ok(doc)
+}
+
+/// The ceilings a *document* is held to. Resolution appends scripts across sources (§3.3.2), so the merged document is held to the per-entry rules only — two legal documents must not merge into a run nobody can fix.
+fn refuse_scripts_past_what_one_document_may_declare(scripts: &[ScriptStep]) -> Result<()> {
+    if scripts.len() > MAX_SCRIPT_STEPS {
+        bail!(
+            "scripts declares {} entries, more than the {MAX_SCRIPT_STEPS}-entry limit; each one becomes a file inside the run's own layer",
+            scripts.len()
+        );
+    }
+    let total_bytes: usize = scripts.iter().map(|script| script.run.len()).sum();
+    if total_bytes > MAX_SCRIPTS_TOTAL_BYTES {
+        bail!(
+            "scripts total {total_bytes} bytes, more than the {MAX_SCRIPTS_TOTAL_BYTES}-byte limit; ship the long ones as filesets and run those instead"
+        );
+    }
+    Ok(())
+}
+
+/// The rules merging cannot break, so they hold for an authored document and a resolved one alike.
+fn validate_scripts(scripts: &[ScriptStep]) -> Result<()> {
+    for script in scripts {
+        if script.run.trim().is_empty() {
+            bail!("a script must carry a run body; there is nothing to run otherwise");
+        }
+        if script.run.contains('\0') {
+            bail!(
+                "script {:?} carries a NUL, which would truncate the file the guest shell reads",
+                script.label()
+            );
+        }
+        if script.run.len() > MAX_SCRIPT_BYTES {
+            bail!(
+                "script {:?} is {} bytes, more than the {MAX_SCRIPT_BYTES}-byte limit; ship it as a fileset and run that instead",
+                script.label(),
+                script.run.len()
+            );
+        }
+        if let Some(user) = &script.user {
+            validate_run_as_user(user)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
@@ -474,7 +579,7 @@ fn overlaps_runtime_namespace(path: &str) -> bool {
     }
 }
 
-/// The value reaches the guest on a space-joined kernel cmdline, so anything that could split it or be read as another key is refused here — the one offline check every load path shares.
+/// One rule for who a guest process runs as, whether the workload's own user or a script's: the workload's reaches the guest on a space-joined kernel cmdline, so anything that could split it or be read as another key is refused here.
 fn validate_run_as_user(user: &str) -> Result<()> {
     let mut segments = user.split(':');
     let name = segments.next().unwrap_or_default();
@@ -765,6 +870,229 @@ mod tests {
         assert!(
             format!("{err:#}").contains("a mixin must not declare workdir"),
             "the author needs the answer that matters — the block does not belong here at all — not a complaint about its contents; got: {err:#}"
+        );
+    }
+
+    fn scripts_json(entries: &str) -> String {
+        format!(r#"{{"image":"ghcr.io/team/base:1","scripts":{entries}}}"#)
+    }
+
+    fn many_scripts(count: usize) -> String {
+        let entries: Vec<String> = (0..count)
+            .map(|n| format!(r#"{{"when":"pre-start","run":"echo {n}"}}"#))
+            .collect();
+        scripts_json(&format!("[{}]", entries.join(",")))
+    }
+
+    #[test]
+    fn a_sandbox_reads_the_scripts_it_declares() {
+        let def = parse(&def_json(&scripts_json(
+            r#"[{"when":"pre-start","user":"root","description":"the psql the prompts assume","run":"apt-get install -y postgresql-client"}]"#,
+        )))
+        .expect("a sandbox may prepare its own environment before the workload starts");
+        let step = &def.spec.scripts[0];
+        assert_eq!(step.when, ScriptSlot::PreStart);
+        assert_eq!(step.run, "apt-get install -y postgresql-client");
+        assert_eq!(step.user.as_deref(), Some("root"));
+        assert_eq!(
+            step.description.as_deref(),
+            Some("the psql the prompts assume")
+        );
+    }
+
+    #[test]
+    fn a_script_naming_no_user_defers_rather_than_claiming_root() {
+        let def = parse(&def_json(&scripts_json(
+            r#"[{"when":"pre-start","run":"mkdir -p /tmp/cache"}]"#,
+        )))
+        .expect("user is optional");
+        assert!(
+            def.spec.scripts[0].user.is_none(),
+            "an absent user must stay absent so the run's own run-as identity decides; defaulting to root here would hand every unadorned script the whole guest"
+        );
+    }
+
+    #[test]
+    fn a_mixin_may_carry_scripts_because_a_mixin_is_where_a_bootstrap_belongs() {
+        let def = parse_mixin(&mixin_json(
+            r#"{"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y postgresql-client"}]}"#,
+        ))
+        .expect("a mixin that installs what it needs is the whole point of the block");
+        assert_eq!(def.spec.scripts[0].user.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn a_scripts_user_is_not_the_launch_user_a_mixin_may_not_declare() {
+        let err = parse_mixin(&mixin_json(r#"{"user":"node"}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("a mixin must not declare user"),
+            "spec.user names the workload's identity and stays forbidden; only a script's own user travels with a mixin; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_script_slot_the_format_does_not_define_is_refused() {
+        let err = parse(&def_json(&scripts_json(
+            r#"[{"when":"post-stop","run":"true"}]"#,
+        )))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("post-stop"),
+            "a slot this grammar has not defined must be named back to the author, not silently run in the one slot that exists; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_script_declaring_no_slot_is_refused() {
+        assert!(
+            parse(&def_json(&scripts_json(r#"[{"run":"true"}]"#))).is_err(),
+            "when is required, so a later slot arrives as one more accepted value rather than as a change of meaning for every entry already written"
+        );
+    }
+
+    #[test]
+    fn a_script_declaring_no_body_is_refused() {
+        for entries in [
+            r#"[{"when":"pre-start"}]"#,
+            r#"[{"when":"pre-start","run":""}]"#,
+            r#"[{"when":"pre-start","run":"  \n\t "}]"#,
+        ] {
+            assert!(
+                parse(&def_json(&scripts_json(entries))).is_err(),
+                "a script with nothing to run is an authoring mistake, and running it would report success for work nobody described: {entries}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_carrying_a_nul_is_refused() {
+        let entries = format!(
+            r#"[{{"when":"pre-start","run":{}}}]"#,
+            serde_json::to_string("echo one\0echo two").expect("a str encodes")
+        );
+        let err = parse(&def_json(&scripts_json(&entries))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("NUL"),
+            "the body reaches the guest as a file the shell reads, and a NUL would truncate it — so the half that never runs must be refused here instead; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_script_user_the_run_as_rule_would_reject_is_refused_here_too() {
+        for user in ["", "node:staff:extra", "no de", "no\"de", "no=de"] {
+            let entries = format!(
+                r#"[{{"when":"pre-start","user":{},"run":"true"}}]"#,
+                serde_json::to_string(user).expect("a str encodes")
+            );
+            let err = parse(&def_json(&scripts_json(&entries))).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid user"),
+                "one rule answers for who a guest process runs as, wherever the question is asked; {user:?} got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_entry_refuses_a_field_the_format_does_not_define() {
+        assert!(
+            parse(&def_json(&scripts_json(
+                r#"[{"when":"pre-start","run":"true","env":{"A":"b"}}]"#
+            )))
+            .is_err(),
+            "strict decoding reaches inside a script entry too, so a field the grammar never defined fails loudly instead of being dropped"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_declares_no_scripts_carries_none() {
+        let def =
+            parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).expect("scripts are optional");
+        assert!(def.spec.scripts.is_empty());
+    }
+
+    #[test]
+    fn the_only_slot_this_grammar_defines_names_itself_the_way_the_document_spells_it() {
+        assert_eq!(
+            ScriptSlot::PreStart.as_str(),
+            "pre-start",
+            "the CLI and the guest both label a script by this string, so it is the document's own spelling rather than an internal one"
+        );
+        assert_eq!(
+            serde_json::to_string(&ScriptSlot::PreStart).expect("a slot encodes"),
+            "\"pre-start\"",
+            "the accessor and the wire form must not be free to drift apart"
+        );
+    }
+
+    #[test]
+    fn more_scripts_than_one_document_may_declare_are_refused() {
+        let err = parse(&def_json(&many_scripts(MAX_SCRIPT_STEPS + 1))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&MAX_SCRIPT_STEPS.to_string()),
+            "every script becomes a file inside the run's own layer, so the ceiling has to be stated rather than discovered at boot; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_script_past_the_size_limit_is_refused() {
+        let entries = format!(
+            r#"[{{"when":"pre-start","run":{}}}]"#,
+            serde_json::to_string(&"x".repeat(MAX_SCRIPT_BYTES + 1)).expect("a str encodes")
+        );
+        let err = parse(&def_json(&scripts_json(&entries))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&MAX_SCRIPT_BYTES.to_string()),
+            "a script this long belongs in a fileset the document ships, not inline; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn scripts_totalling_more_than_one_document_may_declare_are_refused() {
+        let body = serde_json::to_string(&"y".repeat(MAX_SCRIPT_BYTES)).expect("a str encodes");
+        let count = MAX_SCRIPTS_TOTAL_BYTES / MAX_SCRIPT_BYTES + 1;
+        let entries: Vec<String> = (0..count)
+            .map(|_| format!(r#"{{"when":"pre-start","run":{body}}}"#))
+            .collect();
+        let err = parse(&def_json(&scripts_json(&format!(
+            "[{}]",
+            entries.join(",")
+        ))))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&MAX_SCRIPTS_TOTAL_BYTES.to_string()),
+            "each script clearing its own limit must not add up past what the block may carry; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn the_document_ceilings_do_not_hold_the_merged_document_to_what_one_author_may_declare() {
+        let json = def_json(&many_scripts(MAX_SCRIPT_STEPS + 1));
+        assert!(
+            parse(&json).is_err(),
+            "one author declaring more than the limit is an authoring mistake, and that is what the ceiling is for"
+        );
+        let resolved = parse_resolved(&json).expect(
+            "appending across sources is the merge rule, so the sum is nobody's mistake to fix",
+        );
+        assert_eq!(resolved.spec.scripts.len(), MAX_SCRIPT_STEPS + 1);
+    }
+
+    #[test]
+    fn the_merged_document_is_still_held_to_every_per_entry_rule() {
+        assert!(
+            parse_resolved(&def_json(&scripts_json(
+                r#"[{"when":"pre-start","run":"   ","user":"root"}]"#
+            )))
+            .is_err(),
+            "a per-entry rule cannot be broken by merging, so an entry that breaks one came from a document and must still be refused"
+        );
+    }
+
+    #[test]
+    fn a_resolved_document_still_needs_the_image_a_launch_requires() {
+        assert!(
+            parse_resolved(&def_json(r#"{"scripts":[]}"#)).is_err(),
+            "resolution produces the document that boots, so the block that names what boots is not optional in it"
         );
     }
 

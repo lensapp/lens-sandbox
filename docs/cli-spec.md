@@ -266,15 +266,16 @@ Two things a run does without being asked to:
   made here apply without naming a file.
 
 Before anything boots, `lns run` prints what it resolved: the image, the mixins,
-the egress, the credentials, the mounts, the tools, and the ports. That summary is
-the one thing you approve.
+the egress, the credentials, the mounts, the tools, the ports, and the `pre-start`
+scripts — each script named with the user it asks for and the document that
+contributed it. That summary is the one thing you approve.
 
 #### 3.2.2 The rest
 
 | Verb | Shortcut | What it does |
 |---|---|---|
-| `start` | `lns start` | Runs a stopped sandbox again. The launch replays exactly as recorded — image, command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot. Detached by default; `-a` attaches, `-i` also forwards stdin. A conflict (a taken host port, a held volume, a missing bind source) aborts the start and leaves the sandbox stopped. |
-| `stop` | `lns stop` | Asks the workload to exit, then escalates to `SIGKILL` after `-t <SECONDS>` (default `10`). Reports whether it had to escalate. |
+| `start` | `lns start` | Runs a stopped sandbox again. The launch replays exactly as recorded — image, command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot, and the **recorded** `pre-start` scripts run again — the ones the approved launch resolved, not a fresh resolution. Detached by default; `-a` attaches, `-i` also forwards stdin. A conflict (a taken host port, a held volume, a missing bind source) aborts the start and leaves the sandbox stopped. |
+| `stop` | `lns stop` | Asks the workload to exit, then escalates to `SIGKILL` after `-t <SECONDS>` (default `10`). Reports whether it had to escalate. A run still inside its `pre-start` scripts has no workload yet; `stop` ends it too. |
 | `kill` | `lns kill` | Sends one signal and returns. `--signal` takes `TERM` (default), `INT`, `QUIT`, `HUP`, `WINCH`, or `KILL`, bare or `SIG`-prefixed, case-insensitive. |
 | `exec` | `lns exec` | Runs another command inside a running sandbox. `-i` and `-t` work as on `run`, `--detach-keys` closes only this session, and `-q` silences the status lines. |
 | `logs` | `lns logs` | Prints the captured output. `-f`/`--follow` streams until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
@@ -532,7 +533,7 @@ there is no separate `--json` switch.
 | `0` | It did what you asked. |
 | `1` | It did not, and `lns` is telling you why. Includes a refusal, a validation failure, and a "not found" answer such as `config get` on an unset key. |
 | `2` | The invocation could not be parsed: unknown command, missing operand, unparsable value. |
-| `125` | `run` or `exec` failed before the workload started — service unreachable, reference unresolved, mount invalid, declared tool refused. |
+| `125` | `run` or `exec` failed before the workload started — service unreachable, reference unresolved, mount invalid, declared tool refused, `pre-start` script failed. |
 | `126` | The workload command was found but could not be executed. |
 | `127` | The workload command was not found in the sandbox. |
 | *the workload's* | Once the workload has started, `run` and `exec` return its exit status. |

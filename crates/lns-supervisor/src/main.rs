@@ -1,6 +1,7 @@
 mod config;
 mod dispatcher;
 mod run_as;
+mod scripts;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -69,7 +70,16 @@ async fn main() {
     // Reap orphans reparented to PID 1; agent sessions register their protected PID via the dispatcher.
     let reaper = Arc::new(OrphanReaper::spawn());
 
-    let config = Arc::new(config::load_config());
+    let mut config = config::load_config();
+    match config::load_scripts(&config::StagedManifest) {
+        Ok(scripts) => config.scripts = scripts,
+        Err(e) => {
+            // Scripts we cannot read are scripts we cannot run, and the consumer approved them.
+            tracing::error!("refusing to boot: {e}");
+            std::process::exit(scripts::BEFORE_WORKLOAD_EXIT);
+        }
+    }
+    let config = Arc::new(config);
 
     // lns only drives server mode over the vsock relay; fail loud if a policy file flips the mode.
     let SandboxMode::Server { ws_url, .. } = &config.core.mode else {
@@ -80,6 +90,7 @@ async fn main() {
         ws_url = %ws_url,
         workspace = ?config.workspace_path,
         agent_command = %config.agent_command,
+        pre_start_scripts = config.scripts.len(),
         idle_timeout_s = config.core.idle_timeout.map(|d| d.as_secs()),
         drop_privileges = config.core.is_root,
         "starting agent sandbox (server mode)"

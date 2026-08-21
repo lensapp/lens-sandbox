@@ -68,6 +68,19 @@ fn declared_view_env(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<String> {
         .collect()
 }
 
+/// A script travels whole, because a consumer approving one has to be able to read it (§1.5).
+fn declared_view_scripts(spec: &lns_artifact::sandbox::SandboxSpec) -> Vec<lns_ipc::SandboxScript> {
+    spec.scripts
+        .iter()
+        .map(|script| lns_ipc::SandboxScript {
+            when: script.when.as_str().to_string(),
+            run: script.run.clone(),
+            user: script.user.clone(),
+            description: script.description.clone(),
+        })
+        .collect()
+}
+
 fn declared_policy_flags(policy: &lns_policy::Policy) -> Vec<String> {
     crate::artifact::policy::guardrail_flags(policy)
         .iter()
@@ -102,6 +115,7 @@ pub(crate) fn project_inspection(
                 env: declared_view_env(&mixin.spec),
                 credentials: mixin.spec.credentials.clone(),
                 tools: mixin.spec.tools.clone(),
+                scripts: declared_view_scripts(&mixin.spec),
                 policy_flags: declared_policy_flags(&lns_policy::Policy {
                     network: lns_policy::NetworkPolicy {
                         egress: mixin.spec.egress.clone(),
@@ -111,7 +125,7 @@ pub(crate) fn project_inspection(
             })))
         }
         Some(lns_artifact::spec::Kind::Sandbox) => {
-            let def = lns_artifact::sandbox::parse(&resolution.document)
+            let def = lns_artifact::sandbox::parse_resolved(&resolution.document)
                 .with_context(|| format!("inspecting sandbox {image_ref}"))?;
             let resolved = resolved_from_sandbox(&def, &crate::artifact::PackedFilesets::new());
             let (declared_size, _) = lns_artifact::resources::DeclaredSize::from_resources(
@@ -138,6 +152,7 @@ pub(crate) fn project_inspection(
                     connectors: def.spec.connectors.clone(),
                     credentials: def.spec.credentials.clone(),
                     tools: def.spec.tools.clone(),
+                    scripts: declared_view_scripts(&def.spec),
                     policy_flags: resolved
                         .policy
                         .as_ref()
@@ -175,6 +190,52 @@ mod tests {
             declared_path_filesets: std::collections::BTreeMap::new(),
             carriers: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn a_sandbox_reports_every_script_it_declares_with_the_user_it_asks_for() {
+        let spec: lns_artifact::sandbox::SandboxSpec = serde_json::from_str(
+            r#"{"image":"registry.example.test/runtime:1","scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y psql","description":"the psql the prompts assume"},{"when":"pre-start","run":"npm ci"}]}"#,
+        )
+        .expect("a valid fixture");
+        assert_eq!(
+            declared_view_scripts(&spec),
+            vec![
+                lns_ipc::SandboxScript {
+                    when: "pre-start".into(),
+                    run: "apt-get install -y psql".into(),
+                    user: Some("root".into()),
+                    description: Some("the psql the prompts assume".into()),
+                },
+                lns_ipc::SandboxScript {
+                    when: "pre-start".into(),
+                    run: "npm ci".into(),
+                    user: None,
+                    description: None,
+                },
+            ],
+            "a consumer approving a script has to be able to read it, so the body travels whole and an absent user stays absent"
+        );
+    }
+
+    #[test]
+    fn the_preflight_projects_every_script_the_merge_appended() {
+        let entries: Vec<String> = (0..=lns_artifact::sandbox::MAX_SCRIPT_STEPS)
+            .map(|n| format!(r#"{{"when":"pre-start","run":"echo {n}"}}"#))
+            .collect();
+        let config = format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"registry.example.test/runtime:1","scripts":[{}]}}}}"#,
+            entries.join(",")
+        );
+        let projected = serde_json::to_value(project_sandbox(&config).expect(
+            "the preflight reads the resolved document, so it must not hold it to an authoring ceiling",
+        ))
+        .expect("an inspection encodes");
+        assert_eq!(
+            projected["scripts"].as_array().map(Vec::len),
+            Some(lns_artifact::sandbox::MAX_SCRIPT_STEPS + 1),
+            "the disclosure is what the consumer approves, so it has to list every script the run will actually execute"
+        );
     }
 
     fn project_sandbox(config: &str) -> Result<ArtifactInspection> {
@@ -299,6 +360,7 @@ mod tests {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus,
             mem_mib,
@@ -323,6 +385,7 @@ mod tests {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
@@ -347,6 +410,7 @@ mod tests {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,
@@ -381,6 +445,7 @@ mod tests {
                 env: vec!["MODE=research".into()],
                 credentials: Vec::new(),
                 tools: vec!["node@22".into()],
+                scripts: Vec::new(),
                 policy_flags: Vec::new(),
             })),
             "a published mixin is shown unresolved, so what its own graph merges to stays a launch-time answer"
@@ -671,6 +736,7 @@ mod tests {
                 env: vec![],
                 credentials: vec![],
                 tools: vec![],
+                scripts: Vec::new(),
                 policy_flags: vec![
                     "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into()
                 ],
@@ -713,6 +779,7 @@ mod tests {
                     }],
                 }],
                 tools: vec![],
+                scripts: Vec::new(),
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
@@ -745,6 +812,7 @@ mod tests {
                 env: vec![],
                 credentials: vec![],
                 tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
+                scripts: Vec::new(),
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
@@ -777,6 +845,7 @@ mod tests {
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
                 credentials: vec![],
                 tools: vec![],
+                scripts: Vec::new(),
                 policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,

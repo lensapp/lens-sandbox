@@ -49,6 +49,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
             env: Vec::new(),
             credentials: Vec::new(),
             tools: Vec::new(),
+            scripts: Vec::new(),
             policy_flags: Vec::new(),
             cpus: None,
             mem_mib: None,

@@ -70,6 +70,7 @@ The `spec` fields:
 | `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `guestPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
 | `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
+| `scripts`      | Shell scripts the guest runs before the workload starts, each with a `when` slot (`pre-start`), a `run` body, and an optional `user` so a script that needs root can say so without the workload running as root. Mixin-contributed scripts append to the sandbox's own. See [Pre-start scripts](#pre-start-scripts--preparing-the-guest). |
 
 Check the definition offline — no network, no service — with `validate` and a
 target-less `lns inspect`:
@@ -780,6 +781,79 @@ the OS userland; matching builds are selected for its libc flavor (musl or
 glibc). A tool with no build for the image's flavor refuses the launch with
 both remedies: switch to a glibc base image, or bring the runtime via
 `spec.image` as before.
+
+### Pre-start scripts — preparing the guest
+
+`spec.scripts` runs shell scripts inside the guest before the workload starts.
+It is where a document configures what it contributes: a package the image
+lacks, a generated config file, a seeded cache.
+
+```yaml
+spec:
+  egress:
+    http:
+      - match: deb.debian.org
+        verdict: allow
+        description: the mirror the pre-start script installs from
+  scripts:
+    - when: pre-start
+      user: root
+      description: the psql this sandbox's prompts assume
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends postgresql-client
+```
+
+A mixin can carry them too, which is the point: a mixin that declares
+`postgresql@17` and the egress to reach a database can now also install the
+client the workload expects, instead of only working in images that already
+have it. Mixin scripts **append** to the sandbox's own — nothing overrides
+anything, because two scripts answer no shared question, and dropping one would
+not be an override but a missing dependency.
+
+**Reach for `tools` first.** The two blocks solve overlapping problems and the
+trade is not close:
+
+| | `tools` | `scripts` |
+|---|---|---|
+| When it runs | Once per machine, before the microVM boots | Every boot, inside the guest |
+| Cost | Cached; later runs pay nothing | Paid again on every run |
+| Portability | One `name@version` for any image, given a build for its libc flavor | Whatever the image's package manager understands |
+| Network | Provisioned outside workload policy | Under this run's `egress`, like the workload |
+
+So a toolchain belongs in `tools`, and a better base image beats both. Use a
+script for what neither can express.
+
+Four things worth knowing before you write one:
+
+- **A script runs under this run's egress policy.** It reaches what the workload
+  may reach and nothing else, through the same proxy, so a document that
+  installs from a mirror ships that mirror's `egress` in the same document. A
+  destination no rule decides is asked about the way any other is — before the
+  workload has started.
+- **The body runs under `sh -e`**, so the first command that fails ends the
+  script and the run. Write `cmd || true` where a failure is acceptable.
+- **Writes are as durable as where they land.** Outside a volume or a bind they
+  go to the disk the run throws away, so an installed package is installed again
+  next boot. A write into a `volume` outlives the run; a write into a read-write
+  bind reaches your host, exactly as the workload's own would.
+- **`user: root` is root inside the microVM, bounded.** A root script can write
+  anywhere the mounts allow, but it cannot administer the network — so it cannot
+  take down the cage enforcing `egress` — and it cannot create a device node or
+  set a file capability, so a package whose installer needs one of those fails
+  partway through.
+
+A failing script refuses the run: later scripts do not run, the workload never
+starts, and `lns run` exits `125` naming the script and the status it exited
+with. Output streams as it is produced, prefixed `[scripts 1/2]`, so a slow
+install never reads as a hang.
+
+Scripts are disclosed like everything else. The launch summary lists each one in
+run order with the user it asks for, its length, a hash of its body, its
+description, and the document that contributed it; `lns sandbox inspect` prints
+the bodies whole. A pulled sandbox whose only effect is a script still asks
+before it boots — that consent is what stands between you and a stranger's root
+script, so read it.
 
 ### Host bind mounts
 

@@ -7,6 +7,7 @@ pub mod declared_tools;
 pub mod env_injection;
 pub mod exec_session_routing;
 pub mod forward;
+pub mod guest_scripts;
 pub mod host_binds;
 pub mod image_management;
 pub mod ipc;

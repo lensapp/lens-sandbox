@@ -1,4 +1,4 @@
-mod agent;
+pub(crate) mod agent;
 mod runtime;
 
 pub(crate) use agent::AgentDispatcher;
