@@ -140,6 +140,17 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             ));
         }
     }
+    if !world.project_scripts.is_empty() {
+        spec_tail.push_str("\n  scripts:");
+        for body in &world.project_scripts {
+            // A block scalar, like the inline filesets above: a body carrying `: ` or a
+            // leading `-` would change what the definition means as a plain one.
+            spec_tail.push_str("\n    - when: pre-start\n      run: |-");
+            for line in body.split('\n') {
+                spec_tail.push_str(&format!("\n        {line}"));
+            }
+        }
+    }
     if !world.project_ports.is_empty() {
         spec_tail.push_str("\n  ports:");
         for (host, container) in &world.project_ports {
@@ -302,6 +313,11 @@ fn project_declares_credential(world: &mut E2eWorld, env: String, domain: String
 #[given(regex = r#"^the project definition sets command "([^"]+)"$"#)]
 fn project_sets_command(world: &mut E2eWorld, command: String) {
     world.project_command = Some(command);
+}
+
+#[given(regex = r#"^the project definition declares a pre-start script "([^"]+)"$"#)]
+fn project_declares_a_script(world: &mut E2eWorld, body: String) {
+    world.project_scripts.push(body);
 }
 
 #[given(regex = r#"^the project definition sets env "([^"]+)=([^"]*)"$"#)]
