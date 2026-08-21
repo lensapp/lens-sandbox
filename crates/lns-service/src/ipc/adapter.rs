@@ -29,6 +29,7 @@ pub async fn run_server(
     started_at: Instant,
 ) -> anyhow::Result<()> {
     let listener = bind_or_replace_stale(&socket_path).await?;
+    crate::run::scratch::sweep_orphans();
 
     loop {
         tokio::select! {
@@ -759,4 +760,61 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
         &mut frame_rx,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn staged_orphan() -> PathBuf {
+        let dir = crate::cache::root().unwrap().join("runs").join("orphan1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("upper.img"), vec![7u8; 4096]).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn an_exclusive_bind_sweeps_orphaned_scratch_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let orphan = staged_orphan();
+        let shutdown = Arc::new(Shutdown::new());
+        shutdown.signal();
+        run_server(d.path().join("lns.sock"), shutdown, Instant::now())
+            .await
+            .unwrap();
+        assert!(
+            !orphan.exists(),
+            "an orphan is swept once the bind proves this is the only instance"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_second_instance_bails_without_sweeping() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
+        let orphan = staged_orphan();
+        let socket = d.path().join("lns.sock");
+        let live_instance = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = live_instance.accept().await {
+                let _ = read_frame_bytes_async(&mut stream).await;
+                let _ = stream
+                    .write_all(&encode_frame(&Response::Pong).unwrap())
+                    .await;
+            }
+        });
+        let err = run_server(socket, Arc::new(Shutdown::new()), Instant::now())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already running"), "got {err:#}");
+        assert!(
+            orphan.exists(),
+            "a run another instance may own must survive a losing startup"
+        );
+    }
 }
