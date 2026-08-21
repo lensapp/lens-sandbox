@@ -20,7 +20,6 @@ pub mod rootfs_assembly;
 pub mod run_as_env;
 pub mod run_lifecycle;
 pub mod run_naming;
-pub mod run_scratch;
 pub mod run_start_refusal;
 pub mod run_user;
 pub mod sandbox_filesets;
