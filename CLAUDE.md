@@ -157,7 +157,7 @@ Adding a new crate that needs the per-crate `complexity` gate step: add it to `G
 
 ## Toolchain
 
-Rust toolchain is pinned via `rust-toolchain.toml` (currently `1.95.0`). One-time setup:
+Rust toolchain is pinned via `rust-toolchain.toml` (currently `1.96.1`). One-time setup:
 
 ```
 cargo install cargo-llvm-cov   # for `make coverage` / `make coverage-lcov`

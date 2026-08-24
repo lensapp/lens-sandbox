@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lensapp/lens-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/lensapp/lens-sandbox/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](rust-toolchain.toml)
+[![Rust 1.96+](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](rust-toolchain.toml)
 
 > **The sandbox you'll actually leave running.**
 >
