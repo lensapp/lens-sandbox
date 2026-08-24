@@ -18,6 +18,7 @@ fn not_running(reference: &str) -> Response {
 fn cached_artifact(world: &mut BehaviourWorld, reference: &str, inspection: ArtifactInspection) {
     world.sandbox.response = Some(not_running(reference));
     world.sandbox.inspect_image_response = Some(Response::ImageInspected { inspection });
+    world.sandbox.cached_references = vec![reference.to_string()];
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a plain image$"#)]

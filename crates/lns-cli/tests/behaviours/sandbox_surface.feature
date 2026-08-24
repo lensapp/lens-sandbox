@@ -128,6 +128,14 @@ Feature: two things carry a name, and every command acts on one of them
     And the output contains "lns sandbox rm hermes"
     And the output contains "lns artifact rm hermes"
 
+  Scenario: a word only a registry could resolve is not an artifact
+    # Every short word is a real image on Docker Hub, so the lookup asks the
+    # local store. If it asked a registry, no sandbox could be named `redis`.
+    Given "redis" names a sandbox, and the cache holds nothing
+    When the user runs "lns rm redis"
+    Then the command fails with an exit code other than 0
+    And the output contains "running sandbox"
+
   Scenario: a word neither namespace knows names both as searched
     Given "ghost" names neither a sandbox nor a cached artifact
     When the user runs "lns inspect ghost"

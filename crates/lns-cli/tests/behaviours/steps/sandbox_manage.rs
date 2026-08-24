@@ -29,6 +29,7 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
 
 #[given(regex = r#"^the reference "([^"]+)" resolves to a cached sandbox$"#)]
 fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.cached_references = vec![reference.clone()];
     w.sandbox.response = Some(Response::Error {
         message: format!("no active run with id {reference}"),
     });
@@ -62,6 +63,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     regex = r#"^the sandbox "([^"]+)" is cached and no other sandbox shares its base-image layers$"#
 )]
 fn cached_sandbox_sole_owner(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.cached_references = vec![reference.clone()];
     w.sandbox.response = Some(Response::Error {
         message: format!("no active run with id {reference}"),
     });
@@ -192,6 +194,7 @@ fn reports_a_sandbox_and_an_image(w: &mut BehaviourWorld, sandbox: String, image
 #[given(regex = r#"^"([^"]+)" names both a sandbox and a cached artifact$"#)]
 fn names_both(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name.clone());
+    w.sandbox.cached_references = vec![name.clone()];
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: ArtifactInspection::Image(lns_ipc::ImageView {
             reference: name,
@@ -208,4 +211,10 @@ fn names_neither(w: &mut BehaviourWorld, name: String) {
     w.sandbox.inspect_image_response = Some(Response::Error {
         message: format!("no such image: {name}"),
     });
+}
+
+#[given(regex = r#"^"([^"]+)" names a sandbox, and the cache holds nothing$"#)]
+fn names_a_sandbox_only(w: &mut BehaviourWorld, name: String) {
+    reference_resolves_to_running(w, name);
+    w.sandbox.cached_references = Vec::new();
 }
