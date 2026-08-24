@@ -13,6 +13,8 @@ Feature: two things carry a name, and every command acts on one of them
     And the output contains "tag"
     And the output contains "init"
     And the output contains "ps"
+    And the output contains "exec"
+    And the output contains "start"
     And the output contains "sandbox"
     And the output contains "artifact"
     And the output contains "volume"
@@ -158,3 +160,12 @@ Feature: two things carry a name, and every command acts on one of them
     Then the command fails with an exit code other than 0
     And the output contains "lns sandbox ls"
     And the output contains "lns artifact ls"
+
+  Scenario Outline: every verb the front page lists is reachable by that spelling
+    When I run "lns <verb> --help"
+    Then the exit code is 0
+    And the output contains "Usage: lns <verb>"
+    Examples:
+      | verb  |
+      | exec  |
+      | start |

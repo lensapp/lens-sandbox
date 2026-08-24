@@ -1,6 +1,6 @@
-Feature: lns start — restart a stopped run from the CLI
+Feature: lns sandbox start — run a stopped sandbox again from the CLI
   `lns start <RUN>` is the top-level shortcut for `lns sandbox start`.
-  Detached by default: it prints the run's handle and exits; -a attaches
+  Detached by default: it prints the sandbox's handle and exits; -a attaches
   output and adopts the workload's exit code.
 
   Scenario: start is registered in the top-level grammar
