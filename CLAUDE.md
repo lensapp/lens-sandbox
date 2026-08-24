@@ -163,6 +163,8 @@ Rust toolchain is pinned via `rust-toolchain.toml` (currently `1.96.1`). One-tim
 cargo install cargo-llvm-cov   # for `make coverage` / `make coverage-lcov`
 ```
 
+If you use mise, run `mise trust && mise install` too — `.mise.toml` points mise at `rust-toolchain.toml`, and until it is trusted every mise command errors, then warns `missing: rust@<pin>` until the pinned version is installed.
+
 `cargo-llvm-cov` measures **Layer 2 + Layer 3 only** (see [Test layers](#test-layers)). It wraps `cargo` with LLVM source-based instrumentation. Layer 1 (E2E) tests are deliberately excluded from coverage scoring — their value is wiring confidence, not line attribution. Vendored upstream code (`composefs/vendor/`), the build script, and the thin production-wiring adapters (`kernel/real.rs`, `kernel/traits.rs`, `service/real.rs`) all flow through the same IGNORES table in `scripts/coverage-floor.sh` — one mechanism, one place to look.
 
 The Layer 1 cucumber crate (`crates/e2e-tests`) is excluded from `cargo test --workspace --exclude e2e-tests` in `coverage-data`, so its subprocess spawns do not contribute to any crate's coverage data — `make e2e` runs it separately for wiring confirmation only.
