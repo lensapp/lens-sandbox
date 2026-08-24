@@ -58,15 +58,16 @@ pub fn registry() -> Vec<CommandSpec> {
         crate::run::EXEC_SPEC,
         crate::volume::SPEC,
         crate::sandbox::SPEC,
-        crate::sandbox::INIT_SPEC,
+        crate::artifact::SPEC,
+        crate::artifact::INIT_SPEC,
+        crate::artifact::PUSH_SPEC,
+        crate::artifact::PULL_SPEC,
+        crate::artifact::TAG_SPEC,
         crate::sandbox::PS_SPEC,
         crate::sandbox::KILL_SPEC,
-        crate::sandbox::PUSH_SPEC,
-        crate::sandbox::PULL_SPEC,
-        crate::sandbox::TAG_SPEC,
         crate::sandbox::STOP_SPEC,
-        crate::sandbox::RM_SPEC,
-        crate::sandbox::INSPECT_SPEC,
+        crate::shortcut::RM_SPEC,
+        crate::shortcut::INSPECT_SPEC,
         crate::sandbox::LOGS_SPEC,
         crate::sandbox::ATTACH_SPEC,
         crate::audit::SPEC,
@@ -419,10 +420,11 @@ mod tests {
     #[test]
     fn a_verb_that_prompts_never_owns_the_terminal_under_the_sandbox_parent() {
         for argv in [
-            ["lns", "sandbox", "pull", "ghcr.io/team/hermes:1.4.0"].as_slice(),
-            &["lns", "sandbox", "push", "ghcr.io/team/hermes:1.4.0"],
-            &["lns", "sandbox", "prune"],
-            &["lns", "sandbox", "rm", "ghcr.io/team/hermes:1.4.0"],
+            ["lns", "artifact", "pull", "ghcr.io/team/hermes:1.4.0"].as_slice(),
+            &["lns", "artifact", "push", "ghcr.io/team/hermes:1.4.0"],
+            &["lns", "artifact", "prune"],
+            &["lns", "artifact", "rm", "ghcr.io/team/hermes:1.4.0"],
+            &["lns", "artifact", "ls"],
             &["lns", "sandbox", "ls"],
         ] {
             let invocation = argv.join(" ");
@@ -434,12 +436,19 @@ mod tests {
     }
 
     #[test]
-    fn a_shortcut_and_its_sandbox_spelling_agree_on_who_owns_the_terminal() {
-        for verb in [
-            "init", "ps", "kill", "push", "pull", "tag", "stop", "rm", "inspect", "logs", "attach",
+    fn a_shortcut_and_its_namespaced_spelling_agree_on_who_owns_the_terminal() {
+        for (namespace, verb) in [
+            ("artifact", "init"),
+            ("artifact", "push"),
+            ("artifact", "pull"),
+            ("artifact", "tag"),
+            ("sandbox", "kill"),
+            ("sandbox", "stop"),
+            ("sandbox", "logs"),
+            ("sandbox", "attach"),
         ] {
             let argv: Vec<&str> = match verb {
-                "init" | "ps" => vec!["lns", verb],
+                "init" => vec!["lns", verb],
                 "push" | "pull" => vec!["lns", verb, "ghcr.io/team/hermes:1.4.0"],
                 "tag" => vec![
                     "lns",
@@ -450,11 +459,11 @@ mod tests {
                 _ => vec!["lns", verb, "someid"],
             };
             let mut canonical = argv.clone();
-            canonical.insert(1, "sandbox");
+            canonical.insert(1, namespace);
             assert_eq!(
                 owns_terminal_for(&argv),
                 owns_terminal_for(&canonical),
-                "`lns {verb}` is documented as an exact shortcut for `lns sandbox {verb}`, so both spellings must get the same stdin"
+                "`lns {verb}` is documented as an exact shortcut for `lns {namespace} {verb}`, so both spellings must get the same stdin"
             );
         }
     }
@@ -502,7 +511,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "expected the run variant")]
     fn sandbox_run_args_guards_against_decoding_another_verb() {
-        sandbox_run_args(&["lns", "sandbox", "ps"]);
+        sandbox_run_args(&["lns", "sandbox", "ls"]);
     }
 
     #[test]
@@ -544,7 +553,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "expected the exec variant")]
     fn sandbox_exec_args_guards_against_decoding_another_verb() {
-        sandbox_exec_args(&["lns", "sandbox", "ps"]);
+        sandbox_exec_args(&["lns", "sandbox", "ls"]);
     }
 
     #[test]

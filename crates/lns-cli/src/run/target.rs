@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::sandbox::author::{Fs, LNS_YAML, load_definition_json_at};
+use crate::artifact::author::{Fs, LNS_YAML, load_definition_json_at};
 
 /// What `lns run` launches: a registry reference the service resolves and classifies, or a local `lns.yaml` sandbox definition run directly, rooted at its own directory.
 #[derive(Debug)]
@@ -46,7 +46,7 @@ pub fn resolve<F: Fs>(
     }
     let json = load_definition_json_at(fs, &file)?;
     let def = lns_artifact::sandbox::parse(&json)?;
-    let problems = crate::sandbox::fileset::path_fileset_problems(fs, &project_dir, &def);
+    let problems = crate::artifact::fileset::path_fileset_problems(fs, &project_dir, &def);
     if !problems.is_empty() {
         bail!("{}", problems.join("\n"));
     }
@@ -176,7 +176,7 @@ mod tests {
         );
     }
 
-    use crate::sandbox::test_support::MapFs;
+    use crate::artifact::test_support::MapFs;
 
     fn fake(path: &str, contents: &str) -> MapFs {
         MapFs::with(&[(path, contents)])

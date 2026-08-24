@@ -65,6 +65,12 @@ fn cached_sandbox_sole_owner(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.response = Some(Response::Error {
         message: format!("no active run with id {reference}"),
     });
+    w.sandbox.inspect_image_response = Some(Response::ImageInspected {
+        inspection: ArtifactInspection::Image(lns_ipc::ImageView {
+            reference: reference.clone(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        }),
+    });
     w.sandbox.remove_image_response = Some(Response::ImageRemoved {
         reference,
         reclaimed_bytes: 3 * 1024 * 1024,
@@ -180,5 +186,26 @@ fn reports_a_sandbox_and_an_image(w: &mut BehaviourWorld, sandbox: String, image
             cached(&sandbox, CachedKind::Sandbox, None),
             cached(&image, CachedKind::Image, None),
         ],
+    });
+}
+
+#[given(regex = r#"^"([^"]+)" names both a sandbox and a cached artifact$"#)]
+fn names_both(w: &mut BehaviourWorld, name: String) {
+    reference_resolves_to_running(w, name.clone());
+    w.sandbox.inspect_image_response = Some(Response::ImageInspected {
+        inspection: ArtifactInspection::Image(lns_ipc::ImageView {
+            reference: name,
+            digest: format!("sha256:{}", "a".repeat(64)),
+        }),
+    });
+}
+
+#[given(regex = r#"^"([^"]+)" names neither a sandbox nor a cached artifact$"#)]
+fn names_neither(w: &mut BehaviourWorld, name: String) {
+    w.sandbox.response = Some(Response::Error {
+        message: format!("no active run with id {name}"),
+    });
+    w.sandbox.inspect_image_response = Some(Response::Error {
+        message: format!("no such image: {name}"),
     });
 }

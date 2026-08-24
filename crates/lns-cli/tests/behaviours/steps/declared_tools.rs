@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::run::summary::print_run_summary;
-use lns_cli::sandbox::{SandboxCommand, TermInfo, run_with_writers};
+use lns_cli::sandbox::TermInfo;
 use lns_ipc::{ArtifactInspection, Response, SandboxView};
 
 use super::sandbox_cli::fake_sandbox_service;
@@ -100,14 +100,10 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
 async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
     let svc = fake_sandbox_service(w);
     let mut out: Vec<u8> = Vec::new();
-    let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let result = run_with_writers(
-        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
-            output: lns_cli::output::OutputArgs {
-                format: lns_cli::output::Format::Table,
-            },
-            run: Some(TOOLS_REFERENCE.into()),
+    let result = lns_cli::artifact::run_with_writers(
+        &lns_cli::artifact::ArtifactCommand::Inspect(lns_cli::artifact::InspectArgs {
+            reference: Some(TOOLS_REFERENCE.into()),
             mixins: Vec::new(),
             file: None,
         }),
@@ -115,7 +111,6 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
         TermInfo::default(),
         &mut std::io::Cursor::new(""),
         &mut out,
-        &mut stdout,
         &mut stderr,
     )
     .await;

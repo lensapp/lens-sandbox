@@ -156,7 +156,7 @@ network or the service, and a target-less `lns inspect` renders the effective
 definition:
 
 ```bash
-lns sandbox validate     # -> lns.yaml is valid.
+lns artifact validate     # -> lns.yaml is valid.
 lns inspect              # -> the merged, resolved definition (offline)
 ```
 

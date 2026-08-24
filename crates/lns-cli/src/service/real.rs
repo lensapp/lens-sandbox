@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
 
-use super::client::{BoxFuture, ServiceClient};
+use super::client::{BoxFuture, SandboxService, ServiceClient};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -236,6 +236,55 @@ impl ServiceClient for RealServiceClient {
 
     fn cancel_run(&self, run_id: String) -> BoxFuture<'_, ()> {
         Box::pin(send_cancel_impl(&self.socket, run_id))
+    }
+}
+
+pub struct RealSandboxService {
+    socket: PathBuf,
+}
+
+impl RealSandboxService {
+    pub fn new(socket: PathBuf) -> Self {
+        Self { socket }
+    }
+}
+
+impl SandboxService for RealSandboxService {
+    type Stream = UnixStream;
+
+    fn one_shot(&self, request: Request) -> BoxFuture<'_, Result<Response>> {
+        Box::pin(async move {
+            crate::service::real::send_request(&self.socket, &request)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no response from lns-service (is it running?)"))
+        })
+    }
+
+    fn open_stream(&self, request: Request) -> BoxFuture<'_, Result<UnixStream>> {
+        Box::pin(async move {
+            let mut stream = UnixStream::connect(&self.socket)
+                .await
+                .with_context(|| format!("connecting to {}", self.socket.display()))?;
+            let frame = encode_frame(&request).context("encoding stream request")?;
+            stream
+                .write_all(&frame)
+                .await
+                .context("writing stream request")?;
+            Ok(stream)
+        })
+    }
+
+    fn aux_socket(&self) -> Option<PathBuf> {
+        Some(self.socket.clone())
+    }
+
+    fn load_policy(&self, path: &str) -> Option<serde_json::Value> {
+        let path = Path::new(path);
+        if !path.exists() {
+            return None;
+        }
+        let policy = lns_policy::Policy::load_or_default(path).ok()?;
+        serde_json::to_value(&policy).ok()
     }
 }
 

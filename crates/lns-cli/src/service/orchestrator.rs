@@ -63,7 +63,7 @@ pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
     let target = crate::run::target::resolve(
         args.image.as_deref(),
         args.file.as_deref(),
-        &crate::sandbox::real::RealFs,
+        &crate::artifact::real::RealFs,
         &cwd,
     )?;
     require_running().await?;

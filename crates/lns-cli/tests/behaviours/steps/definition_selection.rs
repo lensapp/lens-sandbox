@@ -7,7 +7,7 @@ use crate::world::{BehaviourWorld, TEST_HOST};
 
 #[when(regex = r#"^the user runs "lns push(.*)"$"#)]
 async fn user_runs_lns_push(w: &mut BehaviourWorld, rest: String) {
-    super::sandbox_cli::drive_sandbox_command(w, &format!("push{rest}")).await;
+    super::sandbox_cli::drive_artifact_command(w, &format!("push{rest}")).await;
 }
 
 #[then(regex = r#"^the pushed artifact carries the definition from "([^"]+)"$"#)]

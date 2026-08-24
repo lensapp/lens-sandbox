@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod audit;
 pub mod build;
 pub mod chord;
@@ -13,8 +14,11 @@ pub mod raw_mode;
 pub mod run;
 pub mod sandbox;
 pub mod service;
+pub mod shortcut;
 #[cfg(test)]
 mod test_env;
+#[cfg(test)]
+pub(crate) mod test_service;
 pub mod uninstall;
 pub mod update;
 pub mod update_check;

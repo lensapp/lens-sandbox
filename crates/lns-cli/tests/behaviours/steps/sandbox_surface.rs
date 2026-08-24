@@ -1,4 +1,5 @@
 use cucumber::{given, then, when};
+use lns_cli::artifact::{ArtifactArgs, ArtifactCommand};
 use lns_cli::command::parse_args;
 use lns_cli::sandbox::{SandboxArgs, SandboxCommand, TermInfo, run_with_writers};
 use lns_ipc::Response;
@@ -6,33 +7,53 @@ use lns_ipc::Response;
 use crate::steps::sandbox_cli::fake_sandbox_service;
 use crate::world::BehaviourWorld;
 
-fn decode_shortcut(argv: &[String]) -> SandboxCommand {
+/// Either namespace's decoding of one shortcut argv, so a shortcut and its namespaced form can be driven the same way.
+enum Verb {
+    Sandbox(SandboxCommand),
+    Artifact(ArtifactCommand),
+}
+
+fn decode_shortcut(argv: &[String]) -> Verb {
     match argv[1].as_str() {
-        "pull" => SandboxCommand::Pull(parse_args(argv).expect("pull argv parses")),
-        "ps" => SandboxCommand::Ps(parse_args(argv).expect("ps argv parses")),
-        "stop" => SandboxCommand::Stop(parse_args(argv).expect("stop argv parses")),
-        "kill" => SandboxCommand::Kill(parse_args(argv).expect("kill argv parses")),
-        "rm" => SandboxCommand::Rm(parse_args(argv).expect("rm argv parses")),
-        "inspect" => SandboxCommand::Inspect(parse_args(argv).expect("inspect argv parses")),
+        "pull" => Verb::Artifact(ArtifactCommand::Pull(
+            parse_args(argv).expect("pull parses"),
+        )),
+        "ps" => Verb::Sandbox(SandboxCommand::Ls(parse_args(argv).expect("ps parses"))),
+        "stop" => Verb::Sandbox(SandboxCommand::Stop(parse_args(argv).expect("stop parses"))),
+        "kill" => Verb::Sandbox(SandboxCommand::Kill(parse_args(argv).expect("kill parses"))),
         other => panic!("verb {other} is not part of the shortcut outline"),
     }
 }
 
-async fn record_invocation(w: &mut BehaviourWorld, cmd: SandboxCommand) {
+async fn record_invocation(w: &mut BehaviourWorld, verb: Verb) {
     let svc = fake_sandbox_service(w);
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let _ = run_with_writers(
-        &cmd,
-        &svc,
-        TermInfo::default(),
-        &mut std::io::Cursor::new(""),
-        &mut out,
-        &mut stdout,
-        &mut stderr,
-    )
-    .await;
+    match verb {
+        Verb::Sandbox(cmd) => {
+            let _ = run_with_writers(
+                &cmd,
+                &svc,
+                TermInfo::default(),
+                &mut out,
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
+        }
+        Verb::Artifact(cmd) => {
+            let _ = lns_cli::artifact::run_with_writers(
+                &cmd,
+                &svc,
+                TermInfo::default(),
+                &mut std::io::Cursor::new(""),
+                &mut out,
+                &mut stderr,
+            )
+            .await;
+        }
+    }
     let recorded = std::mem::take(&mut *w.sandbox.requests.lock().unwrap());
     w.equivalence_requests.push(recorded);
 }
@@ -53,12 +74,23 @@ async fn runs_shortcut(w: &mut BehaviourWorld, verb: String, rest: String) {
     record_invocation(w, cmd).await;
 }
 
-#[when(regex = r#"^the user runs its sandbox form "lns sandbox (\S+) ?([^"]*)"$"#)]
-async fn runs_sandbox_form(w: &mut BehaviourWorld, verb: String, rest: String) {
-    let mut argv = vec!["lns".to_string(), "sandbox".to_string(), verb];
+#[when(regex = r#"^the user runs its namespaced form "lns (\S+) (\S+) ?([^"]*)"$"#)]
+async fn runs_namespaced_form(
+    w: &mut BehaviourWorld,
+    namespace: String,
+    verb: String,
+    rest: String,
+) {
+    let mut argv = vec!["lns".to_string(), namespace.clone(), verb];
     argv.extend(rest.split_whitespace().map(str::to_string));
-    let args: SandboxArgs = parse_args(&argv).expect("sandbox argv parses");
-    record_invocation(w, args.command).await;
+    let cmd = if namespace == "artifact" {
+        let args: ArtifactArgs = parse_args(&argv).expect("artifact argv parses");
+        Verb::Artifact(args.command)
+    } else {
+        let args: SandboxArgs = parse_args(&argv).expect("sandbox argv parses");
+        Verb::Sandbox(args.command)
+    };
+    record_invocation(w, cmd).await;
 }
 
 #[then("both invocations issue the same request to the service")]

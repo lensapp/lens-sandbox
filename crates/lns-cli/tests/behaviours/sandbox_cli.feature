@@ -14,7 +14,6 @@ Feature: managing running sandboxes from the CLI
     And the output contains "attach"
     And the output contains "inspect"
     And the output contains "rm"
-    And the output contains "prune"
 
   Scenario: the flat exec and kill verbs stay usable but leave the front page
     When I run "lns --help"
@@ -99,12 +98,6 @@ Feature: managing running sandboxes from the CLI
     When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "policy file could not be read"
-
-  Scenario: --format json has no answer for a cached artifact, and says so
-    Given the reference "hermes:1.4.0" resolves to a cached sandbox
-    When the user runs sandbox command "inspect hermes:1.4.0 --format json"
-    Then the command fails with an exit code other than 0
-    And the output contains "render as themselves"
 
   Scenario: logs dumps the captured output and stops at the end of the buffer
     Given the run 3 stream carries stdout "hello from the workload" then ends

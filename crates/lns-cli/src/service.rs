@@ -8,7 +8,7 @@ pub mod client;
 mod login_agent;
 pub(crate) mod real;
 
-pub use client::ServiceClient;
+pub use client::{SandboxService, ServiceClient, TermInfo};
 pub use login_agent::DisableOutcome;
 
 pub(crate) async fn disable_login_agent() -> DisableOutcome {

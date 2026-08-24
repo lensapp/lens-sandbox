@@ -263,7 +263,7 @@ pub fn confirm_mixin_publication(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::test_support::MapFs;
+    use crate::artifact::test_support::MapFs;
 
     const PARENT: &str = "ghcr.io/acme/dev:1.4";
     const CHILD_DIGEST: &str = "ghcr.io/acme/postgres-tools@sha256:cccc000000000000000000000000000000000000000000000000000000000000";
