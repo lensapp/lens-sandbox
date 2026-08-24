@@ -1239,6 +1239,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_renders_a_cached_sandboxs_connectors_tools_and_scripts() {
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "no such run: hermes:1.4.0".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    mixins: Vec::new(),
+                    pinned_mixins: Vec::new(),
+                    contributions: Vec::new(),
+                    reference: "hermes:1.4.0".into(),
+                    digest: format!("sha256:{}", "a".repeat(64)),
+                    image: "docker.io/library/alpine@sha256:abc".into(),
+                    workdir: None,
+                    user: None,
+                    mounts: Vec::new(),
+                    ports: Vec::new(),
+                    filesets: Vec::new(),
+                    connectors: vec!["some-provider".into()],
+                    env: Vec::new(),
+                    credentials: Vec::new(),
+                    tools: vec!["node@22.11.0".into()],
+                    scripts: vec![
+                        lns_ipc::SandboxScript {
+                            when: "pre-start".into(),
+                            run: "apt-get update\napt-get install -y psql".into(),
+                            user: Some("root".into()),
+                            description: Some("the psql the prompts assume".into()),
+                        },
+                        lns_ipc::SandboxScript {
+                            when: "pre-start".into(),
+                            run: "npm ci".into(),
+                            user: None,
+                            description: None,
+                        },
+                    ],
+                    policy_flags: Vec::new(),
+                    cpus: None,
+                    mem_mib: None,
+                    disk_bytes: None,
+                })),
+            },
+        );
+        let mut out = Vec::new();
+        let code = inspect_cached(&svc, "hermes:1.4.0", &[], &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("kind: sandbox"), "got: {text}");
+        assert!(
+            text.contains("image: docker.io/library/alpine"),
+            "got: {text}"
+        );
+        assert!(text.contains("connector: some-provider"), "got: {text}");
+        assert!(text.contains("tool: node@22.11.0"), "got: {text}");
+        assert!(
+            text.contains("script: pre-start (runs as root)")
+                && text.contains("  the psql the prompts assume")
+                && text.contains("  | apt-get update")
+                && text.contains("  | apt-get install -y psql"),
+            "inspect answers \"so what does it actually do\", so every line of the body has to appear; got: {text}"
+        );
+        assert!(
+            text.contains("script: pre-start (runs as the workload user)"),
+            "a script naming no user runs as the workload does, and a reader should not have to infer that from a blank; got: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn inspect_cached_renders_the_image_kind() {
         let image = CannedService::with_inspect_image(
             Response::Error {
