@@ -26,16 +26,18 @@ pub struct ConnectorArgs {
 pub enum ConnectorCommand {
     #[command(about = "Declare a credential connector in your machine-global catalog.")]
     Add(ConnectorAddArgs),
-    #[command(about = "List the bundled and user-declared connectors.")]
+    #[command(
+        about = "List the connectors this machine knows, how each signs in, and which this project uses."
+    )]
     List(ConnectorListArgs),
     #[command(about = "Remove a user-declared connector; bundled ones cannot be removed.")]
     Remove(ConnectorRemoveArgs),
     #[command(
-        about = "Bind a connector's per-machine value decision (oauth connectors sign in); records the id in this directory's policy."
+        about = "Bind a connector's per-machine value decision (oauth connectors sign in), and record the connection for this project."
     )]
     Connect(ConnectArgs),
     #[command(
-        about = "Disconnect a connector from this directory's policy and forget its per-workload grants here."
+        about = "Withdraw a connector from this project and forget its per-workload grants here."
     )]
     Disconnect(DisconnectArgs),
     #[command(about = "List the per-workload connector grants remembered for this project.")]
