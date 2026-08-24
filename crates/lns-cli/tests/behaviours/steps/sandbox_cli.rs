@@ -48,6 +48,19 @@ impl SandboxService for FakeSandboxService {
                 .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
+            Request::ListImages => self
+                .response
+                .clone()
+                .filter(|r| matches!(r, Response::ImageList { .. }))
+                .or_else(|| {
+                    Some(Response::ImageList {
+                        images: self
+                            .cached_references
+                            .iter()
+                            .map(|reference| cached_entry(reference))
+                            .collect(),
+                    })
+                }),
             Request::RemoveRun { .. } => self
                 .remove_run_response
                 .clone()
