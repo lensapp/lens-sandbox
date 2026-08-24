@@ -35,6 +35,8 @@ pub struct BehaviourWorld {
     pub signin_outcome: Option<lns_cli::connector::SignInOutcome>,
     /// True when the connector under test signs in via the pkce browser redirect, so the fake sign-in renders the browser-opened prompt instead of a device code.
     pub signin_is_pkce: bool,
+    /// The catalog as it stood before a refused `add`, so the refusal can be shown to have written nothing.
+    pub catalog_before: Option<String>,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
