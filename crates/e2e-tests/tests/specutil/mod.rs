@@ -229,7 +229,7 @@ pub fn capture_with_timeout(mut cmd: Command, timeout: Duration) -> CliResult {
 }
 
 pub fn audit_runs_dir(home: &Path) -> PathBuf {
-    data_lns_dir(home).join("runs")
+    data_lns_dir(home).join("audit")
 }
 
 /// One directory holds everything lns keeps, and the harness points `LNS_HOME` at it.

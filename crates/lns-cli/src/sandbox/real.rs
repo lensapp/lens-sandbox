@@ -33,6 +33,13 @@ async fn dispatch_command(
     dispatch(super::SandboxArgs { command }, input).await
 }
 
+pub fn run_start<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxStartArgs::from_arg_matches(matches)?;
+        dispatch_command(super::SandboxCommand::Start(args), ctx.input).await
+    })
+}
+
 pub fn run_stop<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxStopArgs::from_arg_matches(matches)?;
@@ -69,7 +76,7 @@ pub fn run_attach<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutu
 }
 
 // The caller already holds the process-wide stdin lock (run_from_matches), so this must borrow it — a second Stdin::lock on the same thread deadlocks every dispatched verb.
-pub async fn dispatch(args: super::SandboxArgs, _input: &mut dyn std::io::BufRead) -> Result<i32> {
+pub async fn dispatch(args: super::SandboxArgs, input: &mut dyn std::io::BufRead) -> Result<i32> {
     let command = match args.command {
         super::SandboxCommand::Exec(exec_args) => {
             return crate::service::exec_image(exec_args).await;
@@ -84,5 +91,15 @@ pub async fn dispatch(args: super::SandboxArgs, _input: &mut dyn std::io::BufRea
     let mut out = std::io::stdout();
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
-    run_with_writers(&command, &svc, term, &mut out, &mut stdout, &mut stderr).await
+    let mut input = input;
+    run_with_writers(
+        &command,
+        &svc,
+        term,
+        &mut input,
+        &mut out,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await
 }

@@ -678,7 +678,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let _home = home_for(&temp);
         let path = audit_path("aa42").expect("audit_path");
-        assert!(path.ends_with("runs/aa42/audit.jsonl"));
+        assert!(path.ends_with("audit/aa42/audit.jsonl"));
         assert!(
             !path.parent().unwrap().exists(),
             "the run dir is created lazily on the first audit event, not at spawn"
@@ -1334,7 +1334,7 @@ mod tests {
             relay
                 .audit_path
                 .to_string_lossy()
-                .ends_with("runs/aa1234/audit.jsonl")
+                .ends_with("audit/aa1234/audit.jsonl")
         );
         drop(relay.fd_tx);
         tokio::task::yield_now().await;

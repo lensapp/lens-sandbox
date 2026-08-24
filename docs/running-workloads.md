@@ -392,7 +392,8 @@ lns volume prune               # delete every volume no running sandbox holds
 `rm` and `prune` never touch a volume that a live run has attached, and `prune`
 asks for confirmation unless you pass `-f`/`--force`. A volume is the one place
 data persists *across* runs; a run's own writable layer persists only with its
-stopped run, until `lns rm` sweeps both away — so removing a volume is permanent.
+stopped sandbox, until `lns rm` sweeps both away — so removing a volume is
+permanent.
 
 A run that finishes, or that you `lns stop`, **releases** each volume before the
 guest powers off, so the image is left marked clean. A run the host cannot ask to
@@ -1002,7 +1003,7 @@ lns run -d ghcr.io/acme/long-job
 A detached run is reachable later via the
 [running-sandbox lifecycle verbs](#managing-running-sandboxes), and once it ends
 it stays restartable — see
-[the run lifecycle](#the-run-lifecycle--stopped-runs-and-lns-start).
+[the sandbox lifecycle](#the-sandbox-lifecycle--stopped-sandboxes-and-lns-start).
 `-d` cannot be combined with `-i`/`-t`.
 
 ### Detaching from an attached run
@@ -1111,8 +1112,8 @@ lns exec 7 -- bash         # open another session inside a run
 lns kill 7                 # send one signal (default SIGTERM)
 lns stop 7                 # SIGTERM, wait up to 10s, then SIGKILL
 lns stop 7 -t 30           # give it longer to clean up
-lns start 7                # boot a stopped run again on its preserved state
-lns rm 7                   # remove a stopped run; -f kills a running one first
+lns start 7                # run a stopped sandbox again on its preserved layer
+lns rm 7                   # remove a sandbox; -f stops a running one first
 lns logs 7                 # print the captured output so far
 lns logs -f 7              # ...and keep following until it exits
 lns attach 7               # re-join a detached run live
@@ -1162,12 +1163,11 @@ shutdown: it sends `SIGTERM`, waits up to the timeout for the workload to exit, 
 only then sends `SIGKILL`. The command reports which of the two happened —
 `stopped run #7` for a graceful exit, `killed run #7` when it had to escalate.
 
-### The run lifecycle — stopped runs and `lns start`
+### The sandbox lifecycle — stopped sandboxes and `lns start`
 
-A run that ends — because you stopped it or because its workload exited — becomes
-a **stopped run**: it stays listed, keeps its name, and keeps its writable layer,
-until you remove it. `lns start` boots the same run again on top of that layer,
-docker-start style:
+A sandbox outlives its workload. When the workload exits — or you `lns stop` it —
+the sandbox stays listed as **stopped**: it keeps its name and its writable layer
+until you remove it. `lns start` runs it again on top of that layer:
 
 ```bash
 lns run -d --name reviewer ghcr.io/acme/agent
@@ -1180,26 +1180,36 @@ lns start -a -i reviewer   # ...and forward stdin too
 What `start` replays and what it re-resolves is a fixed split — **config frozen,
 policy live**:
 
-- The launch configuration comes verbatim from the run's record: the image (pinned
-  by digest), command, env, mounts, published ports, resources, and run-as
-  identity. Editing `lns.yaml` affects new runs only.
+- The launch configuration replays verbatim from the sandbox's record: the image
+  (pinned by digest), command, env, mounts, published ports, resources, and run-as
+  identity. Editing `lns.yaml` affects new sandboxes only.
 - Network policy and credentials re-resolve live, exactly as a fresh boot would:
   a rule you added to the decisions file since applies, a revoked grant asks
   again.
 - Processes and `/tmp` never survive — the entrypoint runs again from the start.
   Files the workload wrote anywhere else are there, because the writable layer is.
 
-A conflict fails the start closed with an error naming it — a host port another
-process took, a volume another run holds, a bind source that no longer exists, a
-damaged writable layer — and the run stays stopped, untouched. Starting a run
+A conflict aborts the start with an error naming it — a host port another process
+took, a volume another sandbox holds, a bind source that no longer exists, a
+damaged writable layer — and the sandbox stays stopped, untouched. Starting one
 that is already running succeeds and changes nothing.
 
-Stopped runs persist deliberately: they survive a service restart and a host
-reboot, they pin the image they boot from against `lns rmi` and image pruning,
-and their names stay reserved. Nothing ages them out — a run you stopped waits
-for you. Remove one with `lns rm` (record and writable layer go together, the
-name frees up), opt a run out of persistence entirely with `lns run --rm`, or
-sweep every stopped run at once with `lns sandbox prune --force`.
+`lns sandbox ls` shows the running ones; `-a` includes the stopped:
+
+```bash
+lns ps                     # running only
+lns sandbox ls -a          # ...and the ones that stopped
+```
+
+Stopped sandboxes persist deliberately: they survive a service restart and a host
+reboot, they hold the artifact they boot from against `lns artifact rm` and
+`lns artifact prune`, and their names stay reserved. Nothing ages them out — one
+you stopped waits for you. Remove one with `lns rm` (record and writable layer go
+together, the name frees up), opt out of persistence entirely with `lns run --rm`,
+or sweep every stopped sandbox at once with `lns sandbox prune`.
+
+A sandbox's audit chain is not part of what `rm` removes: it lives under
+`~/.lns/audit/`, and outlives the sandbox that wrote it.
 
 ### Logs
 
@@ -1244,7 +1254,7 @@ sandbox is still using. `lns rm` is the shortcut, and works out whether you name
 sandbox or an artifact:
 
 ```bash
-lns rmi ghcr.io/acme/reviewer:1.0.0
+lns artifact rm ghcr.io/acme/reviewer:1.0.0
 ```
 
 `lns artifact prune` removes every cached artifact nothing holds. When no sandbox
@@ -1255,9 +1265,9 @@ sweep and asks, unless you pass `-f`/`--force`:
 lns artifact prune --force
 ```
 
-Removing a cached sandbox is always safe in the durable sense — the next `lns run`
-or `lns pull` simply fetches or rebuilds it again. Removing a stopped run is not:
-its writable layer goes with it.
+Removing a cached artifact is always safe in the durable sense — the next
+`lns run` or `lns pull` simply fetches or rebuilds it again. Removing a stopped
+sandbox is not: its writable layer goes with it.
 
 ## A worked example
 

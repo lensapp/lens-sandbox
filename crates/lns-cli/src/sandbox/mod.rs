@@ -28,6 +28,8 @@ pub enum SandboxCommand {
     Kill(KillArgs),
     #[command(about = "Stop a sandbox gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
     Stop(SandboxStopArgs),
+    #[command(about = "Run a stopped sandbox again on its preserved writable layer.")]
+    Start(SandboxStartArgs),
     #[command(about = "Print a sandbox's captured output; `-f` streams until the workload exits.")]
     Logs(SandboxLogsArgs),
     #[command(about = "Re-attach to a running sandbox's output (detach chord to leave again).")]
@@ -41,12 +43,63 @@ pub enum SandboxCommand {
     Inspect(SandboxInspectArgs),
     #[command(about = "Remove a sandbox: its record and its writable layer.")]
     Rm(SandboxRmArgs),
+    #[command(about = "Remove every stopped sandbox, writable layers included.")]
+    Prune(SandboxPruneArgs),
 }
 
 #[derive(clap::Args)]
 pub struct SandboxLsArgs {
+    #[arg(
+        short = 'a',
+        long = "all",
+        default_value_t = false,
+        help = "Include the sandboxes that have stopped, not only the running ones."
+    )]
+    pub all: bool,
+
     #[command(flatten)]
     pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxStartArgs {
+    #[arg(value_name = "RUN", help = "Stopped sandbox id or name to run again.")]
+    pub run: String,
+
+    #[arg(
+        short = 'a',
+        long,
+        default_value_t = false,
+        help = "Attach to the sandbox's output and adopt the workload's exit code."
+    )]
+    pub attach: bool,
+
+    #[arg(
+        short = 'i',
+        long,
+        default_value_t = false,
+        help = "With -a: forward stdin to the workload."
+    )]
+    pub interactive: bool,
+
+    #[arg(
+        long,
+        default_value = "ctrl-p,ctrl-q",
+        value_parser = parse_detach_keys_arg,
+        help = "With -a: detach chord; on match the CLI detaches, leaving the sandbox running."
+    )]
+    pub detach_keys: DetachChord,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxPruneArgs {
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Remove every stopped sandbox without asking."
+    )]
+    pub force: bool,
 }
 
 #[derive(clap::Args)]
@@ -115,10 +168,18 @@ pub struct SandboxInspectArgs {
 #[derive(clap::Args)]
 pub struct SandboxRmArgs {
     #[arg(
-        value_name = "REF",
-        help = "Cached sandbox reference (or a running sandbox's id/name, which is refused)."
+        value_name = "RUN",
+        help = "Sandbox id or name to remove; a running one is refused unless `-f`."
     )]
     pub run: String,
+
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = false,
+        help = "Stop a running sandbox first, then remove it."
+    )]
+    pub force: bool,
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -133,7 +194,7 @@ pub fn augment(app: clap::Command) -> clap::Command {
 fn verb_owns_terminal(sub: &clap::ArgMatches) -> bool {
     matches!(
         sub.subcommand_name(),
-        Some("run" | "exec" | "logs" | "attach")
+        Some("run" | "exec" | "logs" | "attach" | "start")
     )
 }
 
@@ -188,6 +249,15 @@ macro_rules! shortcut_spec {
 }
 
 shortcut_spec!(
+    augment_start,
+    START_SPEC,
+    SandboxStartArgs,
+    "start",
+    real::run_start,
+    "Run a stopped sandbox again (shortcut for `lns sandbox start`).",
+    crate::command::always_owns_terminal
+);
+shortcut_spec!(
     augment_stop,
     STOP_SPEC,
     SandboxStopArgs,
@@ -222,16 +292,18 @@ shortcut_spec!(
     crate::command::always_owns_terminal
 );
 
-pub async fn run_with_writers<S, W, O, E>(
+pub async fn run_with_writers<S, I, W, O, E>(
     cmd: &SandboxCommand,
     svc: &S,
     term: TermInfo,
+    input: &mut I,
     out: &mut W,
     stdout: &mut O,
     stderr: &mut E,
 ) -> Result<i32>
 where
     S: SandboxService,
+    I: std::io::BufRead,
     W: std::io::Write,
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
@@ -242,6 +314,8 @@ where
         SandboxCommand::Run(_) => bail!("sandbox run is dispatched on its own interactive path"),
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
+        SandboxCommand::Start(args) => start(svc, args, term, out, stdout, stderr).await,
+        SandboxCommand::Prune(args) => prune(svc, args, term, input, out).await,
         SandboxCommand::Inspect(args) => inspect(svc, &args.run, args.output.format, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -253,30 +327,34 @@ pub(crate) fn run_label(run: &str) -> String {
     run.to_string()
 }
 
+/// A stopped sandbox has no guest to sample, so it is listed without a stats probe rather than with a failed one.
 async fn ps<W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxLsArgs,
     out: &mut W,
 ) -> Result<i32> {
-    let running = match svc.one_shot(Request::ListRuns).await? {
+    let listed = match svc.one_shot(Request::ListRuns).await? {
         Response::RunList { runs } => runs
             .into_iter()
-            .filter(|r| matches!(r.status, lns_ipc::RunStatus::Running))
+            .filter(|r| args.all || matches!(r.status, lns_ipc::RunStatus::Running))
             .collect::<Vec<_>>(),
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     };
-    let mut rows = Vec::with_capacity(running.len());
-    for run in &running {
-        let stats = match svc
-            .one_shot(Request::RunStats {
-                run: run.id.clone(),
-            })
-            .await?
-        {
-            Response::RunStats { stats } => Some(stats),
-            Response::Error { .. } => None,
-            other => bail!("unexpected response from daemon: {other:?}"),
+    let mut rows = Vec::with_capacity(listed.len());
+    for run in &listed {
+        let stats = match run.status {
+            lns_ipc::RunStatus::Running => match svc
+                .one_shot(Request::RunStats {
+                    run: run.id.clone(),
+                })
+                .await?
+            {
+                Response::RunStats { stats } => Some(stats),
+                Response::Error { .. } => None,
+                other => bail!("unexpected response from daemon: {other:?}"),
+            },
+            _ => None,
         };
         rows.push(PsRow::new(run, stats));
     }
@@ -299,6 +377,13 @@ struct PsRow {
 }
 
 const NO_SAMPLE: &str = "-";
+
+fn state_cell(status: lns_ipc::RunStatus) -> String {
+    match status {
+        lns_ipc::RunStatus::Running => "running".to_string(),
+        lns_ipc::RunStatus::Exited { code } => format!("stopped ({code})"),
+    }
+}
 
 impl PsRow {
     fn new(run: &lns_ipc::RunSummary, stats: Option<RunStatsInfo>) -> Self {
@@ -330,13 +415,14 @@ impl PsRow {
 }
 
 impl crate::output::TableRow for PsRow {
-    const HEADERS: &'static [&'static str] = &["ID", "NAME", "IMAGE", "CPU %", "MEM"];
+    const HEADERS: &'static [&'static str] = &["ID", "NAME", "IMAGE", "STATE", "CPU %", "MEM"];
 
     fn cells(&self) -> Vec<String> {
         vec![
             lns_ipc::short_run_id(&self.id).to_string(),
             self.name.clone(),
             self.image.clone(),
+            state_cell(self.status),
             self.cpu_permille
                 .map_or_else(|| NO_SAMPLE.to_string(), format_permille),
             self.memory_cell(),
@@ -401,52 +487,120 @@ pub(crate) fn is_unknown_run(message: &str) -> bool {
     message.contains("no such run") || message.contains("no active run with id")
 }
 
+/// The service owns the running-or-stopped decision, so `rm` asks it once rather than acting on a snapshot that could be stale by the time it does.
 async fn rm<W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxRmArgs,
     out: &mut W,
 ) -> Result<i32> {
     match svc
-        .one_shot(Request::InspectRun {
-            run: args.run.clone(),
-        })
-        .await?
-    {
-        Response::RunInspect { details }
-            if matches!(details.summary.status, lns_ipc::RunStatus::Running) =>
-        {
-            bail!(
-                "{} is a running sandbox; stop it first with `lns stop {}`",
-                args.run,
-                args.run
-            )
-        }
-        // An exited sandbox is a spent record.
-        Response::RunInspect { .. } => remove_run(svc, &args.run, out).await,
-        Response::Error { message } => bail!("daemon error: {message}"),
-        other => bail!("unexpected response from daemon: {other:?}"),
-    }
-}
-
-async fn remove_run<W: std::io::Write>(
-    svc: &impl SandboxService,
-    run: &str,
-    out: &mut W,
-) -> Result<i32> {
-    match svc
         .one_shot(Request::RemoveRun {
-            run: run.to_string(),
-            force: false,
+            run: args.run.clone(),
+            force: args.force,
         })
         .await?
     {
         Response::Acknowledged => {
-            writeln!(out, "removed run {run}")?;
+            writeln!(out, "removed sandbox {}", args.run)?;
             Ok(0)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+async fn start<S, W, O, E>(
+    svc: &S,
+    args: &SandboxStartArgs,
+    term: TermInfo,
+    out: &mut W,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<i32>
+where
+    S: SandboxService,
+    W: std::io::Write,
+    O: AsyncWriteExt + Unpin,
+    E: AsyncWriteExt + Unpin,
+{
+    let mut stream = svc
+        .open_stream(Request::StartRun {
+            run: args.run.clone(),
+            attach: args.attach,
+            stdin: args.interactive,
+        })
+        .await?;
+    let run_id = expect_run_started(&mut stream).await?;
+    if !args.attach {
+        writeln!(out, "{}", run_label(&args.run))?;
+        return Ok(0);
+    }
+    crate::service::drive_attached_session_with_writers(
+        stream,
+        svc.aux_socket(),
+        run_id,
+        term.stdin_is_tty,
+        term.stdout_is_terminal,
+        args.detach_keys.0.clone(),
+        crate::service::DetachBehaviour::LeaveRunning,
+        stdout,
+        stderr,
+        false,
+        crate::service::StdinForwarding::of(args.interactive),
+    )
+    .await
+}
+
+async fn prune<I: std::io::BufRead, W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxPruneArgs,
+    term: TermInfo,
+    input: &mut I,
+    out: &mut W,
+) -> Result<i32> {
+    if !args.force && !confirm_prune(term, input, out)? {
+        return Ok(0);
+    }
+    match svc.one_shot(Request::PruneRuns).await? {
+        Response::RunsPruned { mut removed } => {
+            removed.sort_unstable();
+            for run in &removed {
+                writeln!(out, "removed sandbox {run}")?;
+            }
+            if removed.is_empty() {
+                writeln!(out, "No stopped sandboxes.")?;
+            }
+            Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+/// §7.2: with no terminal to ask at, a command that would have asked refuses and names the flag that would have answered it.
+fn confirm_prune<I: std::io::BufRead, W: std::io::Write>(
+    term: TermInfo,
+    input: &mut I,
+    out: &mut W,
+) -> Result<bool> {
+    if !term.stdin_is_tty {
+        bail!(
+            "this removes every stopped sandbox, writable layers included; there is no terminal to ask at, so pass --force to confirm"
+        );
+    }
+    write!(
+        out,
+        "This removes every stopped sandbox, writable layers included. Continue? [y/N] "
+    )?;
+    out.flush()?;
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let answer = line.trim();
+    let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    if !yes {
+        writeln!(out, "Aborted.")?;
+    }
+    Ok(yes)
 }
 
 async fn inspect<W: std::io::Write>(
@@ -683,24 +837,9 @@ mod tests {
         }
     }
 
-    fn running_inspect(status: lns_ipc::RunStatus) -> Response {
-        Response::RunInspect {
-            details: Box::new(RunDetails {
-                summary: lns_ipc::RunSummary {
-                    id: "1a2b3c4d0000000000000000000000aa".into(),
-                    name: "reviewer".into(),
-                    image: "some-image".into(),
-                    command: String::new(),
-                    status,
-                    started: "2026-01-01T00:00:00Z".into(),
-                },
-                config: lns_ipc::RunConfig::default(),
-            }),
-        }
-    }
-
     fn ps_args() -> SandboxLsArgs {
         SandboxLsArgs {
+            all: false,
             output: crate::output::OutputArgs {
                 format: crate::output::Format::Table,
             },
@@ -732,6 +871,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
+            &mut std::io::empty(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -753,6 +893,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
+            &mut std::io::empty(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -926,6 +1067,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_asks_the_service_to_remove_the_sandbox_and_names_it_back() {
+        let svc = CannedService::new(Response::Acknowledged);
+        let mut out = Vec::new();
+        let code = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+                force: false,
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("removed sandbox reviewer"),
+            "the answer names what it acted on"
+        );
+        assert!(matches!(
+            svc.requests.lock().unwrap().as_slice(),
+            [Request::RemoveRun { force: false, .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn rm_f_asks_the_service_to_stop_it_first() {
+        let svc = CannedService::new(Response::Acknowledged);
+        let mut out = Vec::new();
+        rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+                force: true,
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                svc.requests.lock().unwrap().as_slice(),
+                [Request::RemoveRun { force: true, .. }]
+            ),
+            "-f is the service's to act on: only it knows whether the sandbox is still running"
+        );
+    }
+
+    #[tokio::test]
+    async fn rm_surfaces_the_services_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::new(Response::Error {
+            message: "reviewer is running; stop it first, or pass -f".into(),
+        });
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+                force: false,
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is running"));
+
+        let svc = CannedService::new(Response::Pong);
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+                force: false,
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
@@ -945,131 +1167,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
-    }
-
-    #[tokio::test]
-    async fn rm_refuses_a_running_sandbox_naming_stop() {
-        let svc = CannedService::new(running_inspect(lns_ipc::RunStatus::Running));
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("running"), "got: {err:#}");
-        assert!(format!("{err:#}").contains("lns stop"), "got: {err:#}");
-    }
-
-    #[tokio::test]
-    async fn rm_of_an_exited_run_removes_the_spent_run_record() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Acknowledged,
-        );
-        let mut out = Vec::new();
-        let code = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, 0);
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("removed run reviewer"),
-            "an exited run must be dropped via RemoveRun"
-        );
-        let requests = svc.requests.lock().unwrap();
-        assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, Request::RemoveRun { .. })),
-            "rm of an exited run must issue RemoveRun, not RemoveImage: {requests:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rm_of_an_exited_run_surfaces_the_daemon_error() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Error {
-                message: "run vanished mid-remove".into(),
-            },
-        );
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("run vanished mid-remove"));
-    }
-
-    #[tokio::test]
-    async fn rm_of_an_exited_run_rejects_an_unrelated_remove_response() {
-        let svc = CannedService::with_remove_run(
-            running_inspect(lns_ipc::RunStatus::Exited { code: 0 }),
-            Response::Pong,
-        );
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
-    }
-
-    #[tokio::test]
-    async fn rm_surfaces_a_daemon_error_from_the_lookup_rather_than_removing_anything() {
-        let svc = CannedService::new(Response::Error {
-            message: "registry poisoned".into(),
-        });
-        let mut out = Vec::new();
-        let err = rm(
-            &svc,
-            &SandboxRmArgs {
-                run: "reviewer".into(),
-            },
-            &mut out,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("registry poisoned"));
-        assert!(
-            !svc.requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| matches!(r, Request::RemoveRun { .. })),
-            "a lookup that failed says nothing about the sandbox, so nothing may be removed on the strength of it"
-        );
-    }
-
-    #[tokio::test]
-    async fn rm_rejects_an_unrelated_inspect_response() {
-        let svc = CannedService::new(Response::Pong);
-        let mut out = Vec::new();
-        let err = rm(&svc, &SandboxRmArgs { run: "1".into() }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[test]

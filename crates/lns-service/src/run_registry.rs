@@ -317,7 +317,11 @@ pub fn register_exec_session(
     input_tx: mpsc::Sender<SessionInput>,
 ) -> bool {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    let Some(handle) = g.as_mut().and_then(|runs| runs.get_mut(run_id)) else {
+    let Some(handle) = g
+        .as_mut()
+        .and_then(|runs| runs.get_mut(run_id))
+        .and_then(RunEntry::as_live_mut)
+    else {
         return false;
     };
     handle.exec_sessions.insert(session_id, input_tx);
@@ -328,6 +332,7 @@ pub fn deregister_exec_session(run_id: &str, session_id: &str) -> bool {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     g.as_mut()
         .and_then(|runs| runs.get_mut(run_id))
+        .and_then(RunEntry::as_live_mut)
         .and_then(|handle| handle.exec_sessions.remove(session_id))
         .is_some()
 }
@@ -339,6 +344,7 @@ pub fn session_input_sender(target: &lns_ipc::SessionTarget) -> Option<mpsc::Sen
             let g = ACTIVE.lock().expect("ACTIVE poisoned");
             g.as_ref()
                 .and_then(|runs| runs.get(run_id))
+                .and_then(RunEntry::as_live)
                 .and_then(|handle| handle.exec_sessions.get(session_id))
                 .cloned()
         }
