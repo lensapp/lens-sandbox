@@ -107,6 +107,31 @@ fn json_row_non_empty(world: &mut BehaviourWorld, index: usize, key: String) -> 
     }
 }
 
+#[then(regex = r#"^the JSON row for "([^"]+)" has "([^"]+)" set to (true|false)$"#)]
+fn json_row_for_bool(
+    world: &mut BehaviourWorld,
+    id: String,
+    key: String,
+    expected: String,
+) -> Result<(), String> {
+    let doc = parsed(world)?;
+    let rows = doc
+        .as_array()
+        .ok_or_else(|| format!("output is not a json array: {doc}"))?;
+    let found = rows
+        .iter()
+        .find(|r| r.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+        .ok_or_else(|| format!("no row with id {id:?} in {doc}"))?;
+    let value = field(found, &key)?;
+    if value == serde_json::Value::Bool(expected == "true") {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {id}'s {key} to be {expected}, got {value}"
+        ))
+    }
+}
+
 #[then(regex = r#"^the JSON row for "([^"]+)" has "([^"]+)" set to "([^"]*)"$"#)]
 fn json_row_by_id(
     world: &mut BehaviourWorld,

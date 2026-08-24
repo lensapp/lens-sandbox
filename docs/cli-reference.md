@@ -408,21 +408,21 @@ value.
 
 ```bash
 lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
-lns connector list
+lns connector list [--format <table|json>]
 lns connector remove <ID>
-lns connector connect <ID> [--policy <PATH>]
-lns connector disconnect <ID> [--policy <PATH>]
-lns connector grants [--policy <PATH>] [--all]
-lns connector revoke <ID> [--policy <PATH>]
+lns connector connect <ID> [--project <PATH>]
+lns connector disconnect <ID> [--project <PATH>]
+lns connector grants [--project <PATH>] [--all]
+lns connector revoke <ID> [--project <PATH>]
 ```
 
 | Subcommand   | Meaning                                                                       |
 | ------------ | ----------------------------------------------------------------------------- |
-| `add`        | Declare a credential connector in your machine-global catalog.              |
-| `list`       | List the bundled and user-declared connectors and their auth kind.          |
+| `add`        | Declare a credential connector in your machine-global catalog. Refused when a domain it claims is already claimed by another connector: two claiming the same destination is ambiguous, so remove the other one first if this should own it. |
+| `list`       | List the bundled and user-declared connectors, how each signs in, and whether it is connected in this project. Installing grants nothing, so `CONNECTED` is the column that says whether this project uses it. |
 | `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
-| `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares. |
-| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
+| `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the connection for this project — the bind path for ids a definition declares. |
+| `disconnect` | Withdraw a connector from this project, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
 | `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
 | `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
 
@@ -430,7 +430,12 @@ lns connector revoke <ID> [--policy <PATH>]
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
 name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
 connected connector are made interactively in the approval window; grants are
-recorded per project and workload in `~/.lns/workload-grants.json`. See
+recorded per project and workload in `~/.lns/workload-grants.json`.
+
+`--project <PATH>` acts on another project directory instead of the current one.
+Three steps stay separate, and no flag collapses them: declaring a connector makes
+it available, connecting decides this project uses it, and the workload still meets
+a first-use card the first time it reaches for the value. See
 [Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`

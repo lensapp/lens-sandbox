@@ -16,11 +16,22 @@ The set of connectors Lens Sandbox knows about is a **catalog** with two layers:
 - **User** — your own additions in `~/.lns/connectors.yaml`.
 
 The effective catalog is the union of the two; a user entry can't shadow a bundled
-id. List everything Lens Sandbox can connect:
+id. List everything Lens Sandbox can connect, how each signs in, and which ones
+this project uses:
 
 ```bash
 lns connector list
 ```
+
+```text
+CONNECTOR    SOURCE   SIGN-IN     CONNECTED
+gitlab       bundled  credential  yes
+github       bundled  oauth       no
+acme         user     credential  no
+```
+
+Declaring a connector grants nothing: `CONNECTED` is the column that says whether
+this project uses it.
 
 ### Declaring your own
 
@@ -32,6 +43,11 @@ lns connector add acme \
   --inject bearer_header:api.acme.internal \
   --route api.acme.internal
 ```
+
+One connector per domain: an `--inject` naming a destination another connector
+already claims is refused, and the error names the one that holds it. Two
+connectors claiming the same host would make the value a request carries
+ambiguous.
 
 - `id` — the connector id; must not collide with a bundled or existing user id.
 - `--env-var` — the environment variable the placeholder is seeded into.
@@ -88,7 +104,11 @@ A connector reaches a project's workloads in any of three ways:
 ```bash
 lns connector connect gitlab
 lns connector disconnect gitlab
+lns connector connect gitlab --project ../other-project
 ```
+
+`--project <PATH>` acts on another project directory instead of the one you are
+in; `connect`, `disconnect`, `grants` and `revoke` all take it.
 
 The connection is recorded by id for the project, per machine, so the
 definition resolves from the catalog at run time and nothing about which

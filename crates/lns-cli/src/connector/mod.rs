@@ -81,9 +81,10 @@ pub struct ConnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
+        value_name = "PATH",
+        help = "Act on this project directory instead of the current one."
     )]
-    pub policy: Option<PathBuf>,
+    pub project: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -92,9 +93,10 @@ pub struct DisconnectArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path; defaults to `lns-local-mixin.yaml` in the current directory."
+        value_name = "PATH",
+        help = "Act on this project directory instead of the current one."
     )]
-    pub policy: Option<PathBuf>,
+    pub project: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -107,9 +109,10 @@ pub struct ConnectorListArgs {
 pub struct GrantsArgs {
     #[arg(
         long,
-        help = "Policy file path whose project the grants are listed for; defaults to `lns-local-mixin.yaml` in the current directory."
+        value_name = "PATH",
+        help = "List the grants of this project directory instead of the current one."
     )]
-    pub policy: Option<PathBuf>,
+    pub project: Option<PathBuf>,
     #[arg(
         long,
         help = "List grants for every project on this machine, not just this one."
@@ -125,9 +128,10 @@ pub struct RevokeArgs {
     pub id: String,
     #[arg(
         long,
-        help = "Policy file path whose project the grant is revoked from; defaults to `lns-local-mixin.yaml` in the current directory."
+        value_name = "PATH",
+        help = "Revoke in this project directory instead of the current one."
     )]
-    pub policy: Option<PathBuf>,
+    pub project: Option<PathBuf>,
 }
 
 fn parse_injection(s: &str) -> Result<lns_policy::providers::InjectionDef, String> {
@@ -204,7 +208,10 @@ pub async fn run(
 ) -> Result<i32> {
     match cmd {
         ConnectorCommand::Add(args) => add(args, catalog_path, writer),
-        ConnectorCommand::List(args) => list(args, catalog_path, writer),
+        ConnectorCommand::List(args) => {
+            let connected = connected_here(cwd, grants_path);
+            list(args, catalog_path, &connected, writer)
+        }
         ConnectorCommand::Remove(args) => remove(args, catalog_path, writer),
         ConnectorCommand::Connect(args) => {
             connect(args, cwd, catalog_path, grants_path, signin, writer).await
@@ -215,16 +222,41 @@ pub async fn run(
     }
 }
 
-/// The decisions file a connector verb records itself in: the one `--policy` named, rooted where it was typed, else this directory's own.
+/// A connection is recorded against a project, and a project is a directory: the one `--project` names, rooted where it was typed, else the one you are in.
 fn project_decisions_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
-    match explicit {
+    let dir = match explicit {
         Some(p) if p.is_absolute() => p.to_path_buf(),
         Some(p) => cwd.join(p),
-        None => crate::run::summary::policy_path(cwd),
-    }
+        None => cwd.to_path_buf(),
+    };
+    crate::run::summary::policy_path(&dir)
 }
 
 /// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
+/// One connector per domain: two claiming the same destination is ambiguous, and nothing downstream could say which value a request should carry.
+fn refuse_a_claimed_domain(
+    installed: &[Connector],
+    claiming: &[lns_policy::providers::InjectionDef],
+) -> Result<()> {
+    for wanted in claiming {
+        let holder = installed.iter().find(|connector| {
+            connector
+                .credential
+                .iter()
+                .flat_map(|credential| &credential.injections)
+                .any(|held| held.domain == wanted.domain)
+        });
+        if let Some(holder) = holder {
+            bail!(
+                "{:?} is already claimed by the connector {:?}; one connector per domain, so remove that one first if this should own it",
+                wanted.domain,
+                holder.id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn generate_placeholder(id: &str) -> String {
     format!("lns-placeholder-{id}-0000000000000000000000")
 }
@@ -261,6 +293,7 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     if catalog.connectors.iter().any(|i| i.id == args.id) {
         bail!("connector {:?} already exists in your catalog", args.id);
     }
+    refuse_a_claimed_domain(&effective_connectors(&catalog), &args.inject)?;
     let placeholder = match &args.placeholder {
         Some(p) => {
             if let Err(problem) = lns_spec::credential::validate_placeholder(p, &args.id) {
@@ -306,18 +339,31 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     Ok(0)
 }
 
-fn list(args: &ConnectorListArgs, catalog_path: &Path, writer: &mut impl Write) -> Result<i32> {
+/// What this project has connected, read from the sidecar; an unreadable one answers "nothing connected" rather than failing a listing.
+fn connected_here(cwd: &Path, grants_path: &Path) -> Vec<String> {
+    JsonFileGrantStore::new(grants_path.to_path_buf())
+        .load()
+        .map(|file| file.connected_in(&project_key(&project_decisions_path(None, cwd))))
+        .unwrap_or_default()
+}
+
+fn list(
+    args: &ConnectorListArgs,
+    catalog_path: &Path,
+    connected: &[String],
+    writer: &mut impl Write,
+) -> Result<i32> {
     let user = load_catalog(catalog_path)?;
     let mut rows: Vec<ConnectorRow> = bundled_connectors()
         .iter()
-        .map(|i| ConnectorRow::new(i, "bundled"))
+        .map(|i| ConnectorRow::new(i, "bundled", connected))
         .collect();
     // A user id that shadows a bundled one is inert (bundled wins), so don't list it as live.
     rows.extend(
         user.connectors
             .iter()
             .filter(|i| !is_bundled(&i.id))
-            .map(|i| ConnectorRow::new(i, "user")),
+            .map(|i| ConnectorRow::new(i, "user", connected)),
     );
     crate::output::emit(args.output.format, &rows, writer)?;
     Ok(0)
@@ -329,26 +375,30 @@ struct ConnectorRow {
     id: String,
     source: &'static str,
     auth_kind: &'static str,
+    /// Installing grants nothing, so what a reader wants to know first is whether this project uses it.
+    connected: bool,
 }
 
 impl ConnectorRow {
-    fn new(connector: &Connector, source: &'static str) -> Self {
+    fn new(connector: &Connector, source: &'static str, connected: &[String]) -> Self {
         Self {
             id: connector.id.clone(),
             source,
             auth_kind: kind_word(connector.auth_kind),
+            connected: connected.contains(&connector.id),
         }
     }
 }
 
 impl crate::output::TableRow for ConnectorRow {
-    const HEADERS: &'static [&'static str] = &["CONNECTOR", "SOURCE", "AUTH"];
+    const HEADERS: &'static [&'static str] = &["CONNECTOR", "SOURCE", "SIGN-IN", "CONNECTED"];
 
     fn cells(&self) -> Vec<String> {
         vec![
             self.id.clone(),
             self.source.to_string(),
             self.auth_kind.to_string(),
+            if self.connected { "yes" } else { "no" }.to_string(),
         ]
     }
 }
@@ -410,7 +460,7 @@ pub async fn connect(
             BindOutcome::Completed(decision) => bind_message(&args.id, decision),
         }
     };
-    let path = project_decisions_path(args.policy.as_deref(), cwd);
+    let path = project_decisions_path(args.project.as_deref(), cwd);
     connect_project(grants_path, &project_key(&path), &args.id)?;
     writeln!(writer, "{closing}")?;
     // Binding the value cannot lift a workload's decline, so say what will: otherwise the connect reports success and the workload goes on being refused with nothing on screen explaining it.
@@ -456,7 +506,7 @@ pub fn disconnect(
     grants_path: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let path = project_decisions_path(args.policy.as_deref(), cwd);
+    let path = project_decisions_path(args.project.as_deref(), cwd);
     let project = project_key(&path);
     let cleared = disconnect_project(grants_path, &project, &args.id)?
         .ok_or_else(|| anyhow::anyhow!("{:?} is not connected in {project}", args.id))?;
@@ -515,7 +565,7 @@ fn grants(
     let file = store
         .load()
         .with_context(|| format!("reading grants from {}", grants_path.display()))?;
-    let project = project_key(&project_decisions_path(args.policy.as_deref(), cwd));
+    let project = project_key(&project_decisions_path(args.project.as_deref(), cwd));
     let rows: Vec<&GrantRecord> = if args.all {
         file.grants.iter().collect()
     } else {
@@ -581,7 +631,7 @@ fn revoke(
     grants_path: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
-    let project = project_key(&project_decisions_path(args.policy.as_deref(), cwd));
+    let project = project_key(&project_decisions_path(args.project.as_deref(), cwd));
     let cleared = clear_project_grants(grants_path, &project, &args.id)?;
     if cleared == 0 {
         bail!(
@@ -612,22 +662,21 @@ mod tests {
     }
 
     #[test]
-    fn a_named_decisions_file_roots_where_the_developer_typed_it() {
-        // A verb records the connection in the project it names, so the path is theirs and roots at their cwd — the run's own file is found beside a document instead, and never named.
+    fn a_named_project_roots_where_the_developer_typed_it() {
+        // `--project` names a directory, and it is theirs, so a relative one roots at their cwd rather than at any project a document names.
         assert_eq!(
-            project_decisions_path(
-                Some(Path::new("../team/lns-local-mixin.yaml")),
-                Path::new("/w")
-            ),
+            project_decisions_path(Some(Path::new("../team")), Path::new("/w")),
             PathBuf::from("/w/../team/lns-local-mixin.yaml"),
         );
         assert_eq!(
-            project_decisions_path(
-                Some(Path::new("/team/lns-local-mixin.yaml")),
-                Path::new("/w")
-            ),
+            project_decisions_path(Some(Path::new("/team")), Path::new("/w")),
             PathBuf::from("/team/lns-local-mixin.yaml"),
             "an absolute path is already rooted, so the cwd must not be prepended",
+        );
+        assert_eq!(
+            project_decisions_path(None, Path::new("/w")),
+            PathBuf::from("/w/lns-local-mixin.yaml"),
+            "with no --project, the project is the one you are in",
         );
     }
 
@@ -892,16 +941,38 @@ mod tests {
         let path = catalog_at(dir.path());
         add(&add_args("acme"), &path, &mut Vec::new()).unwrap();
         let mut out = Vec::new();
-        list(&list_args(), &path, &mut out).unwrap();
+        list(&list_args(), &path, &[], &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("CONNECTOR"), "{text}");
         assert!(
-            row_for(&text, "gitlab").ends_with("bundled  credential"),
+            row_for(&text, "gitlab").contains("bundled  credential"),
             "{text}"
         );
         assert!(
-            row_for(&text, "acme").ends_with("user     credential"),
+            row_for(&text, "acme").contains("user     credential"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_domain_a_bundled_connector_already_claims_is_refused_too() {
+        // The rule is about the effective catalog, not only about what the user typed into it.
+        let dir = TempDir::new().unwrap();
+        let path = catalog_at(dir.path());
+        let claimed = effective_connectors(&Catalog::default())
+            .iter()
+            .find_map(|c| c.credential.as_ref()?.injections.first().cloned())
+            .expect("the shipped catalog claims at least one domain");
+        let mut rival = add_args("some-rival");
+        rival.inject = vec![claimed.clone()];
+        let err = add(&rival, &path, &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&claimed.domain),
+            "the refusal names the domain: {err:#}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused add writes nothing, not even an empty catalog"
         );
     }
 
@@ -911,7 +982,7 @@ mod tests {
         let path = catalog_at(dir.path());
         write_user_catalog(&path, vec![oauth_connector("somesaas")]);
         let mut out = Vec::new();
-        list(&list_args(), &path, &mut out).unwrap();
+        list(&list_args(), &path, &[], &mut out).unwrap();
         assert!(
             String::from_utf8(out).unwrap().contains("somesaas"),
             "oauth kind must be labelled"
@@ -939,7 +1010,7 @@ mod tests {
             }],
         );
         let mut out = Vec::new();
-        list(&list_args(), &path, &mut out).unwrap();
+        list(&list_args(), &path, &[], &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(row_for(&text, "gitlab").contains("bundled"), "{text}");
         assert!(
@@ -953,7 +1024,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = catalog_at(dir.path());
         std::fs::write(&path, "connectors: not-a-list\n").unwrap();
-        let err = list(&list_args(), &path, &mut Vec::new()).unwrap_err();
+        let err = list(&list_args(), &path, &[], &mut Vec::new()).unwrap_err();
         assert!(format!("{err:#}").contains("loading"));
     }
 
@@ -1055,7 +1126,7 @@ mod tests {
         connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog,
@@ -1078,7 +1149,7 @@ mod tests {
         let err = connect(
             &ConnectArgs {
                 id: "nope".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog_at(dir.path()),
@@ -1099,7 +1170,7 @@ mod tests {
         connect(
             &ConnectArgs {
                 id: "somesaas".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog,
@@ -1124,7 +1195,7 @@ mod tests {
         let err = connect(
             &ConnectArgs {
                 id: "somesaas".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog,
@@ -1148,7 +1219,7 @@ mod tests {
         connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog_at(dir.path()),
@@ -1178,7 +1249,7 @@ mod tests {
         connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog_at(dir.path()),
@@ -1200,7 +1271,7 @@ mod tests {
         let err = connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog_at(dir.path()),
@@ -1223,7 +1294,7 @@ mod tests {
         let err = connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog_at(dir.path()),
@@ -1247,7 +1318,7 @@ mod tests {
         let err = connect(
             &ConnectArgs {
                 id: "somesaas".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog,
@@ -1270,7 +1341,7 @@ mod tests {
         connect(
             &ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &catalog,
@@ -1283,7 +1354,7 @@ mod tests {
         disconnect(
             &DisconnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &dir.path().join("grants.json"),
@@ -1299,7 +1370,7 @@ mod tests {
         let err = disconnect(
             &DisconnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             },
             dir.path(),
             &dir.path().join("grants.json"),
@@ -1361,7 +1432,7 @@ mod tests {
         run(
             &ConnectorCommand::Connect(ConnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             }),
             dir.path(),
             &path,
@@ -1375,7 +1446,7 @@ mod tests {
         run(
             &ConnectorCommand::Disconnect(DisconnectArgs {
                 id: "gitlab".into(),
-                policy: None,
+                project: None,
             }),
             dir.path(),
             &path,
