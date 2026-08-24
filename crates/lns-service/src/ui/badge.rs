@@ -10,7 +10,7 @@ fn badge_fill() -> Color32 {
 fn badge(ui: &mut egui::Ui, label: &str) {
     egui::Frame::new()
         .fill(badge_fill())
-        .stroke(Stroke::new(1.0, window::BORDER))
+        .stroke(Stroke::new(1.0_f32, window::BORDER))
         .corner_radius(CornerRadius::same(theme::BADGE_CORNER_RADIUS))
         .inner_margin(Margin::symmetric(theme::BADGE_PAD_X, theme::BADGE_PAD_Y))
         .show(ui, |ui| {

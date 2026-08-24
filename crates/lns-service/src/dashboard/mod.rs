@@ -118,12 +118,12 @@ fn dashboard_visuals() -> egui::Visuals {
     v.override_text_color = Some(TEXT_PRIMARY);
     v.panel_fill = CONTENT_FILL;
     v.window_fill = CHROME_FILL;
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.window_corner_radius = CornerRadius::same(10);
     v.extreme_bg_color = INPUT_FILL;
     v.faint_bg_color = CHROME_FILL;
     v.selection.bg_fill = CATEGORY;
-    v.selection.stroke = Stroke::new(0.0, Color32::WHITE);
+    v.selection.stroke = Stroke::new(0.0_f32, Color32::WHITE);
     let radius = CornerRadius::same(4);
     for w in [
         &mut v.widgets.inactive,
@@ -133,16 +133,16 @@ fn dashboard_visuals() -> egui::Visuals {
     ] {
         w.corner_radius = radius;
         w.bg_stroke = Stroke::NONE;
-        w.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+        w.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
         w.weak_bg_fill = INPUT_FILL;
         w.bg_fill = INPUT_FILL;
     }
     v.widgets.hovered.weak_bg_fill = HOVER_FILL;
     v.widgets.hovered.bg_fill = HOVER_FILL;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, HOVER_LINE);
-    v.widgets.active.fg_stroke = Stroke::new(1.0, DRAG_LINE);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, WEAK_BORDER);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, HOVER_LINE);
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, DRAG_LINE);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, WEAK_BORDER);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     v
 }
 
@@ -474,7 +474,7 @@ fn control_button(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response 
     let border = if open { CATEGORY } else { BORDER };
     Frame::new()
         .fill(INPUT_FILL)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(CornerRadius::same(6))
         .inner_margin(Margin::symmetric(10, 7))
         .show(ui, |ui| {
@@ -494,7 +494,7 @@ fn control_button(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response 
 fn kind_popup_body(ui: &mut egui::Ui, state: &mut DashboardState) {
     Frame::new()
         .fill(MODAL_FILL)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(6))
         .show(ui, |ui| {
@@ -858,7 +858,7 @@ fn search_modal(ui: &mut egui::Ui, state: &mut DashboardState, reveal: f32) {
         .frame(
             Frame::new()
                 .fill(MODAL_FILL)
-                .stroke(Stroke::new(1.0, BORDER))
+                .stroke(Stroke::new(1.0_f32, BORDER))
                 .corner_radius(CornerRadius::same(12))
                 .shadow(shadow)
                 .inner_margin(Margin::same(14)),

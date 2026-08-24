@@ -906,7 +906,7 @@ fn paint_pile_ledges(ui: &egui::Ui, geom: &PileGeom, layout: &PileLayout, top_h:
             rect,
             radius,
             fill,
-            Stroke::new(1.0, window::BORDER.gamma_multiply(a)),
+            Stroke::new(1.0_f32, window::BORDER.gamma_multiply(a)),
             StrokeKind::Inside,
         );
     }
@@ -1039,7 +1039,7 @@ fn pile_pill(
         r,
         radius,
         Color32::from_rgba_unmultiplied(96, 97, 104, fill_a),
-        Stroke::new(1.0, Color32::from_white_alpha(stroke_a)),
+        Stroke::new(1.0_f32, Color32::from_white_alpha(stroke_a)),
         StrokeKind::Inside,
     );
     if resp.hovered() {
@@ -1107,7 +1107,7 @@ fn pile_header(
     );
     let arm = content.width() * 0.18;
     let c = content.center();
-    let x = Stroke::new(1.6, fg);
+    let x = Stroke::new(1.6_f32, fg);
     ui.painter()
         .line_segment([c - vec2(arm, arm), c + vec2(arm, arm)], x);
     ui.painter()
@@ -1352,7 +1352,7 @@ fn close_button(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect) -> egui::Resp
     painter.circle_filled(center, radius, fill);
 
     let arm = radius * 0.34;
-    let x = Stroke::new(1.6, Color32::from_gray(235));
+    let x = Stroke::new(1.6_f32, Color32::from_gray(235));
     painter.line_segment([center - vec2(arm, arm), center + vec2(arm, arm)], x);
     painter.line_segment([center + vec2(arm, -arm), center - vec2(arm, -arm)], x);
     resp
@@ -1445,7 +1445,7 @@ fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
                 rect,
                 CornerRadius::same(4),
                 fill,
-                Stroke::new(1.5, border),
+                Stroke::new(1.5_f32, border),
                 StrokeKind::Inside,
             );
             if *remember {
@@ -1457,7 +1457,7 @@ fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
                         c + vec2(-0.1 * r, 0.34 * r),
                         c + vec2(0.42 * r, -0.34 * r),
                     ],
-                    Stroke::new(1.7, window::BG_PRIMARY),
+                    Stroke::new(1.7_f32, window::BG_PRIMARY),
                 ));
             }
             ui.label(
@@ -1885,9 +1885,10 @@ fn help_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
 
 fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
     ui.scope(|ui| {
-        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, window::BORDER);
+        ui.style_mut().visuals.widgets.inactive.bg_stroke =
+            egui::Stroke::new(1.0_f32, window::BORDER);
         ui.style_mut().visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(96));
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(96));
         ui.add(
             egui::TextEdit::singleline(value)
                 .password(true)

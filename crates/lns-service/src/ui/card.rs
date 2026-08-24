@@ -39,7 +39,7 @@ pub fn eyebrow(ui: &mut egui::Ui, icon: MaterialIcon, label: &str) {
 fn card_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(card_fill())
-        .stroke(Stroke::new(1.0, window::BORDER))
+        .stroke(Stroke::new(1.0_f32, window::BORDER))
         .corner_radius(CornerRadius::same(theme::CARD_CORNER_RADIUS))
 }
 
