@@ -44,6 +44,17 @@ pub fn names_a_document(operand: Option<&str>) -> bool {
     crate::artifact::author::is_local_inspect(operand)
 }
 
+/// The artifact namespace is the local store, so the lookup asks what the cache holds. Asking a registry instead would make every word Docker Hub can resolve an artifact, and no sandbox could be named `redis`.
+fn cache_holds(cached: &[lns_ipc::ImageInfo], operand: &str) -> bool {
+    let normalized = operand
+        .parse::<oci_client::Reference>()
+        .ok()
+        .map(|reference| reference.whole());
+    cached
+        .iter()
+        .any(|entry| entry.reference == operand || Some(&entry.reference) == normalized.as_ref())
+}
+
 async fn ask_both(svc: &impl SandboxService, operand: &str) -> Result<Owner> {
     let is_a_sandbox = matches!(
         svc.one_shot(Request::InspectRun {
@@ -52,15 +63,10 @@ async fn ask_both(svc: &impl SandboxService, operand: &str) -> Result<Owner> {
         .await?,
         Response::RunInspect { .. }
     );
-    let is_an_artifact = matches!(
-        svc.one_shot(Request::InspectImage {
-            image: operand.to_string(),
-            mixins: Vec::new(),
-            decisions: None,
-        })
-        .await?,
-        Response::ImageInspected { .. }
-    );
+    let is_an_artifact = match svc.one_shot(Request::ListImages).await? {
+        Response::ImageList { images } => cache_holds(&images, operand),
+        _ => false,
+    };
     Ok(owner(is_a_sandbox, is_an_artifact))
 }
 
@@ -139,6 +145,49 @@ mod tests {
         assert_eq!(owner(true, false), Owner::Sandbox);
         assert_eq!(owner(false, true), Owner::Artifact);
         assert_eq!(owner(false, false), Owner::Neither);
+    }
+
+    fn cached(reference: &str) -> lns_ipc::ImageInfo {
+        lns_ipc::ImageInfo {
+            reference: reference.to_string(),
+            kind: lns_ipc::CachedKind::Sandbox,
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 0,
+            layers: 0,
+            pulled: "2026-01-01T00:00:00Z".into(),
+            in_use_by: None,
+        }
+    }
+
+    #[test]
+    fn a_word_a_registry_could_resolve_is_not_an_artifact_unless_the_cache_holds_it() {
+        // Every short word is a real image on Docker Hub. If the lookup asked a registry, no sandbox could be named `redis`.
+        assert!(!cache_holds(&[], "redis"));
+        assert!(!cache_holds(
+            &[cached("ghcr.io/team/hermes:1.4.0")],
+            "redis"
+        ));
+    }
+
+    #[test]
+    fn the_cache_answers_for_the_reference_as_typed_and_as_it_stores_it() {
+        let store = [cached("docker.io/library/redis:latest")];
+        assert!(
+            cache_holds(&store, "redis"),
+            "a bare reference means what the store wrote down"
+        );
+        assert!(cache_holds(&store, "docker.io/library/redis:latest"));
+        assert!(
+            !cache_holds(&store, "redis:7"),
+            "another tag is another artifact"
+        );
+    }
+
+    #[test]
+    fn a_reference_the_cache_cannot_parse_matches_only_itself() {
+        let store = [cached("###")];
+        assert!(cache_holds(&store, "###"));
+        assert!(!cache_holds(&store, "redis"));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub(crate) struct FakeSandboxService {
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
+    cached_references: Vec<String>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -46,6 +47,15 @@ impl SandboxService for FakeSandboxService {
                 .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
+            Request::ListImages => Some(Response::ImageList {
+                images: self
+                    .cached_references
+                    .iter()
+                    .map(|reference| cached_entry(reference))
+                    .collect(),
+            })
+            .filter(|_| !self.cached_references.is_empty())
+            .or_else(|| self.response.clone()),
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);
@@ -350,12 +360,26 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
     });
 }
 
+/// One cached row, so a scenario naming a reference makes the store answer for it.
+fn cached_entry(reference: &str) -> lns_ipc::ImageInfo {
+    lns_ipc::ImageInfo {
+        reference: reference.to_string(),
+        kind: lns_ipc::CachedKind::Sandbox,
+        digest: format!("sha256:{}", "a".repeat(64)),
+        size_bytes: 0,
+        layers: 0,
+        pulled: "2026-01-01T00:00:00Z".into(),
+        in_use_by: None,
+    }
+}
+
 pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
     FakeSandboxService {
         response: w.sandbox.response.clone(),
         stats_response: w.sandbox.stats_response.clone(),
         inspect_image_response: w.sandbox.inspect_image_response.clone(),
         remove_image_response: w.sandbox.remove_image_response.clone(),
+        cached_references: w.sandbox.cached_references.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
