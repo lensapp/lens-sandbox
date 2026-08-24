@@ -71,8 +71,12 @@ work.
 To close a directory instead — block what you have not listed, without being
 prompted — end `egress.http` with a catch-all deny:
 
-```bash
-lns policy deny '*'
+```yaml
+spec:
+  egress:
+    http:
+      - match: "*"
+        verdict: deny
 ```
 
 That rule governs raw destinations too, so `egress.tcp` needs no counterpart. See
@@ -193,9 +197,8 @@ section before using it.
 - **Only meaningful on `allow`.** On a `deny` rule the listed binaries are blocked by
   verdict and every other caller fails closed, so the only thing the scoping buys is
   that a later rule scoped to one of those others can still let it through. That is
-  too fine a distinction to be worth the confusion, so `lns policy deny` has no
-  `--binary` flag; a hand-written scoped deny is honoured, but read it as a plain
-  deny with one narrow exception rather than as a per-binary block.
+  too fine a distinction to rely on; a scoped deny is honoured, but read it as a
+  plain deny with one narrow exception rather than as a per-binary block.
 - **Absolute, canonical paths only.** The path is compared against the kernel's view
   of the running process (`/proc/<pid>/exe`), so name the real binary, not a symlink
   or a `PATH` shim. Paths that could never equal such a target are rejected when the
@@ -211,184 +214,128 @@ section before using it.
 - **It gates DNS too**, not only the connection itself.
 - **Order matters.** Rules are read top to bottom and the first match wins, so a
   scoped rule placed after an unrestricted rule for the same destination never fires.
-  `lns policy allow` handles this for you — it puts a new rule ahead of any existing
-  rule that would pre-empt it and prints where it landed — but when you hand-edit the
-  file, mind the order yourself.
+  Put the specific rule first.
 
-## Editing rules from the CLI
+## Editing the file
 
-You can hand-edit the YAML, but `lns policy` edits it for you and keeps it
-well-formed. All subcommands default to `lns-local-mixin.yaml` in the current directory;
-pass `--policy <path>` to target another file, including the one governing a
-definition you run from elsewhere.
+No command edits the rules. A decision is recorded one of two ways: you answer the
+card a run raises, or you open `lns-local-mixin.yaml` and write the rule yourself.
+Both write the same document.
 
 ### Add an allow or deny rule
 
-```bash
-lns policy allow api.github.com --description "GitHub REST API"
-lns policy allow "*.npmjs.org"
-lns policy deny metrics.vendor.example
+Append an entry to `egress.http`. The gate stops at the first match, so put a
+specific rule ahead of the broad one it narrows:
+
+```yaml
+spec:
+  egress:
+    http:
+      - match: api.github.com
+        verdict: allow
+        description: GitHub REST API
+      - match: "*.npmjs.org"
+        verdict: allow
+      - match: metrics.vendor.example
+        verdict: deny
 ```
 
 ### Scope an allow rule to a binary
 
-`--binary` takes one absolute path and repeats:
+`binaries` takes absolute paths, and the rule has to sit ahead of any broader rule
+covering the same destination — behind one it never fires:
 
-```bash
-lns policy allow git.example.test --binary /usr/bin/git
-lns policy allow api.example.test --binary /usr/bin/curl --binary /usr/bin/wget
+```yaml
+spec:
+  egress:
+    http:
+      - match: api.example.test
+        verdict: allow
+        binaries:
+          - /usr/bin/curl
+          - /usr/bin/wget
+      - match: "*.example.test"
+        verdict: allow
 ```
 
-`lns policy deny` does not take `--binary` — see
-[Scoping a rule to specific binaries](#scoping-a-rule-to-specific-binaries) for why.
+A scoped rule in front of a broader one denies every other caller that destination
+without asking, and the broader rule no longer serves them. That is the fail-closed
+filter arriving, and it is the point of the scoping — see
+[Scoping a rule to specific binaries](#scoping-a-rule-to-specific-binaries).
 
-Because the guest stops at the first matching rule, a narrowing rule only has an
-effect ahead of the broader rule it narrows. `lns policy allow` places it there and
-says so:
+Two orderings are worth avoiding, because the rule you write then does nothing:
 
-```
-Added allow rule for "api.example.test" to lns-local-mixin.yaml
-Placed it before the existing rule for "*.example.test", which covers the same
-destination and would otherwise pre-empt it. Every other caller is now denied
-"api.example.test" without being asked, and that rule no longer serves them.
-```
+- An `allow` behind a `deny` that already covers the destination. Narrow the deny
+  rather than add an allow after it.
+- An unrestricted `allow` behind a binary-scoped rule for the same destination. The
+  guest skips such a rule rather than let it undo the scoping, so drop the scoped
+  rule if you did mean to open the destination to every caller.
 
-That second sentence is the fail-closed filter arriving: the rule the scoped one now
-sits in front of is still in the file, but it no longer admits anyone for that
-destination. A scoped rule for a destination no other rule covers has nothing to sit
-in front of, so it is appended — and still reports what it now denies:
-
-```
-Added allow rule for "git.example.test" to lns-local-mixin.yaml
-Every other caller is now denied "git.example.test" without being asked.
-```
-
-A rule placed in front of another inherits its TLS termination, and says so. Sitting
-ahead of a rule the sandbox intercepts is a narrowing of *who* may reach the
-destination, not a request to stop intercepting it.
-
-What it will not do is widen egress to get a rule to fire. Three cases are refused
-outright, with nothing written:
-
-- An `allow` for a destination an earlier `deny` already blocks. Ahead of that deny
-  it would open every destination the deny covers, so narrowing the deny or
-  reordering the file is left to you.
-- An unrestricted `allow` for a destination an earlier binary-scoped rule already
-  claimed. Ahead of that rule it would open the destination to every caller in the
-  sandbox — the opposite of what the scoped rule says — so the error names the scoped
-  rule and, if you did mean to open it up, tells you to drop that rule first:
-
-  ```
-  error: the rule for "git.example.test" is scoped to /usr/bin/git, and placing
-  this allow rule in front of it would open the destination to every caller in the
-  sandbox — drop the scoped rule with `lns policy remove git.example.test` first if
-  that is what you mean
-  ```
-
-- An `allow` for a destination an earlier rule permits only *some requests* to (a
-  rule carrying a `rules:` list). Ahead of that rule it would hand its callers every
-  method and path the restriction was written to exclude.
-
-A `deny` behind a deny is not an error: the destination is already blocked, so the
-command says so and changes nothing. Adding a rule the file already holds is the
-same — it reports and leaves the file alone. What counts as already held is the rule
-the gate would actually reach, not any copy sitting somewhere in the file: a copy
-stranded behind a rule that pre-empts it — by verdict, by binary scope, or by a
-request filter — is not in force, so the command treats it as the placement or refusal
-it is rather than reporting a grant the sandbox does not honour. Where the stranded
-copy is the one that gets moved into force, it keeps the note it was carrying. The one
-exception is `--description`: the note is not part of the grant, so passing a new one
-for a rule the file already holds edits that rule in place instead of adding a second
-copy of it.
-
-One placement the CLI cannot make for you: a rule whose destination is an address
-range or IP literal is compared numerically, but whether a *hostname* rule resolves
-into a range is DNS's answer, not the file's. A scoped rule for a host behind a
-broad CIDR allow is left where you put it, so order those by hand.
+One ordering the file cannot settle for you: a rule whose destination is an address
+range or IP literal is compared numerically, but whether a *hostname* resolves into
+that range is DNS's answer. Order a scoped host rule against a broad CIDR allow by
+hand.
 
 ### Add a raw TCP rule
 
-The `-tcp` verbs write to `egress.tcp` instead, and require a port:
+`egress.tcp` entries take the same fields, and each must name a port:
 
-```bash
-lns policy allow-tcp db.internal:5432 --description "project database"
-lns policy deny-tcp  10.0.0.0/8:5432
+```yaml
+spec:
+  egress:
+    tcp:
+      - match: db.internal:5432
+        verdict: allow
+        description: project database
+        binaries: ["/usr/bin/psql"]
+      - match: 10.0.0.0/8:5432
+        verdict: deny
 ```
 
 You only need these to decide a raw destination up front; one you have not decided
-raises a card on first use. `allow-tcp` takes `--binary` the way `allow` does, which on a raw
-destination is the narrowest the grant gets — nothing between the workload and it can
-read the traffic, so the one caller allowed to open it is the whole of the control:
-
-```bash
-lns policy allow-tcp db.internal:5432 --binary /usr/bin/psql
-```
-
-The raw table is first-match-wins, so these place a rule where it will actually
-fire — in front of any rule already covering the same destination, saying so when
-they do — and refuse a rule an existing raw deny would make dead.
+raises a card on first use. On a raw destination the caller scope is the whole of
+the control — nothing between the workload and the destination can read the traffic.
 
 Because `tcp` is the pre-filter, a raw rule also takes its destination over from the
-`egress.http` rules naming that host on that port: those rules stop applying to it.
-The `-tcp` verbs say which ones, and refuse outright when one of them is a `deny` —
-lifting a block you wrote is a widening of your own policy, so narrow or remove that
-deny first if that is what you mean.
+`egress.http` rules naming that host on that port: those rules stop applying to it,
+a `deny` among them included. Check what you are lifting before you add one.
 
-### List rules
+### Read the rules
 
-```bash
-lns policy list
-```
-
-The `TABLE` column says which table each rule is in — `http` for inspected
-routes, `tcp` for raw splices. The `BINARIES` column shows what each rule is scoped
-to. `--format json` reports both, under `table` and `binaries` (`null` for a rule
-open to every caller).
-
-### Remove a rule
-
-Remove every rule matching a destination pattern, from either table:
-
-```bash
-lns policy remove api.github.com
-lns policy remove db.internal:5432
-```
-
-Removal goes by pattern alone, so it deletes *every* rule for that destination —
-binary-scoped ones included. The command reports how many rules went; run
-`lns policy list` first to see which ones they will be.
+The summary a run prints before booting lists every rule in force and names the file
+each came from, so `lns run` is where you read the merged result — including the
+rules a mixin or the sandbox document contributed, which this file does not hold.
 
 ### Closing a directory
 
 To block everything you have not listed, and stop being asked, end `egress.http`
 with a catch-all deny:
 
-```bash
-lns policy deny '*'
+```yaml
+spec:
+  egress:
+    http:
+      - match: api.github.com
+        verdict: allow
+      - match: "*"
+        verdict: deny
 ```
 
 The gate stops at the first matching rule, so the rules above it still decide the
-destinations they name — the catch-all only answers for whatever is left. That is
-why `lns policy allow <host>` still works afterwards: the allow goes in front of
-the catch-all, and the command says so. A deny you aimed at a destination is
-different, and an allow behind *that* is refused rather than reordered.
+destinations they name — the catch-all only answers for whatever is left.
 
-Closing `egress.http` closes raw traffic too, so `egress.tcp` needs no
-counterpart: a raw destination no `tcp` rule names falls through to the catch-all,
-and a connection Lens Sandbox cannot read is refused rather than raising a card.
+Closing `egress.http` closes raw traffic too, so `egress.tcp` needs no counterpart:
+a raw destination no `tcp` rule names falls through to the catch-all, and a
+connection Lens Sandbox cannot read is refused rather than raising a card.
 
-Three things worth knowing:
+Two things worth knowing:
 
-- **A second catch-all replaces the first.** `lns policy allow '*'` reopens a closed
-  directory by replacing the catch-all deny, and `lns policy deny '*'` closes an open
-  one the same way. Two catch-alls cannot both be in force, so the file is never left
-  carrying one the gate never reaches.
 - **A near-catch-all is not a catch-all.** `deny 0.0.0.0/0` or `deny '*.com'` are
   ordinary rules covering a lot; only an unscoped `match: "*"` closes a directory.
   A `"*"` deny narrowed by `binaries` or a request filter decides only what it
   names, so it does not close anything either.
-- **A closed directory raises no approval cards**, so the CLI is how you widen it.
-  That is deliberate: a card you never see cannot be a decision.
+- **A closed directory raises no approval cards**, so editing the file is how you
+  widen it. That is deliberate: a card you never see cannot be a decision.
 
 ## The approval flow
 
@@ -445,4 +392,4 @@ re-approve them.
 - [Connectors](connectors.md) — connecting a connector records it under
   `connectors:` and allows the routes it declares.
 - [Running workloads](running-workloads.md) — `--policy` and the run summary.
-- [CLI reference](cli-reference.md) — the full `lns policy` flag list.
+- [CLI reference](cli-reference.md) — every command and flag as it ships today.

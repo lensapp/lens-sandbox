@@ -72,7 +72,7 @@ New behavior goes in one of three layers (see [`AGENTS.md`](AGENTS.md) for the f
 
 Use Conventional Commits. Do not add a `Co-Authored-By` trailer or a generated-with footer.
 
-- `feat: add lns policy show`
+- `feat: add lns sandbox validate`
 - `fix: deny request when no policy rule matches`
 - `docs: explain the credential placeholder flow`
 - `test: cover the audit-chain verifier`

@@ -24,7 +24,7 @@ You drive everything through one binary: the `lns` CLI.
   manifest, seed config, network allowlist, and credential wiring.
 - **[Policy and approvals](policy.md)** — the `lns-local-mixin.yaml` file, being asked
   about what no rule decides, closing a directory, the approval window, and editing
-  rules with `lns policy`.
+  the rules by hand.
 - **[Credentials](credentials.md)** — how placeholders keep real secrets out of
   the workload, and the per-machine value decisions that bind the real value.
 - **[Connectors](connectors.md)** — connect workloads to external services

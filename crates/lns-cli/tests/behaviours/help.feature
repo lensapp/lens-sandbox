@@ -35,6 +35,11 @@ Feature: users discover the CLI surface
     And the output contains "--mem"
     And the output contains "--policy"
 
+  Scenario: the surface offers no command that edits network rules
+    When I run "lns --help"
+    Then the exit code is 0
+    And the output does not contain "policy"
+
   Scenario: lns audit --help describes the unified timeline
     When I run "lns audit --help"
     Then the exit code is 0

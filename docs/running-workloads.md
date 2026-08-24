@@ -699,8 +699,8 @@ it. A run in a directory that decided nothing prints what it always has: one
 author, nothing to attribute.
 
 An entry that says anything about itself says it here too, after the source that
-decided it: the note an approval writes, or the one you gave a rule yourself with
-`lns policy allow --description`.
+decided it: the note an approval writes, or the `description` you gave a rule
+yourself.
 
 `lns inspect <REF> --mixin <REF>` shows the same composition without starting a
 run.
