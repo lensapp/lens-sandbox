@@ -40,6 +40,16 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    /// The one writer both provision tests hand in, so "it wrote" and "it never wrote" are the same code path answering differently.
+    fn recording_writer(
+        wrote: &Cell<bool>,
+    ) -> impl FnOnce(&Plan, &std::path::Path) -> anyhow::Result<()> {
+        move |_plan, p| {
+            wrote.set(true);
+            std::fs::write(p, b"img").map_err(Into::into)
+        }
+    }
+
     #[test]
     fn provision_image_creates_run_dir_and_writes_through() {
         let root = tempfile::TempDir::new().unwrap();
@@ -50,10 +60,7 @@ mod tests {
             [0xCD; 16],
             99,
             DEFAULT_SIZE_BYTES,
-            |_plan, p| {
-                wrote.set(true);
-                std::fs::write(p, b"img").map_err(Into::into)
-            },
+            recording_writer(&wrote),
         )
         .unwrap();
         assert!(wrote.get(), "writer was invoked");
@@ -89,10 +96,7 @@ mod tests {
             [0; 16],
             0,
             DEFAULT_SIZE_BYTES,
-            |_, _| {
-                reformatted.set(true);
-                Ok(())
-            },
+            recording_writer(&reformatted),
         )
         .unwrap();
         assert!(
