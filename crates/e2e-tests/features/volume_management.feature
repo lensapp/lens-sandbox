@@ -17,6 +17,8 @@ Feature: volume lifecycle management end to end
     Then the output contains "prism-data"
     And the output contains "ON DISK"
     When I run "lns volume inspect prism-data"
+    Then the output contains "CAPACITY"
+    When I run "lns volume inspect prism-data --format json"
     Then the output contains "sizeBytes"
     When I run "lns volume rm prism-data"
     Then the exit code is 0
