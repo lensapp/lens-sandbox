@@ -217,12 +217,29 @@ fn names_neither(w: &mut BehaviourWorld, name: String) {
 fn names_a_sandbox_only(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name);
     w.sandbox.cached_references = Vec::new();
+}
+
 #[given(regex = r#"^the service refuses to remove the running sandbox "([^"]+)"$"#)]
 fn service_refuses_a_running_removal(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name.clone());
     w.sandbox.remove_run_response = Some(Response::Error {
         message: format!("{name} is running; stop it first, or pass -f to stop and remove it"),
     });
+}
+
+#[then(regex = r#"^the service received a RemoveRun for "([^"]+)"$"#)]
+fn service_received_remove(w: &mut BehaviourWorld, run: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::RemoveRun { run: asked, .. } if *asked == run))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a RemoveRun for {run:?} among {requests:?}"
+        ))
+    }
 }
 
 #[then(regex = r#"^the service received a forced RemoveRun for "([^"]+)"$"#)]

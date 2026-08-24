@@ -133,8 +133,8 @@ Feature: two things carry a name, and every command acts on one of them
     # local store. If it asked a registry, no sandbox could be named `redis`.
     Given "redis" names a sandbox, and the cache holds nothing
     When the user runs "lns rm redis"
-    Then the command fails with an exit code other than 0
-    And the output contains "running sandbox"
+    Then the exit code is 0
+    And the service received a RemoveRun for "redis"
 
   Scenario: a word neither namespace knows names both as searched
     Given "ghost" names neither a sandbox nor a cached artifact
