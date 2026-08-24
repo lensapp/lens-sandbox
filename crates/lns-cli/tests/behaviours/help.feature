@@ -33,7 +33,15 @@ Feature: users discover the CLI surface
     And the output contains "./lns.yaml"
     And the output contains "--cpus"
     And the output contains "--mem"
-    And the output contains "--policy"
+    And the output contains "--user"
+
+  Scenario: lns run --help offers one run-as flag and no way to name the project mixin
+    When I run "lns run --help"
+    Then the exit code is 0
+    And the output does not contain "--policy"
+    And the output does not contain "--sandbox-user"
+    And the output does not contain "--sandbox-uid"
+    And the output does not contain "--publish-declared"
 
   Scenario: the surface offers no command that edits network rules
     When I run "lns --help"

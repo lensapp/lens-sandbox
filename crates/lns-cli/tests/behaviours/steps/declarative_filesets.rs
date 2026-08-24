@@ -85,7 +85,7 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        lns_cli::run::summary::DecisionsSite::one_directory(&cwd),
+        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");
@@ -176,7 +176,7 @@ fn pulled_run_prepared(world: &mut BehaviourWorld) {
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        lns_cli::run::summary::DecisionsSite::one_directory(&cwd),
+        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");

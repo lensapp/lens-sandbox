@@ -245,10 +245,6 @@ fn run_lns_microvm(world: &mut E2eWorld, tail: Vec<String>) {
 fn run_lns_microvm_as(world: &mut E2eWorld, verb: &[&str], tail: Vec<String>) {
     let project = microvm_project(world);
     let mut args: Vec<String> = verb.iter().map(|s| s.to_string()).collect();
-    if let Some(policy) = &world.policy_path {
-        args.push("--policy".to_string());
-        args.push(policy.to_string_lossy().into_owned());
-    }
     args.extend(tail);
     let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
     let result = run_cli_with_timeout_in_dir(&project, args, socket_env(world), budget);
@@ -263,12 +259,10 @@ fn last_run(world: &E2eWorld) -> Result<String, String> {
         .ok_or_else(|| "no run id was captured from the run output".to_string())
 }
 
+/// The project's own mixin is the only decisions file a run reads, so a scenario that wants rules in force writes them beside the document.
 fn write_policy(world: &mut E2eWorld, yaml: &str) {
-    let dir = tempfile::TempDir::new().expect("tempdir for policy");
-    let path = dir.path().join("lns-local-mixin.yaml");
+    let path = microvm_project(world).join("lns-local-mixin.yaml");
     std::fs::write(&path, yaml).expect("write policy file");
-    world.policy_dir = Some(dir);
-    world.policy_path = Some(path);
 }
 
 fn track_volume(world: &mut E2eWorld, name: &str) {

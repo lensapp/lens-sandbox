@@ -9,60 +9,23 @@ use crate::cli::RunArgs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySource {
-    Explicit(PathBuf),
     Found,
     AutoCreated,
 }
 
-const DEFAULT_POLICY_FILENAME: &str = "lns-local-mixin.yaml";
+pub const DEFAULT_POLICY_FILENAME: &str = "lns-local-mixin.yaml";
 
-/// The two directories a decisions file can root at, which are the same one until a definition somewhere else is run: the default file belongs to the project (§8.1), while a path the developer typed roots where they typed it, as a `--mixin` does (§3.3.1).
-#[derive(Debug, Clone, Copy)]
-pub struct DecisionsSite<'a> {
-    pub typed_in: &'a Path,
-    pub project: &'a Path,
+/// The project's own mixin is found beside the document and never named, so a definition run from another directory is governed by that directory's decisions rather than the one you typed in.
+pub fn policy_path(project: &Path) -> PathBuf {
+    project.join(DEFAULT_POLICY_FILENAME)
 }
 
-impl<'a> DecisionsSite<'a> {
-    pub fn one_directory(dir: &'a Path) -> Self {
-        Self {
-            typed_in: dir,
-            project: dir,
-        }
-    }
-
-    /// A run's site: a local definition's own directory is the project, and a published reference has none of its own, so the directory the run was started in is.
-    pub fn for_run(typed_in: &'a Path, project: Option<&'a Path>) -> Self {
-        Self {
-            typed_in,
-            project: project.unwrap_or(typed_in),
-        }
-    }
-}
-
-pub fn policy_path(explicit: Option<&Path>, site: DecisionsSite<'_>) -> PathBuf {
-    match explicit {
-        Some(p) if p.is_absolute() => p.to_path_buf(),
-        Some(p) => site.typed_in.join(p),
-        None => site.project.join(DEFAULT_POLICY_FILENAME),
-    }
-}
-
-pub fn resolve_policy(
-    explicit: Option<&Path>,
-    site: DecisionsSite<'_>,
-) -> Result<(PathBuf, PolicySource)> {
-    if let Some(p) = explicit {
-        return Ok((
-            policy_path(Some(p), site),
-            PolicySource::Explicit(p.to_path_buf()),
-        ));
-    }
-    let path = policy_path(None, site);
+pub fn resolve_policy(project: &Path) -> Result<(PathBuf, PolicySource)> {
+    let path = policy_path(project);
     match std::fs::metadata(&path) {
         Ok(md) if md.is_file() => Ok((path, PolicySource::Found)),
         Ok(_) => anyhow::bail!(
-            "{} exists but is not a regular file; remove it or pass `--policy <path>`",
+            "{} exists but is not a regular file; remove it so the run can record what you decide",
             path.display()
         ),
         Err(_) => {
@@ -127,10 +90,10 @@ pub fn drop_overridden_mounts(args: &mut RunArgs, overridden: &[String]) {
 pub fn print_run_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
-    site: DecisionsSite<'_>,
+    project: &Path,
     writer: &mut impl io::Write,
 ) -> Result<PathBuf> {
-    let (path, source) = resolve_policy(args.policy.as_deref(), site)?;
+    let (path, source) = resolve_policy(project)?;
     let policy = Policy::load_or_default(&path)
         .with_context(|| format!("loading policy from {}", path.display()))?;
     let body = format_summary(args, size, &policy, &path, &source);
@@ -398,18 +361,6 @@ pub fn format_summary(
     .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
-    if !args.declared_unpublished.is_empty() {
-        writeln!(
-            s,
-            "  Declared:  {} (not published; opt in with -P)",
-            args.declared_unpublished
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-        .unwrap();
-    }
     s.push_str("  Policy:\n");
     writeln!(s, "    file: {}", policy_path.display()).unwrap();
     writeln!(s, "    unmatched destinations: {}", unmatched_line(policy)).unwrap();
@@ -647,7 +598,6 @@ fn source_line(source: &PolicySource) -> String {
         PolicySource::AutoCreated => {
             "auto-created (no policy in the project directory)".to_string()
         }
-        PolicySource::Explicit(p) => format!("--policy {}", p.display()),
     }
 }
 
@@ -840,10 +790,7 @@ mod tests {
             registry: None,
             cpus: None,
             mem: None,
-            policy: None,
             user: None,
-            sandbox_user: None,
-            sandbox_uid: None,
             auto_remove: false,
             interactive: true,
             tty: true,
@@ -855,8 +802,6 @@ mod tests {
             env: Vec::new(),
             env_file: Vec::new(),
             publish: Vec::new(),
-            publish_declared: false,
-            declared_unpublished: Vec::new(),
             filesets: Vec::new(),
             tools: Vec::new(),
             mounts: Vec::new(),
@@ -2044,62 +1989,13 @@ mod tests {
     }
 
     #[test]
-    fn source_line_for_explicit_flag_quotes_the_passed_path() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/home/ops/team-policy.yaml"),
-            &PolicySource::Explicit(PathBuf::from("/home/ops/team-policy.yaml")),
-        );
-        assert!(s.contains("source: --policy /home/ops/team-policy.yaml"));
-    }
-
-    #[test]
-    fn resolve_policy_explicit_passthrough_does_not_touch_disk() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let explicit = dir.path().join("absent-but-named.yaml");
-        let (resolved, source) =
-            resolve_policy(Some(&explicit), DecisionsSite::one_directory(dir.path())).unwrap();
-        assert_eq!(resolved, explicit);
-        assert_eq!(source, PolicySource::Explicit(explicit));
-        assert!(!dir.path().join(DEFAULT_POLICY_FILENAME).exists());
-    }
-
-    #[test]
-    fn resolve_policy_roots_a_relative_explicit_path_where_the_developer_typed_it() {
-        // A path the developer typed is theirs, as a --mixin is (§3.3.1), so it roots where they stood and not at the project a definition somewhere else names.
-        let dir = tempfile::TempDir::new().unwrap();
-        let project = tempfile::TempDir::new().unwrap();
-        let relative = Path::new("team-policy.yaml");
-        let site = DecisionsSite {
-            typed_in: dir.path(),
-            project: project.path(),
-        };
-        let (resolved, source) = resolve_policy(Some(relative), site).unwrap();
-        assert_eq!(
-            resolved,
-            dir.path().join("team-policy.yaml"),
-            "daemon must receive an absolute path so its cwd doesn't change which file is loaded",
-        );
-        assert_eq!(
-            source,
-            PolicySource::Explicit(relative.to_path_buf()),
-            "display source preserves what the user typed",
-        );
-    }
-
-    #[test]
     fn resolve_policy_finds_the_default_file_of_the_project_rather_than_of_the_cwd() {
-        // One directory is one project (§8.1), so the run reads the decisions beside the definition it runs, wherever the developer started it.
+        // One directory is one project, so the run reads the decisions beside the definition it runs, wherever the developer started it.
         let cwd = tempfile::TempDir::new().unwrap();
         let project = tempfile::TempDir::new().unwrap();
         let preexisting = project.path().join(DEFAULT_POLICY_FILENAME);
         Policy::default().save_atomic(&preexisting).unwrap();
-        let site = DecisionsSite {
-            typed_in: cwd.path(),
-            project: project.path(),
-        };
-        let (resolved, source) = resolve_policy(None, site).unwrap();
+        let (resolved, source) = resolve_policy(project.path()).unwrap();
         assert_eq!(resolved, preexisting);
         assert_eq!(source, PolicySource::Found);
         assert!(!cwd.path().join(DEFAULT_POLICY_FILENAME).exists());
@@ -2108,8 +2004,7 @@ mod tests {
     #[test]
     fn resolve_policy_auto_creates_default_file_when_missing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (resolved, source) =
-            resolve_policy(None, DecisionsSite::one_directory(dir.path())).unwrap();
+        let (resolved, source) = resolve_policy(dir.path()).unwrap();
         assert_eq!(resolved, dir.path().join(DEFAULT_POLICY_FILENAME));
         assert_eq!(source, PolicySource::AutoCreated);
         let body = std::fs::read_to_string(&resolved).unwrap();
@@ -2130,8 +2025,7 @@ mod tests {
     fn resolve_policy_errors_when_default_path_is_a_directory() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(DEFAULT_POLICY_FILENAME)).unwrap();
-        let err = resolve_policy(None, DecisionsSite::one_directory(dir.path()))
-            .expect_err("must reject non-file");
+        let err = resolve_policy(dir.path()).expect_err("must reject non-file");
         assert!(format!("{err:#}").contains("not a regular file"));
     }
 
@@ -2143,7 +2037,7 @@ mod tests {
         let path = print_run_summary(
             &args,
             resolved_size(Default::default(), &args),
-            DecisionsSite::one_directory(dir.path()),
+            dir.path(),
             &mut buf,
         )
         .unwrap();

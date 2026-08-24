@@ -53,12 +53,9 @@ spec:
     tcp: []
 ```
 
-One directory, one policy file — it sits next to the project it governs. Point a
-run at a different file with `--policy <path>`:
-
-```bash
-lns run --policy ~/team/shared-policy.yaml ghcr.io/acme/agent
-```
+One directory, one policy file — it sits next to the project it governs, and
+nothing names it. A definition you run from another directory is governed by
+that directory's file, not by the one where you typed the command.
 
 ### What the file decides, and what it doesn't
 
@@ -379,11 +376,10 @@ If no one responds, the request times out and is treated as a denial.
 
 ## Sharing policy
 
-Because policy is a plain file, it travels. Commit `lns-local-mixin.yaml` to the repo so
-everyone running the project shares the same rules, hand it to a teammate, or keep
-a curated file somewhere central and point runs at it with `--policy`. A run loads
-the file at startup, so shared approvals are already in place — no one has to
-re-approve them.
+Because policy is a plain file, it travels. Commit `lns-local-mixin.yaml` to the
+repo so everyone running the project shares the same rules, or hand it to a
+teammate to drop beside their own document. A run loads the file at startup, so
+shared approvals are already in place — no one has to re-approve them.
 
 ## See also
 
@@ -391,5 +387,5 @@ re-approve them.
   policy and follow the same allow / deny / ask model.
 - [Connectors](connectors.md) — connecting a connector records it under
   `connectors:` and allows the routes it declares.
-- [Running workloads](running-workloads.md) — `--policy` and the run summary.
+- [Running workloads](running-workloads.md) — the run summary and what it lists.
 - [CLI reference](cli-reference.md) — every command and flag as it ships today.
