@@ -10,7 +10,7 @@ use crate::connector::LocalBoxFuture;
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::VolumeArgs::from_arg_matches(matches)?;
-        crate::service::require_running().await;
+        crate::service::require_running().await?;
         let svc = RealVolumeService::new(crate::service::socket_path()?);
         let mut out = ctx.out;
         crate::volume::run(&args.command, &svc, ctx.input, &mut out).await

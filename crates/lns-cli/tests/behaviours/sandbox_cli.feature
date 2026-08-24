@@ -69,9 +69,18 @@ Feature: managing running sandboxes from the CLI
     Then the command fails with an exit code other than 0
     And the output contains "is it running?"
 
-  Scenario: inspecting a run prints its state and configuration as JSON
+  Scenario: inspecting a run summarises its state for a reader
     Given the service reports run 3 of image "some-image:1" running with 2 cpus and 1024 MiB
     When the user runs sandbox command "inspect 3"
+    Then the exit code is 0
+    And the output contains "IMAGE"
+    And the output contains "some-image:1"
+    And the output contains "running"
+    And the output contains "1.0 GiB"
+
+  Scenario: --format json gives a script the whole record the table summarises
+    Given the service reports run 3 of image "some-image:1" running with 2 cpus and 1024 MiB
+    When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "some-image:1"
     And the output contains "running"
@@ -80,16 +89,22 @@ Feature: managing running sandboxes from the CLI
   Scenario: inspect embeds the policy file when it is readable
     Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
     And the policy file parses with one allow rule
-    When the user runs sandbox command "inspect 3"
+    When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "egress"
     And the output contains "/work/lns-local-mixin.yaml"
 
   Scenario: inspect marks an unreadable policy file instead of failing
     Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
-    When the user runs sandbox command "inspect 3"
+    When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "policy file could not be read"
+
+  Scenario: --format json has no answer for a cached artifact, and says so
+    Given the reference "hermes:1.4.0" resolves to a cached sandbox
+    When the user runs sandbox command "inspect hermes:1.4.0 --format json"
+    Then the command fails with an exit code other than 0
+    And the output contains "render as themselves"
 
   Scenario: logs dumps the captured output and stops at the end of the buffer
     Given the run 3 stream carries stdout "hello from the workload" then ends

@@ -353,6 +353,9 @@ mod tests {
             run: target.map(str::to_string),
             mixins: Vec::new(),
             file: None,
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
         })
     }
 
@@ -698,6 +701,9 @@ mod tests {
                 run: None,
                 mixins: Vec::new(),
                 file: Some(std::path::PathBuf::from("lns.dev.yaml")),
+                output: crate::output::OutputArgs {
+                    format: crate::output::Format::Table,
+                },
             }
         )));
     }

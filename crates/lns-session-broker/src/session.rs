@@ -241,6 +241,14 @@ pub(crate) fn validate_argv(argv: &[String]) -> Option<Vec<CString>> {
     (cargs.len() == argv.len()).then_some(cargs)
 }
 
+/// A command the sandbox does not have exits 127 and one it has but cannot execute exits 126, so a caller can tell a typo from a file that is there but unusable.
+pub(crate) fn exec_failure_code(kind: io::ErrorKind) -> i32 {
+    match kind {
+        io::ErrorKind::NotFound => 127,
+        _ => 126,
+    }
+}
+
 pub fn read_client_frame(fd: RawFd) -> Option<ClientFrame> {
     let mut len_buf = [0u8; 4];
     if crate::vsock::read_exact(fd, &mut len_buf) != crate::vsock::ReadOutcome::Full {
@@ -734,5 +742,21 @@ mod tests {
         assert!(shared.write_lock().is_none());
         // Closing again is a no-op (fd already -1).
         shared.close();
+    }
+
+    #[test]
+    fn a_missing_command_is_127_and_one_that_cannot_run_is_126() {
+        assert_eq!(exec_failure_code(io::ErrorKind::NotFound), 127);
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::IsADirectory,
+        ] {
+            assert_eq!(
+                exec_failure_code(kind),
+                126,
+                "{kind:?} means the command was found; only a missing one is 127"
+            );
+        }
     }
 }

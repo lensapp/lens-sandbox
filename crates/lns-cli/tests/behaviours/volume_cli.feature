@@ -44,9 +44,17 @@ Feature: managing named volumes from the CLI
     Then the exit code is 0
     And the output contains "prism-data"
 
-  Scenario: inspecting a volume prints its details as JSON
+  Scenario: inspecting a volume names its capacity, its on-disk size, and its holder
     Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
     When the user runs volume command "inspect prism-data"
+    Then the exit code is 0
+    And the output contains "CAPACITY"
+    And the output contains "ON DISK"
+    And the output contains "32 MiB"
+
+  Scenario: inspecting a volume as JSON gives a script the raw byte counts
+    Given the service reports an idle volume "prism-data" using 33554432 bytes on disk
+    When the user runs volume command "inspect prism-data --format json"
     Then the exit code is 0
     And the output is JSON describing the idle volume "prism-data" using 33554432 bytes on disk
 

@@ -30,10 +30,26 @@ fn primary_target(run_id: impl Into<String>) -> lns_ipc::SessionTarget {
     }
 }
 
+/// §5: a `run` or `exec` that fails is `lns` failing, never the workload — the workload's own status comes back as a code, so an error here is always the 125 case and is never mistaken for a workload that exited 1.
+pub const PRE_START_FAILURE: i32 = 125;
+
+fn as_pre_start_failure(result: Result<i32>) -> i32 {
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            crate::log::error!("{e:#}");
+            PRE_START_FAILURE
+        }
+    }
+}
+
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = RunArgs::from_arg_matches(matches)?;
-        launch_run(args, ctx.debug).await
+        let started = async {
+            let args = RunArgs::from_arg_matches(matches)?;
+            launch_run(args, ctx.debug).await
+        };
+        Ok(as_pre_start_failure(started.await))
     })
 }
 
@@ -50,15 +66,18 @@ pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
         &crate::sandbox::real::RealFs,
         &cwd,
     )?;
-    require_running().await;
+    require_running().await?;
     run_image(args, target, cwd, debug).await
 }
 
 pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = ExecArgs::from_arg_matches(matches)?;
-        require_running().await;
-        exec_image(args).await
+        let started = async {
+            let args = ExecArgs::from_arg_matches(matches)?;
+            require_running().await?;
+            exec_image(args).await
+        };
+        Ok(as_pre_start_failure(started.await))
     })
 }
 
@@ -82,19 +101,11 @@ pub async fn dispatch(cmd: &super::ServiceCommand, writer: &mut dyn std::io::Wri
     }
 }
 
-pub async fn require_running() {
-    let client = match real_client() {
-        Ok(c) => c,
-        Err(e) => {
-            crate::log::error!("{e}");
-            std::process::exit(1);
-        }
-    };
+/// The caller decides what an unreachable service costs: `run` and `exec` answer 125 for it (§5), every other verb the ordinary 1.
+pub async fn require_running() -> Result<()> {
+    let client = real_client()?;
     let alive = client.ping().await;
-    if let Err(msg) = require_running_check(alive) {
-        crate::log::error!("{msg}");
-        std::process::exit(1);
-    }
+    require_running_check(alive).map_err(anyhow::Error::msg)
 }
 fn real_client() -> Result<real::RealServiceClient> {
     Ok(real::RealServiceClient::new(

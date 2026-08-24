@@ -54,6 +54,25 @@ pub fn emit_or_note<T: TableRow + serde::Serialize>(
     emit(format, rows, out)
 }
 
+/// One thing rather than a list: the JSON is a single object, and the table is the FIELD/VALUE summary of it that a reader can scan.
+pub fn emit_fields<T: serde::Serialize>(
+    format: Format,
+    fields: &[(&str, String)],
+    record: &T,
+    out: &mut dyn Write,
+) -> Result<()> {
+    match format {
+        Format::Table => {
+            let rows: Vec<Vec<String>> = fields
+                .iter()
+                .map(|(field, value)| vec![(*field).to_string(), value.clone()])
+                .collect();
+            render_table(out, &["FIELD", "VALUE"], &rows).context("writing the table")
+        }
+        Format::Json => emit_object(record, out),
+    }
+}
+
 pub fn emit_object<T: serde::Serialize>(value: &T, out: &mut dyn Write) -> Result<()> {
     let text = serde_json::to_string_pretty(value).context("serializing json output")?;
     writeln!(out, "{text}").context("writing json output")
