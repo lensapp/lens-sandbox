@@ -603,6 +603,9 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
         &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+            output: lns_cli::output::OutputArgs {
+                format: lns_cli::output::Format::Table,
+            },
             run: reference,
             mixins,
             file: None,

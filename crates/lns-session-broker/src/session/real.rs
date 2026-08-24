@@ -574,12 +574,9 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
     argv_ptrs.push(ptr::null());
     // SAFETY: argv_ptrs is NULL-terminated; CStrings outlive the call which doesn't return on success.
     unsafe { libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr()) };
-    let _ = writeln_stderr(&format!(
-        "execvp({:?}): {}",
-        spec.argv[0],
-        io::Error::last_os_error()
-    ));
-    child_exit(127);
+    let failure = io::Error::last_os_error();
+    let _ = writeln_stderr(&format!("execvp({:?}): {failure}", spec.argv[0]));
+    child_exit(super::exec_failure_code(failure.kind()));
 }
 
 fn set_guest_hostname(hostname: Option<&str>) {

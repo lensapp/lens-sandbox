@@ -290,6 +290,9 @@ pub struct SandboxInspectArgs {
         help = "Resolve this mixin into the sandbox before rendering it, as `lns run --mixin` would. Repeatable."
     )]
     pub mixins: Vec<String>,
+
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -527,7 +530,7 @@ where
             let Some(target) = &args.run else {
                 bail!("a local definition inspect runs offline, not through the service dispatch")
             };
-            inspect(svc, target, &args.mixins, out).await
+            inspect(svc, target, &args.mixins, args.output.format, out).await
         }
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -1018,6 +1021,7 @@ async fn inspect<W: std::io::Write>(
     svc: &impl SandboxService,
     target: &str,
     mixins: &[String],
+    format: crate::output::Format,
     out: &mut W,
 ) -> Result<i32> {
     match svc
@@ -1033,11 +1037,12 @@ async fn inspect<W: std::io::Write>(
                 .policy_path
                 .as_deref()
                 .map(|path| policy_doc(path, svc.load_policy(path)));
-            render_inspect(&details, policy, out)?;
+            render_inspect(&details, policy, format, out)?;
             Ok(0)
         }
         // A reference the service knows no run for is a cached artifact; any other error is a real failure, not a miss.
         Response::Error { message } if is_unknown_run(&message) => {
+            refuse_format_for_a_document(format)?;
             inspect_cached(svc, target, mixins, out).await
         }
         Response::Error { message } => bail!("daemon error: {message}"),
@@ -1241,9 +1246,20 @@ fn policy_doc(path: &str, loaded: Option<serde_json::Value>) -> serde_json::Valu
     }
 }
 
+/// `--format` answers for a sandbox's live state (§3.2). A document renders as the prose its author wrote, so asking for a shape it has no answer for is a refusal rather than a flag silently doing nothing.
+fn refuse_format_for_a_document(format: crate::output::Format) -> Result<()> {
+    if format == crate::output::Format::Json {
+        bail!(
+            "--format answers for a running sandbox; a cached artifact and a local document render as themselves"
+        );
+    }
+    Ok(())
+}
+
 fn render_inspect<W: std::io::Write>(
     details: &RunDetails,
     policy: Option<serde_json::Value>,
+    format: crate::output::Format,
     out: &mut W,
 ) -> Result<()> {
     let mut config = serde_json::Map::new();
@@ -1288,9 +1304,43 @@ fn render_inspect<W: std::io::Write>(
     );
     doc.insert("config".into(), config.into());
     doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
-    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(doc))?;
-    writeln!(out, "{rendered}")?;
-    Ok(())
+    let fields = inspect_fields(details);
+    crate::output::emit_fields(format, &fields, &serde_json::Value::Object(doc), out)
+}
+
+/// The table is the summary a reader scans; the JSON stays the record, and carries the launch configuration and the resolved policy the table has no room for.
+fn inspect_fields(details: &RunDetails) -> Vec<(&'static str, String)> {
+    vec![
+        ("ID", details.summary.id.clone()),
+        ("NAME", details.summary.name.clone()),
+        ("IMAGE", details.summary.image.clone()),
+        ("COMMAND", details.summary.command.clone()),
+        (
+            "STATUS",
+            format!("{:?}", details.summary.status).to_lowercase(),
+        ),
+        (
+            "UPTIME",
+            crate::service::friendly_started(&details.summary.started),
+        ),
+        ("CPUS", details.config.cpus.to_string()),
+        (
+            "MEM",
+            format_bytes(details.config.mem_mib as u64 * 1024 * 1024),
+        ),
+        (
+            "WORKDIR",
+            details.config.workdir.clone().unwrap_or_else(|| "-".into()),
+        ),
+        (
+            "USER",
+            details
+                .config
+                .sandbox_user
+                .clone()
+                .unwrap_or_else(|| "-".into()),
+        ),
+    ]
 }
 
 fn format_permille(permille: u32) -> String {
@@ -1631,6 +1681,9 @@ mod tests {
                 run: None,
                 mixins: Vec::new(),
                 file: None,
+                output: crate::output::OutputArgs {
+                    format: crate::output::Format::Table,
+                },
             }),
         ] {
             let mut out = Vec::new();
@@ -2240,9 +2293,15 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &["ghcr.io/acme/obs:2".to_string()], &mut out)
-            .await
-            .unwrap_err();
+        let err = inspect(
+            &svc,
+            "1",
+            &["ghcr.io/acme/obs:2".to_string()],
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("--mixin applies to a sandbox reference"),
             "a live run has already booted, so rendering it as though the flag applied would describe a composition that never ran; got: {err:#}"
@@ -2253,7 +2312,9 @@ mod tests {
     async fn inspect_rejects_an_unrelated_response_variant() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &[], &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", &[], crate::output::Format::Json, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2263,7 +2324,9 @@ mod tests {
             message: "no active run with id 1".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "1", &[], &mut out).await.unwrap_err();
+        let err = inspect(&svc, "1", &[], crate::output::Format::Table, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("no active run with id 1"));
     }
 
@@ -2312,7 +2375,15 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        let code = inspect(&svc, "hermes:1.4.0", &[], &mut out).await.unwrap();
+        let code = inspect(
+            &svc,
+            "hermes:1.4.0",
+            &[],
+            crate::output::Format::Table,
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: sandbox"), "got: {text}");
@@ -2349,7 +2420,9 @@ mod tests {
             },
         );
         let mut out = Vec::new();
-        inspect(&image, "x", &[], &mut out).await.unwrap();
+        inspect(&image, "x", &[], crate::output::Format::Table, &mut out)
+            .await
+            .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("kind: image"), "got: {text}");
         assert!(text.contains("digest: sha256:abc"), "got: {text}");
@@ -2364,7 +2437,9 @@ mod tests {
             Response::Pong,
         );
         let mut out = Vec::new();
-        let err = inspect(&svc, "x", &[], &mut out).await.unwrap_err();
+        let err = inspect(&svc, "x", &[], crate::output::Format::Table, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
@@ -2374,7 +2449,9 @@ mod tests {
             message: "daemon busy".into(),
         });
         let mut out = Vec::new();
-        let err = inspect(&svc, "reviewer", &[], &mut out).await.unwrap_err();
+        let err = inspect(&svc, "reviewer", &[], crate::output::Format::Json, &mut out)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("daemon busy"),
             "a transient InspectRun error must surface, not be masked as no-such-image: {err:#}"
@@ -2819,7 +2896,9 @@ mod tests {
             }),
         });
         let mut out = Vec::new();
-        let code = inspect(&svc, "1", &[], &mut out).await.unwrap();
+        let code = inspect(&svc, "1", &[], crate::output::Format::Json, &mut out)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(

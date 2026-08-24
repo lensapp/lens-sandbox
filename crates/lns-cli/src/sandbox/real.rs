@@ -36,7 +36,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             )
             .await;
         }
-        crate::service::require_running().await;
+        crate::service::require_running().await?;
         dispatch(args, ctx.input).await
     })
 }
@@ -76,7 +76,7 @@ async fn dispatch_command(
     command: super::SandboxCommand,
     input: &mut dyn std::io::BufRead,
 ) -> Result<i32> {
-    crate::service::require_running().await;
+    crate::service::require_running().await?;
     dispatch(super::SandboxArgs { command }, input).await
 }
 

@@ -22,8 +22,8 @@ pub enum VolumeCommand {
     Ls(VolumeLsArgs),
     #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
     Create(VolumeNameArg),
-    #[command(about = "Show a volume's details as JSON.")]
-    Inspect(VolumeNameArg),
+    #[command(about = "Show a volume's capacity, on-disk bytes, age, and holder.")]
+    Inspect(VolumeInspectArgs),
     #[command(about = "Remove a named volume; refused while a run holds it.")]
     Rm(VolumeNameArg),
     #[command(about = "Remove every volume not attached to a running sandbox.")]
@@ -32,6 +32,18 @@ pub enum VolumeCommand {
 
 #[derive(clap::Args)]
 pub struct VolumeLsArgs {
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
+}
+
+#[derive(clap::Args)]
+pub struct VolumeInspectArgs {
+    #[arg(
+        value_parser = parse_volume_name,
+        help = "Volume name, as used with `lns run -v name:/path`."
+    )]
+    pub name: String,
+
     #[command(flatten)]
     pub output: crate::output::OutputArgs,
 }
@@ -90,7 +102,7 @@ pub async fn run(
     match cmd {
         VolumeCommand::Ls(args) => ls(svc, args, writer).await,
         VolumeCommand::Create(args) => create(svc, &args.name, writer).await,
-        VolumeCommand::Inspect(args) => inspect(svc, &args.name, writer).await,
+        VolumeCommand::Inspect(args) => inspect(svc, &args.name, args.output.format, writer).await,
         VolumeCommand::Rm(args) => rm(svc, &args.name, writer).await,
         VolumeCommand::Prune(args) => prune(svc, args.force, input, writer).await,
     }
@@ -140,6 +152,18 @@ impl VolumeRow {
     }
 }
 
+impl VolumeRow {
+    fn fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("NAME", self.name.clone()),
+            ("CAPACITY", format_size(self.size_bytes)),
+            ("ON DISK", format_size(self.disk_bytes)),
+            ("CREATED", crate::service::friendly_started(&self.created)),
+            ("IN USE", in_use_str(self.in_use_by.as_deref())),
+        ]
+    }
+}
+
 impl crate::output::TableRow for VolumeRow {
     const HEADERS: &'static [&'static str] = &["NAME", "ON DISK", "CREATED", "IN USE"];
 
@@ -166,13 +190,19 @@ async fn create(svc: &dyn VolumeService, name: &str, writer: &mut impl Write) ->
     }
 }
 
-async fn inspect(svc: &dyn VolumeService, name: &str, writer: &mut impl Write) -> Result<i32> {
+async fn inspect(
+    svc: &dyn VolumeService,
+    name: &str,
+    format: crate::output::Format,
+    writer: &mut impl Write,
+) -> Result<i32> {
     let req = Request::InspectVolume {
         name: name.to_string(),
     };
     match send(svc, req).await? {
         Response::VolumeInspect { volume } => {
-            crate::output::emit_object(&VolumeRow::new(&volume), writer)?;
+            let row = VolumeRow::new(&volume);
+            crate::output::emit_fields(format, &row.fields(), &row, writer)?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -329,12 +359,19 @@ mod tests {
         }
     }
 
+    fn inspect_arg(name: &str, format: crate::output::Format) -> VolumeInspectArgs {
+        VolumeInspectArgs {
+            name: name.to_string(),
+            output: crate::output::OutputArgs { format },
+        }
+    }
+
     #[tokio::test]
     async fn each_verb_rejects_a_mismatched_response_kind() {
         for cmd in [
             VolumeCommand::Ls(ls_args()),
             VolumeCommand::Create(name_arg("v")),
-            VolumeCommand::Inspect(name_arg("v")),
+            VolumeCommand::Inspect(inspect_arg("v", crate::output::Format::Json)),
             VolumeCommand::Rm(name_arg("v")),
             VolumeCommand::Prune(VolumePruneArgs { force: true }),
         ] {
@@ -402,17 +439,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_emits_the_volume_as_pretty_json() {
+    async fn inspect_emits_the_volume_as_one_object_not_a_list() {
         let svc = CannedService::with([Some(Response::VolumeInspect {
             volume: volume("prism-data"),
         })]);
-        let (_, out) = run_cmd(&VolumeCommand::Inspect(name_arg("prism-data")), &svc)
-            .await
-            .unwrap();
+        let (_, out) = run_cmd(
+            &VolumeCommand::Inspect(inspect_arg("prism-data", crate::output::Format::Json)),
+            &svc,
+        )
+        .await
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed.is_object(), "one thing is one object: {parsed}");
         assert_eq!(parsed["name"], "prism-data");
         assert_eq!(parsed["sizeBytes"], 10_737_418_240_u64);
         assert_eq!(parsed["diskBytes"], 33_554_432);
+    }
+
+    #[tokio::test]
+    async fn inspect_as_a_table_names_the_capacity_the_json_carries_raw() {
+        let svc = CannedService::with([Some(Response::VolumeInspect {
+            volume: volume("prism-data"),
+        })]);
+        let (_, out) = run_cmd(
+            &VolumeCommand::Inspect(inspect_arg("prism-data", crate::output::Format::Table)),
+            &svc,
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("CAPACITY"), "got: {out}");
+        assert!(out.contains("10 GiB"), "got: {out}");
+        assert!(out.contains("ON DISK"), "got: {out}");
     }
 
     #[test]

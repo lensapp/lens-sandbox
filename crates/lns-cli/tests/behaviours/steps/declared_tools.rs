@@ -104,6 +104,9 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
         &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+            output: lns_cli::output::OutputArgs {
+                format: lns_cli::output::Format::Table,
+            },
             run: Some(TOOLS_REFERENCE.into()),
             mixins: Vec::new(),
             file: None,

@@ -18,13 +18,34 @@ the CLI asks before it acts — see the
 
 Log levels: `error`, `warn`, `info`, `debug`.
 
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | It did what you asked. |
+| `1` | It did not, and `lns` is telling you why — a refusal, a validation failure, or a "not found" answer such as `lns config get` on an unset key. |
+| `2` | The invocation could not be parsed: unknown command, missing operand, unparsable value. |
+| `125` | `run` or `exec` failed before the workload started — service unreachable, reference unresolved, mount invalid, declared tool refused, `pre-start` script failed. |
+| `126` | The workload command was found in the sandbox but could not be executed. |
+| `127` | The workload command was not found in the sandbox. |
+| *the workload's* | Once the workload has started, `run` and `exec` return its exit status. |
+
+The three high codes exist so a failure of `lns` is never mistaken for the workload
+exiting with the same number. Detaching with the chord exits `0`.
+
 ## Machine-readable output
 
 The list and status verbs take `--format <table|json>`, so a script doesn't have to
 parse the human table:
 
-`lns ps`, `lns sandbox ls`, `lns volume ls`, `lns connector list`,
-`lns connector grants`, `lns config list`, `lns config get`, `lns service status`.
+`lns ps`, `lns sandbox ls`, `lns sandbox inspect <RUN>`, `lns volume ls`,
+`lns volume inspect`, `lns connector list`, `lns connector grants`,
+`lns config list`, `lns config get`, `lns service status`.
+
+`table` is the default everywhere, including the two `inspect` verbs — the table is
+a summary a reader scans, the JSON is the record. `lns sandbox inspect` answers for
+a **running** sandbox; a cached artifact and a local document render as themselves,
+and asking those for `--format json` is refused rather than silently ignored.
 
 `lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
 its machine-readable form is one JSON event per line. The older `--json` spelling still
@@ -71,7 +92,7 @@ Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
 | `lns stop <RUN>`           | `lns sandbox stop <RUN>`          |
 | `lns logs <RUN>`           | `lns sandbox logs <RUN>`          |
 | `lns attach <RUN>`         | `lns sandbox attach <RUN>`        |
-| `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET> [--mixin <REF>]`    |
+| `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET> [--mixin <REF>] [--format <table|json>]`    |
 | `lns rm <REF>`             | `lns sandbox rm <REF>`            |
 
 The lns-native verbs `validate`, `ls`, and `prune` live under `lns sandbox`
@@ -152,7 +173,7 @@ lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
 lns sandbox logs [-f] <RUN>
 lns sandbox attach <RUN> [--detach-keys <CHORD>]
-lns sandbox inspect <TARGET> [--mixin <REF>]
+lns sandbox inspect <TARGET> [--mixin <REF>] [--format <table|json>]
 
 # cache
 lns sandbox rm <REF>
@@ -177,7 +198,7 @@ interchangeable everywhere a run is addressed.
 | `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
 | `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
 | `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. |
+| `inspect`  | `lns inspect`  | `--format <table|json>` chooses the shape for a **running** sandbox: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. The other two targets render as themselves and refuse `--format json`. With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. |
 | `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
 | `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Asks first, unless `-f`/`--force`. |
 
@@ -193,14 +214,18 @@ accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optio
 Manage the named volumes used with `lns run -v` (`docker volume`-style).
 
 ```bash
-lns volume ls | create <NAME> | inspect <NAME> | rm <NAME> | prune [-f]
+lns volume ls [--format <table|json>]
+lns volume create <NAME>
+lns volume inspect <NAME> [--format <table|json>]
+lns volume rm <NAME>
+lns volume prune [-f]
 ```
 
 | Subcommand       | Meaning                                                                              |
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `ls`             | List named volumes with their on-disk size, age, and the run holding them (if any).  |
 | `create <NAME>`  | Create a named volume ahead of its first `lns run -v` attach. No-op if it exists.    |
-| `inspect <NAME>` | Show a volume's details as JSON (capacity, on-disk bytes, created, holder).          |
+| `inspect <NAME>` | Show a volume's capacity, on-disk bytes, age, and holder.                            |
 | `rm <NAME>`      | Remove a volume and its data; refused while a run holds it.                          |
 | `prune`          | Remove every volume not attached to a running sandbox. Prompts unless `-f`/`--force`.|
 
