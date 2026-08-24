@@ -293,6 +293,11 @@ async fn run_connect(world: &mut BehaviourWorld, id: String) {
     run_connector(world, &["connect", &id]).await;
 }
 
+#[when(regex = r#"^the developer runs "lns connector connect (\S+) --project (\S+)"$"#)]
+async fn run_connect_in_project(world: &mut BehaviourWorld, id: String, project: String) {
+    run_connector(world, &["connect", &id, "--project", &project]).await;
+}
+
 #[when(regex = r#"^the developer runs "lns connector list"$"#)]
 async fn run_list(world: &mut BehaviourWorld) {
     run_connector(world, &["list"]).await;
@@ -408,8 +413,94 @@ fn listed_as_kind(world: &mut BehaviourWorld, id: String, kind: String) {
         .lines()
         .find(|l| l.starts_with(&id))
         .unwrap_or_else(|| panic!("no listing line for {id} in:\n{out}"));
-    assert!(
-        line.trim_end().ends_with(&kind),
+    let sign_in = line.split_whitespace().nth(2);
+    assert_eq!(
+        sign_in,
+        Some(kind.as_str()),
         "expected {id} listed as {kind}, got line: {line}"
     );
+}
+
+#[given(regex = r#"^"([^"]+)" is already connected in this project$"#)]
+fn already_connected_here(world: &mut BehaviourWorld, id: String) {
+    use lns_policy::grants::GrantStore as _;
+    let dir = cwd(world);
+    let project = lns_policy::grants::project_key(&dir.join("lns-local-mixin.yaml"));
+    lns_policy::grants::JsonFileGrantStore::new(dir.join("workload-grants.json"))
+        .update(&mut |file| {
+            file.connect(&project, &id);
+            true
+        })
+        .expect("seed the sidecar");
+}
+
+#[then(regex = r#"^"([^"]+)" is listed as (connected|not connected) here$"#)]
+fn listed_as_connected(world: &mut BehaviourWorld, id: String, state: String) {
+    let out = &world
+        .result
+        .as_ref()
+        .expect("a run must have happened")
+        .output;
+    let row = out
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(id.as_str()))
+        .unwrap_or_else(|| panic!("no row for {id:?} in:\n{out}"));
+    let wanted = if state == "connected" { "yes" } else { "no" };
+    assert_eq!(
+        row.split_whitespace().last(),
+        Some(wanted),
+        "installing grants nothing, so the listing has to say whether this project uses it: {row}"
+    );
+}
+
+#[then(regex = r#"^"([^"]+)" is recorded as connected for the project at "([^"]+)"$"#)]
+fn recorded_for_other_project(world: &mut BehaviourWorld, id: String, project: String) {
+    use lns_policy::grants::GrantStore as _;
+    let dir = cwd(world);
+    let key = lns_policy::grants::project_key(
+        &std::path::Path::new(&project).join("lns-local-mixin.yaml"),
+    );
+    let connected = lns_policy::grants::JsonFileGrantStore::new(dir.join("workload-grants.json"))
+        .load()
+        .expect("the sidecar reads back")
+        .connected_in(&key);
+    assert!(
+        connected.contains(&id),
+        "--project names the directory the connection is recorded against; got {connected:?} for {key}"
+    );
+}
+
+#[when(regex = r#"^the developer adds a connector claiming "([^"]+)"$"#)]
+async fn adds_a_connector_claiming(world: &mut BehaviourWorld, domain: String) {
+    let catalog_before = std::fs::read_to_string(cwd(world).join("connectors.yaml")).ok();
+    world.catalog_before = catalog_before;
+    run_connector(
+        world,
+        &[
+            "add",
+            "some-rival",
+            "--env-var",
+            "SOME_RIVAL_TOKEN",
+            "--inject",
+            &format!("bearer_header:{domain}"),
+        ],
+    )
+    .await;
+}
+
+#[then(regex = r#"^the command fails naming "([^"]+)" as the connector that already claims it$"#)]
+fn fails_naming_the_holder(world: &mut BehaviourWorld, holder: String) {
+    let run = world.result.as_ref().expect("a run must have happened");
+    assert_ne!(run.exit_code, 0, "got: {}", run.output);
+    assert!(
+        run.output.contains(&holder),
+        "the refusal has to name which connector already owns the domain; got: {}",
+        run.output
+    );
+}
+
+#[then("the catalog is left unchanged")]
+fn catalog_unchanged(world: &mut BehaviourWorld) {
+    let after = std::fs::read_to_string(cwd(world).join("connectors.yaml")).ok();
+    assert_eq!(world.catalog_before, after, "a refused add writes nothing");
 }

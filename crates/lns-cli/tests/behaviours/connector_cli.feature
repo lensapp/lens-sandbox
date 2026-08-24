@@ -7,8 +7,9 @@ Feature: connecting connectors from the CLI
   decision lands in the per-machine credential store, never in
   `lns-local-mixin.yaml`; the connection is recorded for the directory in
   the per-machine sidecar only once the bind or sign-in completes.
-  `lns connector list` shows, per connector, whether it authenticates
-  by sign-in or a value.
+  `lns connector list` shows, per connector, how it signs in and whether
+  it is connected here. `--project <PATH>` acts on another project
+  directory instead of the current one.
 
   These scenarios use arbitrary user-declared connectors, so nothing
   here pins a shipped service.
@@ -75,3 +76,34 @@ Feature: connecting connectors from the CLI
     When the user runs connector command "list --format json"
     Then the JSON row for "some-provider" has "source" set to "user"
     And the JSON row for "some-provider" has "authKind" set to "credential"
+
+  Scenario: The listing says whether each connector is connected in this project
+    Given a user catalog declares the "some-provider" credential connector
+    And "some-provider" is already connected in this project
+    When the developer runs "lns connector list"
+    Then the output contains "CONNECTED"
+    And "some-provider" is listed as connected here
+    And "gitlab" is listed as not connected here
+
+  Scenario: The JSON listing carries the same answer for a script
+    Given a user catalog declares the "some-provider" credential connector
+    And "some-provider" is already connected in this project
+    When the user runs connector command "list --format json"
+    Then the JSON row for "some-provider" has "connected" set to true
+    And the JSON row for "gitlab" has "connected" set to false
+
+  Scenario: --project acts on another project directory
+    When the developer runs "lns connector connect some-oauth --project /other"
+    Then "some-oauth" is recorded as connected for the project at "/other"
+    And "some-oauth" is not recorded as connected
+
+  Scenario: --policy is gone; the flag names a project, not a file
+    When I run "lns connector connect some-oauth --policy team.yaml"
+    Then the exit code is 2
+    And the output contains "unexpected argument"
+
+  Scenario: adding a connector that claims a domain another already claims is refused
+    Given a user catalog declares the "some-provider" credential connector
+    When the developer adds a connector claiming "api.some-provider.example"
+    Then the command fails naming "some-provider" as the connector that already claims it
+    And the catalog is left unchanged
