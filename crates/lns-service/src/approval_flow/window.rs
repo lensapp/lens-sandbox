@@ -533,32 +533,32 @@ pub fn lds_visuals() -> egui::Visuals {
     v.override_text_color = Some(TEXT_PRIMARY);
     v.hyperlink_color = ACCENT_GREEN;
     v.selection.bg_fill = Color32::from_gray(64);
-    v.selection.stroke = Stroke::new(1.0, TEXT_ACCENT);
+    v.selection.stroke = Stroke::new(1.0_f32, TEXT_ACCENT);
 
     let radius = egui::CornerRadius::same(8);
 
     v.widgets.noninteractive.bg_fill = BG_SECONDARY;
     v.widgets.noninteractive.weak_bg_fill = BG_SECONDARY;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     v.widgets.noninteractive.corner_radius = radius;
 
     v.widgets.inactive.bg_fill = ACCENT_GREEN;
     v.widgets.inactive.weak_bg_fill = ACCENT_GREEN;
     v.widgets.inactive.bg_stroke = Stroke::NONE;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, BG_PRIMARY);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, BG_PRIMARY);
     v.widgets.inactive.corner_radius = radius;
 
     v.widgets.hovered.bg_fill = ACCENT_GREEN_HOVER;
     v.widgets.hovered.weak_bg_fill = ACCENT_GREEN_HOVER;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT_GREEN_HOVER);
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, BG_PRIMARY);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT_GREEN_HOVER);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, BG_PRIMARY);
     v.widgets.hovered.corner_radius = radius;
 
     v.widgets.active.bg_fill = ACCENT_GREEN_PRESSED;
     v.widgets.active.weak_bg_fill = ACCENT_GREEN_PRESSED;
-    v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT_GREEN_PRESSED);
-    v.widgets.active.fg_stroke = Stroke::new(1.0, BG_PRIMARY);
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT_GREEN_PRESSED);
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, BG_PRIMARY);
     v.widgets.active.corner_radius = radius;
     v
 }

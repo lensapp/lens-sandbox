@@ -128,8 +128,8 @@ fn style_button(style: &mut egui::Style, kind: ButtonKind) {
 fn set_state(w: &mut egui::style::WidgetVisuals, c: &StateColors, radius: CornerRadius) {
     w.bg_fill = c.fill;
     w.weak_bg_fill = c.fill;
-    w.bg_stroke = Stroke::new(1.0, c.stroke);
-    w.fg_stroke = Stroke::new(1.0, c.fg);
+    w.bg_stroke = Stroke::new(1.0_f32, c.stroke);
+    w.fg_stroke = Stroke::new(1.0_f32, c.fg);
     w.corner_radius = radius;
 }
 
