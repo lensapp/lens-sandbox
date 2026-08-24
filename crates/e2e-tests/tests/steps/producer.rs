@@ -25,8 +25,8 @@ fn cache_env(world: &mut E2eWorld) -> Vec<(String, String)> {
             home.path().to_string_lossy().into_owned(),
         ),
         (
-            "XDG_CACHE_HOME".to_string(),
-            home.path().join(".cache").to_string_lossy().into_owned(),
+            "LNS_HOME".to_string(),
+            home.path().join(".lns").to_string_lossy().into_owned(),
         ),
     ]
 }

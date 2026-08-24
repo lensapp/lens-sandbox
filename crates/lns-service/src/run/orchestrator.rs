@@ -611,25 +611,21 @@ async fn gate_declared_sign_ins(
     use crate::artifact::credential_boot::{
         BootGate, SlotPlan, boot_gate, plan_declared_connectors, sign_in_gate_ids,
     };
-    use crate::credential_flow::store::{
-        CredentialStore, JsonFileCredentialStore, default_credentials_path,
-    };
+    use crate::credential_flow::store::{CredentialStore, JsonFileCredentialStore};
     use lns_ipc::Response;
 
     let mut signed_in = Vec::new();
     if credentials.is_empty() {
         return Ok(signed_in);
     }
-    let user = lns_policy::connectors::Catalog::load_or_default(
-        &lns_policy::connectors::default_connectors_path(),
-    )
-    .unwrap_or_default();
+    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path())
+        .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
     let declared = sign_in_gate_ids(credentials, &catalog);
     if declared.is_empty() {
         return Ok(signed_in);
     }
-    let state = JsonFileCredentialStore::new(default_credentials_path())
+    let state = JsonFileCredentialStore::new(lns_ipc::credentials_path())
         .load()
         .unwrap_or_default();
     let plans = plan_declared_connectors(&declared, &catalog, &state);

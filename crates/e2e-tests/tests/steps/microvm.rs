@@ -208,9 +208,7 @@ fn socket_env(world: &E2eWorld) -> Vec<(&'static str, std::ffi::OsString)> {
     let mut envs: Vec<(&'static str, std::ffi::OsString)> = Vec::new();
     if let Some(home) = &world.home {
         envs.push(("HOME", home.path().into()));
-        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
-        envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
-        envs.push(("XDG_DATA_HOME", home.path().join(".local/share").into()));
+        envs.push(("LNS_HOME", home.path().join(".lns").into()));
     }
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
@@ -290,7 +288,8 @@ fn home_catalog_declares(world: &mut E2eWorld, id: String, env: String) {
     let catalog = format!(
         "connectors:\n  - id: {id}\n    authKind: credential\n    routes:\n      - match: api.{id}.example\n    credential:\n      envVar: {env}\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
     );
-    std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
+    std::fs::create_dir_all(home.path().join(".lns")).expect("create the lns home");
+    std::fs::write(home.path().join(".lns").join("connectors.yaml"), catalog)
         .expect("write the user connector catalog");
 }
 
@@ -330,7 +329,8 @@ fn home_catalog_declares_oauth(world: &mut E2eWorld, id: String, endpoint: Strin
     let catalog = format!(
         "connectors:\n  - id: {id}\n    authKind: oauth\n    routes:\n      - match: api.{id}.example\n    oauth:\n      clientId: some-client\n      deviceAuthorizationEndpoint: {endpoint}/device\n      tokenEndpoint: {endpoint}/token\n      envVar: SOME_OAUTH_TOKEN\n      placeholder: {id}-LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.{id}.example\n"
     );
-    std::fs::write(home.path().join(".lns-connectors.yaml"), catalog)
+    std::fs::create_dir_all(home.path().join(".lns")).expect("create the lns home");
+    std::fs::write(home.path().join(".lns").join("connectors.yaml"), catalog)
         .expect("write the user connector catalog");
 }
 
@@ -1075,12 +1075,7 @@ fn tool_resolution_record_is_lost(world: &mut E2eWorld) {
         .as_ref()
         .expect("Given a clean lns cache home first")
         .path();
-    let cache_root = if cfg!(target_os = "macos") {
-        home.join("Library").join("Caches")
-    } else {
-        home.join(".cache")
-    };
-    let record = cache_root.join("lns").join("tools").join("resolved.json");
+    let record = home.join(".lns").join("tools").join("resolved.json");
     assert!(
         record.is_file(),
         "the pull must have written {} before this step deletes it",
@@ -1583,13 +1578,8 @@ fn volume_image_path(world: &E2eWorld, name: &str) -> Result<std::path::PathBuf,
         .as_ref()
         .ok_or("Given a clean lns cache home first")?
         .path();
-    let cache_root = if cfg!(target_os = "macos") {
-        home.join("Library").join("Caches")
-    } else {
-        home.join(".cache")
-    };
-    Ok(cache_root
-        .join("lns")
+    Ok(home
+        .join(".lns")
         .join("volumes")
         .join(format!("{name}.img")))
 }

@@ -187,8 +187,6 @@ mod tests {
         let _path = crate::test_env::EnvVarGuard::unset("LNS_KERNEL_PATH");
         let _cdn = crate::test_env::EnvVarGuard::set("LNS_KERNEL_CDN", server.uri());
         let _home = crate::test_env::EnvVarGuard::set("HOME", cache_root.path());
-        let _xdg =
-            crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", cache_root.path().join("xdg"));
         let result = ensure().await;
 
         let err = result.expect_err("wiremock bytes won't match KERNEL_SHA256");
@@ -223,8 +221,6 @@ mod tests {
         let _path = crate::test_env::EnvVarGuard::unset("LNS_KERNEL_PATH");
         let _cdn = crate::test_env::EnvVarGuard::set("LNS_KERNEL_CDN", server.uri());
         let _home = crate::test_env::EnvVarGuard::set("HOME", cache_root.path());
-        let _xdg =
-            crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", cache_root.path().join("xdg"));
         let result = ensure().await;
 
         let err = result.expect_err("503 must bail");
@@ -248,8 +244,6 @@ mod tests {
         let _path = crate::test_env::EnvVarGuard::unset("LNS_KERNEL_PATH");
         let _cdn = crate::test_env::EnvVarGuard::set("LNS_KERNEL_CDN", format!("http://{addr}"));
         let _home = crate::test_env::EnvVarGuard::set("HOME", cache_root.path());
-        let _xdg =
-            crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", cache_root.path().join("xdg"));
         let result = ensure().await;
 
         let err = result.expect_err("connect-refused must bail");

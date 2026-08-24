@@ -70,7 +70,7 @@ fn given_workload_with_placeholder(world: &mut BehaviourWorld, _credential_id: S
     world.credential();
 }
 
-#[given(regex = r#"^no credential rule exists in "~/.lns-credentials.json" for "([^"]+)"$"#)]
+#[given(regex = r#"^no credential rule exists in "~/.lns/credentials.json" for "([^"]+)"$"#)]
 fn given_no_credential_rule(world: &mut BehaviourWorld, credential_id: String) {
     let rig = world.credential();
     assert!(
@@ -129,7 +129,7 @@ fn submit_if_not_visible(rig: &mut CredentialRig, credential_id: &str) {
     }
 }
 
-#[given(regex = r#"^"~/.lns-credentials.json" has an entry for "([^"]+)" with kind "([^"]+)"$"#)]
+#[given(regex = r#"^"~/.lns/credentials.json" has an entry for "([^"]+)" with kind "([^"]+)"$"#)]
 fn given_credentials_file_has_entry(
     world: &mut BehaviourWorld,
     credential_id: String,
@@ -151,7 +151,7 @@ fn given_host_no_longer_yields(world: &mut BehaviourWorld, credential_id: String
 }
 
 #[given(
-    regex = r#"^a workload is running with a "stored" credential rule for "([^"]+)" in "~/.lns-credentials.json"$"#
+    regex = r#"^a workload is running with a "stored" credential rule for "([^"]+)" in "~/.lns/credentials.json"$"#
 )]
 fn given_workload_with_stored_rule(world: &mut BehaviourWorld, credential_id: String) {
     let rig = world.credential();
@@ -183,7 +183,7 @@ fn given_open_credential_card(world: &mut BehaviourWorld, credential_id: String)
     let _ = drain_frames(rig);
 }
 
-#[given(r#""~/.lns-credentials.json" cannot be written"#)]
+#[given(r#""~/.lns/credentials.json" cannot be written"#)]
 fn given_credentials_file_cannot_be_written(world: &mut BehaviourWorld) {
     world.credential().store.break_next_save();
 }
@@ -303,7 +303,7 @@ fn then_request_leaves_with_bound_value(world: &mut BehaviourWorld) -> Result<()
     Ok(())
 }
 
-#[then(r#""~/.lns-credentials.json" still holds the value it was bound with"#)]
+#[then(r#""~/.lns/credentials.json" still holds the value it was bound with"#)]
 fn then_credentials_file_keeps_bound_value(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.credential();
     let on_disk = rig.store.load().map_err(|e| e.to_string())?;
@@ -323,7 +323,7 @@ fn when_developer_picks_deny_credential(world: &mut BehaviourWorld) {
         .record_decision(&id, CredentialDecisionRequest::Deny);
 }
 
-#[when(regex = r#"^the developer deletes the "([^"]+)" entry from "~/.lns-credentials.json"$"#)]
+#[when(regex = r#"^the developer deletes the "([^"]+)" entry from "~/.lns/credentials.json"$"#)]
 fn when_developer_deletes_entry(world: &mut BehaviourWorld, credential_id: String) {
     let rig = world.credential();
     let mut state = rig.session.current_state();
@@ -587,7 +587,7 @@ fn then_grant_sidecar_records_deny(
     }
 }
 
-#[then(regex = r#"^"~/.lns-credentials.json" gains an entry for "([^"]+)" with kind "([^"]+)"$"#)]
+#[then(regex = r#"^"~/.lns/credentials.json" gains an entry for "([^"]+)" with kind "([^"]+)"$"#)]
 fn then_credentials_file_has_entry(
     world: &mut BehaviourWorld,
     credential_id: String,
@@ -602,7 +602,7 @@ fn then_credentials_file_has_entry(
 }
 
 #[then(
-    regex = r#"^"~/.lns-credentials.json" gains an entry for "([^"]+)" with kind "stored" carrying the typed value$"#
+    regex = r#"^"~/.lns/credentials.json" gains an entry for "([^"]+)" with kind "stored" carrying the typed value$"#
 )]
 fn then_credentials_file_has_stored_with_value(
     world: &mut BehaviourWorld,
@@ -862,7 +862,7 @@ fn then_credential_card_removed(world: &mut BehaviourWorld) -> Result<(), String
     Ok(())
 }
 
-#[then(r#""~/.lns-credentials.json" is unchanged"#)]
+#[then(r#""~/.lns/credentials.json" is unchanged"#)]
 fn then_credentials_file_unchanged(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.credential();
     let state = rig.store.load().map_err(|e| e.to_string())?;

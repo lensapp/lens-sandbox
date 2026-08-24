@@ -16,12 +16,7 @@ fn home_config_with_invalid_cpus(world: &mut E2eWorld) {
         .home
         .as_ref()
         .expect("Given a clean lns cache home first");
-    let config_dir = if cfg!(target_os = "macos") {
-        home.path().join("Library").join("Application Support")
-    } else {
-        home.path().join(".config")
-    };
-    let dir = config_dir.join("lns");
+    let dir = home.path().join(".lns");
     std::fs::create_dir_all(&dir).expect("create config dir");
     std::fs::write(dir.join("config.yaml"), "run:\n  cpus: 0\n").expect("write config");
 }
@@ -32,9 +27,7 @@ fn i_run(world: &mut E2eWorld, cmd_line: String) {
     let mut envs: Vec<(&str, std::ffi::OsString)> = Vec::new();
     if let Some(home) = &world.home {
         envs.push(("HOME", home.path().into()));
-        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
-        envs.push(("XDG_CONFIG_HOME", home.path().join(".config").into()));
-        envs.push(("XDG_DATA_HOME", home.path().join(".local/share").into()));
+        envs.push(("LNS_HOME", home.path().join(".lns").into()));
     }
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH", socket.clone().into()));
@@ -56,7 +49,7 @@ fn i_run_with_stdout_closed(world: &mut E2eWorld, cmd_line: String) {
         .expect("Given a clean lns cache home before piping");
     let envs = [
         ("HOME", home.path().to_path_buf()),
-        ("XDG_CACHE_HOME", home.path().join(".cache")),
+        ("LNS_HOME", home.path().join(".lns")),
     ];
     world.result = Some(run_cli_with_closed_stdout(args, envs));
 }

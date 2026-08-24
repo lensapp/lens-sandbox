@@ -81,7 +81,7 @@ impl Fetcher for RealFetcher {
 struct RealStore;
 impl RealStore {
     fn root() -> Result<PathBuf> {
-        Ok(lns_ipc::data_root()?)
+        Ok(lns_ipc::lns_home()?)
     }
 }
 impl StateStore for RealStore {

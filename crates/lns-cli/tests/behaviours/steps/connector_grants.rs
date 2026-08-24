@@ -13,7 +13,7 @@ fn cwd(world: &mut BehaviourWorld) -> PathBuf {
 }
 
 fn store(world: &mut BehaviourWorld) -> JsonFileGrantStore {
-    JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
+    JsonFileGrantStore::new(cwd(world).join("workload-grants.json"))
 }
 
 /// Derived the same way the commands derive it, so a seeded grant keys identically to one a real run would have left.
@@ -50,7 +50,7 @@ fn output(world: &BehaviourWorld) -> &str {
 #[given(regex = r#"^this project connects "([^"]+)"$"#)]
 fn project_connects(world: &mut BehaviourWorld, id: String) {
     let project = this_project(world);
-    let store = JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"));
+    let store = JsonFileGrantStore::new(cwd(world).join("workload-grants.json"));
     let mut file = store.load().expect("the sidecar reads back");
     file.connect(&project, &id);
     store.save(&file).expect("seeding the sidecar");
@@ -88,13 +88,13 @@ fn workload_denied(world: &mut BehaviourWorld, workload: String, id: String) {
 
 #[given("the grant sidecar cannot be updated")]
 fn grant_sidecar_unwritable(world: &mut BehaviourWorld) {
-    let lock = cwd(world).join(".lns-workload-grants.json.lock");
+    let lock = cwd(world).join("workload-grants.json.lock");
     std::fs::create_dir(&lock).expect("occupy the lock path");
 }
 
 #[then(regex = r#"^this project still connects "([^"]+)"$"#)]
 fn project_still_connects(world: &mut BehaviourWorld, id: String) {
-    let connected = JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
+    let connected = JsonFileGrantStore::new(cwd(world).join("workload-grants.json"))
         .load()
         .expect("the sidecar reads back")
         .connected_in(&project_key(&cwd(world).join("lns-local-mixin.yaml")));

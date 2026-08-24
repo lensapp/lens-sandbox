@@ -752,7 +752,7 @@ mod tests {
     }
 
     fn catalog_at(dir: &Path) -> std::path::PathBuf {
-        dir.join(".lns-connectors.yaml")
+        dir.join("connectors.yaml")
     }
 
     fn load(path: &Path) -> Catalog {

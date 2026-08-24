@@ -13,8 +13,7 @@ The set of connectors Lens Sandbox knows about is a **catalog** with two layers:
 
 - **Bundled** — ships inside `lns` and grows with each release, so common services
   work without any setup on your part.
-- **User** — your own additions in `~/.lns-connectors.yaml`
-  (override the path with `LNS_CONNECTORS_PATH`).
+- **User** — your own additions in `~/.lns/connectors.yaml`.
 
 The effective catalog is the union of the two; a user entry can't shadow a bundled
 id. List everything Lens Sandbox can connect:

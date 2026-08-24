@@ -1,4 +1,4 @@
-//! The credential-rule source of truth lives in `~/.lns-credentials.json`, not `lns-local-mixin.yaml`.
+//! The credential-rule source of truth lives in `~/.lns/credentials.json`, not `lns-local-mixin.yaml`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};

@@ -1,16 +1,14 @@
 use anyhow::{Context, Result};
 use http::HeaderValue;
 use lns_artifact::build::BuiltArtifact;
-use lns_policy::registry_auth::{
-    JsonFileRegistryAuthStore, RegistryAuthStore, default_registry_auth_path,
-};
+use lns_policy::registry_auth::{JsonFileRegistryAuthStore, RegistryAuthStore};
 use oci_client::{Reference, RegistryOperation, client::ClientConfig, secrets::RegistryAuth};
 
 use crate::build::push_auth::{auth_error, push_error, select_auth};
 
 /// The stored login for `reference`'s registry, or anonymous when none is recorded.
 fn registry_auth_for(reference: &Reference) -> RegistryAuth {
-    let loaded = JsonFileRegistryAuthStore::new(default_registry_auth_path()).load();
+    let loaded = JsonFileRegistryAuthStore::new(lns_ipc::registry_auth_path()).load();
     select_auth(loaded, reference.registry())
 }
 

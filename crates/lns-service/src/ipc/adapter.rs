@@ -253,14 +253,10 @@ async fn run_credential_bind(id: &str) -> Response {
     use crate::credential_flow::bind::{
         BindResolution, bind_prompt, bind_provider, resolve_bind_decision,
     };
-    use crate::credential_flow::store::{
-        CredentialStore, JsonFileCredentialStore, default_credentials_path,
-    };
+    use crate::credential_flow::store::{CredentialStore, JsonFileCredentialStore};
 
-    let user = lns_policy::connectors::Catalog::load_or_default(
-        &lns_policy::connectors::default_connectors_path(),
-    )
-    .unwrap_or_default();
+    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path())
+        .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
     let Some(integ) = catalog.iter().find(|i| i.id == id) else {
         return Response::CredentialBindFailed {
@@ -310,7 +306,7 @@ async fn run_credential_bind(id: &str) -> Response {
     };
     match resolve_bind_decision(delivery.request) {
         BindResolution::Persist(entry, decision) => {
-            let store = JsonFileCredentialStore::new(default_credentials_path());
+            let store = JsonFileCredentialStore::new(lns_ipc::credentials_path());
             let mut state = match store.load() {
                 Ok(state) => state,
                 Err(e) => {
@@ -338,10 +334,8 @@ pub(crate) async fn run_connector_sign_in(
 ) -> Response {
     use lns_policy::connectors::OauthFlow;
 
-    let user = lns_policy::connectors::Catalog::load_or_default(
-        &lns_policy::connectors::default_connectors_path(),
-    )
-    .unwrap_or_default();
+    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path())
+        .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
     let Some(oauth) = catalog
         .iter()
@@ -461,10 +455,8 @@ fn persist_oauth_token(
     token: &crate::oauth::TokenSet,
     clock: &dyn crate::oauth::Clock,
 ) -> std::io::Result<()> {
-    use crate::credential_flow::store::{
-        CredentialStore, JsonFileCredentialStore, default_credentials_path,
-    };
-    let store = JsonFileCredentialStore::new(default_credentials_path());
+    use crate::credential_flow::store::{CredentialStore, JsonFileCredentialStore};
+    let store = JsonFileCredentialStore::new(lns_ipc::credentials_path());
     let mut state = store.load()?;
     state.insert(id.to_string(), crate::oauth::entry_from_token(clock, token));
     store.save(&state)
@@ -472,9 +464,9 @@ fn persist_oauth_token(
 
 fn persist_pkce_key(id: &str, key: String) -> std::io::Result<()> {
     use crate::credential_flow::store::{
-        CredentialEntry, CredentialStore, JsonFileCredentialStore, default_credentials_path,
+        CredentialEntry, CredentialStore, JsonFileCredentialStore,
     };
-    let store = JsonFileCredentialStore::new(default_credentials_path());
+    let store = JsonFileCredentialStore::new(lns_ipc::credentials_path());
     let mut state = store.load()?;
     state.insert(id.to_string(), CredentialEntry::Stored { value: key });
     store.save(&state)

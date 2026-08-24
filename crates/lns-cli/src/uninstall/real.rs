@@ -49,39 +49,23 @@ async fn build_plan(purge: bool) -> Result<UninstallPlan> {
         }
     }
     binaries.push(lns);
-    let (purge_dirs, purge_files, kept_paths) = if purge {
+    let (purge_dirs, purge_files) = if purge {
         purge_targets_from_env()?
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new())
     };
     Ok(UninstallPlan {
         binaries,
         purge_dirs,
         purge_files,
-        kept_paths,
     })
 }
 
-fn purge_targets_from_env() -> Result<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
-    let connectors = lns_policy::connectors::default_connectors_path();
-    let kept = if connectors.exists() {
-        vec![connectors]
-    } else {
-        Vec::new()
-    };
+fn purge_targets_from_env() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     Ok(super::purge_targets(PurgeSources {
-        cache_root: lns_ipc::cache_root().context("resolving the cache directory")?,
-        data_root: lns_ipc::data_root().context("resolving the data directory")?,
-        config: crate::config::default_config_path()?,
-        config_overridden: std::env::var_os("LNS_CONFIG_PATH").is_some(),
+        lns_home: lns_ipc::lns_home().context("resolving the lns home directory")?,
         socket: crate::service::socket_path()?,
         socket_overridden: std::env::var_os("LNS_SOCKET_PATH").is_some(),
-        secret_files: vec![
-            lns_policy::credentials::default_credentials_path(),
-            lns_policy::registry_auth::default_registry_auth_path(),
-            lns_policy::host_bind_decisions::default_host_bind_decisions_path(),
-        ],
-        kept,
     }))
 }
 

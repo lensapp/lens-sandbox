@@ -564,9 +564,7 @@ mod tests {
         let supervisor_bin = dir.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let guards = vec![
-            EnvVarGuard::set("HOME", dir.path()),
-            EnvVarGuard::unset("LNS_CONNECTORS_PATH"),
-            EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH"),
+            EnvVarGuard::set("LNS_HOME", dir.path()),
             EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
         ];
         let policy_path = dir.path().join("lns-local-mixin.yaml");
@@ -601,7 +599,7 @@ mod tests {
                 token_fallback: None,
             }],
         }
-        .save_atomic(&dir.path().join(".lns-connectors.yaml"))
+        .save_atomic(&dir.path().join("connectors.yaml"))
         .expect("user catalog");
         BootSignInFixture {
             dir,
@@ -652,7 +650,7 @@ mod tests {
 
         let session = start_with_boot_sign_in(&fixture, &workload).await;
 
-        let sidecar = JsonFileGrantStore::new(fixture.dir.path().join(".lns-workload-grants.json"));
+        let sidecar = JsonFileGrantStore::new(fixture.dir.path().join("workload-grants.json"));
         let grants = sidecar.load().expect("sidecar readable");
         let grant = grants
             .lookup(&project_key(&fixture.policy_path), &workload, "some-oauth")
@@ -672,7 +670,7 @@ mod tests {
         use crate::approval_flow::window;
         let fixture = boot_sign_in_fixture();
         // An unopenable lockfile path fails the sidecar update closed, standing in for any machine where it can't be written.
-        std::fs::create_dir(fixture.dir.path().join(".lns-workload-grants.json.lock"))
+        std::fs::create_dir(fixture.dir.path().join("workload-grants.json.lock"))
             .expect("occupy the lock path");
 
         let session = start_with_boot_sign_in(
@@ -697,7 +695,7 @@ mod tests {
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
         let d = tempfile::TempDir::new().expect("tempdir");
-        let _home = EnvVarGuard::set("HOME", d.path());
+        let _home = EnvVarGuard::set("LNS_HOME", d.path());
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
@@ -728,7 +726,7 @@ mod tests {
         use crate::test_env::EnvVarGuard;
         window::install(WindowState::new());
         let d = tempfile::TempDir::new().expect("tempdir");
-        let _home = EnvVarGuard::set("HOME", d.path());
+        let _home = EnvVarGuard::set("LNS_HOME", d.path());
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);

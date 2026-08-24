@@ -114,23 +114,21 @@ mod tests {
         let mut env = serde_json::Map::new();
         env.insert("FOO".into(), "bar".into());
         let run_env = lns_ocsf::run_env(&octx(run_id, "2026-06-29T13:00:01Z"), &env).to_string();
-        for data in ["Library/Application Support", ".local/share"] {
-            let dir = home.join(data).join("lns").join("runs").join(run_id);
-            std::fs::create_dir_all(&dir).unwrap();
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = String::new();
-            for line in [&volume, &run_env] {
-                let aug = chain.augment(line).unwrap();
-                payload.push_str(std::str::from_utf8(&aug).unwrap());
-                payload.push('\n');
-            }
-            std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
-            std::fs::write(
-                dir.join("audit.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
-            )
-            .unwrap();
+        let dir = home.join(".lns").join("runs").join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut payload = String::new();
+        for line in [&volume, &run_env] {
+            let aug = chain.augment(line).unwrap();
+            payload.push_str(std::str::from_utf8(&aug).unwrap());
+            payload.push('\n');
         }
+        std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+        std::fs::write(
+            dir.join("audit.anchor"),
+            chain.anchor().expect("chain has events").to_line(),
+        )
+        .unwrap();
     }
 
     fn write_sandbox_run_chain(home: &std::path::Path, run_id: &str) {
@@ -142,19 +140,17 @@ mod tests {
             "policyhash",
         )
         .to_string();
-        for data in ["Library/Application Support", ".local/share"] {
-            let dir = home.join(data).join("lns").join("runs").join(run_id);
-            std::fs::create_dir_all(&dir).unwrap();
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut payload = chain.augment(&event).unwrap();
-            payload.push(b'\n');
-            std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
-            std::fs::write(
-                dir.join("audit.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
-            )
-            .unwrap();
-        }
+        let dir = home.join(".lns").join("runs").join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut payload = chain.augment(&event).unwrap();
+        payload.push(b'\n');
+        std::fs::write(dir.join("audit.jsonl"), payload).unwrap();
+        std::fs::write(
+            dir.join("audit.anchor"),
+            chain.anchor().expect("chain has events").to_line(),
+        )
+        .unwrap();
     }
 
     fn tamper_run_log(home: &std::path::Path, run_id: &str) {
@@ -165,17 +161,12 @@ mod tests {
             .unwrap()
             .insert("prev_hash".into(), "deadbeef".into());
         let line = format!("{event}\n");
-        for data in ["Library/Application Support", ".local/share"] {
-            let log = home
-                .join(data)
-                .join("lns")
-                .join("runs")
-                .join(run_id)
-                .join("audit.jsonl");
-            if log.exists() {
-                std::fs::write(&log, &line).unwrap();
-            }
-        }
+        let log = home
+            .join(".lns")
+            .join("runs")
+            .join(run_id)
+            .join("audit.jsonl");
+        std::fs::write(&log, &line).unwrap();
     }
 
     fn write_ledger(home: &std::path::Path) {
@@ -188,27 +179,24 @@ mod tests {
             None,
         )
         .to_string();
-        for data in ["Library/Application Support", ".local/share"] {
-            let dir = home.join(data).join("lns");
-            std::fs::create_dir_all(&dir).unwrap();
-            let mut chain = lns_ipc::AuditChain::new();
-            let mut line = chain.augment(&event).unwrap();
-            line.push(b'\n');
-            std::fs::write(dir.join("ledger.jsonl"), line).unwrap();
-            std::fs::write(
-                dir.join("ledger.anchor"),
-                chain.anchor().expect("chain has events").to_line(),
-            )
-            .unwrap();
-        }
+        let dir = home.join(".lns");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut line = chain.augment(&event).unwrap();
+        line.push(b'\n');
+        std::fs::write(dir.join("ledger.jsonl"), line).unwrap();
+        std::fs::write(
+            dir.join("ledger.anchor"),
+            chain.anchor().expect("chain has events").to_line(),
+        )
+        .unwrap();
     }
 
     fn home_env(home: &std::path::Path) -> Vec<crate::test_env::EnvScope> {
-        vec![
-            crate::test_env::EnvScope::set("HOME", home),
-            crate::test_env::EnvScope::set("XDG_CACHE_HOME", home.join(".cache")),
-            crate::test_env::EnvScope::set("XDG_DATA_HOME", home.join(".local/share")),
-        ]
+        vec![crate::test_env::EnvScope::set(
+            "LNS_HOME",
+            home.join(".lns"),
+        )]
     }
 
     async fn dispatch_argv(argv: &[&str], out: &mut Vec<u8>) -> Result<i32> {

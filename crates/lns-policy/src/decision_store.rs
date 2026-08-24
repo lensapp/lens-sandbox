@@ -16,16 +16,6 @@ pub trait DecisionStore<T>: Send + Sync {
     fn save(&self, state: &DecisionFile<T>) -> io::Result<()>;
 }
 
-/// The override env var wins, then `$HOME/<filename>`; falls back to the working directory rather than panicking when `HOME` is unset.
-pub fn default_path(override_env: &str, filename: &str) -> PathBuf {
-    if let Some(path) = std::env::var_os(override_env) {
-        return PathBuf::from(path);
-    }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(filename))
-        .unwrap_or_else(|| PathBuf::from(filename))
-}
-
 pub struct JsonDecisionStore<T> {
     pub path: PathBuf,
     answer: PhantomData<fn() -> T>,
@@ -118,41 +108,5 @@ mod tests {
         second.insert("second".to_string(), SomeAnswer::No);
         store.save(&second).unwrap();
         assert_eq!(store.load().unwrap(), second);
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_uses_the_override_when_set() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_SOME_DECISIONS_PATH", "/tmp/custom.json");
-        let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
-        assert_eq!(
-            default_path("LNS_SOME_DECISIONS_PATH", ".lns-some.json"),
-            PathBuf::from("/tmp/custom.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_falls_back_to_a_home_dotfile() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_SOME_DECISIONS_PATH");
-        let _g2 = EnvVarGuard::set("HOME", "/home/dev");
-        assert_eq!(
-            default_path("LNS_SOME_DECISIONS_PATH", ".lns-some.json"),
-            PathBuf::from("/home/dev/.lns-some.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_falls_back_to_the_working_directory_when_home_is_unset() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_SOME_DECISIONS_PATH");
-        let _g2 = EnvVarGuard::unset("HOME");
-        assert_eq!(
-            default_path("LNS_SOME_DECISIONS_PATH", ".lns-some.json"),
-            PathBuf::from(".lns-some.json")
-        );
     }
 }

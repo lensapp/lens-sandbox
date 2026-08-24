@@ -12,11 +12,11 @@ Feature: lns-service credential flow
   provider's per-service detection strategy, type one in, or deny.
   Every decision is sticky — there is no once/always distinction — but
   dismissing a card is not a decision and settles nothing.
-  Decisions and any typed values land in `~/.lns-credentials.json` (a
+  Decisions and any typed values land in `~/.lns/credentials.json` (a
   pluggable host-side store, JSON-file v1). They do NOT live in
   `lns-local-mixin.yaml`: the shareable policy file stays free of
   per-machine credential state. Manual edits to
-  `~/.lns-credentials.json` are picked up live and double as the
+  `~/.lns/credentials.json` are picked up live and double as the
   revocation mechanism.
 
   These scenarios illustrate the flow with an arbitrary `some-provider`
@@ -37,7 +37,7 @@ Feature: lns-service credential flow
 
   Scenario: A placeholder used in an outbound request prompts the developer when the host has the credential
     Given a workload is running with the seeded "some-provider" placeholder
-    And no credential rule exists in "~/.lns-credentials.json" for "some-provider"
+    And no credential rule exists in "~/.lns/credentials.json" for "some-provider"
     And the host has a "some-provider" credential reachable via the registered detection strategy
     When the workload sends a request carrying the some-provider placeholder
     Then a credential card appears for "some-provider" showing the provider, the originating sandbox, and the destination
@@ -46,7 +46,7 @@ Feature: lns-service credential flow
 
   Scenario: A placeholder used in an outbound request prompts the developer when the host has no credential
     Given a workload is running with the seeded "some-provider" placeholder
-    And no credential rule exists in "~/.lns-credentials.json" for "some-provider"
+    And no credential rule exists in "~/.lns/credentials.json" for "some-provider"
     And no "some-provider" credential is reachable on the host
     When the workload sends a request carrying the some-provider placeholder
     Then a credential card appears for "some-provider"
@@ -57,7 +57,7 @@ Feature: lns-service credential flow
   Scenario: Use from host arms the credential at the boundary and persists a host-detect rule
     Given a credential card for "some-provider" is visible with "use from host" available
     When the developer picks "use from host"
-    Then "~/.lns-credentials.json" gains an entry for "some-provider" with kind "host-detect"
+    Then "~/.lns/credentials.json" gains an entry for "some-provider" with kind "host-detect"
     And the workload's request leaves the boundary with the host-detected some-provider credential substituted in
     And the workload still sees only the placeholder
     And a future request carrying the some-provider placeholder is exchanged silently using the currently host-detected value
@@ -66,7 +66,7 @@ Feature: lns-service credential flow
   Scenario: A typed value arms the credential at the boundary and persists a stored rule
     Given a credential card for "some-provider" is visible
     When the developer types a value and submits
-    Then "~/.lns-credentials.json" gains an entry for "some-provider" with kind "stored" carrying the typed value
+    Then "~/.lns/credentials.json" gains an entry for "some-provider" with kind "stored" carrying the typed value
     And the workload's request leaves the boundary with the typed value substituted for the placeholder
     And a future request carrying the some-provider placeholder is exchanged silently using the stored value
     And "lns-local-mixin.yaml" is unchanged
@@ -78,7 +78,7 @@ Feature: lns-service credential flow
     And the card offers to use the value already bound on this machine
     When the developer picks "use the bound value"
     Then the workload's request leaves the boundary with the bound value substituted for the placeholder
-    And "~/.lns-credentials.json" still holds the value it was bound with
+    And "~/.lns/credentials.json" still holds the value it was bound with
 
   Scenario: A disconnect that lands while the card is open is not undone by answering it
     Given a credential card for "some-provider" is visible
@@ -101,7 +101,7 @@ Feature: lns-service credential flow
     When the developer closes the card without choosing
     Then the workload's held request is failed at the boundary
     And the credential card is removed from the approval window
-    And "~/.lns-credentials.json" is unchanged
+    And "~/.lns/credentials.json" is unchanged
     And the workload grant sidecar records no grant for "some-provider"
     And a future request carrying the some-provider placeholder fires a fresh credential card
 
@@ -109,13 +109,13 @@ Feature: lns-service credential flow
     Given a credential card for "some-provider" is visible
     When the developer closes the card without choosing
     Then a run in another project is still asked for "some-provider"
-    And "~/.lns-credentials.json" is unchanged
+    And "~/.lns/credentials.json" is unchanged
 
   Scenario: Closing every card at once decides nothing for any of them
     Given credential cards for "some-provider" and "some-other-provider" are visible
     When the developer closes every card at once
     Then both held requests are failed at the boundary
-    And "~/.lns-credentials.json" is unchanged
+    And "~/.lns/credentials.json" is unchanged
     And a future request carrying either the "some-provider" or "some-other-provider" placeholder fires a fresh credential card
 
   Scenario: A dismissed credential card records no approval in the audit chain
@@ -126,7 +126,7 @@ Feature: lns-service credential flow
   Scenario: A request needing both an unknown network rule and an unknown credential surfaces both cards in parallel
     Given a workload is running with the seeded "some-provider" placeholder
     And the policy has no rule for "api.some-provider.example"
-    And no credential rule exists in "~/.lns-credentials.json" for "some-provider"
+    And no credential rule exists in "~/.lns/credentials.json" for "some-provider"
     When the workload sends a request to "api.some-provider.example" carrying the some-provider placeholder
     Then a network card appears for "api.some-provider.example"
     And a credential card appears for "some-provider"
@@ -134,7 +134,7 @@ Feature: lns-service credential flow
     And a "deny" decision on either card fails the request at the boundary
 
   Scenario: A stored rule whose source no longer yields a value re-prompts
-    Given "~/.lns-credentials.json" has an entry for "some-provider" with kind "host-detect"
+    Given "~/.lns/credentials.json" has an entry for "some-provider" with kind "host-detect"
     And the host no longer yields a "some-provider" credential via the registered detection strategy
     When the workload sends a request carrying the some-provider placeholder
     Then a credential card for "some-provider" appears
@@ -142,8 +142,8 @@ Feature: lns-service credential flow
     And the workload's request is held pending a decision
 
   Scenario: A manual edit to the credentials file is picked up live and revokes the rule
-    Given a workload is running with a "stored" credential rule for "some-provider" in "~/.lns-credentials.json"
-    When the developer deletes the "some-provider" entry from "~/.lns-credentials.json"
+    Given a workload is running with a "stored" credential rule for "some-provider" in "~/.lns/credentials.json"
+    When the developer deletes the "some-provider" entry from "~/.lns/credentials.json"
     Then a subsequent request from the workload carrying the some-provider placeholder fires a fresh credential card for "some-provider"
     And no restart of the workload is required
 
@@ -159,18 +159,18 @@ Feature: lns-service credential flow
     When no decision is recorded before the configured approval timeout
     Then the workload's held request is failed at the boundary
     And the credential card is removed from the approval window
-    And "~/.lns-credentials.json" is unchanged
+    And "~/.lns/credentials.json" is unchanged
     And a future request carrying the some-provider placeholder fires a fresh credential card
 
   Scenario: A workload exit withdraws its open credential cards without persisting
     Given a workload has an open credential card for "some-provider"
     When the workload exits before a decision is recorded
     Then the credential card is removed from the approval window
-    And "~/.lns-credentials.json" is unchanged
+    And "~/.lns/credentials.json" is unchanged
 
   Scenario: A failed write to the credentials file keeps the rule in memory and informs the developer
     Given a credential card for "some-provider" is visible
-    And "~/.lns-credentials.json" cannot be written
+    And "~/.lns/credentials.json" cannot be written
     When the developer picks "use from host"
     Then the workload's held request leaves the boundary with the host-detected some-provider credential substituted in
     And the running credential rules contain a "host-detect" entry for "some-provider"

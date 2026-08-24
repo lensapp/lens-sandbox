@@ -19,7 +19,7 @@ pub(crate) fn start_service_with(world: &mut E2eWorld, extra: &[(&str, &str)]) {
     ];
     if let Some(home) = &world.home {
         envs.push(("HOME", home.path().into()));
-        envs.push(("XDG_CACHE_HOME", home.path().join(".cache").into()));
+        envs.push(("LNS_HOME", home.path().join(".lns").into()));
     }
     envs.extend(extra.iter().map(|(k, v)| (*k, std::ffi::OsString::from(v))));
     let result = run_cli_with_env(["service", "start"], envs);

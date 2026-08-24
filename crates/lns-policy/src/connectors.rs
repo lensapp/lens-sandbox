@@ -253,16 +253,6 @@ pub fn bundled_connectors() -> &'static [Connector] {
     BUNDLED.as_slice()
 }
 
-/// Falls back to `./.lns-connectors.yaml` when `HOME` is unset rather than panicking.
-pub fn default_connectors_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LNS_CONNECTORS_PATH") {
-        return PathBuf::from(p);
-    }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".lns-connectors.yaml"))
-        .unwrap_or_else(|| PathBuf::from(".lns-connectors.yaml"))
-}
-
 /// The effective catalog is the bundled set extended with user entries whose id isn't already shipped — a bundled id can never be shadowed.
 pub fn effective_connectors(user: &Catalog) -> Vec<Connector> {
     let mut out: Vec<Connector> = bundled_connectors().to_vec();
@@ -1141,7 +1131,7 @@ mod tests {
     #[test]
     fn load_or_default_reads_an_existing_user_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         Catalog {
             connectors: vec![sample_connector()],
         }
@@ -1155,7 +1145,7 @@ mod tests {
     #[test]
     fn load_or_default_rejects_an_upstream_route_transport() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         let mut connector = sample_connector();
         connector.routes[0].transport = Some(Transport::Upstream);
         Catalog {
@@ -1249,7 +1239,7 @@ mod tests {
     #[test]
     fn save_atomic_round_trips_creates_parent_and_leaves_no_tmp() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("nested/dir/.lns-connectors.yaml");
+        let path = dir.path().join("nested/dir/connectors.yaml");
         let c = Catalog {
             connectors: vec![sample_connector()],
         };
@@ -1266,7 +1256,7 @@ mod tests {
         let victim = dir.path().join("victim");
         let victim_contents = b"victim-data-must-survive";
         fs::write(&victim, victim_contents).unwrap();
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         std::os::unix::fs::symlink(&victim, path.with_extension("yaml.tmp")).unwrap();
 
         let _ = Catalog {
@@ -1284,7 +1274,7 @@ mod tests {
     #[test]
     fn file_catalog_store_save_writes_yaml_readable_by_load_or_default() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         let store = FileCatalogStore::new(path.clone());
         let c = Catalog {
             connectors: vec![sample_connector()],
@@ -1298,7 +1288,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let not_a_dir = dir.path().join("file");
         fs::write(&not_a_dir, b"").unwrap();
-        let store = FileCatalogStore::new(not_a_dir.join("nested/.lns-connectors.yaml"));
+        let store = FileCatalogStore::new(not_a_dir.join("nested/connectors.yaml"));
         let err = store.save(&Catalog::default()).unwrap_err();
         assert!(!err.to_string().is_empty());
     }
@@ -1338,42 +1328,6 @@ mod tests {
             gitlab.credential.as_ref().unwrap().env_var,
             "EVIL",
             "the bundled gitlab definition must win over a user shadow"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_connectors_path_uses_override_when_set() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_CONNECTORS_PATH", "/tmp/custom-connectors.yaml");
-        let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
-        assert_eq!(
-            default_connectors_path(),
-            PathBuf::from("/tmp/custom-connectors.yaml")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_connectors_path_falls_back_to_home_dotfile() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
-        let _g2 = EnvVarGuard::set("HOME", "/home/dev");
-        assert_eq!(
-            default_connectors_path(),
-            PathBuf::from("/home/dev/.lns-connectors.yaml")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_connectors_path_falls_back_to_cwd_when_home_unset() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_CONNECTORS_PATH");
-        let _g2 = EnvVarGuard::unset("HOME");
-        assert_eq!(
-            default_connectors_path(),
-            PathBuf::from(".lns-connectors.yaml")
         );
     }
 }

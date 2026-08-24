@@ -33,6 +33,34 @@ Log levels: `error`, `warn`, `info`, `debug`.
 The three high codes exist so a failure of `lns` is never mistaken for the workload
 exiting with the same number. Detaching with the chord exits `0`.
 
+## Environment and files
+
+| Variable | Effect |
+| -------- | ------ |
+| `LNS_LOG` / `RUST_LOG` | Override the log threshold. |
+| `NO_COLOR` | Disable colour. |
+| `LNS_HOME` | The directory below, instead of `~/.lns`. |
+| `LNS_SOCKET_PATH` | The service socket to talk to. |
+| `LNS_NO_UPDATE_CHECK` | Suppress the update-and-security check and its announcement. |
+| `LNS_SERVICE_BIN` | The `lns-service` binary `lns service start` launches. |
+
+Everything `lns` keeps for you lives in one directory, `~/.lns/`:
+
+| Path | Holds |
+| ---- | ----- |
+| `~/.lns/config.yaml` | Your `lns config` defaults. |
+| `~/.lns/connectors.yaml` | The connectors declared on this machine. |
+| `~/.lns/credentials.json` | The per-machine credential values you bound. |
+| `~/.lns/workload-grants.json` | Which workload was granted which connector, per project. |
+| `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
+| `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
+
+One directory, one thing to back up, one thing `lns uninstall --purge` removes.
+
+The project keeps two files, both in the directory you work in: `./lns.yaml`, the
+sandbox document, and `./lns-local-mixin.yaml`, what you decided here. Secrets are
+never written to the project.
+
 ## Machine-readable output
 
 The list and status verbs take `--format <table|json>`, so a script doesn't have to
@@ -261,8 +289,8 @@ login (such as `ghcr.io`) still take the flag-driven forms below.
 The registry is matched by host: a bare published-sandbox reference uses the
 `run.registry` default (or the Lens hub), while a fully-qualified
 `lns run ghcr.io/org/app` always targets that registry and uses its stored login if present. Credentials live in
-a per-user file (`~/.lns-registry-auth.json`, `0600`; override with
-`LNS_REGISTRY_AUTH_PATH`), separate from any shareable policy.
+a per-user file (`~/.lns/registry-auth.json`, `0600`), separate from any
+shareable policy.
 
 ## `lns audit`
 
@@ -329,7 +357,7 @@ lns update [--force] [--dry-run]
 ## `lns connector`
 
 Manage the credential-connector catalog — the services whose credentials reach a
-workload. The catalog is machine-global (`~/.lns-connectors.yaml`). A connector
+workload. The catalog is machine-global (`~/.lns/connectors.yaml`). A connector
 declared in a sandbox definition's `spec.connectors` seeds its placeholder env
 var but is only offered — the workload is prompted on first use, never armed
 automatically. Connecting one records the connection for that project on this
@@ -361,7 +389,7 @@ lns connector revoke <ID> [--policy <PATH>]
 `token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
 name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
 connected connector are made interactively in the approval window; grants are
-recorded per project and workload in `~/.lns-workload-grants.json`. See
+recorded per project and workload in `~/.lns/workload-grants.json`. See
 [Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`
@@ -394,6 +422,5 @@ variables, volumes, and ports are properties of a sandbox, not persistent config
 set them per run (`-e`, `-v`, `-p`) or in the sandbox definition's `spec`.
 
 Values are validated when stored, with the same parsers the run flags use.
-Defaults live in a per-user file — `~/Library/Application Support/lns/config.yaml`
-on macOS, `~/.config/lns/config.yaml` on Linux; override with `LNS_CONFIG_PATH`.
+Defaults live in `~/.lns/config.yaml`, with everything else lns keeps for you.
 A per-run flag always wins.
