@@ -160,9 +160,19 @@ fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
         .map(|r| r.id.clone())
 }
 
+/// An artifact record names the base image it needs and carries no layers of its own; a plain image record is the other way round, so the dependency edge is what tells the two apart.
+fn kind_of(record: &ImageRecord) -> lns_ipc::CachedKind {
+    if record.dependencies.is_empty() {
+        lns_ipc::CachedKind::Image
+    } else {
+        lns_ipc::CachedKind::Sandbox
+    }
+}
+
 fn info_from(record: &ImageRecord, active: &[lns_ipc::RunSummary]) -> lns_ipc::ImageInfo {
     lns_ipc::ImageInfo {
         reference: record.reference.clone(),
+        kind: kind_of(record),
         digest: record.digest.clone(),
         size_bytes: record.layers.iter().map(|l| l.size_bytes).sum(),
         layers: record.layers.len() as u32,

@@ -58,8 +58,11 @@ fn qualified_reference(reference: &str) -> Result<String> {
     ))
 }
 
-pub fn run_init<'a>(_matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move { run_author(&super::SandboxCommand::Init, ctx) })
+pub fn run_init<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+    Box::pin(async move {
+        let args = super::SandboxInitArgs::from_arg_matches(matches)?;
+        run_author(&super::SandboxCommand::Init(args), ctx)
+    })
 }
 
 pub fn run_ps<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -302,9 +305,11 @@ fn run_author(command: &super::SandboxCommand, ctx: RunCtx<'_>) -> Result<i32> {
     let cwd = ctx.cwd()?;
     let mut out = std::io::stdout();
     match command {
-        super::SandboxCommand::Init => super::author::init(&RealFs, &cwd, &mut out),
+        super::SandboxCommand::Init(args) => {
+            super::author::init(&RealFs, &cwd, args.kind, args.file.as_deref(), &mut out)
+        }
         super::SandboxCommand::Validate(args) => {
-            super::author::validate(&RealFs, &cwd, args.file.as_deref(), &mut out)
+            super::author::validate(&RealFs, &cwd, args.kind, args.file.as_deref(), &mut out)
         }
         super::SandboxCommand::Inspect(args) => super::author::inspect_local(
             &RealFs,

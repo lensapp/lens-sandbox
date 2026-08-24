@@ -25,6 +25,14 @@ fn existing_lns_yaml(w: &mut BehaviourWorld) {
     seed(w, EXISTING_SENTINEL);
 }
 
+#[given("the current directory already has an lns.dev.yaml")]
+fn existing_named_definition(w: &mut BehaviourWorld) {
+    w.author_files.insert(
+        PathBuf::from("/work/lns.dev.yaml"),
+        EXISTING_SENTINEL.to_string(),
+    );
+}
+
 #[given("a valid lns.yaml in the current directory")]
 fn valid_lns_yaml(w: &mut BehaviourWorld) {
     seed(
@@ -229,28 +237,49 @@ fn project_directory_contains(w: &mut BehaviourWorld, dir: String, file: String)
     w.author_files.insert(path, "fixture contents".to_string());
 }
 
-#[then(regex = r#"^a file "lns\.yaml" is created$"#)]
-fn file_created(w: &mut BehaviourWorld) -> Result<(), String> {
-    if w.author_files.contains_key(&yaml_key()) {
+#[then(regex = r#"^a file "([^"]+)" is created$"#)]
+fn file_created(w: &mut BehaviourWorld, name: String) -> Result<(), String> {
+    if w.author_files
+        .contains_key(&PathBuf::from("/work").join(&name))
+    {
         Ok(())
     } else {
-        Err("lns.yaml was not created".to_string())
+        Err(format!("{name} was not created"))
     }
 }
 
-#[then(regex = r#"^the file "lns\.yaml" contains "([^"]+)"$"#)]
-fn file_contains(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
-    let contents = w
-        .author_files
-        .get(&yaml_key())
-        .ok_or("lns.yaml does not exist")?;
+#[then(regex = r#"^the file "([^"]+)" contains "([^"]+)"$"#)]
+fn file_contains(w: &mut BehaviourWorld, name: String, needle: String) -> Result<(), String> {
+    let contents = authored(w, &name)?;
     if contents.contains(&needle) {
         Ok(())
     } else {
         Err(format!(
-            "expected lns.yaml to contain {needle:?}, got:\n{contents}"
+            "expected {name} to contain {needle:?}, got:\n{contents}"
         ))
     }
+}
+
+#[then(regex = r#"^the file "([^"]+)" does not contain "([^"]+)"$"#)]
+fn file_does_not_contain(
+    w: &mut BehaviourWorld,
+    name: String,
+    needle: String,
+) -> Result<(), String> {
+    let contents = authored(w, &name)?;
+    if contents.contains(&needle) {
+        Err(format!(
+            "expected {name} not to contain {needle:?}, got:\n{contents}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn authored<'a>(w: &'a BehaviourWorld, name: &str) -> Result<&'a String, String> {
+    w.author_files
+        .get(&PathBuf::from("/work").join(name))
+        .ok_or_else(|| format!("{name} does not exist"))
 }
 
 #[then("the existing lns.yaml is left unchanged")]

@@ -27,8 +27,8 @@ pub struct SandboxArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SandboxCommand {
-    #[command(about = "Scaffold a default ./lns.yaml (kind: sandbox) in this directory.")]
-    Init,
+    #[command(about = "Scaffold a document in this directory; `--kind` chooses which.")]
+    Init(SandboxInitArgs),
     #[command(about = "Validate ./lns.yaml — schema, cross-field, and secret checks, offline.")]
     Validate(SandboxValidateArgs),
     #[command(
@@ -80,12 +80,81 @@ pub struct PsArgs {
 
 #[derive(clap::Args)]
 pub struct LsArgs {
+    #[arg(
+        long,
+        value_enum,
+        value_name = "KIND",
+        help = "List only the cached entries of this kind."
+    )]
+    pub kind: Option<CachedKindFilter>,
+
     #[command(flatten)]
     pub output: crate::output::OutputArgs,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum CachedKindFilter {
+    Image,
+    Sandbox,
+}
+
+impl CachedKindFilter {
+    fn matches(self, kind: lns_ipc::CachedKind) -> bool {
+        matches!(
+            (self, kind),
+            (CachedKindFilter::Image, lns_ipc::CachedKind::Image)
+                | (CachedKindFilter::Sandbox, lns_ipc::CachedKind::Sandbox)
+        )
+    }
+}
+
+#[derive(clap::Args)]
+pub struct SandboxInitArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DocumentKind::Sandbox,
+        value_name = "KIND",
+        help = "Which document to scaffold."
+    )]
+    pub kind: DocumentKind,
+
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "File to write instead of ./lns.yaml. Refuses to overwrite either way."
+    )]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum DocumentKind {
+    Sandbox,
+    Mixin,
+}
+
+impl DocumentKind {
+    pub fn as_artifact_kind(self) -> lns_artifact::spec::Kind {
+        match self {
+            DocumentKind::Sandbox => lns_artifact::spec::Kind::Sandbox,
+            DocumentKind::Mixin => lns_artifact::spec::Kind::Mixin,
+        }
+    }
+}
+
 #[derive(clap::Args)]
 pub struct SandboxValidateArgs {
+    #[arg(
+        long,
+        value_enum,
+        value_name = "KIND",
+        help = "Also require the document to be this kind."
+    )]
+    pub kind: Option<DocumentKind>,
+
     #[arg(
         short = 'f',
         long = "file",
@@ -238,7 +307,7 @@ pub struct SandboxPruneArgs {
         short = 'f',
         long,
         default_value_t = false,
-        help = "Required: confirm removing unused cached sandboxes and, when none is live, the provisioned tool cache."
+        help = "Remove unused cached sandboxes, and the provisioned tool cache when none is live, without asking."
     )]
     pub force: bool,
 }
@@ -279,8 +348,8 @@ pub const SPEC: CommandSpec = CommandSpec {
 
 pub fn augment_init(app: clap::Command) -> clap::Command {
     app.subcommand(
-        clap::Command::new("init")
-            .about("Scaffold a default ./lns.yaml (shortcut for `lns sandbox init`)."),
+        subcommand::<SandboxInitArgs>("init")
+            .about("Scaffold a document in this directory (shortcut for `lns sandbox init`)."),
     )
 }
 
@@ -440,7 +509,7 @@ where
     E: AsyncWriteExt + Unpin,
 {
     match cmd {
-        SandboxCommand::Init | SandboxCommand::Validate(_) => {
+        SandboxCommand::Init(_) | SandboxCommand::Validate(_) => {
             bail!("author commands run offline, not through the service dispatch")
         }
         SandboxCommand::Push(_) => {
@@ -463,7 +532,7 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
-        SandboxCommand::Prune(args) => prune(svc, args, out).await,
+        SandboxCommand::Prune(args) => prune(svc, args, input, out).await,
     }
 }
 
@@ -681,7 +750,11 @@ async fn ls<W: std::io::Write>(
     match svc.one_shot(Request::ListImages).await? {
         Response::ImageList { mut images } => {
             images.sort_by(|a, b| a.reference.cmp(&b.reference));
-            let rows: Vec<SandboxRow> = images.iter().map(SandboxRow::new).collect();
+            let rows: Vec<SandboxRow> = images
+                .iter()
+                .filter(|image| args.kind.is_none_or(|kind| kind.matches(image.kind)))
+                .map(SandboxRow::new)
+                .collect();
             crate::output::emit(args.output.format, &rows, out)?;
             Ok(0)
         }
@@ -694,6 +767,7 @@ async fn ls<W: std::io::Write>(
 #[serde(rename_all = "camelCase")]
 struct SandboxRow {
     reference: String,
+    kind: String,
     digest: String,
     size_bytes: u64,
     layers: u32,
@@ -705,6 +779,7 @@ impl SandboxRow {
     fn new(image: &lns_ipc::ImageInfo) -> Self {
         Self {
             reference: image.reference.clone(),
+            kind: image.kind.as_str().to_string(),
             digest: image.digest.clone(),
             size_bytes: image.size_bytes,
             layers: image.layers,
@@ -714,11 +789,29 @@ impl SandboxRow {
     }
 }
 
+/// The digest column is the short form the tables elsewhere use, since the whole one crowds out every other column and the JSON carries it in full.
+fn short_digest(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    hex.char_indices()
+        .nth(12)
+        .map_or(hex, |(i, _)| &hex[..i])
+        .to_string()
+}
+
 impl crate::output::TableRow for SandboxRow {
-    const HEADERS: &'static [&'static str] = &["SANDBOX", "STATE"];
+    const HEADERS: &'static [&'static str] = &["ARTIFACT", "KIND", "DIGEST", "SIZE", "HOLDER"];
 
     fn cells(&self) -> Vec<String> {
-        vec![self.reference.clone(), "cached".to_string()]
+        vec![
+            self.reference.clone(),
+            self.kind.clone(),
+            short_digest(&self.digest),
+            format_bytes(self.size_bytes),
+            match &self.in_use_by {
+                Some(run) => format!("run {}", lns_ipc::short_run_id(run)),
+                None => "-".to_string(),
+            },
+        ]
     }
 }
 
@@ -858,15 +951,14 @@ async fn remove_cached<W: std::io::Write>(
     }
 }
 
-async fn prune<W: std::io::Write>(
+async fn prune<I: std::io::BufRead, W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxPruneArgs,
+    input: &mut I,
     out: &mut W,
 ) -> Result<i32> {
-    if !args.force {
-        bail!(
-            "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; pass --force to confirm"
-        );
+    if !args.force && !confirm_prune(input, out)? {
+        return Ok(0);
     }
     match svc.one_shot(Request::PruneImages).await? {
         Response::ImagesPruned {
@@ -883,6 +975,25 @@ async fn prune<W: std::io::Write>(
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
+}
+
+fn confirm_prune<I: std::io::BufRead, W: std::io::Write>(
+    input: &mut I,
+    out: &mut W,
+) -> Result<bool> {
+    write!(
+        out,
+        "This removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache. Continue? [y/N] "
+    )?;
+    out.flush()?;
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let answer = line.trim();
+    let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    if !yes {
+        writeln!(out, "Aborted.")?;
+    }
+    Ok(yes)
 }
 
 /// `--mixin` composes a document before it boots, and neither a run that has already booted nor a file rendered offline can honour it.
@@ -1385,6 +1496,7 @@ mod tests {
     fn pulled_response() -> Response {
         Response::ImagePulled {
             image: lns_ipc::ImageInfo {
+                kind: lns_ipc::CachedKind::Sandbox,
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 digest: format!("sha256:{}", "a".repeat(64)),
                 size_bytes: 1024,
@@ -1499,8 +1611,14 @@ mod tests {
     async fn run_with_writers_refuses_the_offline_author_verbs() {
         let svc = CannedService::new(Response::Pong);
         for cmd in [
-            SandboxCommand::Init,
-            SandboxCommand::Validate(SandboxValidateArgs { file: None }),
+            SandboxCommand::Init(SandboxInitArgs {
+                kind: DocumentKind::Sandbox,
+                file: None,
+            }),
+            SandboxCommand::Validate(SandboxValidateArgs {
+                kind: None,
+                file: None,
+            }),
             SandboxCommand::Inspect(SandboxInspectArgs {
                 run: None,
                 mixins: Vec::new(),
@@ -1557,6 +1675,7 @@ mod tests {
         let svc = CannedService::with_inspect_image(
             Response::ImagePulled {
                 image: lns_ipc::ImageInfo {
+                    kind: lns_ipc::CachedKind::Sandbox,
                     reference: "ghcr.io/team/hermes:1.4.0".into(),
                     digest: digest.clone(),
                     size_bytes: 1024,
@@ -1905,6 +2024,7 @@ mod tests {
 
     fn ls_args() -> LsArgs {
         LsArgs {
+            kind: None,
             output: crate::output::OutputArgs {
                 format: crate::output::Format::Table,
             },
@@ -2475,13 +2595,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_requires_force_before_touching_the_cache() {
+    async fn declining_the_prune_prompt_reaches_no_service() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
-        let err = prune(&svc, &SandboxPruneArgs { force: false }, &mut out)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("--force"), "got: {err:#}");
+        let code = prune(
+            &svc,
+            &SandboxPruneArgs { force: false },
+            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(out).unwrap().contains("Aborted."));
+        assert!(svc.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2491,9 +2618,14 @@ mod tests {
             reclaimed_bytes: 64 * 1024 * 1024,
         });
         let mut out = Vec::new();
-        let code = prune(&svc, &SandboxPruneArgs { force: true }, &mut out)
-            .await
-            .unwrap();
+        let code = prune(
+            &svc,
+            &SandboxPruneArgs { force: true },
+            &mut std::io::empty(),
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
         assert!(
@@ -2510,6 +2642,7 @@ mod tests {
                 message: "registry poisoned".into(),
             }),
             &SandboxPruneArgs { force: true },
+            &mut std::io::empty(),
             &mut Vec::new(),
         )
         .await
@@ -2519,6 +2652,7 @@ mod tests {
         let err = prune(
             &CannedService::new(Response::Pong),
             &SandboxPruneArgs { force: true },
+            &mut std::io::empty(),
             &mut Vec::new(),
         )
         .await

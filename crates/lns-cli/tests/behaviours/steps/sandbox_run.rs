@@ -57,6 +57,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
     let digest = format!("sha256:{}", "a".repeat(64));
     w.sandbox.response = Some(lns_ipc::Response::ImagePulled {
         image: lns_ipc::ImageInfo {
+            kind: lns_ipc::CachedKind::Sandbox,
             reference: reference.clone(),
             digest: digest.clone(),
             size_bytes: 3 * 1024 * 1024,

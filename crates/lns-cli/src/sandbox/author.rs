@@ -3,11 +3,23 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::SandboxCommand;
+use super::{DocumentKind, SandboxCommand};
 
 pub const LNS_YAML: &str = "lns.yaml";
 
-const SCAFFOLD: &str = "apiVersion: lns.run/v1
+const MIXIN_SCAFFOLD: &str = "apiVersion: lns.run/v1
+kind: mixin
+name: mixin
+spec:
+  egress:
+    http: []
+    tcp: []
+  credentials: []
+  filesets: []
+  tools: []
+";
+
+const SANDBOX_SCAFFOLD: &str = "apiVersion: lns.run/v1
 kind: sandbox
 name: sandbox
 spec:
@@ -85,7 +97,7 @@ pub fn map_dir_entries<'a>(
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
 pub fn is_offline(cmd: &SandboxCommand) -> bool {
     match cmd {
-        SandboxCommand::Init | SandboxCommand::Validate(_) => true,
+        SandboxCommand::Init(_) | SandboxCommand::Validate(_) => true,
         SandboxCommand::Inspect(args) => {
             args.file.is_some() || is_local_inspect(args.run.as_deref())
         }
@@ -112,16 +124,40 @@ pub fn selected_definition_path(file: Option<&Path>, cwd: &Path) -> PathBuf {
     }
 }
 
-pub fn init<F: Fs, W: Write>(fs: &F, cwd: &Path, out: &mut W) -> Result<i32> {
-    let path = yaml_path(cwd);
+pub fn init<F: Fs, W: Write>(
+    fs: &F,
+    cwd: &Path,
+    kind: DocumentKind,
+    file: Option<&Path>,
+    out: &mut W,
+) -> Result<i32> {
+    let path = selected_definition_path(file, cwd);
+    let name = path.file_name().map_or_else(
+        || LNS_YAML.to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     if fs.exists(&path) {
-        bail!("{LNS_YAML} already exists in this directory; not overwriting it");
+        bail!("{name} already exists in this directory; not overwriting it");
     }
-    fs.write(&path, SCAFFOLD)
+    let (scaffold, next_steps) = match kind {
+        DocumentKind::Sandbox => (
+            SANDBOX_SCAFFOLD,
+            "  1. set spec.image (scaffolded to alpine:3.20)\n  2. boot it with `lns run`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-sandbox:1.0.0`",
+        ),
+        DocumentKind::Mixin => (
+            MIXIN_SCAFFOLD,
+            "  1. name the capability it layers on — tools, filesets, egress, credentials\n  2. try it with `lns run --mixin .`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-mixin:1.0.0`",
+        ),
+    };
+    fs.write(&path, scaffold)
         .with_context(|| format!("writing {}", path.display()))?;
+    let noun = match kind {
+        DocumentKind::Sandbox => "sandbox definition",
+        DocumentKind::Mixin => "mixin",
+    };
     writeln!(
         out,
-        "✓ created {LNS_YAML} — your sandbox definition, every field ready to edit\n\n  1. set spec.image (scaffolded to alpine:3.20)\n  2. boot it with `lns run`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-sandbox:1.0.0`"
+        "✓ created {name} — your {noun}, every field ready to edit\n\n{next_steps}"
     )?;
     Ok(0)
 }
@@ -143,6 +179,7 @@ pub fn load_definition_json_at<F: Fs + ?Sized>(fs: &F, path: &Path) -> Result<Ve
 pub fn validate<F: Fs, W: Write>(
     fs: &F,
     cwd: &Path,
+    kind: Option<DocumentKind>,
     file: Option<&Path>,
     out: &mut W,
 ) -> Result<i32> {
@@ -156,6 +193,7 @@ pub fn validate<F: Fs, W: Write>(
         Ok(()) => Vec::new(),
         Err(problems) => problems,
     };
+    problems.extend(wrong_kind_problem(&json, kind));
     if problems.is_empty()
         && let Ok(def) = lns_artifact::sandbox::parse_document(&json)
     {
@@ -177,6 +215,19 @@ pub fn validate<F: Fs, W: Write>(
     Ok(1)
 }
 
+/// `--kind` is the caller saying which document they think this is, so a file of another kind is a problem alongside whatever else validation found rather than instead of it.
+fn wrong_kind_problem(json: &[u8], wanted: Option<DocumentKind>) -> Option<String> {
+    let wanted = wanted?.as_artifact_kind();
+    let found = lns_artifact::spec::read_kind(json).ok()?;
+    (found != wanted).then(|| {
+        format!(
+            "kind: expected a {}, but this is a {}",
+            wanted.as_str(),
+            found.as_str()
+        )
+    })
+}
+
 pub fn inspect_local<F: Fs, W: Write>(
     fs: &F,
     cwd: &Path,
@@ -192,15 +243,27 @@ pub fn inspect_local<F: Fs, W: Write>(
         (None, file) => selected_definition_path(file, cwd),
     };
     let json = load_definition_json_at(fs, &path)?;
-    let def = lns_artifact::sandbox::parse(&json)
-        .map_err(|e| anyhow::anyhow!("{} is not a valid sandbox: {e:#}", path.display()))?;
-    render_effective(&def, out)?;
+    let kind = lns_artifact::spec::read_kind(&json)
+        .map_err(|e| anyhow::anyhow!("{}: {e:#}", path.display()))?;
+    let def = lns_artifact::sandbox::parse_document(&json).map_err(|e| {
+        anyhow::anyhow!("{} is not a valid {}: {e:#}", path.display(), kind.as_str())
+    })?;
+    render_effective(kind, &def, out)?;
     Ok(0)
 }
 
-fn render_effective<W: Write>(def: &lns_artifact::sandbox::Definition, out: &mut W) -> Result<()> {
-    writeln!(out, "Sandbox: {}", def.name)?;
-    writeln!(out, "  image:        {}", def.spec.image)?;
+fn render_effective<W: Write>(
+    kind: lns_artifact::spec::Kind,
+    def: &lns_artifact::sandbox::Definition,
+    out: &mut W,
+) -> Result<()> {
+    match kind {
+        lns_artifact::spec::Kind::Sandbox => {
+            writeln!(out, "Sandbox: {}", def.name)?;
+            writeln!(out, "  image:        {}", def.spec.image)?;
+        }
+        lns_artifact::spec::Kind::Mixin => writeln!(out, "Mixin: {}", def.name)?,
+    }
     for mixin in &def.spec.mixins {
         writeln!(out, "  mixin: {mixin}")?;
     }
@@ -298,9 +361,17 @@ mod tests {
 
     #[test]
     fn is_offline_matches_the_author_verbs_and_local_inspects_only() {
-        assert!(is_offline(&SandboxCommand::Init));
+        assert!(is_offline(&SandboxCommand::Init(
+            crate::sandbox::SandboxInitArgs {
+                kind: DocumentKind::Sandbox,
+                file: None,
+            }
+        )));
         assert!(is_offline(&SandboxCommand::Validate(
-            crate::sandbox::SandboxValidateArgs { file: None }
+            crate::sandbox::SandboxValidateArgs {
+                kind: None,
+                file: None,
+            }
         )));
         assert!(is_offline(&inspect_cmd(None)));
         assert!(is_offline(&inspect_cmd(Some("."))));
@@ -314,6 +385,7 @@ mod tests {
             },
         })));
         assert!(!is_offline(&SandboxCommand::Ls(crate::sandbox::LsArgs {
+            kind: None,
             output: crate::output::OutputArgs {
                 format: crate::output::Format::Table,
             },
@@ -324,7 +396,7 @@ mod tests {
     fn init_scaffolds_a_default_definition() {
         let fs = MapFs::default();
         let mut out = Vec::new();
-        let code = init(&fs, cwd(), &mut out).unwrap();
+        let code = init(&fs, cwd(), DocumentKind::Sandbox, None, &mut out).unwrap();
         assert_eq!(code, 0);
         let written = fs.read_to_string(&yaml_path(cwd())).unwrap();
         assert!(written.contains("kind: sandbox"));
@@ -338,7 +410,7 @@ mod tests {
     fn init_refuses_to_clobber_an_existing_definition() {
         let fs = fake("/work/lns.yaml", "keep me");
         let mut out = Vec::new();
-        let err = init(&fs, cwd(), &mut out).unwrap_err();
+        let err = init(&fs, cwd(), DocumentKind::Sandbox, None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"));
         assert_eq!(fs.read_to_string(&yaml_path(cwd())).unwrap(), "keep me");
     }
@@ -350,7 +422,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = Vec::new();
-        let err = init(&fs, cwd(), &mut out).unwrap_err();
+        let err = init(&fs, cwd(), DocumentKind::Sandbox, None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("writing"));
     }
 
@@ -358,7 +430,7 @@ mod tests {
     fn validate_passes_a_well_formed_definition() {
         let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
-        let code = validate(&fs, cwd(), None, &mut out).unwrap();
+        let code = validate(&fs, cwd(), None, None, &mut out).unwrap();
         assert_eq!(code, 0);
         assert!(String::from_utf8(out).unwrap().contains("is valid"));
     }
@@ -374,6 +446,7 @@ mod tests {
         let code = validate(
             &fs,
             cwd(),
+            None,
             Some(Path::new("../other/lns.dev.yaml")),
             &mut out,
         )
@@ -393,7 +466,7 @@ mod tests {
             "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec: {}\n",
         );
         let mut out = Vec::new();
-        let code = validate(&fs, cwd(), Some(Path::new("lns.dev.yaml")), &mut out).unwrap();
+        let code = validate(&fs, cwd(), None, Some(Path::new("lns.dev.yaml")), &mut out).unwrap();
         assert_eq!(code, 1);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("lns.dev.yaml is not valid:"), "got: {text}");
@@ -403,7 +476,7 @@ mod tests {
     fn validate_surfaces_a_missing_file() {
         let fs = MapFs::default();
         let mut out = Vec::new();
-        let err = validate(&fs, cwd(), None, &mut out).unwrap_err();
+        let err = validate(&fs, cwd(), None, None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("lns init"));
     }
 
@@ -411,7 +484,8 @@ mod tests {
     fn a_missing_variant_file_does_not_hint_lns_init() {
         let fs = MapFs::default();
         let mut out = Vec::new();
-        let err = validate(&fs, cwd(), Some(Path::new("lns.dev.yaml")), &mut out).unwrap_err();
+        let err =
+            validate(&fs, cwd(), None, Some(Path::new("lns.dev.yaml")), &mut out).unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("lns.dev.yaml"), "got: {text}");
         assert!(
@@ -424,7 +498,7 @@ mod tests {
     fn validate_surfaces_malformed_yaml() {
         let fs = fake("/work/lns.yaml", "spec: [unterminated");
         let mut out = Vec::new();
-        let err = validate(&fs, cwd(), None, &mut out).unwrap_err();
+        let err = validate(&fs, cwd(), None, None, &mut out).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
     }
 
@@ -526,7 +600,7 @@ mod tests {
             "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n",
         );
         let mut out = Vec::new();
-        let code = validate(&fs, cwd(), None, &mut out).unwrap();
+        let code = validate(&fs, cwd(), None, None, &mut out).unwrap();
         assert_eq!(code, 1);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("fileset ./skills"), "got: {text}");

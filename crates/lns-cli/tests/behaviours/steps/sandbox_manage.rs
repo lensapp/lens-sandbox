@@ -1,7 +1,7 @@
 use cucumber::{given, then};
 use lns_ipc::{
-    ArtifactInspection, ImageInfo, Request, Response, RunConfig, RunDetails, RunStatus, RunSummary,
-    SandboxView,
+    ArtifactInspection, CachedKind, ImageInfo, Request, Response, RunConfig, RunDetails, RunStatus,
+    RunSummary, SandboxView,
 };
 
 use crate::world::BehaviourWorld;
@@ -147,16 +147,38 @@ fn reports_no_cached_sandboxes(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::ImageList { images: Vec::new() });
 }
 
+fn cached(reference: &str, kind: CachedKind, holder: Option<String>) -> ImageInfo {
+    ImageInfo {
+        reference: reference.to_string(),
+        kind,
+        digest: format!("sha256:{}", "a".repeat(64)),
+        size_bytes: 14 * 1024 * 1024,
+        layers: 3,
+        pulled: "2026-01-01T00:00:00Z".into(),
+        in_use_by: holder,
+    }
+}
+
 #[given(regex = r#"^the service reports one cached sandbox "([^"]+)"$"#)]
 fn reports_one_cached_sandbox(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.response = Some(Response::ImageList {
-        images: vec![ImageInfo {
-            reference,
-            digest: format!("sha256:{}", "a".repeat(64)),
-            size_bytes: 14 * 1024 * 1024,
-            layers: 3,
-            pulled: "2026-01-01T00:00:00Z".into(),
-            in_use_by: None,
-        }],
+        images: vec![cached(&reference, CachedKind::Sandbox, None)],
+    });
+}
+
+#[given(regex = r#"^the service reports one cached sandbox "([^"]+)" held by run (\d+)$"#)]
+fn reports_one_held_cached_sandbox(w: &mut BehaviourWorld, reference: String, run: u32) {
+    w.sandbox.response = Some(Response::ImageList {
+        images: vec![cached(&reference, CachedKind::Sandbox, Some(hexid(run)))],
+    });
+}
+
+#[given(regex = r#"^the service reports a cached sandbox "([^"]+)" and a cached image "([^"]+)"$"#)]
+fn reports_a_sandbox_and_an_image(w: &mut BehaviourWorld, sandbox: String, image: String) {
+    w.sandbox.response = Some(Response::ImageList {
+        images: vec![
+            cached(&sandbox, CachedKind::Sandbox, None),
+            cached(&image, CachedKind::Image, None),
+        ],
     });
 }
