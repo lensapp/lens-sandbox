@@ -1,7 +1,7 @@
-Feature: authoring a sandbox
-  A sandbox is authored on disk as `./lns.yaml` (kind: sandbox). The author
-  verbs scaffold it and validate it offline; `inspect` with no target (or a
-  path-shaped one) renders its effective definition, also offline.
+Feature: authoring a document
+  A document is authored on disk as `./lns.yaml`, or as whatever file `-f`
+  names. `init` scaffolds the kind you ask for, and `validate` and `inspect`
+  answer for whichever kind the file declares — offline, either way.
 
   Scenario: init scaffolds a default sandbox definition with every spec field
     Given the current directory has no lns.yaml
@@ -35,7 +35,40 @@ Feature: authoring a sandbox
     And the output contains "already exists"
     And the existing lns.yaml is left unchanged
 
-  Scenario: init takes no flags
+  Scenario: init scaffolds a mixin when asked for one
+    Given the current directory has no lns.yaml
+    When the user runs sandbox command "init --kind mixin"
+    Then the exit code is 0
+    And a file "lns.yaml" is created
+    And the file "lns.yaml" contains "kind: mixin"
+    And the file "lns.yaml" does not contain "image:"
+
+  Scenario: the scaffolded mixin is valid as written
+    Given the current directory has no lns.yaml
+    When the user runs sandbox command "init --kind mixin"
+    And the user runs sandbox command "validate"
+    Then the exit code is 0
+    And the output contains "valid"
+
+  Scenario: init writes the file -f names
+    Given the current directory has no lns.yaml
+    When the user runs sandbox command "init -f lns.dev.yaml"
+    Then the exit code is 0
+    And a file "lns.dev.yaml" is created
+    And the file "lns.dev.yaml" contains "kind: sandbox"
+
+  Scenario: init refuses to clobber the file -f names
+    Given the current directory already has an lns.dev.yaml
+    When the user runs sandbox command "init -f lns.dev.yaml"
+    Then the command fails with an exit code other than 0
+    And the output contains "already exists"
+
+  Scenario: init scaffolds no kind it cannot also validate
+    When I run "lns init --kind sorcery"
+    Then the exit code is 2
+    And the output contains "invalid value"
+
+  Scenario: init takes no flag that edits the document
     When I run "lns init --image alpine"
     Then the exit code is 2
     And the output contains "unexpected argument"
@@ -57,6 +90,20 @@ Feature: authoring a sandbox
   Scenario: validate answers for a mixin document too
     Given an lns.yaml holding a mixin document
     When the user runs sandbox command "validate"
+    Then the exit code is 0
+    And the output contains "valid"
+    And the service received no request
+
+  Scenario: validate --kind holds the document to the kind you named
+    Given an lns.yaml holding a mixin document
+    When the user runs sandbox command "validate --kind sandbox"
+    Then the command fails with an exit code other than 0
+    And the output contains "is a mixin"
+    And the service received no request
+
+  Scenario: validate --kind passes a document that is that kind
+    Given an lns.yaml holding a mixin document
+    When the user runs sandbox command "validate --kind mixin"
     Then the exit code is 0
     And the output contains "valid"
     And the service received no request
@@ -88,6 +135,14 @@ Feature: authoring a sandbox
     Then the exit code is 0
     And the output contains "image"
     And the output contains "egress"
+    And the service received no request
+
+  Scenario: inspect renders a mixin, not only a sandbox
+    Given an lns.yaml holding a mixin document
+    When the user runs sandbox command "inspect"
+    Then the exit code is 0
+    And the output contains "postgres-tools"
+    And the output contains "node@22"
     And the service received no request
 
   Scenario: inspect discloses the run-as user a definition asks for

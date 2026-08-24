@@ -320,9 +320,11 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
     };
     let mut out: Vec<u8> = Vec::new();
     let result = match cmd {
-        SandboxCommand::Init => author::init(&fs, cwd, &mut out),
+        SandboxCommand::Init(args) => {
+            author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
+        }
         SandboxCommand::Validate(args) => {
-            author::validate(&fs, cwd, args.file.as_deref(), &mut out)
+            author::validate(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
         }
         SandboxCommand::Inspect(args) => author::inspect_local(
             &fs,

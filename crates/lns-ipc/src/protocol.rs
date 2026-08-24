@@ -303,9 +303,27 @@ pub struct VolumePruneFailure {
     pub error: String,
 }
 
+/// What a cached entry is: an `lns.run/v1` sandbox artifact, or the plain OCI image one runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CachedKind {
+    Image,
+    Sandbox,
+}
+
+impl CachedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CachedKind::Image => "image",
+            CachedKind::Sandbox => "sandbox",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub reference: String,
+    pub kind: CachedKind,
     pub digest: String,
     pub size_bytes: u64,
     pub layers: u32,
@@ -1609,6 +1627,7 @@ mod tests {
     fn image_responses_survive_round_trips() {
         let info = ImageInfo {
             reference: "registry.example.test/some/image:1.0".into(),
+            kind: CachedKind::Sandbox,
             digest: format!("sha256:{}", "a".repeat(64)),
             size_bytes: 3 * 1024 * 1024,
             layers: 2,
@@ -1681,6 +1700,7 @@ mod tests {
     fn image_info_serializes_idle_holder_as_null() {
         let info = ImageInfo {
             reference: "registry.example.test/some/image:1.0".into(),
+            kind: CachedKind::Image,
             digest: format!("sha256:{}", "b".repeat(64)),
             size_bytes: 4096,
             layers: 1,

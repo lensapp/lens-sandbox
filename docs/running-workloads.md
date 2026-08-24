@@ -21,8 +21,12 @@ Scaffold a `./lns.yaml` in the current directory with `lns init` (a shortcut for
 `lns sandbox init`):
 
 ```bash
-lns init
+lns init                        # ./lns.yaml, kind: sandbox
+lns init --kind mixin           # a mixin instead
+lns init -f lns.dev.yaml        # under another name
 ```
+
+`init` refuses to overwrite a file that is already there.
 
 ```yaml
 apiVersion: lns.run/v1

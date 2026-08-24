@@ -217,7 +217,9 @@ section before using it.
 
 No command edits the rules. A decision is recorded one of two ways: you answer the
 card a run raises, or you open `lns-local-mixin.yaml` and write the rule yourself.
-Both write the same document.
+Both write the same document, and because it is a `kind: mixin` document,
+`lns sandbox validate -f lns-local-mixin.yaml` checks what you wrote and
+`lns sandbox inspect -f lns-local-mixin.yaml` renders it.
 
 ### Add an allow or deny rule
 

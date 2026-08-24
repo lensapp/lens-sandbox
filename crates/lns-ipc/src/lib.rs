@@ -20,7 +20,7 @@ pub use paths::{
     cache_root, connection_ledger, connection_ledger_anchor, data_root, short_run_id,
 };
 pub use protocol::{
-    ArtifactInspection, BindMount, BindSpec, ContributionBlock, CredentialBindDecision,
+    ArtifactInspection, BindMount, BindSpec, CachedKind, ContributionBlock, CredentialBindDecision,
     DisplacedEntry, ExecImageArgs, ImageInfo, ImageView, LogLevel, MixinView, MountSpec,
     PackedFilesetSource, PortPublish, Protocol, Request, Response, RunConfig, RunDetails,
     RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset, SandboxFilesetOwner,
