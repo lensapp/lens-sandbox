@@ -212,7 +212,7 @@ lns uninstall --purge
 ```
 
 `--purge` keeps only files you authored yourself, such as your
-`~/.lns-connectors.yaml` catalog and each project's `lns-local-mixin.yaml`, and prints
+`~/.lns/connectors.yaml` catalog and each project's `lns-local-mixin.yaml`, and prints
 what it left behind.
 
 ## Where to go next

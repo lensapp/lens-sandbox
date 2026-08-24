@@ -221,8 +221,6 @@ mod tests {
         let tmphome = tempfile::TempDir::new().unwrap();
         let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let _home = crate::test_env::EnvVarGuard::set("HOME", tmphome.path());
-        let _xdg =
-            crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", tmphome.path().join(".cache"));
         let _init = crate::test_env::EnvVarGuard::set("LNS_INIT_BIN", &target);
         let _broker = crate::test_env::EnvVarGuard::set("LNS_SESSION_BROKER_BIN", &target);
 

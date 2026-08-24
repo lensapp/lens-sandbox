@@ -2171,7 +2171,6 @@ mod tests {
     async fn lifecycle_production_wrappers_round_trip_under_the_cache_root() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
 
         let reference: oci_client::Reference =
             "registry.example.test/cov/lifecycle:1".parse().unwrap();
@@ -2217,7 +2216,6 @@ mod tests {
     async fn record_artifact_run_persists_the_sandbox_dependency_under_the_cache_root() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         let base = format!("registry.example.test/team/base@sha256:{}", "a".repeat(64));
 
         record_artifact_run("registry.example.test/team/agent:1", "sha256:m", &base)

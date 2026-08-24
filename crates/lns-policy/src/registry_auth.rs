@@ -1,4 +1,4 @@
-//! Registry logins live in `~/.lns-registry-auth.json`, not `lns-local-mixin.yaml`, to keep the shareable policy file free of per-machine secrets.
+//! Registry logins live in `~/.lns/registry-auth.json`, not `lns-local-mixin.yaml`, to keep the shareable policy file free of per-machine secrets.
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,16 +18,6 @@ pub type RegistryAuthFile = HashMap<String, RegistryCredential>;
 pub trait RegistryAuthStore: Send + Sync {
     fn load(&self) -> io::Result<RegistryAuthFile>;
     fn save(&self, state: &RegistryAuthFile) -> io::Result<()>;
-}
-
-/// Falls back to `./.lns-registry-auth.json` when `HOME` is unset rather than panicking.
-pub fn default_registry_auth_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LNS_REGISTRY_AUTH_PATH") {
-        return PathBuf::from(p);
-    }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".lns-registry-auth.json"))
-        .unwrap_or_else(|| PathBuf::from(".lns-registry-auth.json"))
 }
 
 pub struct JsonFileRegistryAuthStore {
@@ -230,41 +220,5 @@ mod tests {
             "hubuser"
         );
         assert!(credential_for(&file, "ghcr.io").is_none());
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_registry_auth_path_uses_override_when_set() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_REGISTRY_AUTH_PATH", "/tmp/custom-auth.json");
-        let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
-        assert_eq!(
-            default_registry_auth_path(),
-            PathBuf::from("/tmp/custom-auth.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_registry_auth_path_falls_back_to_home_dotfile() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_REGISTRY_AUTH_PATH");
-        let _g2 = EnvVarGuard::set("HOME", "/home/dev");
-        assert_eq!(
-            default_registry_auth_path(),
-            PathBuf::from("/home/dev/.lns-registry-auth.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_registry_auth_path_falls_back_to_cwd_when_home_unset() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_REGISTRY_AUTH_PATH");
-        let _g2 = EnvVarGuard::unset("HOME");
-        assert_eq!(
-            default_registry_auth_path(),
-            PathBuf::from(".lns-registry-auth.json")
-        );
     }
 }

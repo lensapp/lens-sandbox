@@ -68,8 +68,8 @@ impl ConnectorSignIn for FakeSignIn {
 
 async fn run_connector(world: &mut BehaviourWorld, tail: &[&str]) {
     let dir = cwd(world);
-    let catalog = dir.join(".lns-connectors.yaml");
-    let grants = dir.join(".lns-workload-grants.json");
+    let catalog = dir.join("connectors.yaml");
+    let grants = dir.join("workload-grants.json");
     let signin = FakeSignIn {
         outcome: world
             .signin_outcome
@@ -142,7 +142,7 @@ fn given_user_oauth_connector(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-connectors.yaml"))
+    .save_atomic(&dir.join("connectors.yaml"))
     .unwrap();
 }
 
@@ -188,7 +188,7 @@ fn given_user_pkce_connector(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-connectors.yaml"))
+    .save_atomic(&dir.join("connectors.yaml"))
     .unwrap();
 }
 
@@ -221,7 +221,7 @@ fn write_credential_catalog(world: &mut BehaviourWorld, id: String) {
             token_fallback: None,
         }],
     }
-    .save_atomic(&dir.join(".lns-connectors.yaml"))
+    .save_atomic(&dir.join("connectors.yaml"))
     .unwrap();
 }
 
@@ -327,7 +327,7 @@ fn recorded(world: &mut BehaviourWorld, id: String) {
 fn connected_for(world: &mut BehaviourWorld) -> Vec<String> {
     use lns_policy::grants::GrantStore as _;
     let policy = policy_file(world);
-    lns_policy::grants::JsonFileGrantStore::new(cwd(world).join(".lns-workload-grants.json"))
+    lns_policy::grants::JsonFileGrantStore::new(cwd(world).join("workload-grants.json"))
         .load()
         .expect("the sidecar reads back")
         .connected_in(&lns_policy::grants::project_key(&policy))

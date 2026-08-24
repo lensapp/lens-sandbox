@@ -26,14 +26,13 @@ use crate::credential_flow::providers::{DefProvider, Provider};
 use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
 use crate::credential_flow::session::CredentialSession;
 use crate::credential_flow::store::{
-    CredentialStateFile, CredentialStore, JsonFileCredentialStore, default_credentials_path,
+    CredentialStateFile, CredentialStore, JsonFileCredentialStore,
 };
 use crate::credential_flow::watcher::CredentialWatcher;
 use crate::log;
 use crate::relay;
 use lns_policy::grants::{
-    GrantStore, JsonFileGrantStore, WorkloadGrantFile, WorkloadIdentity,
-    default_workload_grants_path, project_key,
+    GrantStore, JsonFileGrantStore, WorkloadGrantFile, WorkloadIdentity, project_key,
 };
 use lns_policy::{FilePolicyStore, Policy, RouteRule};
 
@@ -221,7 +220,7 @@ fn sweep_once(weak: &Weak<ApprovalSession>) -> bool {
     true
 }
 
-/// Defaults to empty and warns on store error, so a malformed `~/.lns-credentials.json` doesn't silently wipe the developer's rules at startup.
+/// Defaults to empty and warns on store error, so a malformed `~/.lns/credentials.json` doesn't silently wipe the developer's rules at startup.
 fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> CredentialStateFile {
     match store.load() {
         Ok(state) => state,
@@ -233,7 +232,7 @@ fn load_credentials_or_warn(store: &dyn CredentialStore, path: &Path) -> Credent
     }
 }
 
-/// Defaults to an empty grant set and warns on load error, so a malformed `~/.lns-workload-grants.json` fails safe: every connector re-offers at first use rather than silently arming.
+/// Defaults to an empty grant set and warns on load error, so a malformed `~/.lns/workload-grants.json` fails safe: every connector re-offers at first use rather than silently arming.
 fn load_grants_or_warn(store: &dyn GrantStore, path: &Path) -> WorkloadGrantFile {
     match store.load() {
         Ok(grants) => grants,
@@ -309,7 +308,7 @@ fn record_boot_sign_in_grants(
 /// Each connector's forget count as it stands before a run's boot sign-in gate opens, so a `lns connector disconnect` landing during a browser device flow — minutes, not milliseconds — still wins over the grant that sign-in would earn.
 pub(crate) fn revocations_before_gate(policy_path: &Path) -> HashMap<String, u64> {
     let project = project_key(policy_path);
-    JsonFileGrantStore::new(default_workload_grants_path())
+    JsonFileGrantStore::new(lns_ipc::workload_grants_path())
         .load()
         .unwrap_or_default()
         .revocations
@@ -319,7 +318,7 @@ pub(crate) fn revocations_before_gate(policy_path: &Path) -> HashMap<String, u64
         .collect()
 }
 
-/// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns-connectors.yaml` doesn't break a run — the bundled catalog still applies.
+/// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns/connectors.yaml` doesn't break a run — the bundled catalog still applies.
 fn load_user_catalog_or_warn(path: &Path) -> lns_policy::connectors::Catalog {
     match lns_policy::connectors::Catalog::load_or_default(path) {
         Ok(catalog) => catalog,
@@ -523,7 +522,7 @@ async fn start_credential_subsystem(
     oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
-    let credentials_path = default_credentials_path();
+    let credentials_path = lns_ipc::credentials_path();
     let credential_store: Arc<dyn CredentialStore> =
         Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
     let mut initial_credential_state =
@@ -679,11 +678,10 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let sandbox_credentials = consent.credentials;
     let workload = consent.workload;
-    let connected = connected_in(&default_workload_grants_path(), &project_key(policy_path));
+    let connected = connected_in(&lns_ipc::workload_grants_path(), &project_key(policy_path));
     let (mut policy, own_policy) = running_policies(policy_path, sandbox_policy, connected)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
-    let user_catalog =
-        load_user_catalog_or_warn(&lns_policy::connectors::default_connectors_path());
+    let user_catalog = load_user_catalog_or_warn(&lns_ipc::connectors_path());
     let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
     let applied = resolve_applied_with_credentials(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog connectors resolve as connectable — detect-only unless definition-declared — so their use offers a live connect.
@@ -716,7 +714,7 @@ pub(super) async fn start(
     log::info!("Approvals", "window ready");
 
     // A machine-global value arms only for a value key this workload holds an allow grant for, so a cloned overlay or a declared credential re-offers at first use instead of silently spending the credential.
-    let grants_path = default_workload_grants_path();
+    let grants_path = lns_ipc::workload_grants_path();
     let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
     let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
     let project = project_key(policy_path);
@@ -1384,7 +1382,7 @@ mod tests {
 
     fn seeded_sidecar(dir: &std::path::Path, policy_path: &Path) -> JsonFileGrantStore {
         Policy::default().save_atomic(policy_path).expect("policy");
-        let store = JsonFileGrantStore::new(dir.join("grants.json"));
+        let store = JsonFileGrantStore::new(dir.join("workload-grants.json"));
         store
             .update(&mut |file| {
                 file.revoke_project_connector(&project_key(policy_path), "acme");
@@ -1402,10 +1400,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let policy_path = dir.path().join("lns-local-mixin.yaml");
         seeded_sidecar(dir.path(), &policy_path);
-        let _g = crate::test_env::EnvVarGuard::set(
-            "LNS_WORKLOAD_GRANTS_PATH",
-            dir.path().join("grants.json"),
-        );
+        let _g = crate::test_env::EnvVarGuard::set("LNS_HOME", dir.path());
 
         let counts = revocations_before_gate(&policy_path);
 
@@ -1420,9 +1415,9 @@ mod tests {
     #[serial_test::serial(env)]
     fn revocations_before_gate_reads_nothing_from_an_unreadable_sidecar() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let sidecar = dir.path().join("grants.json");
-        std::fs::write(&sidecar, "{ not json").expect("corrupt sidecar");
-        let _g = crate::test_env::EnvVarGuard::set("LNS_WORKLOAD_GRANTS_PATH", &sidecar);
+        std::fs::write(dir.path().join("workload-grants.json"), "{ not json")
+            .expect("corrupt sidecar");
+        let _g = crate::test_env::EnvVarGuard::set("LNS_HOME", dir.path());
 
         assert!(
             revocations_before_gate(&dir.path().join("lns-local-mixin.yaml")).is_empty(),
@@ -1586,7 +1581,7 @@ mod tests {
     fn load_user_catalog_or_warn_reads_an_existing_user_catalog() {
         use lns_policy::connectors::{AuthKind, Catalog, Connector, CredentialAuth};
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         Catalog {
             connectors: vec![Connector {
                 id: "acme".into(),
@@ -1613,7 +1608,7 @@ mod tests {
     fn load_user_catalog_or_warn_defaults_to_empty_and_warns_on_load_error() {
         init_tracing_capture();
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().join(".lns-connectors.yaml");
+        let path = dir.path().join("connectors.yaml");
         std::fs::write(&path, "connectors: not-a-list\n").unwrap();
         let catalog = load_user_catalog_or_warn(&path);
         assert!(
@@ -3043,9 +3038,7 @@ mod tests {
     #[serial_test::serial(env)]
     async fn ensure_without_embed_or_override_bails() {
         let cache_root = tempfile::TempDir::new().unwrap();
-        let _home = crate::test_env::EnvVarGuard::set("HOME", cache_root.path());
-        let _xdg =
-            crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", cache_root.path().join("xdg"));
+        let _home = crate::test_env::EnvVarGuard::set("LNS_HOME", cache_root.path());
 
         let err = ensure_with(|_| None, None)
             .await
@@ -3069,8 +3062,7 @@ mod tests {
         let cache_root = tempfile::TempDir::new().unwrap();
         // SAFETY: env mutation is serialized via #[serial(env)].
         unsafe {
-            std::env::set_var("HOME", cache_root.path());
-            std::env::set_var("XDG_CACHE_HOME", cache_root.path().join("xdg"));
+            std::env::set_var("LNS_HOME", cache_root.path());
         }
         let bytes = b"\x7fELF fake embedded supervisor".as_slice();
         // env_get returns None so the override is absent and the embedded
@@ -3079,8 +3071,7 @@ mod tests {
         let second = ensure_with(|_| None, Some(bytes)).await;
         // SAFETY: env mutation is serialized via #[serial(env)].
         unsafe {
-            std::env::remove_var("HOME");
-            std::env::remove_var("XDG_CACHE_HOME");
+            std::env::remove_var("LNS_HOME");
         }
 
         let first = first.expect("embedded install succeeds");

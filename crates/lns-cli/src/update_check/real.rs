@@ -7,7 +7,7 @@ pub struct RealStatusReader;
 
 impl RealStatusReader {
     fn root() -> Option<PathBuf> {
-        lns_ipc::data_root().ok()
+        lns_ipc::lns_home().ok()
     }
 }
 

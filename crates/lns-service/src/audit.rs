@@ -466,7 +466,6 @@ mod tests {
     fn record_sandbox_run_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         record_sandbox_run(
             "aa125",
             "calm-finch",
@@ -587,7 +586,6 @@ mod tests {
     fn record_bind_attached_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         record_bind_attached(
             "aa123",
             "calm-finch",
@@ -611,7 +609,6 @@ mod tests {
     fn record_tool_provisioned_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         let outcome = crate::tools::ProvisionOutcome {
             tool: "some-tool".into(),
             requested: "some-tool@1".into(),
@@ -661,7 +658,6 @@ mod tests {
     fn record_volume_attached_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         record_volume_attached("aa123", "calm-finch", "prism-data", "/data", &CLOCK).unwrap();
         let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(content.contains("\"lns_name\":\"prism-data\""), "{content}");
@@ -673,7 +669,6 @@ mod tests {
     fn record_run_launched_writes_under_the_runs_audit_log() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
-        let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
         record_run_launched("aa124", "calm-finch", "alpine:latest", &CLOCK).unwrap();
         let content = std::fs::read_to_string(audit_path("aa124").unwrap()).unwrap();
         assert!(

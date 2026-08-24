@@ -1,52 +1,91 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum CachePathError {
-    #[error("could not determine cache dir")]
-    NoCacheDir,
-    #[error("could not determine data dir")]
-    NoDataDir,
+#[error(
+    "could not determine your home directory; set LNS_HOME to the directory lns should keep its data in"
+)]
+pub struct NoLnsHome;
+
+/// Everything lns keeps for you lives in one directory, so there is one thing to back up and one thing `lns uninstall --purge` removes.
+pub fn lns_home() -> Result<PathBuf, NoLnsHome> {
+    lns_home_with(|key| std::env::var_os(key), dirs::home_dir())
 }
 
-pub fn cache_root() -> Result<PathBuf, CachePathError> {
-    dirs::cache_dir()
-        .map(|p| p.join("lns"))
-        .ok_or(CachePathError::NoCacheDir)
+pub fn lns_home_with(
+    env: impl Fn(&str) -> Option<OsString>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, NoLnsHome> {
+    match env("LNS_HOME") {
+        Some(overridden) => Ok(PathBuf::from(overridden)),
+        None => home.map(|home| home.join(".lns")).ok_or(NoLnsHome),
+    }
 }
 
-pub fn data_root() -> Result<PathBuf, CachePathError> {
-    dirs::data_dir()
-        .map(|p| p.join("lns"))
-        .ok_or(CachePathError::NoDataDir)
+fn in_lns_home(name: &str) -> PathBuf {
+    under(lns_home(), name)
 }
 
-pub fn build_cache_root() -> Result<PathBuf, CachePathError> {
-    Ok(cache_root()?.join("builds"))
+/// A per-machine file lns keeps for you; with no home to resolve it lands in the working directory rather than failing a command that only wanted to read one that may not exist.
+fn under(home: Result<PathBuf, NoLnsHome>, name: &str) -> PathBuf {
+    home.unwrap_or_else(|_| PathBuf::from(".lns")).join(name)
+}
+
+pub fn build_cache_root() -> Result<PathBuf, NoLnsHome> {
+    Ok(lns_home()?.join("builds"))
 }
 
 pub fn short_run_id(id: &str) -> &str {
     id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
 }
 
-pub fn audit_runs_root() -> Result<PathBuf, CachePathError> {
-    Ok(data_root()?.join("runs"))
+pub fn audit_runs_root() -> Result<PathBuf, NoLnsHome> {
+    Ok(lns_home()?.join("runs"))
 }
 
-pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
+pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, NoLnsHome> {
     Ok(audit_runs_root()?.join(run_id).join("audit.jsonl"))
 }
 
-pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, CachePathError> {
+pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, NoLnsHome> {
     Ok(audit_runs_root()?.join(run_id).join("audit.anchor"))
 }
 
-pub fn connection_ledger() -> Result<PathBuf, CachePathError> {
-    Ok(data_root()?.join("ledger.jsonl"))
+pub fn connection_ledger() -> Result<PathBuf, NoLnsHome> {
+    Ok(lns_home()?.join("ledger.jsonl"))
 }
 
-pub fn connection_ledger_anchor() -> Result<PathBuf, CachePathError> {
-    Ok(data_root()?.join("ledger.anchor"))
+pub fn connection_ledger_anchor() -> Result<PathBuf, NoLnsHome> {
+    Ok(lns_home()?.join("ledger.anchor"))
+}
+
+pub fn config_path() -> Result<PathBuf, NoLnsHome> {
+    Ok(lns_home()?.join("config.yaml"))
+}
+
+pub fn connectors_path() -> PathBuf {
+    in_lns_home("connectors.yaml")
+}
+
+pub fn credentials_path() -> PathBuf {
+    in_lns_home("credentials.json")
+}
+
+pub fn registry_auth_path() -> PathBuf {
+    in_lns_home("registry-auth.json")
+}
+
+pub fn workload_grants_path() -> PathBuf {
+    in_lns_home("workload-grants.json")
+}
+
+pub fn host_path_decisions_path() -> PathBuf {
+    in_lns_home("host-path-decisions.json")
+}
+
+pub fn host_bind_decisions_path() -> PathBuf {
+    in_lns_home("host-bind-decisions.json")
 }
 
 #[cfg(test)]
@@ -70,93 +109,82 @@ mod tests {
     }
 
     #[test]
-    fn audit_log_lives_under_data_root_so_it_outlives_the_ephemeral_run_dir() {
-        let data = data_root().expect("data dir resolves in test env");
-        let p = audit_log_for_run("42").expect("audit_log_for_run");
-        assert_eq!(p, data.join("runs").join("42").join("audit.jsonl"));
-        assert!(
-            !p.starts_with(cache_root().expect("cache dir resolves in test env")),
-            "the audit trail must outlive ephemeral run dirs, so it cannot live under cache_root: {p:?}"
+    fn lns_home_is_a_dot_directory_beside_the_rest_of_your_home() {
+        let resolved = lns_home_with(|_| None, Some(PathBuf::from("/home/dev"))).unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/dev/.lns"));
+    }
+
+    #[test]
+    fn lns_home_redirects_the_whole_directory_at_once() {
+        let resolved = lns_home_with(
+            |key| (key == "LNS_HOME").then(|| OsString::from("/tmp/elsewhere")),
+            Some(PathBuf::from("/home/dev")),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/elsewhere"),
+            "the override names the root itself, not a directory to put .lns inside"
         );
     }
 
     #[test]
-    fn audit_runs_root_is_the_shared_base_of_every_per_run_log() {
-        let root = audit_runs_root().expect("audit_runs_root");
-        assert_eq!(root, data_root().expect("data dir").join("runs"));
-        assert!(audit_log_for_run("42").expect("log").starts_with(&root));
+    fn with_no_home_and_no_override_there_is_nowhere_to_keep_anything() {
+        let err = lns_home_with(|_| None, None).unwrap_err();
         assert!(
-            audit_anchor_for_run("42")
-                .expect("anchor")
-                .starts_with(&root)
+            err.to_string().contains("LNS_HOME"),
+            "the answer must name the way out: {err}"
         );
     }
 
     #[test]
-    fn audit_anchor_path_is_a_sibling_of_the_audit_log() {
+    fn every_path_lns_keeps_for_you_is_inside_the_one_directory() {
+        let home = lns_home().expect("a home resolves in the test env");
+        for path in [
+            build_cache_root().unwrap(),
+            audit_runs_root().unwrap(),
+            audit_log_for_run("42").unwrap(),
+            audit_anchor_for_run("42").unwrap(),
+            connection_ledger().unwrap(),
+            connection_ledger_anchor().unwrap(),
+            config_path().unwrap(),
+            connectors_path(),
+            credentials_path(),
+            registry_auth_path(),
+            workload_grants_path(),
+            host_path_decisions_path(),
+            host_bind_decisions_path(),
+        ] {
+            assert!(
+                path.starts_with(&home),
+                "one directory, one thing to back up: {path:?} is outside {home:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_audit_anchor_is_a_sibling_of_the_log_it_anchors() {
         let log = audit_log_for_run("42").expect("audit_log_for_run");
         let anchor = audit_anchor_for_run("42").expect("audit_anchor_for_run");
         assert_eq!(anchor.parent(), log.parent());
         assert!(anchor.ends_with("runs/42/audit.anchor"));
-    }
-
-    #[test]
-    fn cache_root_is_non_empty_absolute_and_ends_with_lns() {
-        let root = cache_root().expect("cache dir resolves in test env");
-        assert!(
-            !root.as_os_str().is_empty(),
-            "cache_root must return a non-empty path"
-        );
-        assert!(
-            root.ends_with("lns"),
-            "cache_root must end with 'lns', got: {root:?}"
-        );
-        assert!(
-            root.is_absolute(),
-            "cache_root must be absolute, got: {root:?}"
-        );
-    }
-
-    #[test]
-    fn build_cache_root_lives_under_cache_root_not_data_root() {
-        let cache = cache_root().expect("cache dir resolves in test env");
-        let builds = build_cache_root().expect("build_cache_root");
-        assert_eq!(builds, cache.join("builds"));
-        assert!(
-            !builds.starts_with(data_root().expect("data dir resolves in test env")),
-            "the build cache is reconstructible content, so it belongs under cache_root, not data_root"
-        );
-    }
-
-    #[test]
-    fn data_root_is_absolute_and_ends_with_lns() {
-        let root = data_root().expect("data dir resolves in test env");
-        assert!(
-            root.ends_with("lns"),
-            "data_root must end with 'lns', got: {root:?}"
-        );
-        assert!(
-            root.is_absolute(),
-            "data_root must be absolute, got: {root:?}"
-        );
-    }
-
-    #[test]
-    fn connection_ledger_lives_under_data_root_not_cache_root() {
-        let data = data_root().expect("data dir resolves in test env");
         let ledger = connection_ledger().expect("connection_ledger");
-        assert_eq!(ledger, data.join("ledger.jsonl"));
-        assert!(
-            !ledger.starts_with(cache_root().expect("cache dir resolves in test env")),
-            "the ledger must outlive ephemeral run dirs, so it cannot live under cache_root: {ledger:?}"
+        assert_eq!(
+            connection_ledger_anchor().unwrap().parent(),
+            ledger.parent()
         );
     }
 
     #[test]
-    fn connection_ledger_anchor_is_a_sibling_of_the_ledger() {
-        let ledger = connection_ledger().expect("connection_ledger");
-        let anchor = connection_ledger_anchor().expect("connection_ledger_anchor");
-        assert_eq!(anchor.parent(), ledger.parent());
-        assert!(anchor.ends_with("ledger.anchor"));
+    fn a_per_machine_file_falls_back_to_the_working_directory_rather_than_failing_a_read() {
+        // These callers only ever want to read a file that may not exist, so nowhere to look is an empty answer rather than a broken command.
+        assert_eq!(
+            under(Err(NoLnsHome), "connectors.yaml"),
+            PathBuf::from(".lns/connectors.yaml")
+        );
+        assert_eq!(
+            under(Ok(PathBuf::from("/home/dev/.lns")), "connectors.yaml"),
+            PathBuf::from("/home/dev/.lns/connectors.yaml")
+        );
     }
 }

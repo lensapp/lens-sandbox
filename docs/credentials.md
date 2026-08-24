@@ -40,7 +40,7 @@ workload — see
 ## Value decisions
 
 A provider's *value decision* is per-machine — it's how the real secret is bound
-on your machine. It's stored in `~/.lns-credentials.json`, separate from the
+on your machine. It's stored in `~/.lns/credentials.json`, separate from the
 shareable `lns-local-mixin.yaml`, so secrets are never committed.
 
 Decisions are made interactively, at either of two moments:
@@ -60,7 +60,7 @@ the held request fails, and the next use asks again.
 
 Denying is the one choice whose reach depends on which card you answered.
 Denying the **proactive** card is a decision about the machine, and lands in
-`~/.lns-credentials.json` alongside the values. Declining a **reactive**
+`~/.lns/credentials.json` alongside the values. Declining a **reactive**
 first-use card is a decision about the workload in front of you, and is
 remembered as a per-workload deny instead — see
 [Workload grants](#workload-grants).
@@ -82,7 +82,7 @@ than the new shape inheriting the old approval. That holds for a decline as
 well as an approval — a redefined connector is a different question, so a
 standing no does not carry over to it either.
 
-Grants live in `~/.lns-workload-grants.json` — per-machine, alongside the
+Grants live in `~/.lns/workload-grants.json` — per-machine, alongside the
 credential values and equally outside anything you commit. Declining a card is
 remembered there too, as a standing no for that workload only; the same
 connector is still offered to your other projects, and to other workloads in

@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn store_at(dir: &TempDir) -> std::path::PathBuf {
-        dir.path().join(".lns-registry-auth.json")
+        dir.path().join("registry-auth.json")
     }
 
     fn loaded(path: &Path) -> lns_policy::registry_auth::RegistryAuthFile {

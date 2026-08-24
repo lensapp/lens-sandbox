@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::FromArgMatches;
 use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_async};
-use lns_policy::registry_auth::default_registry_auth_path;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
@@ -15,7 +14,7 @@ pub fn run_login<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
     Box::pin(async move {
         let args = LoginArgs::from_arg_matches(matches)?;
         let default_registry = configured_default_registry()?;
-        let auth_path = default_registry_auth_path();
+        let auth_path = lns_ipc::registry_auth_path();
         let verifier = RealRegistryVerifier::new(crate::service::socket_path()?);
         let input = ctx.input;
         let mut out = ctx.out;
@@ -36,7 +35,7 @@ pub fn run_logout<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutu
     Box::pin(async move {
         let args = LogoutArgs::from_arg_matches(matches)?;
         let default_registry = configured_default_registry()?;
-        let auth_path = default_registry_auth_path();
+        let auth_path = lns_ipc::registry_auth_path();
         let mut out = ctx.out;
         super::logout(&args, &default_registry, &auth_path, &mut out)
     })

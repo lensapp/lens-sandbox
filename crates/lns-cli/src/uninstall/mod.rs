@@ -19,7 +19,7 @@ pub struct UninstallArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Also delete all local data: cached images and layers, named volumes, the audit trail, config, and stored credentials. Without this, only the program is removed and your data is kept."
+        help = "Also delete everything under ~/.lns: cached artifacts and layers, named volumes, the audit trail, config, connectors, and stored credentials. Without this, only the program is removed and the directory is kept."
     )]
     pub purge: bool,
 
@@ -65,7 +65,6 @@ pub struct UninstallPlan {
     pub binaries: Vec<PathBuf>,
     pub purge_dirs: Vec<PathBuf>,
     pub purge_files: Vec<PathBuf>,
-    pub kept_paths: Vec<PathBuf>,
 }
 
 pub struct Deps<'a, S, C, A, F> {
@@ -200,13 +199,6 @@ async fn purge(fs: &impl Fs, plan: &UninstallPlan, writer: &mut impl Write) -> R
     for file in &plan.purge_files {
         removed(fs.remove_file(file).await, file, writer)?;
     }
-    for kept in &plan.kept_paths {
-        writeln!(
-            writer,
-            "kept {} (your own edits; delete it manually to remove)",
-            kept.display()
-        )?;
-    }
     Ok(())
 }
 
@@ -245,56 +237,27 @@ async fn remove_binaries(
     Ok(())
 }
 
-/// The resolved locations `--purge` clears, plus whether the config and socket paths came from an env override.
+/// What `--purge` clears: the one directory lns keeps everything in, and the socket, which lives with the service rather than with your data.
 pub(crate) struct PurgeSources {
-    pub cache_root: PathBuf,
-    pub data_root: PathBuf,
-    pub config: PathBuf,
-    pub config_overridden: bool,
+    pub lns_home: PathBuf,
     pub socket: PathBuf,
     pub socket_overridden: bool,
-    pub secret_files: Vec<PathBuf>,
-    pub kept: Vec<PathBuf>,
 }
 
-pub(crate) fn purge_targets(src: PurgeSources) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
-    let mut dirs = vec![src.cache_root, src.data_root];
-    let mut files = src.secret_files;
-    push_owned(
-        &mut dirs,
-        &mut files,
-        src.config,
-        src.config_overridden,
-        None,
-    );
-    let log = src.socket.parent().map(|p| p.join("service.log"));
-    push_owned(
-        &mut dirs,
-        &mut files,
-        src.socket,
-        src.socket_overridden,
-        log,
-    );
-    (dirs, files, src.kept)
-}
-
-/// A path at its default lns-owned location takes its whole parent directory; an env-overridden path may live anywhere, so only its own file (and any named sibling) is removed — never an arbitrary parent.
-fn push_owned(
-    dirs: &mut Vec<PathBuf>,
-    files: &mut Vec<PathBuf>,
-    path: PathBuf,
-    overridden: bool,
-    sibling: Option<PathBuf>,
-) {
-    match (overridden, path.parent()) {
+pub(crate) fn purge_targets(src: PurgeSources) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut dirs = vec![src.lns_home];
+    let mut files = Vec::new();
+    // A socket at its default lns-owned location takes its whole parent directory; an env-overridden one may live anywhere, so only the socket and the log beside it go.
+    match (src.socket_overridden, src.socket.parent()) {
         (false, Some(parent)) => dirs.push(parent.to_path_buf()),
         _ => {
-            files.push(path);
-            if let Some(sibling) = sibling {
-                files.push(sibling);
+            if let Some(log) = src.socket.parent().map(|p| p.join("service.log")) {
+                files.push(log);
             }
+            files.push(src.socket);
         }
     }
+    (dirs, files)
 }
 
 #[cfg(test)]
@@ -886,12 +849,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_removes_data_prints_kept_paths_then_removes_binaries() {
+    async fn purge_removes_the_one_directory_and_the_socket_then_the_binaries() {
         let plan = UninstallPlan {
             binaries: vec![PathBuf::from("/bin/lns")],
-            purge_dirs: vec![PathBuf::from("/cache/lns"), PathBuf::from("/data/lns")],
-            purge_files: vec![PathBuf::from("/home/me/.lns-credentials.json")],
-            kept_paths: vec![PathBuf::from("/home/me/.lns-connectors.yaml")],
+            purge_dirs: vec![PathBuf::from("/home/me/.lns")],
+            purge_files: vec![PathBuf::from("/run/user/1000/lns/service.log")],
         };
         let rig = rig(
             FakeService::default(),
@@ -904,16 +866,12 @@ mod tests {
         assert_eq!(
             rig.fs.removed(),
             vec![
-                PathBuf::from("/cache/lns"),
-                PathBuf::from("/data/lns"),
-                PathBuf::from("/home/me/.lns-credentials.json"),
+                PathBuf::from("/home/me/.lns"),
+                PathBuf::from("/run/user/1000/lns/service.log"),
                 PathBuf::from("/bin/lns"),
             ]
         );
-        assert!(
-            out.contains("kept /home/me/.lns-connectors.yaml"),
-            "got: {out}"
-        );
+        assert!(out.contains("removed /home/me/.lns"), "got: {out}");
     }
 
     #[tokio::test]
@@ -985,9 +943,8 @@ mod tests {
     async fn purge_tolerates_already_removed_data() {
         let plan = UninstallPlan {
             binaries: vec![PathBuf::from("/bin/lns")],
-            purge_dirs: vec![PathBuf::from("/cache/lns")],
-            purge_files: vec![PathBuf::from("/home/me/.lns-credentials.json")],
-            ..UninstallPlan::default()
+            purge_dirs: vec![PathBuf::from("/home/me/.lns")],
+            purge_files: vec![PathBuf::from("/run/user/1000/lns/service.log")],
         };
         let rig = rig(
             FakeService::default(),
@@ -995,9 +952,9 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs {
                 errors: [
-                    (PathBuf::from("/cache/lns"), std::io::ErrorKind::NotFound),
+                    (PathBuf::from("/home/me/.lns"), std::io::ErrorKind::NotFound),
                     (
-                        PathBuf::from("/home/me/.lns-credentials.json"),
+                        PathBuf::from("/run/user/1000/lns/service.log"),
                         std::io::ErrorKind::NotFound,
                     ),
                 ]
@@ -1055,49 +1012,29 @@ mod tests {
 
     fn sources() -> PurgeSources {
         PurgeSources {
-            cache_root: PathBuf::from("/home/me/.cache/lns"),
-            data_root: PathBuf::from("/home/me/.local/share/lns"),
-            config: PathBuf::from("/home/me/.config/lns/config.yaml"),
-            config_overridden: false,
+            lns_home: PathBuf::from("/home/me/.lns"),
             socket: PathBuf::from("/run/user/1000/lns/service.sock"),
             socket_overridden: false,
-            secret_files: vec![PathBuf::from("/home/me/.lns-credentials.json")],
-            kept: vec![PathBuf::from("/home/me/.lns-connectors.yaml")],
         }
     }
 
     #[test]
-    fn purge_targets_at_default_locations_take_their_owned_parent_dirs() {
-        let (dirs, files, kept) = purge_targets(sources());
+    fn purge_takes_the_one_directory_lns_keeps_everything_in() {
+        let (dirs, files) = purge_targets(sources());
         assert_eq!(
             dirs,
             vec![
-                PathBuf::from("/home/me/.cache/lns"),
-                PathBuf::from("/home/me/.local/share/lns"),
-                PathBuf::from("/home/me/.config/lns"),
+                PathBuf::from("/home/me/.lns"),
                 PathBuf::from("/run/user/1000/lns"),
-            ]
+            ],
+            "one root means one thing to delete, plus the socket's own directory"
         );
-        assert_eq!(files, vec![PathBuf::from("/home/me/.lns-credentials.json")]);
-        assert_eq!(kept, vec![PathBuf::from("/home/me/.lns-connectors.yaml")]);
-    }
-
-    #[test]
-    fn an_overridden_config_is_removed_as_a_file_never_its_parent() {
-        let (dirs, files, _) = purge_targets(PurgeSources {
-            config_overridden: true,
-            ..sources()
-        });
-        assert!(
-            !dirs.contains(&PathBuf::from("/home/me/.config/lns")),
-            "an override's arbitrary parent must never be rm -rf'd"
-        );
-        assert!(files.contains(&PathBuf::from("/home/me/.config/lns/config.yaml")));
+        assert!(files.is_empty(), "got: {files:?}");
     }
 
     #[test]
     fn an_overridden_socket_removes_the_socket_and_log_files_never_its_parent() {
-        let (dirs, files, _) = purge_targets(PurgeSources {
+        let (dirs, files) = purge_targets(PurgeSources {
             socket_overridden: true,
             ..sources()
         });
@@ -1110,11 +1047,12 @@ mod tests {
     }
 
     #[test]
-    fn a_parentless_path_is_removed_as_a_file() {
-        let mut dirs = Vec::new();
-        let mut files = Vec::new();
-        push_owned(&mut dirs, &mut files, PathBuf::from("/"), false, None);
-        assert!(dirs.is_empty());
+    fn a_parentless_socket_is_removed_as_a_file() {
+        let (dirs, files) = purge_targets(PurgeSources {
+            socket: PathBuf::from("/"),
+            ..sources()
+        });
+        assert_eq!(dirs, vec![PathBuf::from("/home/me/.lns")]);
         assert_eq!(files, vec![PathBuf::from("/")]);
     }
 

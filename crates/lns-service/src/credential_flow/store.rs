@@ -2,5 +2,4 @@
 
 pub use lns_policy::credentials::{
     CredentialEntry, CredentialStateFile, CredentialStore, JsonFileCredentialStore,
-    default_credentials_path,
 };

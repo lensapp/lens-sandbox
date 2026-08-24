@@ -64,7 +64,7 @@ fn run_in_project_dir(world: &mut E2eWorld, cmd_line: String) {
     let mut envs: Vec<(String, std::ffi::OsString)> = Vec::new();
     if let Some(home) = &world.home {
         envs.push(("HOME".into(), home.path().into()));
-        envs.push(("XDG_CACHE_HOME".into(), home.path().join(".cache").into()));
+        envs.push(("LNS_HOME".into(), home.path().join(".lns").into()));
     }
     if let Some(socket) = &world.service_socket {
         envs.push(("LNS_SOCKET_PATH".into(), socket.clone().into()));

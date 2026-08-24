@@ -20,7 +20,7 @@ fn auth_path(world: &mut BehaviourWorld) -> PathBuf {
         .as_ref()
         .unwrap()
         .path()
-        .join(".lns-registry-auth.json")
+        .join("registry-auth.json")
 }
 
 /// Stands in for the running service's pull-auth handshake: records what it was asked and verifies everything.

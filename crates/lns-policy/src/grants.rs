@@ -1,4 +1,4 @@
-//! Per-workload connector grants live in `~/.lns-workload-grants.json`, per-machine and never committed — a grant lets one workload spend a machine-global credential, which is a per-machine risk acceptance, not a shareable rule.
+//! Per-workload connector grants live in `~/.lns/workload-grants.json`, per-machine and never committed — a grant lets one workload spend a machine-global credential, which is a per-machine risk acceptance, not a shareable rule.
 
 use std::fs;
 use std::io;
@@ -335,16 +335,6 @@ pub fn project_key(policy_path: &Path) -> String {
         .unwrap_or_else(|_| policy_path.to_path_buf())
         .to_string_lossy()
         .into_owned()
-}
-
-/// Falls back to `./.lns-workload-grants.json` when `HOME` is unset rather than panicking.
-pub fn default_workload_grants_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LNS_WORKLOAD_GRANTS_PATH") {
-        return PathBuf::from(p);
-    }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".lns-workload-grants.json"))
-        .unwrap_or_else(|| PathBuf::from(".lns-workload-grants.json"))
 }
 
 pub struct JsonFileGrantStore {
@@ -968,42 +958,6 @@ mod tests {
     fn project_key_falls_back_to_the_raw_path_when_it_cannot_be_canonicalized() {
         let path = Path::new("/no/such/dir/lns-local-mixin.yaml");
         assert_eq!(project_key(path), "/no/such/dir/lns-local-mixin.yaml");
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_uses_override_when_set() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::set("LNS_WORKLOAD_GRANTS_PATH", "/tmp/custom-grants.json");
-        let _g2 = EnvVarGuard::set("HOME", "/tmp/home-should-be-ignored");
-        assert_eq!(
-            default_workload_grants_path(),
-            PathBuf::from("/tmp/custom-grants.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_falls_back_to_home_dotfile() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH");
-        let _g2 = EnvVarGuard::set("HOME", "/home/dev");
-        assert_eq!(
-            default_workload_grants_path(),
-            PathBuf::from("/home/dev/.lns-workload-grants.json")
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn default_path_falls_back_to_cwd_when_home_unset() {
-        use crate::test_env::EnvVarGuard;
-        let _g1 = EnvVarGuard::unset("LNS_WORKLOAD_GRANTS_PATH");
-        let _g2 = EnvVarGuard::unset("HOME");
-        assert_eq!(
-            default_workload_grants_path(),
-            PathBuf::from(".lns-workload-grants.json")
-        );
     }
 
     struct FaultyStore {

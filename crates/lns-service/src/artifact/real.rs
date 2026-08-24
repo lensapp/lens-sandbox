@@ -285,15 +285,13 @@ impl crate::artifact::mixin::MixinSource for RegistryMixins {
 }
 
 fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
-    let user = lns_policy::connectors::Catalog::load_or_default(
-        &lns_policy::connectors::default_connectors_path(),
-    )
-    .unwrap_or_else(|e| {
-        crate::log::warn!(
-            "unreadable user connector catalog ({e}); using the bundled catalog only"
-        );
-        lns_policy::connectors::Catalog::default()
-    });
+    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path())
+        .unwrap_or_else(|e| {
+            crate::log::warn!(
+                "unreadable user connector catalog ({e}); using the bundled catalog only"
+            );
+            lns_policy::connectors::Catalog::default()
+        });
     lns_policy::connectors::effective_connectors(&user)
 }
 

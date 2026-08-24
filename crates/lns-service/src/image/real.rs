@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use lns_policy::registry_auth::{
-    JsonFileRegistryAuthStore, RegistryAuthStore, credential_for, default_registry_auth_path,
-};
+use lns_policy::registry_auth::{JsonFileRegistryAuthStore, RegistryAuthStore, credential_for};
 use oci_client::{
     Reference, RegistryOperation,
     manifest::{OciDescriptor, OciImageManifest},
@@ -39,7 +37,7 @@ pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
     let Ok(reference) = image.parse::<Reference>() else {
         return RegistryAuth::Anonymous;
     };
-    let store = JsonFileRegistryAuthStore::new(default_registry_auth_path());
+    let store = JsonFileRegistryAuthStore::new(lns_ipc::registry_auth_path());
     let Ok(file) = store.load() else {
         return RegistryAuth::Anonymous;
     };
