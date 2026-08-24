@@ -1,11 +1,12 @@
 //! The two verbs both namespaces answer for. `lns rm` and `lns inspect` work out which one you meant, and refuse rather than guess when both could.
 
 use anyhow::{Result, bail};
-use clap::FromArgMatches;
 use lns_ipc::{Request, Response};
 
-use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
+use crate::command::{CommandSpec, subcommand};
 use crate::service::client::SandboxService;
+
+mod real;
 
 /// Which namespace owns a word, once both have been asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub fn augment_rm(app: clap::Command) -> clap::Command {
 pub const RM_SPEC: CommandSpec = CommandSpec {
     name: "rm",
     augment: augment_rm,
-    run: run_rm,
+    run: real::run_rm,
     announces_update_check: true,
     owns_terminal: crate::command::never_owns_terminal,
 };
@@ -90,80 +91,10 @@ pub fn augment_inspect(app: clap::Command) -> clap::Command {
 pub const INSPECT_SPEC: CommandSpec = CommandSpec {
     name: "inspect",
     augment: augment_inspect,
-    run: run_inspect,
+    run: real::run_inspect,
     announces_update_check: true,
     owns_terminal: crate::command::never_owns_terminal,
 };
-
-fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = crate::artifact::RmArgs::from_arg_matches(matches)?;
-        crate::service::require_running().await?;
-        let svc = crate::service::real::RealSandboxService::new(crate::service::socket_path()?);
-        match which(&svc, "rm", &args.reference).await? {
-            Owner::Artifact => {
-                crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Rm(args),
-                    ctx.input,
-                )
-                .await
-            }
-            _ => {
-                crate::sandbox::real::dispatch(
-                    crate::sandbox::SandboxArgs {
-                        command: crate::sandbox::SandboxCommand::Rm(
-                            crate::sandbox::SandboxRmArgs {
-                                run: args.reference,
-                            },
-                        ),
-                    },
-                    ctx.input,
-                )
-                .await
-            }
-        }
-    })
-}
-
-fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
-    Box::pin(async move {
-        let args = crate::artifact::InspectArgs::from_arg_matches(matches)?;
-        if args.file.is_some() || names_a_document(args.reference.as_deref()) {
-            return crate::artifact::real::run_inspect_offline(args, ctx);
-        }
-        let reference = args
-            .reference
-            .clone()
-            .expect("a reference-less inspect is a local document, settled above");
-        crate::service::require_running().await?;
-        let svc = crate::service::real::RealSandboxService::new(crate::service::socket_path()?);
-        match which(&svc, "inspect", &reference).await? {
-            Owner::Artifact => {
-                crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Inspect(args),
-                    ctx.input,
-                )
-                .await
-            }
-            _ => {
-                crate::sandbox::real::dispatch(
-                    crate::sandbox::SandboxArgs {
-                        command: crate::sandbox::SandboxCommand::Inspect(
-                            crate::sandbox::SandboxInspectArgs {
-                                run: reference,
-                                output: crate::output::OutputArgs {
-                                    format: crate::output::Format::Table,
-                                },
-                            },
-                        ),
-                    },
-                    ctx.input,
-                )
-                .await
-            }
-        }
-    })
-}
 
 #[cfg(test)]
 mod tests {

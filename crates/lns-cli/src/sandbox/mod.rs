@@ -1036,6 +1036,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_surfaces_a_daemon_error_from_the_lookup_rather_than_removing_anything() {
+        let svc = CannedService::new(Response::Error {
+            message: "registry poisoned".into(),
+        });
+        let mut out = Vec::new();
+        let err = rm(
+            &svc,
+            &SandboxRmArgs {
+                run: "reviewer".into(),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("registry poisoned"));
+        assert!(
+            !svc.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| matches!(r, Request::RemoveRun { .. })),
+            "a lookup that failed says nothing about the sandbox, so nothing may be removed on the strength of it"
+        );
+    }
+
+    #[tokio::test]
     async fn rm_rejects_an_unrelated_inspect_response() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
