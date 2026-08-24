@@ -42,11 +42,11 @@ Feature: running a sandbox
     And the output contains "no lns.yaml"
     And the output contains "lns init"
 
-  Scenario: run --policy applies a per-run policy override
+  Scenario: there is no flag that names another decisions file
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
     When the user runs "lns run --policy strict.yaml ghcr.io/team/hermes:1.4.0"
-    Then the exit code is 0
-    And the run summary names "strict.yaml" as the policy source
+    Then the exit code is 2
+    And the output contains "unexpected argument"
 
   Scenario: ps lists running sandboxes with cpu and memory
     Given the service reports one running sandbox using 125 permille cpu and 92274688 bytes

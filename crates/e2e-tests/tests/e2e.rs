@@ -18,8 +18,6 @@ pub struct E2eWorld {
     pub detached_runs: Vec<String>,
     pub last_run_id: Option<String>,
     pub created_volumes: Vec<String>,
-    pub policy_dir: Option<TempDir>,
-    pub policy_path: Option<PathBuf>,
     pub host_bind_dir: Option<TempDir>,
     pub registry: Option<registry::LocalRegistry>,
     pub version_index: Option<registry::VersionIndex>,

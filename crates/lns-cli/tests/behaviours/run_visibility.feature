@@ -32,11 +32,6 @@ Feature: users see what `lns run` is doing from the moment they hit Enter
     Then the Policy block source line reads "auto-created (no policy in the project directory)"
     And a destination no rule names is "ask"ed
 
-  Scenario: Explicit --policy is called out in the source line
-    Given the command is `lns run --policy ~/team/strict.yaml ubuntu`
-    When the run starts
-    Then the Policy block source line reads "source: --policy ~/team/strict.yaml"
-
   Scenario: Phase lines fill in fields the summary left as placeholders (cold cache)
     Given the image is not in the local cache
     When the service resolves the image

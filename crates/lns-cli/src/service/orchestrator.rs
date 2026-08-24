@@ -338,9 +338,8 @@ pub async fn run_image(
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
     let project_dir = target.project_dir().unwrap_or(&cwd).to_path_buf();
-    let site = crate::run::summary::DecisionsSite::for_run(&cwd, Some(&project_dir));
     // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
-    let decisions = crate::run::summary::policy_path(args.policy.as_deref(), site);
+    let decisions = crate::run::summary::policy_path(&project_dir);
     let mut authored_egress = None;
     // A mixin the preflight pulled brings its filesets packed in its own artifact, and the merged document alone cannot say which.
     let mut packed_filesets = Vec::new();
@@ -400,14 +399,8 @@ pub async fn run_image(
     )?;
     args.workdir = resolved.workdir;
     args.mounts = resolved.mounts;
-    let local_definition = matches!(&target, crate::run::target::RunTarget::Local { .. });
-    let composed = crate::run::declarative::compose_ports(
-        &defaults.ports,
-        std::mem::take(&mut args.publish),
-        local_definition || args.publish_declared,
-    )?;
-    args.publish = composed.published;
-    args.declared_unpublished = composed.declared_unpublished;
+    args.publish =
+        crate::run::declarative::compose_ports(&defaults.ports, std::mem::take(&mut args.publish))?;
     args.filesets = match (&target, &published) {
         (crate::run::target::RunTarget::Local { def, .. }, _) => def
             .spec
@@ -454,10 +447,10 @@ pub async fn run_image(
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
     let resolved_policy = if quiet {
-        let (path, _source) = crate::run::summary::resolve_policy(args.policy.as_deref(), site)?;
+        let (path, _source) = crate::run::summary::resolve_policy(&project_dir)?;
         path
     } else {
-        print_run_summary(&args, size, site, &mut std::io::stderr())?
+        print_run_summary(&args, size, &project_dir, &mut std::io::stderr())?
     };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);

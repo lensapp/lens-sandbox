@@ -6,12 +6,10 @@ use cucumber::{given, then, when};
 use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
 use lns_cli::run::progress::ProgressRenderer;
-use lns_cli::run::summary::{PolicySource, format_summary};
 use lns_cli::run::target::{RunTarget, resolve};
 use lns_cli::sandbox::author::{DirEntry, Fs, map_dir_entries};
 use lns_cli::service::pre_phase_step;
 use lns_ipc::{Response, encode_frame};
-use lns_policy::Policy;
 
 use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
@@ -194,11 +192,11 @@ fn drive_run(w: &mut BehaviourWorld, argv: &[String]) {
                 output: format!("{e:#}"),
             });
         }
-        Ok(target) => run_resolved(w, args, &target, cwd),
+        Ok(target) => run_resolved(w, &target, cwd),
     }
 }
 
-fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: &Path) {
+fn run_resolved(w: &mut BehaviourWorld, target: &RunTarget, cwd: &Path) {
     if let Some(refusal) = w.sandbox_run.refusal.clone() {
         w.result = Some(surface_service_refusal(&refusal));
         return;
@@ -208,18 +206,8 @@ fn run_resolved(w: &mut BehaviourWorld, args: RunArgs, target: &RunTarget, cwd: 
     w.sandbox_run.definition = target.definition_json();
     w.sandbox_run.project_dir = target.project_dir().map(Path::to_path_buf);
     w.sandbox_run.decisions = Some(lns_cli::run::summary::policy_path(
-        args.policy.as_deref(),
-        lns_cli::run::summary::DecisionsSite::for_run(cwd, target.project_dir()),
+        target.project_dir().unwrap_or(cwd),
     ));
-    if let Some(policy) = args.policy.as_deref() {
-        w.summary_output = format_summary(
-            &args,
-            lns_cli::run::summary::resolved_size(Default::default(), &args),
-            &Policy::default(),
-            &cwd.join(policy),
-            &PolicySource::Explicit(policy.to_path_buf()),
-        );
-    }
     w.result = Some(CliRun {
         exit_code: 0,
         output: String::new(),
@@ -273,18 +261,5 @@ fn service_received_run_request(w: &mut BehaviourWorld) -> Result<(), String> {
     match &w.sandbox_run.request_image {
         Some(image) if !image.is_empty() => Ok(()),
         _ => Err("no run request was built for the service".to_string()),
-    }
-}
-
-#[then(regex = r#"^the run summary names "([^"]+)" as the policy source$"#)]
-fn summary_names_policy_source(w: &mut BehaviourWorld, name: String) -> Result<(), String> {
-    let needle = format!("--policy {name}");
-    if w.summary_output.contains(&needle) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected the summary to name {needle:?}, got:\n{}",
-            w.summary_output
-        ))
     }
 }

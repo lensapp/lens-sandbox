@@ -76,31 +76,12 @@ pub struct RunArgs {
     pub mem: Option<usize>,
 
     #[arg(
-        long,
-        help = "Policy file path; defaults to `lns-local-mixin.yaml` beside the definition being run, auto-created with no rules if absent. A relative path roots where you typed it."
-    )]
-    pub policy: Option<PathBuf>,
-
-    #[arg(
         short = 'u',
         long = "user",
         value_name = "USER[:GROUP]",
-        conflicts_with_all = ["sandbox_user", "sandbox_uid"],
-        help = "Run-as user or uid inside the sandbox (`USER[:GROUP]`). Alias for `--sandbox-user` / `--sandbox-uid`."
+        help = "Run-as user or uid inside the sandbox (`USER[:GROUP]`). Defaults to the image's USER; the unprivileged `sandbox` user when the image sets none."
     )]
     pub user: Option<String>,
-
-    #[arg(
-        long,
-        help = "Run-as user inside the sandbox. Defaults to the image's USER; the unprivileged `sandbox` user when the image sets none."
-    )]
-    pub sandbox_user: Option<String>,
-
-    #[arg(
-        long,
-        help = "Run-as uid inside the sandbox. Defaults to the image's USER uid; 65534 (the `sandbox` user) when the image sets none."
-    )]
-    pub sandbox_uid: Option<u32>,
 
     #[arg(
         long = "rm",
@@ -199,17 +180,6 @@ pub struct RunArgs {
     )]
     pub publish: Vec<PortPublish>,
 
-    #[arg(
-        short = 'P',
-        long = "publish-declared",
-        default_value_t = false,
-        help = "Publish the definition's declared spec.ports on loopback (host value when present, the container number otherwise). Automatic for a local ./lns.yaml run; opt-in for a pulled sandbox."
-    )]
-    pub publish_declared: bool,
-
-    #[arg(skip)]
-    pub declared_unpublished: Vec<u16>,
-
     #[arg(skip)]
     pub filesets: Vec<crate::run::summary::FilesetSummary>,
 
@@ -275,12 +245,11 @@ impl RunArgs {
     }
 
     pub fn effective_sandbox_user(&self) -> Option<String> {
-        self.user.clone().or_else(|| self.sandbox_user.clone())
+        self.user.clone()
     }
 
     pub fn effective_sandbox_uid(&self) -> Option<u32> {
-        self.sandbox_uid
-            .or_else(|| self.user.as_deref().and_then(user_spec_uid))
+        self.user.as_deref().and_then(user_spec_uid)
     }
 }
 

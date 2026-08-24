@@ -68,7 +68,7 @@ The `spec` fields:
 | `resources`    | vCPUs, memory, and disk the sandbox boots with. `cpu` and `memory` take a unit suffix or `N%` of the host, and per-run `--cpus` / `--mem` flags win. `disk` sizes the writable disk the run throws away when it ends; it takes an absolute size only (`40Gi`, minimum `20Mi`), defaults to `10Gi`, and no flag overrides it. A named volume sizes itself with its own `size` — see [Declarative mounts](#declarative-mounts). |
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose, and a named volume may set its `size`. See [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), snapshot-mounted at `guestPath` and owned by the workload user unless pinned with `owner: root`; see [Filesets](#filesets--files-shipped-inside-the-artifact). |
-| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Running your own `./lns.yaml` publishes them automatically (compose-style, on loopback); a pulled sandbox's declared ports are disclosure only until you opt in with `-P` — see [Publishing ports](#publishing-ports). |
+| `ports`        | Container ports the sandbox serves (`container`, optional `host`), validated offline. Every run publishes them on loopback, whether the document is yours or pulled — see [Publishing ports](#publishing-ports). |
 | `tools`        | Developer tools the workload needs, as portable `name@version` entries (`node@22`, `python@3.12`, `node@latest`). A version is required, and engine syntax (`aqua:`, `npm:`) is refused — the spec stays portable. Validated offline; the service provisions declared tools once per machine before boot, outside workload policy, and `lns push` pins fuzzy versions exact — see [Tools](#tools--declared-toolchains). |
 | `scripts`      | Shell scripts the guest runs before the workload starts, each with a `when` slot (`pre-start`), a `run` body, and an optional `user` so a script that needs root can say so without the workload running as root. Mixin-contributed scripts append to the sandbox's own. See [Pre-start scripts](#pre-start-scripts--preparing-the-guest). |
 
@@ -964,17 +964,13 @@ The format is `[host_ip:]hostport:containerport[/proto]`:
 - IPv6 host IPs go in brackets: `[::1]:8080:3000`.
 - Only `tcp` is supported today; `udp` is rejected.
 
-Declared `spec.ports` follow the docker family on both sides of the trust line:
+A `spec.ports` entry is a statement that the sandbox serves on that port, so
+every run publishes it — no flag opts in:
 
-- **Your own `./lns.yaml` is `docker compose up`**: every declared port
-  publishes automatically — the `host:` value when present, the container
-  number otherwise. The definition in your directory is policy you wrote;
-  the run summary's `Ports:` line discloses each binding.
-- **A pulled sandbox is `docker run`**: its declared ports are EXPOSE-style
-  disclosure, not a grant — a bare run publishes nothing, and the summary
-  lists them as declared but not published. Opt in to the declared set with
-  `-P`/`--publish-declared` (same mapping). A pulled artifact's definition is
-  policy you run into, so inbound access stays yours to grant.
+- **The mapping is the entry**: the `host:` value when present, the container
+  number otherwise. It holds whether the document is one you wrote or one you
+  pulled, and the run summary's `Ports:` line discloses each binding before
+  anything boots. That summary is what you approve.
 - Declared publishing always binds loopback — compose's `0.0.0.0` default is
   deliberately not copied. To expose wider, name the port explicitly with
   `-p host_ip:hostport:containerport`.

@@ -100,22 +100,14 @@ impl Defaults {
     }
 }
 
-#[derive(Debug)]
-pub struct ComposedPorts {
-    pub published: Vec<lns_ipc::PortPublish>,
-    pub declared_unpublished: Vec<u16>,
-}
-
-/// Explicit -p entries win a container-port conflict; without publish_declared the declared set is disclosure only.
+/// A declared port is a statement that the sandbox serves on it, so every one publishes on loopback; an explicit -p entry wins a container-port conflict.
 pub fn compose_ports(
     declared: &[PortDefault],
     explicit: Vec<lns_ipc::PortPublish>,
-    publish_declared: bool,
-) -> Result<ComposedPorts> {
+) -> Result<Vec<lns_ipc::PortPublish>> {
     let explicit_containers: BTreeSet<u16> =
         explicit.iter().map(|port| port.container_port).collect();
     let mut published = Vec::new();
-    let mut declared_unpublished = Vec::new();
     let mut substituted = BTreeSet::new();
     for port in declared {
         let container = declared_port(port.container, "container")?;
@@ -127,7 +119,7 @@ pub fn compose_ports(
                     .copied(),
             );
             substituted.insert(container);
-        } else if publish_declared {
+        } else {
             published.push(lns_ipc::PortPublish {
                 host_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 host_port: match port.host {
@@ -137,8 +129,6 @@ pub fn compose_ports(
                 container_port: container,
                 protocol: lns_ipc::Protocol::Tcp,
             });
-        } else {
-            declared_unpublished.push(container);
         }
     }
     published.extend(
@@ -148,10 +138,7 @@ pub fn compose_ports(
     );
     let published = dedupe_identical(published);
     refuse_host_port_collision(&published)?;
-    Ok(ComposedPorts {
-        published,
-        declared_unpublished,
-    })
+    Ok(published)
 }
 
 /// The same mapping asked for twice is one binding, not a collision — the second bind would fail on a port the user did ask for.
@@ -359,7 +346,7 @@ mod tests {
 
     #[test]
     fn composition_rejects_an_out_of_range_declared_container_port() {
-        let err = compose_ports(&[declared(None, 70000)], Vec::new(), true).unwrap_err();
+        let err = compose_ports(&[declared(None, 70000)], Vec::new()).unwrap_err();
         assert!(
             format!("{err:#}").contains("declared container port 70000 is out of range"),
             "got: {err:#}"
@@ -368,7 +355,7 @@ mod tests {
 
     #[test]
     fn composition_rejects_an_out_of_range_declared_host_port() {
-        let err = compose_ports(&[declared(Some(0), 3003)], Vec::new(), true).unwrap_err();
+        let err = compose_ports(&[declared(Some(0), 3003)], Vec::new()).unwrap_err();
         assert!(
             format!("{err:#}").contains("declared host port 0 is out of range"),
             "got: {err:#}"
@@ -376,15 +363,14 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_entry_also_settles_an_unpublished_declared_port() {
+    fn an_explicit_entry_replaces_the_declared_mapping_rather_than_adding_to_it() {
         let explicit = vec![lns_ipc::PortPublish {
             host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             host_port: 4000,
             container_port: 3003,
             protocol: lns_ipc::Protocol::Tcp,
         }];
-        let composed = compose_ports(&[declared(None, 3003)], explicit, false).unwrap();
-        assert_eq!(composed.published.len(), 1);
-        assert!(composed.declared_unpublished.is_empty());
+        let composed = compose_ports(&[declared(None, 3003)], explicit.clone()).unwrap();
+        assert_eq!(composed, explicit);
     }
 }

@@ -77,14 +77,8 @@ fn summarize(world: &mut BehaviourWorld, defaults: &Defaults, flags: &str, local
         argv.push("registry.example.test/team/sandbox:1".to_string());
     }
     let mut args: RunArgs = parse_args(&argv).expect("port flags must parse");
-    let composed = compose_ports(
-        &defaults.ports,
-        std::mem::take(&mut args.publish),
-        local || args.publish_declared,
-    )
-    .expect("declared ports must compose");
-    args.publish = composed.published;
-    args.declared_unpublished = composed.declared_unpublished;
+    args.publish = compose_ports(&defaults.ports, std::mem::take(&mut args.publish))
+        .expect("declared ports must compose");
     if world.cwd.is_none() {
         world.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
     }
@@ -93,7 +87,7 @@ fn summarize(world: &mut BehaviourWorld, defaults: &Defaults, flags: &str, local
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        lns_cli::run::summary::DecisionsSite::one_directory(&cwd),
+        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");
@@ -138,32 +132,13 @@ fn published_run_with_flags(world: &mut BehaviourWorld, flags: String) {
     summarize(world, &defaults, &flags, false);
 }
 
-#[then(regex = r"^the summary notes port (\d+) is declared but not published$")]
-fn summary_notes_declared_unpublished(
-    world: &mut BehaviourWorld,
-    port: String,
-) -> Result<(), String> {
-    let has_port = world.summary_output.contains(&format!("Declared:  {port}"));
-    let has_note = world
-        .summary_output
-        .contains("not published; opt in with -P");
-    if has_port && has_note {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected a declared-but-unpublished note for port {port} in:\n{}",
-            world.summary_output
-        ))
-    }
-}
-
 fn compose(world: &mut BehaviourWorld, flags: &str) {
     let defaults = Defaults::from_definition(&definition(world), Some(TEST_HOST));
     let mut argv = vec!["lns".to_string(), "run".to_string()];
     argv.extend(flags.split_whitespace().map(str::to_string));
     let mut args: RunArgs = parse_args(&argv).expect("port flags must parse");
-    match compose_ports(&defaults.ports, std::mem::take(&mut args.publish), true) {
-        Ok(composed) => world.composed_ports = composed.published,
+    match compose_ports(&defaults.ports, std::mem::take(&mut args.publish)) {
+        Ok(published) => world.composed_ports = published,
         Err(e) => world.port_composition_error = Some(format!("{e:#}")),
     }
 }
