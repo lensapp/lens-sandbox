@@ -1067,6 +1067,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_surfaces_the_services_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::new(Response::Error {
+            message: "runs dir unreadable".into(),
+        });
+        let err = prune(
+            &svc,
+            &SandboxPruneArgs { force: true },
+            TermInfo::default(),
+            &mut std::io::empty(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("runs dir unreadable"));
+
+        let svc = CannedService::new(Response::Pong);
+        let err = prune(
+            &svc,
+            &SandboxPruneArgs { force: true },
+            TermInfo::default(),
+            &mut std::io::empty(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
     async fn rm_asks_the_service_to_remove_the_sandbox_and_names_it_back() {
         let svc = CannedService::new(Response::Acknowledged);
         let mut out = Vec::new();

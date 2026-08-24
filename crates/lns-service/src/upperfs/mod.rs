@@ -82,15 +82,23 @@ mod tests {
         let existing = root.path().join("runs").join("aa07");
         std::fs::create_dir_all(&existing).unwrap();
         std::fs::write(existing.join("upper.img"), b"a stopped sandbox's data").unwrap();
+        let reformatted = Cell::new(false);
         let path = provision_image(
             root.path(),
             "aa07",
             [0; 16],
             0,
             DEFAULT_SIZE_BYTES,
-            |_, _| panic!("a preserved writable layer must never be reformatted"),
+            |_, _| {
+                reformatted.set(true);
+                Ok(())
+            },
         )
         .unwrap();
+        assert!(
+            !reformatted.get(),
+            "a preserved writable layer must never be reformatted"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"a stopped sandbox's data");
     }
 
