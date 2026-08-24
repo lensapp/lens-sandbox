@@ -1,24 +1,26 @@
 # Running workloads
 
-Lens Sandbox has one user-facing noun: the **sandbox**. A sandbox is defined by a
-`./lns.yaml` file that pins a base OCI image plus its command, environment, policy,
-and connectors. One directory is one sandbox. A sandbox is either **cached**
-(pulled or built, sitting in the local cache) or **running**.
+Two things carry a name. An **artifact** is one `lns.run/v1` document — a
+`./lns.yaml` that pins a base OCI image plus its command, environment, policy, and
+connectors, or a mixin layered onto one. A **sandbox** is what a sandbox artifact
+becomes when it runs. One directory is one sandbox.
 
-You drive it on two tiers:
+Each has its own namespace:
 
-- The **top level** carries the docker-familiar verbs — `lns run`, `lns ps`,
-  `lns stop`, `lns pull`, `lns push`, and so on. Each (except `run`) is an exact
-  shortcut into the `lns sandbox` namespace.
-- **`lns sandbox <verb>`** is the complete surface. The lns-native verbs that have
-  no docker analogue — `validate`, `ls`, `prune` — live only there.
+- **`lns artifact <verb>`** authors, validates, publishes, fetches, and caches the
+  document, of whatever kind.
+- **`lns sandbox <verb>`** creates, watches, and removes what one became.
+
+The common verbs are also spelled at the top level — `lns run`, `lns ps`,
+`lns stop`, `lns pull`, `lns push` — and each is an exact shortcut into whichever
+namespace owns it.
 
 The background service must be running first (`lns service start`).
 
 ## Defining a sandbox
 
 Scaffold a `./lns.yaml` in the current directory with `lns init` (a shortcut for
-`lns sandbox init`):
+`lns artifact init`):
 
 ```bash
 lns init                        # ./lns.yaml, kind: sandbox
@@ -80,13 +82,13 @@ Check the definition offline — no network, no service — with `validate` and 
 target-less `lns inspect`:
 
 ```bash
-lns sandbox validate     # schema, cross-field, and secret checks -> "lns.yaml is valid."
+lns artifact validate     # schema, cross-field, and secret checks -> "lns.yaml is valid."
 lns inspect              # render the effective definition (merged config, resolved values)
 ```
 
 `lns inspect` also takes a path (`.`, `lns.yaml`, `./dir`) to render another
 directory's definition, still offline; a run id or registry reference inspects
-live or cached state instead — see [`lns sandbox`](cli-reference.md#lns-sandbox).
+live or cached state instead — see [`lns artifact`](cli-reference.md#lns-artifact).
 
 `validate` reports each problem with its cause and exits non-zero when the
 definition is broken:
@@ -159,7 +161,7 @@ default (say `lns.dev.yaml` with looser resources), select it explicitly with
 
 ```bash
 lns run -f lns.dev.yaml                  # run the variant
-lns sandbox validate -f lns.dev.yaml     # validate it, offline
+lns artifact validate -f lns.dev.yaml     # validate it, offline
 lns push -f lns.dev.yaml ghcr.io/acme/agent-dev:1.0.0
 lns inspect -f lns.dev.yaml              # render it, offline
 ```
@@ -733,7 +735,7 @@ spec:
   definition — it re-checks the version index on every run, so a new release is
   picked up the next time you start. To move a bounded line, edit the version you
   declared.
-- `lns sandbox validate` checks the shape offline; the version resolves when
+- `lns artifact validate` checks the shape offline; the version resolves when
   the tools are provisioned.
 - The service provisions declared tools **before the microVM boots** and caches
   them per machine: the first run of a tool set downloads it, and every later
@@ -764,7 +766,7 @@ spec:
   error; use a glibc base image if that matters.
 - The per-machine tool cache is **not reclaimed automatically**. Every version
   a tool resolves to keeps its tree, so a long-lived `node@latest` accumulates
-  one per upstream release. `lns sandbox prune --force` reclaims the provisioned
+  one per upstream release. `lns artifact prune --force` reclaims the provisioned
   tool cache when no sandbox is running; while any run is live it keeps the
   shared tool content intact. The next run re-provisions what it needs — to the
   same versions, because prune reclaims the cached trees without touching what
@@ -1021,7 +1023,7 @@ cancelled. Use the chord — or start the run with `-d` — to step away safely.
 
 ## Distributing a sandbox
 
-Publishing is one step. `lns push` (a shortcut for `lns sandbox push`) builds
+Publishing is one step. `lns push` (a shortcut for `lns artifact push`) builds
 `./lns.yaml` and uploads it to a registry as a sandbox artifact:
 
 ```bash
@@ -1113,12 +1115,11 @@ lns attach 7               # re-join a detached run live
 lns inspect 7              # state + launch config as JSON
 ```
 
-The full namespace holds the same verbs plus the lns-native `ls` — the
-alias-bearing list of **cached** sandboxes (`lns sandbox ls` / `lns sandbox list`),
-the counterpart to `lns ps`'s list of running ones:
+`lns artifact ls` is the counterpart list — what the cache holds rather than what
+is running:
 
 ```bash
-lns sandbox ls             # list cached sandboxes (pulled or built)
+lns artifact ls            # reference, kind, digest, size, and the holder of each
 lns sandbox exec 7 -- bash # (identical to `lns exec 7 -- bash`)
 ```
 
@@ -1194,21 +1195,21 @@ still gets a row, with `-` in place of its CPU and memory (`null` under
 
 ## Cleaning up the cache
 
-Cached sandboxes accumulate as you pull and build. Remove one with `lns rm` (a
-shortcut for `lns sandbox rm`); it frees the layers no remaining cached sandbox
-shares and refuses a reference that a run is still using:
+Cached artifacts accumulate as you pull and build. Remove one with `lns artifact
+rm`; it frees the layers no remaining artifact shares and refuses a reference a
+sandbox is still using. `lns rm` is the shortcut, and works out whether you named a
+sandbox or an artifact:
 
 ```bash
 lns rm ghcr.io/acme/reviewer:1.0.0
 ```
 
-`lns sandbox prune` removes every cached sandbox not held by a running one. When
-no sandbox is running, it also reclaims the provisioned tool cache. It requires
-`-f`/`--force` — there is no interactive prompt, so nothing is swept until you
-ask for it explicitly:
+`lns artifact prune` removes every cached artifact nothing holds. When no sandbox
+is running, it also reclaims the provisioned tool cache. It lists what it will
+sweep and asks, unless you pass `-f`/`--force`:
 
 ```bash
-lns sandbox prune --force
+lns artifact prune --force
 ```
 
 Removing a cached sandbox is always safe in the durable sense — the next `lns run`

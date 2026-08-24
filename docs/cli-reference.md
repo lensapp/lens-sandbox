@@ -66,14 +66,13 @@ never written to the project.
 The list and status verbs take `--format <table|json>`, so a script doesn't have to
 parse the human table:
 
-`lns ps`, `lns sandbox ls`, `lns sandbox inspect <RUN>`, `lns volume ls`,
-`lns volume inspect`, `lns connector list`, `lns connector grants`,
+`lns ps`, `lns sandbox ls`, `lns sandbox inspect <RUN>`, `lns artifact ls`,
+`lns volume ls`, `lns volume inspect`, `lns connector list`, `lns connector grants`,
 `lns config list`, `lns config get`, `lns service status`.
 
 `table` is the default everywhere, including the two `inspect` verbs — the table is
-a summary a reader scans, the JSON is the record. `lns sandbox inspect` answers for
-a **running** sandbox; a cached artifact renders as itself, so asking it for
-`--format json` is refused rather than silently ignored.
+a summary a reader scans, the JSON is the record. `lns artifact inspect` renders a
+document as its author wrote it and takes no `--format`.
 
 `lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
 its machine-readable form is one JSON event per line. The older `--json` spelling still
@@ -82,7 +81,7 @@ works as an alias for `--format jsonl`.
 What the JSON gives you:
 
 - **A bare array of objects** for the list verbs, pretty-printed. `lns service status`,
-  `lns inspect`, and `lns volume inspect` emit a single object instead.
+  `lns sandbox inspect`, and `lns volume inspect` emit a single object instead.
 - **camelCase keys**, always present — a key with no value is `null`, never omitted, so
   `jq .inUseBy` needs no guard.
 - **Raw numbers**, so nothing has to be un-humanized: `sizeBytes: 92274688`, not
@@ -99,33 +98,51 @@ What the JSON gives you:
 > minor release, so pin your `lns` version in scripts that depend on them. Table output
 > is for humans and carries no stability promise at all.
 
-## The sandbox surface
+## Two namespaces
 
-Lens Sandbox exposes a single noun — the **sandbox** — on two tiers:
+Two things carry a name, and every command acts on one of them.
 
-- The **top level** carries the docker-familiar verbs. Every one of them (except
-  `run`) is an exact shortcut into the `lns sandbox` namespace.
-- **`lns sandbox <verb>`** is the complete surface, including the lns-native verbs
-  that have no top-level shortcut.
+- An **artifact** is one `lns.run/v1` document, published as one OCI artifact.
+  [`lns artifact`](#lns-artifact) authors, publishes, fetches and caches it,
+  addressed by a `REF` — a registry coordinate or a path to a local document.
+- A **sandbox** is what a sandbox artifact becomes when it runs.
+  [`lns sandbox`](#lns-sandbox) creates, watches and removes it, addressed by a
+  `RUN` — an id or a name.
 
-| Top-level shortcut         | Expands to                        |
-| -------------------------- | --------------------------------- |
-| `lns run [REF]`            | `lns sandbox run [REF]`           |
-| `lns init`                 | `lns sandbox init`                |
-| `lns push <REF>`           | `lns sandbox push <REF>`          |
-| `lns pull <REF>`           | `lns sandbox pull <REF>`          |
-| `lns tag <SOURCE> <TARGET>`| `lns sandbox tag <SOURCE> <TARGET>` |
-| `lns ps`                   | `lns sandbox ps`                  |
-| `lns kill <RUN>`           | `lns sandbox kill <RUN>`          |
-| `lns stop <RUN>`           | `lns sandbox stop <RUN>`          |
-| `lns logs <RUN>`           | `lns sandbox logs <RUN>`          |
-| `lns attach <RUN>`         | `lns sandbox attach <RUN>`        |
-| `lns inspect <TARGET>`     | `lns sandbox inspect <TARGET> [--mixin <REF>] [--format <table|json>]`    |
-| `lns rm <REF>`             | `lns sandbox rm <REF>`            |
+`lns sandbox run <REF>` is the one command that crosses between them.
 
-The lns-native verbs `validate`, `ls`, and `prune` live under `lns sandbox`
-with no top-level shortcut. `lns exec` also works as an unlisted shorthand for
-`lns sandbox exec`.
+Common verbs are also spelled at the top level, and each is an exact alias — same
+arguments, same output:
+
+| Top-level shortcut          | Expands to                            |
+| --------------------------- | ------------------------------------- |
+| `lns run [REF]`             | `lns sandbox run [REF]`               |
+| `lns exec <RUN>`            | `lns sandbox exec <RUN>`              |
+| `lns ps`                    | `lns sandbox ls`                      |
+| `lns kill <RUN>`            | `lns sandbox kill <RUN>`              |
+| `lns stop <RUN>`            | `lns sandbox stop <RUN>`              |
+| `lns logs <RUN>`            | `lns sandbox logs <RUN>`              |
+| `lns attach <RUN>`          | `lns sandbox attach <RUN>`            |
+| `lns init`                  | `lns artifact init`                   |
+| `lns push <REF>`            | `lns artifact push <REF>`             |
+| `lns pull <REF>`            | `lns artifact pull <REF>`             |
+| `lns tag <SOURCE> <TARGET>` | `lns artifact tag <SOURCE> <TARGET>`  |
+
+`rm` and `inspect` exist in both namespaces, so their shortcuts work out which you
+meant:
+
+1. A path-shaped operand is a local document — the artifact. The service is never
+   asked.
+2. Otherwise `lns` looks the word up in both namespaces.
+3. One match runs.
+4. Two matches refuse, and print the two namespaced commands. `lns` never guesses
+   here.
+5. No match is an error that names both namespaces as searched.
+
+`prune` has no shortcut: it takes no operand, so nothing could tell them apart.
+`lns artifact prune` and `lns volume prune` always name what they sweep.
+
+`validate` and `ls` have no shortcut either.
 
 ## `lns run`
 
@@ -178,64 +195,75 @@ For the environment, the layering is `--env-file` < `-e`.
 
 See [Running workloads](running-workloads.md).
 
-## `lns sandbox`
+## `lns artifact`
 
-The complete sandbox surface: author, distribute, run, and manage it.
+Author, publish, fetch, and cache documents of any kind. Every verb here works on
+a `sandbox` and on a `mixin` alike, because each reads the kind from the document
+itself — there is no `lns mixin push`.
 
 ```bash
-# author (offline)
-lns sandbox init [--kind <sandbox|mixin>] [-f <FILE>]
-lns sandbox validate [--kind <KIND>] [-f <FILE>]
-lns inspect              # target-less: render ./lns.yaml, offline
-
-# distribute
-lns sandbox push <REF>
-lns sandbox pull [--yes] <REF>
-lns sandbox tag <SOURCE> <TARGET>
-
-# running lifecycle
-lns sandbox ps
-lns sandbox ls [--kind <image|sandbox>]
-lns sandbox exec [OPTIONS] <RUN> [-- COMMAND...]
-lns sandbox kill <RUN> [--signal <SIG>]
-lns sandbox stop <RUN> [-t <SECONDS>]
-lns sandbox logs [-f] <RUN>
-lns sandbox attach <RUN> [--detach-keys <CHORD>]
-lns sandbox inspect <TARGET> [--mixin <REF>] [--format <table|json>]
-
-# cache
-lns sandbox rm <REF>
-lns sandbox prune [-f]
+lns artifact init [--kind <sandbox|mixin>] [-f <FILE>]
+lns artifact validate [--kind <KIND>] [-f <FILE>]
+lns artifact push <REF> [--dry-run] [--yes] [-f <FILE>]
+lns artifact pull <REF> [--yes]
+lns artifact tag <SOURCE> <TARGET>
+lns artifact ls [--kind <image|sandbox>] [--format <table|json>]
+lns artifact inspect [REF] [--mixin <REF>]... [-f <FILE>]
+lns artifact rm <REF>
+lns artifact prune [-f]
 ```
 
-A `<REF>` addresses a **cached** sandbox (a registry coordinate); a `<RUN>`
-addresses a **running** one by numeric id (`7`) or name (`reviewer`) — the two are
-interchangeable everywhere a run is addressed.
+`REF` is a registry coordinate (`ghcr.io/team/hermes:1.4.0`, `you/agent`,
+`name@sha256:…`) or a path to a local document (`.`, `./dir`, `lns.dev.yaml`). A
+bare reference is qualified by `run.registry`, else the Lens hub (`hub.lns.run`).
 
-| Subcommand | Shortcut       | Meaning |
-| ---------- | -------------- | ------- |
-| `init`     | `lns init`     | Scaffold a document in this directory. `--kind` chooses which — `sandbox` (the default) or `mixin`; the file is `./lns.yaml` unless `-f`/`--file` names another. Refuses to overwrite. |
-| `validate` | —              | Validate `./lns.yaml` — schema, cross-field, and secret checks, offline. It answers for whichever kind the file declares. Exits non-zero and lists each problem when the document is broken. `--kind <KIND>` also requires the document to be that kind. `-f`/`--file` validates another file instead. |
-| `push`     | `lns push`     | Build `./lns.yaml` and upload it to a registry as an artifact — a `kind: sandbox` document publishes as a sandbox, a `kind: mixin` one as a mixin — in one step. `<REF>` is the registry reference to publish at; a bare one (`you/agent`) resolves against the `run.registry` default, else the Lens hub (`hub.lns.run`). Each `spec.filesets` `path` directory is packed into a layer of that same artifact, in declaration order, so the files and the declaration that mounts them share one digest; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. A `spec.mixins` entry that names a local path is published too: the document it names goes up first as its own artifact, beside `<REF>` and under that mixin's own `name`, tagged with its own digest, and the entry you uploaded is pinned to that digest — your own file keeps the path. Push lists those mixins and asks before it uploads anything; `--yes` accepts without prompting. `--dry-run` validates, packs, and builds all of it offline, prints the digests every artifact would publish under, and uploads nothing (declared tools are not resolved — it notes when a published digest may differ). `-f`/`--file` publishes another definition file instead. |
-| `pull`     | `lns pull`     | Inspect and fetch a published sandbox and its base image into the local cache. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — it takes no index entry, so it never appears in `lns image ls`. A bare `<REF>` resolves the same way as for `push`. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
-| `tag`      | `lns tag`      | Re-reference a cached sandbox under a new tag (`docker tag`-style). |
-| `ps`       | `lns ps`       | List running sandboxes with their CPU and memory (`docker ps`-style). |
-| `ls`       | —              | List what the local store holds — reference, kind, digest, size, and the run holding each. `--kind` filters to `sandbox` (a pulled or built artifact) or `image` (the base OCI image one runs on). Alias: `list`. |
-| `exec`     | `lns exec`     | Run another command against a running run. Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
-| `kill`     | `lns kill`     | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
-| `stop`     | `lns stop`     | Stop a run gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
-| `logs`     | `lns logs`     | Print the run's captured stdout/stderr; `-f` keeps streaming until the run exits. The service keeps the most recent 2 MiB of output per run, while the run is listed. |
-| `attach`   | `lns attach`   | Re-join a run's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves the run running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the run was started with stdin open. |
-| `inspect`  | `lns inspect`  | `--format <table|json>` chooses the shape for a **running** sandbox: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. A cached reference renders as itself and refuses `--format json`. With no target, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: render that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a running run: print its live state and launch configuration as JSON, with the policy file's parsed contents embedded when readable. For a cached reference: print the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin into the sandbox first, so a composition can be previewed without starting a run. |
-| `rm`       | `lns rm`       | Remove a cached sandbox and free its now-unreferenced layers; refuses a running one (a running id/name is rejected). |
-| `prune`    | —              | Remove every cached sandbox not held by a running one and, when none is live, reclaim the provisioned tool cache. Asks first, unless `-f`/`--force`. |
+| Subcommand | Shortcut     | Meaning |
+| ---------- | ------------ | ------- |
+| `init`     | `lns init`   | Scaffold a document in this directory. `--kind` chooses which — `sandbox` (the default) or `mixin`; the file is `./lns.yaml` unless `-f`/`--file` names another. Refuses to overwrite. |
+| `validate` | —            | Check the document named by `-f`, or `./lns.yaml`, offline — schema, cross-field, and secret checks — and list every problem, not just the first. It answers for whichever kind the file declares. Exits non-zero when the document is broken. `--kind <KIND>` also requires the document to be that kind. |
+| `push`     | `lns push`   | Build `./lns.yaml` and upload it to a registry as one artifact — a `kind: sandbox` document publishes as a sandbox, a `kind: mixin` one as a mixin — in one step. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, in declaration order, so the files and the declaration that mounts them share one digest; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. A `spec.mixins` entry that names a local path is published too: the document it names goes up first as its own artifact, beside `<REF>` and under that mixin's own `name`, tagged with its own digest, and the entry you uploaded is pinned to that digest — your own file keeps the path. Push lists those mixins and asks before it uploads anything; `--yes` accepts without prompting. `--dry-run` validates, packs, and builds all of it offline, prints the digests every artifact would publish under, and uploads nothing (declared tools are not resolved — it notes when a published digest may differ). `-f`/`--file` publishes another file instead. |
+| `pull`     | `lns pull`   | Inspect and fetch a published artifact and its base image into the local cache. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — it takes no index entry, so it never appears in `lns artifact ls`. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
+| `tag`      | `lns tag`    | Re-reference a cached artifact under a new tag (`docker tag`-style). |
+| `ls`       | —            | List what the local store holds — reference, kind, digest, size, and the sandbox holding each. `--kind` filters to `sandbox` (a pulled or built artifact) or `image` (the base OCI image one runs on). Alias: `list`. |
+| `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. |
+| `rm`       | `lns rm`     | Remove one cached artifact and free its now-unreferenced layers. |
+| `prune`    | —            | Remove every cached artifact nothing holds and, when no sandbox is live, reclaim the provisioned tool cache. Asks first, unless `-f`/`--force`. |
 
-The `./lns.yaml` definition (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
+The `./lns.yaml` document (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
 `workdir`, `volumes`, `env`, `egress`, and `connectors`. Declarative mounts
 accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
 `readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).
+
+## `lns sandbox`
+
+Create, run, watch, and remove sandboxes. A `RUN` is a sandbox's numeric id (`7`)
+or its name (`reviewer`) — the two are interchangeable everywhere one is addressed.
+
+```bash
+lns sandbox run [OPTIONS] [REF] [-- COMMAND...]
+lns sandbox exec [OPTIONS] <RUN> [-- COMMAND...]
+lns sandbox kill <RUN> [--signal <SIG>]
+lns sandbox stop <RUN> [-t <SECONDS>]
+lns sandbox logs [-f] <RUN>
+lns sandbox attach <RUN> [--detach-keys <CHORD>]
+lns sandbox ls [--format <table|json>]
+lns sandbox inspect <RUN> [--format <table|json>]
+lns sandbox rm <RUN>
+```
+
+| Subcommand | Shortcut     | Meaning |
+| ---------- | ------------ | ------- |
+| `run`      | `lns run`    | Run a sandbox in a microVM. See [`lns run`](#lns-run). |
+| `exec`     | `lns exec`   | Run another command inside a running sandbox. Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
+| `kill`     | `lns kill`   | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
+| `stop`     | `lns stop`   | Stop a sandbox gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
+| `logs`     | `lns logs`   | Print the sandbox's captured stdout/stderr; `-f` keeps streaming until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
+| `attach`   | `lns attach` | Re-join a sandbox's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves it running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the sandbox was started with stdin open. |
+| `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. Alias: `list`. |
+| `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
+| `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer. Refuses a running one, naming `lns stop`. |
 
 ## `lns volume`
 

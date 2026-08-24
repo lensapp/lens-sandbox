@@ -32,7 +32,7 @@ Feature: selecting the sandbox definition file
 
   Scenario: validate --file validates the named definition
     Given a sandbox definition file "lns.dev.yaml" in the current directory
-    When the user runs sandbox command "validate --file lns.dev.yaml"
+    When the user runs artifact command "validate --file lns.dev.yaml"
     Then the exit code is 0
     And the output contains "valid"
     And the service received no request
@@ -46,7 +46,7 @@ Feature: selecting the sandbox definition file
 
   Scenario: inspect renders a named yaml file's definition offline
     Given a sandbox definition file "lns.dev.yaml" in the current directory
-    When the user runs sandbox command "inspect ./lns.dev.yaml"
+    When the user runs artifact command "inspect ./lns.dev.yaml"
     Then the exit code is 0
     And the output contains "image"
     And the service received no request

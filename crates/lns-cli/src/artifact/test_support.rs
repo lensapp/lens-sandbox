@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::author::{DirEntry, Fs, map_dir_entries};
+use crate::artifact::author::{DirEntry, Fs, map_dir_entries};
 
 /// The one in-memory Fs fake shared by every sandbox-side unit suite: a flat path→contents map with optional unreadable/read-only failure modes.
 #[derive(Default)]

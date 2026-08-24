@@ -6,15 +6,15 @@ Feature: declaring developer tools in a sandbox definition
 
   Scenario: Declaring tools validates offline
     Given a lns.yaml declaring tools ["node@22", "python@3.12"]
-    When the user runs sandbox command "validate"
+    When the user runs artifact command "validate"
     Then validation succeeds without touching the network or the service
 
   Scenario: A malformed tool entry is refused with its cause
     Given a lns.yaml declaring tools ["node@"]
-    When the user runs sandbox command "validate"
+    When the user runs artifact command "validate"
     Then validation fails naming the entry and the expected "name@version" shape
 
   Scenario: A tool entry without a version is refused
     Given a lns.yaml declaring tools ["node"]
-    When the user runs sandbox command "validate"
+    When the user runs artifact command "validate"
     Then validation fails asking for an explicit version such as "node@22" or "node@latest"

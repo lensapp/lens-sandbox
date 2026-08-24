@@ -476,7 +476,7 @@ mod tests {
         }
     }
 
-    use crate::sandbox::test_support::MapFs;
+    use crate::artifact::test_support::MapFs;
 
     struct FakeResolver {
         versions: std::collections::HashMap<String, String>,

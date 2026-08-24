@@ -6,7 +6,7 @@ Feature: managing cached sandboxes
 
   Scenario: ls says what each cached artifact is, how big, and who holds it
     Given the service reports one cached sandbox "hermes:1.4.0"
-    When the user runs sandbox command "ls"
+    When the user runs artifact command "ls"
     Then the exit code is 0
     And the output contains "hermes:1.4.0"
     And the output contains "KIND"
@@ -18,19 +18,19 @@ Feature: managing cached sandboxes
 
   Scenario: ls names the run holding an artifact rather than leaving the column blank
     Given the service reports one cached sandbox "hermes:1.4.0" held by run 3
-    When the user runs sandbox command "ls"
+    When the user runs artifact command "ls"
     Then the exit code is 0
     And the output contains "000000030000"
 
   Scenario: ls --kind lists only the artifacts of that kind
     Given the service reports a cached sandbox "hermes:1.4.0" and a cached image "alpine:3.20"
-    When the user runs sandbox command "ls --kind image"
+    When the user runs artifact command "ls --kind image"
     Then the exit code is 0
     And the output contains "alpine:3.20"
     And the output does not contain "hermes:1.4.0"
 
   Scenario: ls --kind rejects a kind the cache cannot hold
-    When I run "lns sandbox ls --kind sorcery"
+    When I run "lns artifact ls --kind sorcery"
     Then the exit code is 2
     And the output contains "invalid value"
 
@@ -60,14 +60,14 @@ Feature: managing cached sandboxes
 
   Scenario: rm removes a cached sandbox and frees its now-unreferenced layers
     Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers
-    When the user runs sandbox command "rm hermes:1.4.0"
+    When the user runs artifact command "rm hermes:1.4.0"
     Then the exit code is 0
     And the output contains "removed"
     And the output reports reclaimed base-image layers
 
   Scenario: prune sweeps the reconstructible cache and reports reclaimed bytes
     Given two cached sandboxes and one running sandbox
-    When the user runs sandbox command "prune --force"
+    When the user runs artifact command "prune --force"
     Then the exit code is 0
     And the output reports reclaimed bytes
     And the running sandbox and its layers are kept
@@ -76,7 +76,7 @@ Feature: managing cached sandboxes
   Scenario: prune asks before it sweeps, and proceeds on yes
     Given two cached sandboxes and one running sandbox
     And the user will answer "y" to the sandbox prompt
-    When the user runs sandbox command "prune"
+    When the user runs artifact command "prune"
     Then the exit code is 0
     And the output contains "Continue? [y/N]"
     And the output contains "provisioned tool cache"
@@ -85,7 +85,7 @@ Feature: managing cached sandboxes
   Scenario: with no terminal to ask at, prune refuses rather than assuming
     Given two cached sandboxes and one running sandbox
     And sandbox input is non-interactive
-    When the user runs sandbox command "prune"
+    When the user runs artifact command "prune"
     Then the command fails with an exit code other than 0
     And the output contains "--force"
     And the service received no request
@@ -93,14 +93,14 @@ Feature: managing cached sandboxes
   Scenario: declining the prune prompt touches nothing
     Given two cached sandboxes and one running sandbox
     And the user will answer "n" to the sandbox prompt
-    When the user runs sandbox command "prune"
+    When the user runs artifact command "prune"
     Then the exit code is 0
     And the output contains "Aborted."
     And the service received no request
 
   Scenario: prune never removes a named volume
     Given a cached sandbox that names a volume "claude-home"
-    When the user runs sandbox command "prune --force"
+    When the user runs artifact command "prune --force"
     Then the exit code is 0
     And the named volume "claude-home" still exists
 

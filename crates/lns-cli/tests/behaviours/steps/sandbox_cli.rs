@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use cucumber::{given, then, when};
+use lns_cli::artifact::{ArtifactArgs, ArtifactCommand, author, distribute};
 use lns_cli::command::parse_args;
 use lns_cli::connector::LocalBoxFuture;
-use lns_cli::sandbox::{SandboxArgs, SandboxCommand, author, distribute};
+use lns_cli::sandbox::{SandboxArgs, SandboxCommand};
 use lns_cli::sandbox::{SandboxService, TermInfo, run_with_writers};
 use lns_cli::service::client::BoxFuture;
 use lns_ipc::{
@@ -313,23 +314,23 @@ impl distribute::ToolResolver for StepResolver {
     }
 }
 
-fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
+fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
     let cwd = Path::new("/work");
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
     };
     let mut out: Vec<u8> = Vec::new();
     let result = match cmd {
-        SandboxCommand::Init(args) => {
+        ArtifactCommand::Init(args) => {
             author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
         }
-        SandboxCommand::Validate(args) => {
+        ArtifactCommand::Validate(args) => {
             author::validate(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
         }
-        SandboxCommand::Inspect(args) => author::inspect_local(
+        ArtifactCommand::Inspect(args) => author::inspect_local(
             &fs,
             cwd,
-            args.run.as_deref(),
+            args.reference.as_deref(),
             args.file.as_deref(),
             &args.mixins,
             &mut out,
@@ -349,6 +350,19 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &SandboxCommand) {
     });
 }
 
+pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
+    FakeSandboxService {
+        response: w.sandbox.response.clone(),
+        stats_response: w.sandbox.stats_response.clone(),
+        inspect_image_response: w.sandbox.inspect_image_response.clone(),
+        remove_image_response: w.sandbox.remove_image_response.clone(),
+        frames: w.sandbox.frames.clone(),
+        unreachable: w.sandbox.unreachable,
+        policy: w.sandbox.policy.clone(),
+        requests: w.sandbox.requests.clone(),
+    }
+}
+
 #[when(regex = r#"^the user runs sandbox command "([^"]+)"$"#)]
 async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
     drive_sandbox_command(w, &cmd).await;
@@ -357,104 +371,11 @@ async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
 pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut argv: Vec<&str> = vec!["lns", "sandbox"];
     argv.extend(cmd.split_whitespace());
-    let mut args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
-    lns_cli::sandbox::apply_registry_default(&mut args.command, None);
-
-    if author::is_offline(&args.command) {
-        run_author_verb(w, &args.command);
-        return;
-    }
-
-    if let SandboxCommand::Push(push_args) = &args.command {
-        let fs = StepFs {
-            files: RefCell::new(w.author_files.clone()),
-        };
-        let producer = StepProducer {
-            outcome: w.push_outcome.clone().unwrap_or(Err(
-                "the push must refuse before reaching the producer".into(),
-            )),
-            uploaded: RefCell::new(Vec::new()),
-            fail_after: w.push_fails_after,
-        };
-        let mut out: Vec<u8> = Vec::new();
-        let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
-        let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
-        let result = match author::load_definition_json_at(&fs, &path) {
-            Ok(doc) if push_args.dry_run => {
-                distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
-            }
-            Ok(doc) => {
-                let resolver = StepResolver {
-                    versions: w.tool_index.clone(),
-                    unlisted: w.unlisted_pins.clone(),
-                };
-                let mut input = std::io::Cursor::new(
-                    w.sandbox
-                        .prompt_answer
-                        .clone()
-                        .unwrap_or_default()
-                        .into_bytes(),
-                );
-                distribute::push(
-                    distribute::PushPorts {
-                        fs: &fs,
-                        cwd: &project_dir,
-                        producer: &producer,
-                        resolver: &resolver,
-                    },
-                    &doc,
-                    &push_args.reference,
-                    distribute::Confirm {
-                        assume_yes: push_args.assume_yes,
-                        interactive: w.sandbox.stdin_is_tty,
-                        input: &mut input,
-                    },
-                    &mut out,
-                )
-                .await
-            }
-            Err(e) => Err(e),
-        };
-        let uploaded = producer.uploaded.into_inner();
-        w.pushed_refs = uploaded
-            .iter()
-            .map(|(reference, _)| reference.clone())
-            .collect();
-        w.pushed_layers = uploaded
-            .last()
-            .map(|(_, built)| built.fileset_layers().map(|l| l.digest.clone()).collect())
-            .unwrap_or_default();
-        w.pushed_doc = uploaded.last().and_then(|(_, built)| {
-            built
-                .blobs
-                .iter()
-                .find(|blob| blob.media_type.ends_with(".config.v1+json"))
-                .map(|blob| blob.data.clone())
-        });
-        w.result = Some(match result {
-            Ok(exit_code) => CliRun {
-                exit_code,
-                output: String::from_utf8_lossy(&out).into_owned(),
-            },
-            Err(e) => CliRun {
-                exit_code: 1,
-                output: format!("{e:#}"),
-            },
-        });
-        return;
-    }
-
+    let args: SandboxArgs = parse_args(&argv).expect("sandbox argv must parse");
     let svc = fake_sandbox_service(w);
-
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let answer = w
-        .sandbox
-        .prompt_answer
-        .clone()
-        .map(|answer| format!("{answer}\n"))
-        .unwrap_or_default();
     let result = run_with_writers(
         &args.command,
         &svc,
@@ -462,13 +383,11 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             stdin_is_tty: w.sandbox.stdin_is_tty,
             stdout_is_terminal: false,
         },
-        &mut std::io::Cursor::new(answer),
         &mut out,
         &mut stdout,
         &mut stderr,
     )
     .await;
-
     w.sandbox.workload_stdout = stdout;
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
@@ -477,9 +396,212 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
         },
         Err(e) => CliRun {
             exit_code: 1,
-            output: format!("{}{e:#}", String::from_utf8_lossy(&out)),
+            output: format!("{e:#}"),
         },
     });
+}
+
+#[when(regex = r#"^the user runs artifact command "([^"]+)"$"#)]
+async fn run_artifact_command(w: &mut BehaviourWorld, cmd: String) {
+    drive_artifact_command(w, &cmd).await;
+}
+
+pub(crate) async fn drive_artifact_command(w: &mut BehaviourWorld, cmd: &str) {
+    let mut argv: Vec<&str> = vec!["lns", "artifact"];
+    argv.extend(cmd.split_whitespace());
+    let mut args: ArtifactArgs = parse_args(&argv).expect("artifact argv must parse");
+    lns_cli::artifact::apply_registry_default(&mut args.command, None);
+
+    if author::is_offline(&args.command) {
+        run_author_verb(w, &args.command);
+        return;
+    }
+
+    if let ArtifactCommand::Push(push_args) = &args.command {
+        run_push_verb(w, push_args).await;
+        return;
+    }
+
+    let svc = fake_sandbox_service(w);
+    let mut out: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let answer = w
+        .sandbox
+        .prompt_answer
+        .clone()
+        .map(|answer| format!("{answer}\n"))
+        .unwrap_or_default();
+    let result = lns_cli::artifact::run_with_writers(
+        &args.command,
+        &svc,
+        TermInfo {
+            stdin_is_tty: w.sandbox.stdin_is_tty,
+            stdout_is_terminal: false,
+        },
+        &mut std::io::Cursor::new(answer),
+        &mut out,
+        &mut stderr,
+    )
+    .await;
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
+async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::PushArgs) {
+    let fs = StepFs {
+        files: RefCell::new(w.author_files.clone()),
+    };
+    let producer = StepProducer {
+        outcome: w.push_outcome.clone().unwrap_or(Err(
+            "the push must refuse before reaching the producer".into(),
+        )),
+        uploaded: RefCell::new(Vec::new()),
+        fail_after: w.push_fails_after,
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
+    let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
+    let result = match author::load_definition_json_at(&fs, &path) {
+        Ok(doc) if push_args.dry_run => {
+            distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
+        }
+        Ok(doc) => {
+            let resolver = StepResolver {
+                versions: w.tool_index.clone(),
+                unlisted: w.unlisted_pins.clone(),
+            };
+            let mut input = std::io::Cursor::new(
+                w.sandbox
+                    .prompt_answer
+                    .clone()
+                    .unwrap_or_default()
+                    .into_bytes(),
+            );
+            distribute::push(
+                distribute::PushPorts {
+                    fs: &fs,
+                    cwd: &project_dir,
+                    producer: &producer,
+                    resolver: &resolver,
+                },
+                &doc,
+                &push_args.reference,
+                distribute::Confirm {
+                    assume_yes: push_args.assume_yes,
+                    interactive: w.sandbox.stdin_is_tty,
+                    input: &mut input,
+                },
+                &mut out,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let uploaded = producer.uploaded.into_inner();
+    w.pushed_refs = uploaded
+        .iter()
+        .map(|(reference, _)| reference.clone())
+        .collect();
+    w.pushed_layers = uploaded
+        .last()
+        .map(|(_, built)| built.fileset_layers().map(|l| l.digest.clone()).collect())
+        .unwrap_or_default();
+    w.pushed_doc = uploaded.last().and_then(|(_, built)| {
+        built
+            .blobs
+            .iter()
+            .find(|blob| blob.media_type.ends_with(".config.v1+json"))
+            .map(|blob| blob.data.clone())
+    });
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
+#[then(regex = r"^the service received a StopRun request for run (\d+) with timeout (\d+)$")]
+fn then_stop_request(w: &mut BehaviourWorld, run_id: u32, timeout: u64) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::StopRun {
+        run: run_id.to_string(),
+        timeout_secs: timeout,
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then(regex = r"^the service received a RunLogs request for run (\d+) (with|without) follow$")]
+fn then_logs_request(w: &mut BehaviourWorld, run_id: u32, mode: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::RunLogs {
+        run: run_id.to_string(),
+        follow: mode == "with",
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then(regex = r"^the service received an AttachRun request for run (\d+)$")]
+fn then_attach_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::AttachRun {
+        run: run_id.to_string(),
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[then(regex = r#"^the workload stdout contains "([^"]*)"$"#)]
+fn then_workload_stdout(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let text = String::from_utf8_lossy(&w.sandbox.workload_stdout);
+    if text.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected workload stdout to contain {needle:?}, got {text:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the service received a StopRun request for run "([^"]+)" with timeout (\d+)$"#)]
+fn then_stop_request_by_handle(
+    w: &mut BehaviourWorld,
+    run: String,
+    timeout: u64,
+) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let expected = Request::StopRun {
+        run,
+        timeout_secs: timeout,
+    };
+    if requests.contains(&expected) {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?} among {requests:?}"))
+    }
 }
 
 #[given(regex = r#"^the published sandbox declares tool "([^"]+)"$"#)]
@@ -573,19 +695,6 @@ fn canned_no_runs(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::RunList { runs: Vec::new() });
 }
 
-pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
-    FakeSandboxService {
-        response: w.sandbox.response.clone(),
-        stats_response: w.sandbox.stats_response.clone(),
-        inspect_image_response: w.sandbox.inspect_image_response.clone(),
-        remove_image_response: w.sandbox.remove_image_response.clone(),
-        frames: w.sandbox.frames.clone(),
-        unreachable: w.sandbox.unreachable,
-        policy: w.sandbox.policy.clone(),
-        requests: w.sandbox.requests.clone(),
-    }
-}
-
 #[when(regex = r#"^the user runs "lns inspect ([^"]+)"$"#)]
 async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
     let mut reference = None;
@@ -598,26 +707,102 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
         }
     }
     let svc = fake_sandbox_service(w);
+    let Some(reference) = reference else { return };
+    // The shortcut asks both namespaces and refuses to guess; only a settled answer runs.
+    let owner = match lns_cli::shortcut::which(&svc, "inspect", &reference).await {
+        Ok(owner) => owner,
+        Err(e) => {
+            w.result = Some(CliRun {
+                exit_code: 1,
+                output: format!("{e:#}"),
+            });
+            return;
+        }
+    };
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let result = run_with_writers(
-        &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
-            output: lns_cli::output::OutputArgs {
-                format: lns_cli::output::Format::Table,
-            },
-            run: reference,
-            mixins,
-            file: None,
-        }),
-        &svc,
-        TermInfo::default(),
-        &mut std::io::Cursor::new(""),
-        &mut out,
-        &mut stdout,
-        &mut stderr,
-    )
-    .await;
+    let result = if owner == lns_cli::shortcut::Owner::Artifact {
+        lns_cli::artifact::run_with_writers(
+            &lns_cli::artifact::ArtifactCommand::Inspect(lns_cli::artifact::InspectArgs {
+                reference: Some(reference),
+                mixins,
+                file: None,
+            }),
+            &svc,
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut out,
+            &mut stderr,
+        )
+        .await
+    } else {
+        run_with_writers(
+            &SandboxCommand::Inspect(lns_cli::sandbox::SandboxInspectArgs {
+                output: lns_cli::output::OutputArgs {
+                    format: lns_cli::output::Format::Table,
+                },
+                run: reference,
+            }),
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+    };
+    w.result = Some(match result {
+        Ok(exit_code) => CliRun {
+            exit_code,
+            output: String::from_utf8_lossy(&out).into_owned(),
+        },
+        Err(e) => CliRun {
+            exit_code: 1,
+            output: format!("{e:#}"),
+        },
+    });
+}
+
+#[when(regex = r#"^the user runs "lns rm ([^"]+)"$"#)]
+async fn run_lns_rm(w: &mut BehaviourWorld, operand: String) {
+    let svc = fake_sandbox_service(w);
+    let owner = match lns_cli::shortcut::which(&svc, "rm", &operand).await {
+        Ok(owner) => owner,
+        Err(e) => {
+            w.result = Some(CliRun {
+                exit_code: 1,
+                output: format!("{e:#}"),
+            });
+            return;
+        }
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let result = if owner == lns_cli::shortcut::Owner::Artifact {
+        lns_cli::artifact::run_with_writers(
+            &lns_cli::artifact::ArtifactCommand::Rm(lns_cli::artifact::RmArgs {
+                reference: operand,
+            }),
+            &svc,
+            TermInfo::default(),
+            &mut std::io::Cursor::new(""),
+            &mut out,
+            &mut stderr,
+        )
+        .await
+    } else {
+        run_with_writers(
+            &SandboxCommand::Rm(lns_cli::sandbox::SandboxRmArgs { run: operand }),
+            &svc,
+            TermInfo::default(),
+            &mut out,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+    };
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
             exit_code,
@@ -637,14 +822,13 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
-        &SandboxCommand::Ps(lns_cli::sandbox::PsArgs {
+        &SandboxCommand::Ls(lns_cli::sandbox::SandboxLsArgs {
             output: lns_cli::output::OutputArgs {
                 format: lns_cli::output::Format::Table,
             },
         }),
         &svc,
         TermInfo::default(),
-        &mut std::io::Cursor::new(""),
         &mut out,
         &mut stdout,
         &mut stderr,
@@ -660,75 +844,4 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
             output: format!("{e:#}"),
         },
     });
-}
-
-#[then(regex = r"^the service received a StopRun request for run (\d+) with timeout (\d+)$")]
-fn then_stop_request(w: &mut BehaviourWorld, run_id: u32, timeout: u64) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::StopRun {
-        run: run_id.to_string(),
-        timeout_secs: timeout,
-    };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
-}
-
-#[then(regex = r"^the service received a RunLogs request for run (\d+) (with|without) follow$")]
-fn then_logs_request(w: &mut BehaviourWorld, run_id: u32, mode: String) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::RunLogs {
-        run: run_id.to_string(),
-        follow: mode == "with",
-    };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
-}
-
-#[then(regex = r"^the service received an AttachRun request for run (\d+)$")]
-fn then_attach_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::AttachRun {
-        run: run_id.to_string(),
-    };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
-}
-
-#[then(regex = r#"^the workload stdout contains "([^"]*)"$"#)]
-fn then_workload_stdout(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
-    let text = String::from_utf8_lossy(&w.sandbox.workload_stdout);
-    if text.contains(&needle) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected workload stdout to contain {needle:?}, got {text:?}"
-        ))
-    }
-}
-
-#[then(regex = r#"^the service received a StopRun request for run "([^"]+)" with timeout (\d+)$"#)]
-fn then_stop_request_by_handle(
-    w: &mut BehaviourWorld,
-    run: String,
-    timeout: u64,
-) -> Result<(), String> {
-    let requests = w.sandbox.requests.lock().unwrap();
-    let expected = Request::StopRun {
-        run,
-        timeout_secs: timeout,
-    };
-    if requests.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?} among {requests:?}"))
-    }
 }

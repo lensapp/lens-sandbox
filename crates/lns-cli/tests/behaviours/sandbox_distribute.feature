@@ -7,7 +7,7 @@ Feature: distributing a sandbox
   Scenario: push builds then uploads in a single step
     Given a valid lns.yaml in the current directory
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "built"
     And the output contains "ghcr.io/team/hermes:1.4.0"
@@ -15,20 +15,20 @@ Feature: distributing a sandbox
   Scenario: a bare push reference publishes to the Lens hub
     Given a valid lns.yaml in the current directory
     And the registry accepts the push
-    When the user runs sandbox command "push hchen/claude-code"
+    When the user runs artifact command "push hchen/claude-code"
     Then the exit code is 0
     And the output contains "hub.lns.run/hchen/claude-code"
 
   Scenario: a bare pull reference fetches from the Lens hub
     Given the registry serves the sandbox "hub.lns.run/hchen/claude-code"
-    When the user runs sandbox command "pull hchen/claude-code"
+    When the user runs artifact command "pull hchen/claude-code"
     Then the exit code is 0
     And the service received a request to pull "hub.lns.run/hchen/claude-code"
 
   Scenario: a fully-qualified reference is published where it names
     Given a valid lns.yaml in the current directory
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "ghcr.io/team/hermes:1.4.0"
 
@@ -39,7 +39,7 @@ Feature: distributing a sandbox
 
   Scenario: push --dry-run builds everything and uploads nothing
     Given a valid lns.yaml in the current directory
-    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "would push ghcr.io/team/hermes:1.4.0@sha256:"
     And the output contains "nothing uploaded"
@@ -48,7 +48,7 @@ Feature: distributing a sandbox
   Scenario: push --dry-run previews the layer digest each path fileset would publish under
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
-    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "would pack fileset ./skills -> sha256:"
     And nothing is pushed
@@ -56,7 +56,7 @@ Feature: distributing a sandbox
   Scenario: push --dry-run refuses an invalid definition like a real push
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"
-    When the user runs sandbox command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
     Then the command fails with an exit code other than 0
     And the output contains ".env"
     And nothing is pushed
@@ -64,7 +64,7 @@ Feature: distributing a sandbox
   Scenario: push fails clearly when the credential lacks write scope
     Given a valid lns.yaml in the current directory
     And the stored credential for the registry lacks push scope
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the command fails with an exit code other than 0
     And the output contains "push scope"
     And the output contains "ghcr.io"
@@ -73,7 +73,7 @@ Feature: distributing a sandbox
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains "prompts.md"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the sandbox artifact carries the packed directory as a layer of its own
     And the published sandbox config keeps the fileset path it was authored with
@@ -81,7 +81,7 @@ Feature: distributing a sandbox
   Scenario: a secret-shaped file in a path fileset refuses the push
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the command fails with an exit code other than 0
     And the output contains ".env"
     And nothing is pushed
@@ -89,7 +89,7 @@ Feature: distributing a sandbox
   Scenario: push carries inline files in the document itself with no layer at all
     Given a valid lns.yaml in the current directory declaring an inline fileset at "/home/sandbox"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the artifact carries no packed layer
     And the published sandbox config carries the inline content unchanged
@@ -98,35 +98,35 @@ Feature: distributing a sandbox
     Given a lns.yaml declaring tools ["node@22"]
     And the version index resolves "node@22" to "22.11.0"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/acme/agent:1.0.0"
+    When the user runs artifact command "push ghcr.io/acme/agent:1.0.0"
     Then the published artifact carries the exact resolved versions
 
   Scenario: push warns about an exact pin the version index does not list
     Given a lns.yaml declaring tools ["node@99.99.99"]
     And the version index does not list "node@99.99.99"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/acme/agent:1.0.0"
+    When the user runs artifact command "push ghcr.io/acme/agent:1.0.0"
     Then the exit code is 0
     And the output contains "warning"
     And the output contains "node@99.99.99"
 
   Scenario: pull hands the reference to the service and reports the digest
     Given the registry serves the sandbox "ghcr.io/team/hermes:1.4.0"
-    When the user runs sandbox command "pull ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "pull ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "sha256:"
     And the service received a request to pull "ghcr.io/team/hermes:1.4.0"
 
   Scenario: tag re-refs a cached sandbox
     Given the sandbox "hermes:1.4.0" is cached
-    When the user runs sandbox command "tag hermes:1.4.0 hermes:latest"
+    When the user runs artifact command "tag hermes:1.4.0 hermes:latest"
     Then the exit code is 0
     And the sandbox "hermes:latest" resolves to the same cached artifact
 
   Scenario: push carries a hostPath fileset verbatim and packs nothing for it
     Given a valid lns.yaml in the current directory declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the artifact carries no packed layer
     And the published sandbox config carries the hostPath unchanged
@@ -134,7 +134,7 @@ Feature: distributing a sandbox
   Scenario: pulling a published mixin caches the graph it layers on and asks nothing
     Given the registry serves the mixin "ghcr.io/acme/obs-tools:2"
     And sandbox input is non-interactive
-    When the user runs sandbox command "pull ghcr.io/acme/obs-tools:2"
+    When the user runs artifact command "pull ghcr.io/acme/obs-tools:2"
     Then the exit code is 0
     And the output contains "pulled ghcr.io/acme/obs-tools:2"
     And the output contains "cached 2 mixin(s) it layers on"
@@ -142,7 +142,7 @@ Feature: distributing a sandbox
 
   Scenario: a mixin the registry gives no digest for refuses the pull
     Given the registry serves a mixin with no digest at "ghcr.io/acme/obs-tools:2"
-    When the user runs sandbox command "pull ghcr.io/acme/obs-tools:2"
+    When the user runs artifact command "pull ghcr.io/acme/obs-tools:2"
     Then the exit code is 1
     And the output contains "did not provide a digest"
 
@@ -150,7 +150,7 @@ Feature: distributing a sandbox
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 0
     And the mixin "ghcr.io/team/postgres-tools" was published before the sandbox
     And the mixin "ghcr.io/team/postgres-tools" was published under its own digest as a tag
@@ -162,7 +162,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts the push
     And the user will answer "y" to the sandbox prompt
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And the output contains "./mixins/pg/"
     And the output contains "ghcr.io/team/postgres-tools"
@@ -173,7 +173,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts the push
     And the user will answer "n" to the sandbox prompt
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 1
     And nothing is pushed
     And the output contains "nothing was published"
@@ -183,7 +183,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts the push
     And sandbox input is non-interactive
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 1
     And nothing is pushed
     And the output contains "--yes"
@@ -193,7 +193,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/outer/" is named "outer" and layers on "./inner/"
     And the local mixin at "./mixins/outer/inner/" is named "inner"
     And the registry accepts the push
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 0
     And exactly 3 artifact(s) were uploaded
     And the mixin "ghcr.io/team/inner" was published before the sandbox
@@ -203,7 +203,7 @@ Feature: distributing a sandbox
     Given a valid lns.yaml in the current directory
     And the registry accepts the push
     And sandbox input is non-interactive
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
     And exactly 1 artifact(s) were uploaded
     And the output does not contain "Continue?"
@@ -212,14 +212,14 @@ Feature: distributing a sandbox
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts 1 upload(s) then refuses
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 1
     And the output contains "retrying is safe"
 
   Scenario: push --dry-run previews every artifact it would publish and asks nothing
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --dry-run"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --dry-run"
     Then the exit code is 0
     And the output contains "would publish mixin ./mixins/pg/"
     And the output contains "ghcr.io/team/postgres-tools"
@@ -229,7 +229,7 @@ Feature: distributing a sandbox
 
   Scenario: an unpinned remote mixin still refuses the push
     Given an lns.yaml layering on the local mixin "ghcr.io/team/observability:2"
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 1
     And nothing is pushed
     And the output contains "digest-pinned"
@@ -238,7 +238,7 @@ Feature: distributing a sandbox
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools"
     And the registry accepts 0 upload(s) then refuses
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 1
     And the output contains "publishing mixin ./mixins/pg/"
     And the output contains "retrying is safe"
@@ -250,7 +250,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/outer/inner/" is named "inner"
     And the local mixin at "./mixins/other/" is named "other"
     And the registry accepts 2 upload(s) then refuses
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 1
     And the output contains "retrying is safe"
     And the output does not contain "no document references"
@@ -261,7 +261,7 @@ Feature: distributing a sandbox
     And the local mixin at "./mixins/outer/" is named "outer" and layers on "./inner/"
     And the local mixin at "./mixins/outer/inner/" is named "inner"
     And the registry accepts 2 upload(s) then refuses
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --yes"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
     Then the exit code is 1
     And the output contains "retrying is safe"
     And the output does not contain "unreferenced"
@@ -269,7 +269,7 @@ Feature: distributing a sandbox
   Scenario: a fuzzy tool a mixin declares makes the dry-run say the digest may differ
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools" and declares tool "node@22"
-    When the user runs sandbox command "push ghcr.io/team/hermes:1.4.0 --dry-run"
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --dry-run"
     Then the exit code is 0
     And the output contains "may differ"
     And nothing is pushed

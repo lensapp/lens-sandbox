@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{DocumentKind, SandboxCommand};
+use super::{ArtifactCommand, DocumentKind};
 
 pub const LNS_YAML: &str = "lns.yaml";
 
@@ -95,11 +95,11 @@ pub fn map_dir_entries<'a>(
 }
 
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
-pub fn is_offline(cmd: &SandboxCommand) -> bool {
+pub fn is_offline(cmd: &ArtifactCommand) -> bool {
     match cmd {
-        SandboxCommand::Init(_) | SandboxCommand::Validate(_) => true,
-        SandboxCommand::Inspect(args) => {
-            args.file.is_some() || is_local_inspect(args.run.as_deref())
+        ArtifactCommand::Init(_) | ArtifactCommand::Validate(_) => true,
+        ArtifactCommand::Inspect(args) => {
+            args.file.is_some() || is_local_inspect(args.reference.as_deref())
         }
         _ => false,
     }
@@ -233,7 +233,7 @@ pub fn inspect_local<F: Fs, W: Write>(
     mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
-    crate::sandbox::refuse_mixins_unless_published(mixins)?;
+    super::refuse_mixins_unless_published(mixins)?;
     let path = match (target, file) {
         (Some(_), Some(_)) => bail!("pass an inspect target or --file, not both"),
         (Some(target), None) => crate::run::target::definition_file(target, cwd),
@@ -312,7 +312,7 @@ fn render_effective<W: Write>(
         writeln!(
             out,
             "  credential: {}",
-            crate::sandbox::credential_disclosure(credential)
+            super::credential_disclosure(credential)
         )?;
     }
     for tool in &def.spec.tools {
@@ -334,7 +334,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::sandbox::test_support::MapFs;
+    use crate::artifact::test_support::MapFs;
 
     fn fake(path: &str, contents: &str) -> MapFs {
         MapFs::with(&[(path, contents)])
@@ -348,27 +348,22 @@ mod tests {
         "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n"
     }
 
-    fn inspect_cmd(target: Option<&str>) -> SandboxCommand {
-        SandboxCommand::Inspect(crate::sandbox::SandboxInspectArgs {
-            run: target.map(str::to_string),
+    fn inspect_cmd(target: Option<&str>) -> ArtifactCommand {
+        ArtifactCommand::Inspect(super::super::InspectArgs {
+            reference: target.map(str::to_string),
             mixins: Vec::new(),
             file: None,
-            output: crate::output::OutputArgs {
-                format: crate::output::Format::Table,
-            },
         })
     }
 
     #[test]
     fn is_offline_matches_the_author_verbs_and_local_inspects_only() {
-        assert!(is_offline(&SandboxCommand::Init(
-            crate::sandbox::SandboxInitArgs {
-                kind: DocumentKind::Sandbox,
-                file: None,
-            }
-        )));
-        assert!(is_offline(&SandboxCommand::Validate(
-            crate::sandbox::SandboxValidateArgs {
+        assert!(is_offline(&ArtifactCommand::Init(super::super::InitArgs {
+            kind: DocumentKind::Sandbox,
+            file: None,
+        })));
+        assert!(is_offline(&ArtifactCommand::Validate(
+            super::super::ValidateArgs {
                 kind: None,
                 file: None,
             }
@@ -379,12 +374,7 @@ mod tests {
         assert!(is_offline(&inspect_cmd(Some("../other"))));
         assert!(!is_offline(&inspect_cmd(Some("ghcr.io/team/hermes:1"))));
         assert!(!is_offline(&inspect_cmd(Some("brave_narwhal"))));
-        assert!(!is_offline(&SandboxCommand::Ps(crate::sandbox::PsArgs {
-            output: crate::output::OutputArgs {
-                format: crate::output::Format::Table,
-            },
-        })));
-        assert!(!is_offline(&SandboxCommand::Ls(crate::sandbox::LsArgs {
+        assert!(!is_offline(&ArtifactCommand::Ls(super::super::LsArgs {
             kind: None,
             output: crate::output::OutputArgs {
                 format: crate::output::Format::Table,
@@ -516,7 +506,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("--mixin applies to a sandbox reference"),
+            format!("{err:#}").contains("--mixin applies to a published reference"),
             "this render never resolves anything, so honouring the flag silently would show a composition the file does not describe; got: {err:#}"
         );
     }
@@ -696,14 +686,11 @@ mod tests {
 
     #[test]
     fn a_file_selector_inspect_is_offline() {
-        assert!(is_offline(&SandboxCommand::Inspect(
-            crate::sandbox::SandboxInspectArgs {
-                run: None,
+        assert!(is_offline(&ArtifactCommand::Inspect(
+            super::super::InspectArgs {
+                reference: None,
                 mixins: Vec::new(),
                 file: Some(std::path::PathBuf::from("lns.dev.yaml")),
-                output: crate::output::OutputArgs {
-                    format: crate::output::Format::Table,
-                },
             }
         )));
     }

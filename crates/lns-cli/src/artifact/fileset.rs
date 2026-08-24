@@ -147,7 +147,7 @@ pub fn directory_mixin_problems<F: Fs + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::test_support::MapFs;
+    use crate::artifact::test_support::MapFs;
 
     fn definition(mixins: &str) -> lns_artifact::sandbox::Definition {
         lns_artifact::sandbox::parse(

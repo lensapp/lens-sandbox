@@ -17,6 +17,7 @@ Feature: sandbox lifecycle verbs reach the service end to end
     When I run "lns --help"
     Then the exit code is 0
     And the output contains "init"
+    And the output contains "artifact"
     And the output contains "ps"
     And the output contains "push"
     And the output contains "pull"

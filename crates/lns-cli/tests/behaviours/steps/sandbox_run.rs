@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cucumber::{given, then, when};
+use lns_cli::artifact::author::{DirEntry, Fs, map_dir_entries};
 use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
 use lns_cli::run::progress::ProgressRenderer;
 use lns_cli::run::target::{RunTarget, resolve};
-use lns_cli::sandbox::author::{DirEntry, Fs, map_dir_entries};
 use lns_cli::service::pre_phase_step;
 use lns_ipc::{Response, encode_frame};
 

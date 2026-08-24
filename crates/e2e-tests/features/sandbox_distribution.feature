@@ -16,7 +16,7 @@ Feature: distributing a sandbox through a registry end to end
     Then the exit code is 0
     And the output contains "pulled"
     And the output contains the pushed reference
-    When I run lns "sandbox ls" against the service
+    When I run lns "artifact ls" against the service
     Then the exit code is 0
     And the output contains the pushed reference
     And the output contains "/e2e-base@sha256:"
@@ -27,7 +27,7 @@ Feature: distributing a sandbox through a registry end to end
     When I run lns "pull <pushed-ref>" against the service
     And I run lns "tag <pushed-ref> <pushed-ref>-copy" against the service
     Then the exit code is 0
-    When I run lns "sandbox ls" against the service
+    When I run lns "artifact ls" against the service
     Then the output contains "e2e-cache-sandbox:1-copy"
 
   Scenario: inspect renders the cached sandbox's definition
@@ -65,13 +65,13 @@ Feature: distributing a sandbox through a registry end to end
     When I run lns "pull <pushed-ref>" against the service
     And I run lns "rm <pushed-ref>" against the service
     Then the exit code is 0
-    When I run lns "sandbox ls" against the service
+    When I run lns "artifact ls" against the service
     Then the output no longer lists the pushed reference
 
   Scenario: prune reclaims the cached sandbox
     When I run lns "pull <pushed-ref>" against the service
-    And I run lns "sandbox prune --force" against the service
+    And I run lns "artifact prune --force" against the service
     Then the exit code is 0
     And the output contains "reclaimed"
-    When I run lns "sandbox ls" against the service
+    When I run lns "artifact ls" against the service
     Then the output no longer lists the pushed reference
