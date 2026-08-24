@@ -20,7 +20,8 @@ Feature: distributing a sandbox through a registry end to end
     Then the exit code is 0
     And the output contains the pushed reference
     And the output contains "/e2e-base@sha256:"
-    And the output contains "cached"
+    And the output contains "sandbox"
+    And the output contains "image"
 
   Scenario: tag re-references the cached sandbox under a new tag
     When I run lns "pull <pushed-ref>" against the service

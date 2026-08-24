@@ -12,8 +12,11 @@ Feature: cached sandbox management end to end
   Scenario: listing an empty cache renders only the table header
     When I run "lns sandbox ls"
     Then the exit code is 0
-    And the output contains "SANDBOX"
-    And the output contains "STATE"
+    And the output contains "ARTIFACT"
+    And the output contains "KIND"
+    And the output contains "DIGEST"
+    And the output contains "SIZE"
+    And the output contains "HOLDER"
 
   Scenario: removing a sandbox that is not cached fails cleanly
     When I run "lns sandbox rm registry.example.test/absent:1"
@@ -25,7 +28,7 @@ Feature: cached sandbox management end to end
     Then the exit code is 0
     And the output contains "reclaimed 0 B"
 
-  Scenario: prune refuses to run without --force
+  Scenario: with no terminal to ask at, prune refuses rather than assuming
     When I run "lns sandbox prune"
     Then the exit code is non-zero
     And the output contains "pass --force to confirm"

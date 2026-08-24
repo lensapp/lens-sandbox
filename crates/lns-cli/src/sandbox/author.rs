@@ -132,10 +132,7 @@ pub fn init<F: Fs, W: Write>(
     out: &mut W,
 ) -> Result<i32> {
     let path = selected_definition_path(file, cwd);
-    let name = path.file_name().map_or_else(
-        || LNS_YAML.to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+    let name = file.map_or_else(|| LNS_YAML.to_string(), |f| f.display().to_string());
     if fs.exists(&path) {
         bail!("{name} already exists in this directory; not overwriting it");
     }

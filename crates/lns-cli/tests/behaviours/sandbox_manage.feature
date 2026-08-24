@@ -82,6 +82,14 @@ Feature: managing cached sandboxes
     And the output contains "provisioned tool cache"
     And the service received a PruneImages request
 
+  Scenario: with no terminal to ask at, prune refuses rather than assuming
+    Given two cached sandboxes and one running sandbox
+    And sandbox input is non-interactive
+    When the user runs sandbox command "prune"
+    Then the command fails with an exit code other than 0
+    And the output contains "--force"
+    And the service received no request
+
   Scenario: declining the prune prompt touches nothing
     Given two cached sandboxes and one running sandbox
     And the user will answer "n" to the sandbox prompt
