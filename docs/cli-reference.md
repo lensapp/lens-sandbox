@@ -53,7 +53,9 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | `~/.lns/credentials.json` | The per-machine credential values you bound. |
 | `~/.lns/workload-grants.json` | Which workload was granted which connector, per project. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
-| `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
+| `~/.lns/audit/` | Each sandbox's own audit chain, which outlives the sandbox that wrote it. |
+| `~/.lns/runs/` | A live or stopped sandbox's writable layer and scratch, removed with the sandbox. |
+| `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the connection ledger, and the kernel. |
 
 One directory, one thing to back up, one thing `lns uninstall --purge` removes.
 
@@ -121,6 +123,7 @@ arguments, same output:
 | `lns ps`                    | `lns sandbox ls`                      |
 | `lns kill <RUN>`            | `lns sandbox kill <RUN>`              |
 | `lns stop <RUN>`            | `lns sandbox stop <RUN>`              |
+| `lns start <RUN>`           | `lns sandbox start <RUN>`             |
 | `lns logs <RUN>`            | `lns sandbox logs <RUN>`              |
 | `lns attach <RUN>`          | `lns sandbox attach <RUN>`            |
 | `lns init`                  | `lns artifact init`                   |
@@ -140,7 +143,8 @@ meant:
 5. No match is an error that names both namespaces as searched.
 
 `prune` has no shortcut: it takes no operand, so nothing could tell them apart.
-`lns artifact prune` and `lns volume prune` always name what they sweep.
+`lns artifact prune`, `lns sandbox prune` and `lns volume prune` always name what
+they sweep.
 
 `validate` and `ls` have no shortcut either.
 
@@ -246,24 +250,33 @@ lns sandbox run [OPTIONS] [REF] [-- COMMAND...]
 lns sandbox exec [OPTIONS] <RUN> [-- COMMAND...]
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox stop <RUN> [-t <SECONDS>]
+lns sandbox start <RUN> [-a [-i]] [--detach-keys <CHORD>]
 lns sandbox logs [-f] <RUN>
 lns sandbox attach <RUN> [--detach-keys <CHORD>]
-lns sandbox ls [--format <table|json>]
+lns sandbox ls [-a] [--format <table|json>]
 lns sandbox inspect <RUN> [--format <table|json>]
-lns sandbox rm <RUN>
+lns sandbox rm <RUN> [-f]
+lns sandbox prune [-f]
 ```
+
+A sandbox outlives its workload. When the workload exits — or you `lns stop` it —
+the sandbox stays listed as **stopped**, keeping its name and its writable layer,
+until you remove it. `lns run --rm` opts out: that sandbox goes the moment its
+workload does.
 
 | Subcommand | Shortcut     | Meaning |
 | ---------- | ------------ | ------- |
 | `run`      | `lns run`    | Run a sandbox in a microVM. See [`lns run`](#lns-run). |
 | `exec`     | `lns exec`   | Run another command inside a running sandbox. Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
 | `kill`     | `lns kill`   | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
-| `stop`     | `lns stop`   | Stop a sandbox gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. |
+| `stop`     | `lns stop`   | Stop a sandbox gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. The sandbox stays listed as **stopped**, restartable with `lns start` until you `lns sandbox rm` it. |
+| `start`    | `lns start`  | Run a stopped sandbox again on its preserved writable layer. The launch replays exactly as recorded — image (digest-pinned), command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot. Detached by default: prints the handle and returns. `-a` attaches output and adopts the workload's exit code; `-i` (with `-a`) forwards stdin. A conflict — a taken host port, a volume another sandbox holds, a missing bind source — aborts the start and leaves the sandbox stopped, untouched. |
 | `logs`     | `lns logs`   | Print the sandbox's captured stdout/stderr; `-f` keeps streaming until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
 | `attach`   | `lns attach` | Re-join a sandbox's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves it running and returns you to your shell (docker-attach style; no signal is sent). Stdin reaches the workload only if the sandbox was started with stdin open. |
-| `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. Alias: `list`. |
+| `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
 | `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
-| `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer. Refuses a running one, naming `lns stop`. |
+| `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. Refuses a running one; `-f`/`--force` stops it first. |
+| `prune`    | —            | Remove every stopped sandbox, writable layers included. Asks first, unless `-f`/`--force`. |
 
 ## `lns volume`
 

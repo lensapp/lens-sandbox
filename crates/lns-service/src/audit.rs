@@ -742,9 +742,9 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn audit_path_lands_under_the_run_directory() {
+    fn audit_path_lands_beside_the_other_chains_not_inside_the_run_directory() {
         let p = audit_path("aa99").unwrap();
-        assert!(p.ends_with("runs/aa99/audit.jsonl"), "got {}", p.display());
+        assert!(p.ends_with("audit/aa99/audit.jsonl"), "got {}", p.display());
     }
 
     #[test]

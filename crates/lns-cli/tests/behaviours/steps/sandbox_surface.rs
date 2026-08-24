@@ -36,6 +36,7 @@ async fn record_invocation(w: &mut BehaviourWorld, verb: Verb) {
                 &cmd,
                 &svc,
                 TermInfo::default(),
+                &mut std::io::empty(),
                 &mut out,
                 &mut stdout,
                 &mut stderr,

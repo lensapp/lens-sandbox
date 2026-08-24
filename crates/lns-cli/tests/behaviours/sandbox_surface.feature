@@ -110,10 +110,10 @@ Feature: two things carry a name, and every command acts on one of them
     And the service received no request
 
   Scenario: a word only the sandbox namespace knows runs there
-    Given the reference "reviewer" resolves to a running sandbox
+    Given the service refuses to remove the running sandbox "reviewer"
     When the user runs "lns rm reviewer"
     Then the command fails with an exit code other than 0
-    And the output contains "running sandbox"
+    And the output contains "running"
 
   Scenario: a word only the artifact namespace knows runs there
     Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers

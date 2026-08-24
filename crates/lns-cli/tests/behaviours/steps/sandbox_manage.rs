@@ -27,23 +27,6 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
     });
 }
 
-#[given(regex = r#"^the daemon refuses to remove the running run "([^"]+)"$"#)]
-fn daemon_refuses_running_removal(w: &mut BehaviourWorld, name: String) {
-    w.sandbox.response = Some(Response::Error {
-        message: format!(
-            "run {name} is still running; stop it first with `lns stop {name}` or force with `lns rm -f {name}`"
-        ),
-    });
-}
-
-#[given("a cached sandbox not used by any run")]
-fn a_cached_sandbox_not_used(w: &mut BehaviourWorld) {
-    w.sandbox.remove_image_response = Some(Response::ImageRemoved {
-        reference: "registry.example.test/idle-sandbox:1".into(),
-        reclaimed_bytes: 1024,
-    });
-}
-
 #[given(regex = r#"^the reference "([^"]+)" resolves to a cached sandbox$"#)]
 fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     w.sandbox.cached_references = vec![reference.clone()];
@@ -234,4 +217,86 @@ fn names_neither(w: &mut BehaviourWorld, name: String) {
 fn names_a_sandbox_only(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name);
     w.sandbox.cached_references = Vec::new();
+#[given(regex = r#"^the service refuses to remove the running sandbox "([^"]+)"$"#)]
+fn service_refuses_a_running_removal(w: &mut BehaviourWorld, name: String) {
+    reference_resolves_to_running(w, name.clone());
+    w.sandbox.remove_run_response = Some(Response::Error {
+        message: format!("{name} is running; stop it first, or pass -f to stop and remove it"),
+    });
+}
+
+#[then(regex = r#"^the service received a forced RemoveRun for "([^"]+)"$"#)]
+fn service_received_forced_remove(w: &mut BehaviourWorld, run: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::RemoveRun { run: asked, force: true } if *asked == run))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a forced RemoveRun for {run:?} among {requests:?}"
+        ))
+    }
+}
+
+#[given("the service reports one running sandbox and one that stopped")]
+fn one_running_one_stopped(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![
+            RunSummary {
+                id: hexid(3),
+                name: "reviewer".into(),
+                image: "some-image".into(),
+                command: "some-command".into(),
+                status: RunStatus::Running,
+                started: "2026-01-01T00:00:00Z".into(),
+            },
+            RunSummary {
+                id: hexid(4),
+                name: "scribe".into(),
+                image: "some-image".into(),
+                command: "some-command".into(),
+                status: RunStatus::Exited { code: 0 },
+                started: "2026-01-01T00:00:00Z".into(),
+            },
+        ],
+    });
+    w.sandbox.stats_response = Some(Response::RunStats {
+        stats: lns_ipc::RunStatsInfo {
+            cpu_permille: 125,
+            mem_used_bytes: 92_274_688,
+            mem_total_bytes: 536_870_912,
+        },
+    });
+}
+
+#[then("the service asked for stats exactly once")]
+fn stats_asked_once(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let probes = requests
+        .iter()
+        .filter(|r| matches!(r, Request::RunStats { .. }))
+        .count();
+    if probes == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "a stopped sandbox has no guest to sample, so only the running one may be probed; got {probes} probes"
+        ))
+    }
+}
+
+#[given(regex = r#"^the service will sweep the stopped sandboxes "([^"]+)" and "([^"]+)"$"#)]
+fn service_will_sweep(w: &mut BehaviourWorld, first: String, second: String) {
+    w.sandbox.response = Some(Response::RunsPruned {
+        removed: vec![first, second],
+    });
+}
+
+#[given("the service reports no stopped sandboxes to sweep")]
+fn service_sweeps_nothing(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::RunsPruned {
+        removed: Vec::new(),
+    });
 }

@@ -24,6 +24,7 @@ pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunF
                         command: crate::sandbox::SandboxCommand::Rm(
                             crate::sandbox::SandboxRmArgs {
                                 run: args.reference,
+                                force: false,
                             },
                         ),
                     },
