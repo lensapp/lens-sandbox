@@ -320,46 +320,74 @@ where
     }
 }
 
-/// The named-volume verbs, kept off the one-shot dispatcher's own branch count.
-async fn handle_volume_request(request: &Request) -> Response {
-    match request {
-        Request::ListVolumes => volume_response(
+/// The named-volume verbs, kept off the one-shot dispatcher's own branch count; naming them as their own type is what makes "not a volume verb" unrepresentable rather than an unreachable arm.
+enum VolumeVerb<'a> {
+    List,
+    Create(&'a str),
+    Inspect(&'a str),
+    Remove(&'a str),
+    Prune,
+}
+
+impl<'a> VolumeVerb<'a> {
+    fn of(request: &'a Request) -> Option<Self> {
+        match request {
+            Request::ListVolumes => Some(VolumeVerb::List),
+            Request::CreateVolume { name } => Some(VolumeVerb::Create(name)),
+            Request::InspectVolume { name } => Some(VolumeVerb::Inspect(name)),
+            Request::RemoveVolume { name } => Some(VolumeVerb::Remove(name)),
+            Request::PruneVolumes => Some(VolumeVerb::Prune),
+            _ => None,
+        }
+    }
+}
+
+async fn handle_volume_request(verb: VolumeVerb<'_>) -> Response {
+    match verb {
+        VolumeVerb::List => volume_response(
             crate::volume_store::list()
                 .await
                 .map(|volumes| Response::VolumeList { volumes }),
         ),
-        Request::CreateVolume { name } => volume_response(
+        VolumeVerb::Create(name) => volume_response(
             crate::volume_store::create(name)
                 .await
                 .map(|volume| Response::VolumeCreated { volume }),
         ),
-        Request::InspectVolume { name } => volume_response(
+        VolumeVerb::Inspect(name) => volume_response(
             crate::volume_store::inspect(name)
                 .await
                 .map(|volume| Response::VolumeInspect { volume }),
         ),
-        Request::RemoveVolume { name } => volume_response(
-            crate::volume_store::remove(name)
-                .await
-                .map(|()| Response::VolumeRemoved { name: name.clone() }),
-        ),
-        Request::PruneVolumes => {
-            volume_response(crate::volume_store::prune().await.map(|report| {
-                Response::VolumesPruned {
-                    removed: report.removed,
-                    reclaimed_bytes: report.reclaimed_bytes,
-                    failed: report.failed,
+        VolumeVerb::Remove(name) => {
+            volume_response(crate::volume_store::remove(name).await.map(|()| {
+                Response::VolumeRemoved {
+                    name: name.to_string(),
                 }
             }))
         }
-        other => unreachable!("{other:?} is not a volume verb"),
+        VolumeVerb::Prune => volume_response(crate::volume_store::prune().await.map(|report| {
+            Response::VolumesPruned {
+                removed: report.removed,
+                reclaimed_bytes: report.reclaimed_bytes,
+                failed: report.failed,
+            }
+        })),
     }
 }
 
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+    if let Some(verb) = VolumeVerb::of(request) {
+        return handle_volume_request(verb).await;
+    }
     match request {
-        // Each of these opens a stream the caller drives; the one-shot dispatcher is not on their path.
-        Request::RunImage(_)
+        // A volume verb was answered above; each of the rest opens a stream the caller drives.
+        Request::ListVolumes
+        | Request::CreateVolume { .. }
+        | Request::InspectVolume { .. }
+        | Request::RemoveVolume { .. }
+        | Request::PruneVolumes
+        | Request::RunImage(_)
         | Request::ExecImage(_)
         | Request::BeginConnectorSignIn { .. }
         | Request::BindConnectorCredential { .. }
@@ -367,7 +395,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::RunLogs { .. }
         | Request::AttachRun { .. }
         | Request::RunStats { .. } => {
-            unreachable!("{request:?} has a streaming handler of its own")
+            unreachable!("{request:?} has a handler of its own, not this match")
         }
         Request::Ping => Response::Pong,
         Request::Status => Response::Status(StatusInfo {
@@ -417,11 +445,6 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::ListRuns => Response::RunList {
             runs: crate::run_registry::snapshot(),
         },
-        volume_request @ (Request::ListVolumes
-        | Request::CreateVolume { .. }
-        | Request::InspectVolume { .. }
-        | Request::RemoveVolume { .. }
-        | Request::PruneVolumes) => handle_volume_request(volume_request).await,
         Request::PullImage {
             image,
             expected_digest,
@@ -989,7 +1012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn run_image_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
@@ -1032,7 +1055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn begin_connector_sign_in_via_handle_request_panics() {
         let _ = handle_request(
             &Request::BeginConnectorSignIn {
@@ -1044,7 +1067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn bind_connector_credential_via_handle_request_panics() {
         let _ = handle_request(
             &Request::BindConnectorCredential {
@@ -2049,7 +2072,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn exec_image_via_handle_request_panics() {
         let req = Request::ExecImage(lns_ipc::ExecImageArgs {
             run: "1".into(),
@@ -2318,7 +2341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn run_logs_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunLogs {
@@ -2331,7 +2354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn start_run_via_handle_request_panics() {
         let _ = handle_request(
             &Request::StartRun {
@@ -2431,13 +2454,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn attach_run_via_handle_request_panics() {
         let _ = handle_request(&Request::AttachRun { run: "1".into() }, Instant::now()).await;
     }
 
     #[tokio::test]
-    #[should_panic(expected = "has a streaming handler of its own")]
+    #[should_panic(expected = "has a handler of its own")]
     async fn run_stats_via_handle_request_panics() {
         let _ = handle_request(&Request::RunStats { run: "1".into() }, Instant::now()).await;
     }
