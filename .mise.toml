@@ -1,0 +1,3 @@
+# mise's rust backend exports RUSTUP_TOOLCHAIN, which outranks rust-toolchain.toml; this makes mise read the repo pin instead of overriding it.
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
