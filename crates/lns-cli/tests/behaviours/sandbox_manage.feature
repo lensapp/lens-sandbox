@@ -52,11 +52,18 @@ Feature: managing cached sandboxes
     And the output contains "kind: sandbox"
     And the output contains "image"
 
-  Scenario: rm refuses a running sandbox
-    Given the reference "reviewer" resolves to a running sandbox
+  Scenario: the service refuses to remove a running sandbox, and rm says how to force it
+    Given the service refuses to remove the running sandbox "reviewer"
     When the user runs sandbox command "rm reviewer"
     Then the command fails with an exit code other than 0
     And the output contains "running"
+    And the output contains "-f"
+
+  Scenario: rm -f asks the service to stop the sandbox first
+    Given the reference "reviewer" resolves to a running sandbox
+    When the user runs sandbox command "rm -f reviewer"
+    Then the exit code is 0
+    And the service received a forced RemoveRun for "reviewer"
 
   Scenario: rm removes a cached sandbox and frees its now-unreferenced layers
     Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers
@@ -105,15 +112,62 @@ Feature: managing cached sandboxes
     And the named volume "claude-home" still exists
 
   @todo
-  Scenario: rmi removes a cached reference
-    Given a cached sandbox not used by any run
-    When I run "lns rmi" with its reference
-    Then it is removed exactly as "lns rm <ref>" did before the rename
-
-  @todo
   Scenario: diff shows local edits and accreted grants against the pulled version
     Given the sandbox "hermes:1.4.0" was pulled and then locally edited
     When the user runs sandbox command "diff hermes:1.4.0"
     Then the exit code is 0
     And the output contains "egress"
     And the output shows the local changes since the pulled version
+
+  Scenario: ls shows only the running sandboxes
+    Given the service reports one running sandbox and one that stopped
+    When the user runs sandbox command "ls"
+    Then the exit code is 0
+    And the output contains "reviewer"
+    And the output does not contain "scribe"
+
+  Scenario: ls -a includes the sandboxes that stopped
+    Given the service reports one running sandbox and one that stopped
+    When the user runs sandbox command "ls -a"
+    Then the exit code is 0
+    And the output contains "reviewer"
+    And the output contains "scribe"
+    And the output contains "STATE"
+    And the output contains "stopped (0)"
+
+  Scenario: a stopped sandbox is listed without sampling a guest that is not there
+    Given the service reports one running sandbox and one that stopped
+    When the user runs sandbox command "ls -a"
+    Then the exit code is 0
+    And the service asked for stats exactly once
+
+  Scenario: prune asks before it sweeps the stopped sandboxes
+    Given the service will sweep the stopped sandboxes "scribe" and "hermes"
+    And the user will answer "y" to the sandbox prompt
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the output contains "Continue? [y/N]"
+    And the output contains "removed sandbox hermes"
+    And the output contains "removed sandbox scribe"
+
+  Scenario: declining the prune prompt sweeps nothing
+    Given the service will sweep the stopped sandboxes "scribe" and "hermes"
+    And the user will answer "n" to the sandbox prompt
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the output contains "Aborted."
+    And the service received no request
+
+  Scenario: with no terminal to ask at, prune refuses rather than assuming
+    Given the service will sweep the stopped sandboxes "scribe" and "hermes"
+    And sandbox input is non-interactive
+    When the user runs sandbox command "prune"
+    Then the command fails with an exit code other than 0
+    And the output contains "--force"
+    And the service received no request
+
+  Scenario: pruning with nothing stopped says so
+    Given the service reports no stopped sandboxes to sweep
+    When the user runs sandbox command "prune --force"
+    Then the exit code is 0
+    And the output contains "No stopped sandboxes."

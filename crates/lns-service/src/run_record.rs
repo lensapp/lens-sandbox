@@ -164,6 +164,7 @@ mod tests {
             cpus_explicit: false,
             mem_explicit: false,
             policy_path: None,
+            denied_host_paths: Vec::new(),
             sandbox_user: None,
             sandbox_uid: None,
             entrypoint: None,

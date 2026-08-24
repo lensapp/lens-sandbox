@@ -114,7 +114,7 @@ mod tests {
         let mut env = serde_json::Map::new();
         env.insert("FOO".into(), "bar".into());
         let run_env = lns_ocsf::run_env(&octx(run_id, "2026-06-29T13:00:01Z"), &env).to_string();
-        let dir = home.join(".lns").join("runs").join(run_id);
+        let dir = home.join(".lns").join("audit").join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let mut chain = lns_ipc::AuditChain::new();
         let mut payload = String::new();
@@ -140,7 +140,7 @@ mod tests {
             "policyhash",
         )
         .to_string();
-        let dir = home.join(".lns").join("runs").join(run_id);
+        let dir = home.join(".lns").join("audit").join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let mut chain = lns_ipc::AuditChain::new();
         let mut payload = chain.augment(&event).unwrap();
@@ -163,7 +163,7 @@ mod tests {
         let line = format!("{event}\n");
         let log = home
             .join(".lns")
-            .join("runs")
+            .join("audit")
             .join(run_id)
             .join("audit.jsonl");
         std::fs::write(&log, &line).unwrap();

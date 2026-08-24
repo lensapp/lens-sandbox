@@ -14,7 +14,6 @@ pub(crate) struct CannedService {
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
-    remove_run_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     pub requests: Arc<Mutex<Vec<Request>>>,
 }
@@ -26,7 +25,6 @@ impl CannedService {
             stats_response: None,
             inspect_image_response: None,
             remove_image_response: None,
-            remove_run_response: None,
             frames: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -49,13 +47,6 @@ impl CannedService {
     pub fn with_remove_image(run_response: Response, remove_response: Response) -> Self {
         Self {
             remove_image_response: Some(remove_response),
-            ..Self::new(run_response)
-        }
-    }
-
-    pub fn with_remove_run(run_response: Response, remove_response: Response) -> Self {
-        Self {
-            remove_run_response: Some(remove_response),
             ..Self::new(run_response)
         }
     }
@@ -128,10 +119,6 @@ impl SandboxService for CannedService {
                 .unwrap_or_else(|| self.response.clone()),
             Request::RemoveImage { .. } => self
                 .remove_image_response
-                .clone()
-                .unwrap_or_else(|| self.response.clone()),
-            Request::RemoveRun { .. } => self
-                .remove_run_response
                 .clone()
                 .unwrap_or_else(|| self.response.clone()),
             _ => self.response.clone(),

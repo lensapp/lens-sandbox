@@ -40,8 +40,9 @@ pub fn short_run_id(id: &str) -> &str {
     id.char_indices().nth(12).map_or(id, |(i, _)| &id[..i])
 }
 
+/// A sandbox's chain outlives the sandbox, so it cannot live in `runs/`, which is what removing one deletes.
 pub fn audit_runs_root() -> Result<PathBuf, NoLnsHome> {
-    Ok(lns_home()?.join("runs"))
+    Ok(lns_home()?.join("audit"))
 }
 
 pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, NoLnsHome> {
@@ -163,11 +164,21 @@ mod tests {
     }
 
     #[test]
+    fn a_sandboxs_chain_is_not_inside_the_directory_removing_it_deletes() {
+        // §3.6: removing a sandbox does not remove what it did.
+        let scratch = lns_home().unwrap().join("runs").join("42");
+        assert!(
+            !audit_log_for_run("42").unwrap().starts_with(&scratch),
+            "the chain must outlive the run directory that `lns sandbox rm` deletes"
+        );
+    }
+
+    #[test]
     fn the_audit_anchor_is_a_sibling_of_the_log_it_anchors() {
         let log = audit_log_for_run("42").expect("audit_log_for_run");
         let anchor = audit_anchor_for_run("42").expect("audit_anchor_for_run");
         assert_eq!(anchor.parent(), log.parent());
-        assert!(anchor.ends_with("runs/42/audit.anchor"));
+        assert!(anchor.ends_with("audit/42/audit.anchor"));
         let ledger = connection_ledger().expect("connection_ledger");
         assert_eq!(
             connection_ledger_anchor().unwrap().parent(),

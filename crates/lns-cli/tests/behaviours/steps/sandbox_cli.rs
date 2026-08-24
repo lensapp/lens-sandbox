@@ -24,6 +24,7 @@ pub(crate) struct FakeSandboxService {
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
     cached_references: Vec<String>,
+    remove_run_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -47,7 +48,17 @@ impl SandboxService for FakeSandboxService {
                 .remove_image_response
                 .clone()
                 .or_else(|| self.response.clone()),
-677da9bf (feat!: give the CLI docker-start parity — start, rm for runs, rmi for images)
+            Request::RemoveRun { .. } => self
+                .remove_run_response
+                .clone()
+                .or(Some(Response::Acknowledged)),
+            Request::PruneRuns => self
+                .response
+                .clone()
+                .filter(|r| matches!(r, Response::RunsPruned { .. }))
+                .or(Some(Response::RunsPruned {
+                    removed: Vec::new(),
+                })),
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);
@@ -372,6 +383,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         inspect_image_response: w.sandbox.inspect_image_response.clone(),
         remove_image_response: w.sandbox.remove_image_response.clone(),
         cached_references: w.sandbox.cached_references.clone(),
+        remove_run_response: w.sandbox.remove_run_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
@@ -392,6 +404,12 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let mut out: Vec<u8> = Vec::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let answer = w
+        .sandbox
+        .prompt_answer
+        .clone()
+        .map(|answer| format!("{answer}\n"))
+        .unwrap_or_default();
     let result = run_with_writers(
         &args.command,
         &svc,
@@ -399,6 +417,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
             stdin_is_tty: w.sandbox.stdin_is_tty,
             stdout_is_terminal: false,
         },
+        &mut std::io::Cursor::new(answer),
         &mut out,
         &mut stdout,
         &mut stderr,
@@ -762,6 +781,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
             }),
             &svc,
             TermInfo::default(),
+            &mut std::io::empty(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -810,9 +830,13 @@ async fn run_lns_rm(w: &mut BehaviourWorld, operand: String) {
         .await
     } else {
         run_with_writers(
-            &SandboxCommand::Rm(lns_cli::sandbox::SandboxRmArgs { run: operand }),
+            &SandboxCommand::Rm(lns_cli::sandbox::SandboxRmArgs {
+                run: operand,
+                force: false,
+            }),
             &svc,
             TermInfo::default(),
+            &mut std::io::empty(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -839,12 +863,14 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
     let mut stderr: Vec<u8> = Vec::new();
     let result = run_with_writers(
         &SandboxCommand::Ls(lns_cli::sandbox::SandboxLsArgs {
+            all: false,
             output: lns_cli::output::OutputArgs {
                 format: lns_cli::output::Format::Table,
             },
         }),
         &svc,
         TermInfo::default(),
+        &mut std::io::empty(),
         &mut out,
         &mut stdout,
         &mut stderr,
