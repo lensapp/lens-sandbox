@@ -215,7 +215,6 @@ pub async fn run(
     }
 }
 
-/// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
 /// The decisions file a connector verb records itself in: the one `--policy` named, rooted where it was typed, else this directory's own.
 fn project_decisions_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
     match explicit {
@@ -225,6 +224,7 @@ fn project_decisions_path(explicit: Option<&Path>, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Self-identifying so the MITM can detect it without false positives; explicit `--placeholder` is for shape-sensitive providers.
 fn generate_placeholder(id: &str) -> String {
     format!("lns-placeholder-{id}-0000000000000000000000")
 }
@@ -609,6 +609,26 @@ mod tests {
             .load()
             .expect("the sidecar reads back")
             .connected_in(&project_key(&dir.join("lns-local-mixin.yaml")))
+    }
+
+    #[test]
+    fn a_named_decisions_file_roots_where_the_developer_typed_it() {
+        // A verb records the connection in the project it names, so the path is theirs and roots at their cwd — the run's own file is found beside a document instead, and never named.
+        assert_eq!(
+            project_decisions_path(
+                Some(Path::new("../team/lns-local-mixin.yaml")),
+                Path::new("/w")
+            ),
+            PathBuf::from("/w/../team/lns-local-mixin.yaml"),
+        );
+        assert_eq!(
+            project_decisions_path(
+                Some(Path::new("/team/lns-local-mixin.yaml")),
+                Path::new("/w")
+            ),
+            PathBuf::from("/team/lns-local-mixin.yaml"),
+            "an absolute path is already rooted, so the cwd must not be prepended",
+        );
     }
 
     #[test]
