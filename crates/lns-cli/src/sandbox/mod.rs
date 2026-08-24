@@ -532,7 +532,7 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
-        SandboxCommand::Prune(args) => prune(svc, args, input, out).await,
+        SandboxCommand::Prune(args) => prune(svc, args, term, input, out).await,
     }
 }
 
@@ -954,11 +954,19 @@ async fn remove_cached<W: std::io::Write>(
 async fn prune<I: std::io::BufRead, W: std::io::Write>(
     svc: &impl SandboxService,
     args: &SandboxPruneArgs,
+    term: TermInfo,
     input: &mut I,
     out: &mut W,
 ) -> Result<i32> {
-    if !args.force && !confirm_prune(input, out)? {
-        return Ok(0);
+    if !args.force {
+        if !term.stdin_is_tty {
+            bail!(
+                "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; there is no terminal to ask at, so pass --force to confirm"
+            );
+        }
+        if !confirm_prune(input, out)? {
+            return Ok(0);
+        }
     }
     match svc.one_shot(Request::PruneImages).await? {
         Response::ImagesPruned {
@@ -2601,6 +2609,10 @@ mod tests {
         let code = prune(
             &svc,
             &SandboxPruneArgs { force: false },
+            TermInfo {
+                stdin_is_tty: true,
+                stdout_is_terminal: false,
+            },
             &mut std::io::Cursor::new(b"n\n".to_vec()),
             &mut out,
         )
@@ -2621,6 +2633,7 @@ mod tests {
         let code = prune(
             &svc,
             &SandboxPruneArgs { force: true },
+            TermInfo::default(),
             &mut std::io::empty(),
             &mut out,
         )
@@ -2642,6 +2655,7 @@ mod tests {
                 message: "registry poisoned".into(),
             }),
             &SandboxPruneArgs { force: true },
+            TermInfo::default(),
             &mut std::io::empty(),
             &mut Vec::new(),
         )
@@ -2652,6 +2666,7 @@ mod tests {
         let err = prune(
             &CannedService::new(Response::Pong),
             &SandboxPruneArgs { force: true },
+            TermInfo::default(),
             &mut std::io::empty(),
             &mut Vec::new(),
         )
