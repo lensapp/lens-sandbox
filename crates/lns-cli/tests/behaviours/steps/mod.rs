@@ -13,7 +13,6 @@ pub mod interactive_exec;
 pub mod local_decisions;
 pub mod login_web;
 pub mod machine_output;
-pub mod policy_cli;
 pub mod publish;
 pub mod pulled_host_path_consent;
 pub mod run;

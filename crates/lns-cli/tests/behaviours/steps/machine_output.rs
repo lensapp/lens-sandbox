@@ -96,27 +96,6 @@ fn json_row_number(
     }
 }
 
-#[then(regex = r#"^JSON row (\d+) has "([^"]+)" set to the list "([^"]*)"$"#)]
-fn json_row_list(
-    world: &mut BehaviourWorld,
-    index: usize,
-    key: String,
-    expected: String,
-) -> Result<(), String> {
-    let found = field(&row(world, index)?, &key)?;
-    let wanted: Vec<serde_json::Value> = expected
-        .split(',')
-        .map(|item| serde_json::Value::String(item.to_string()))
-        .collect();
-    if found == serde_json::Value::Array(wanted) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected {key} to be the list {expected:?}, got {found}"
-        ))
-    }
-}
-
 #[then(regex = r#"^JSON row (\d+) has a non-empty "([^"]+)"$"#)]
 fn json_row_non_empty(world: &mut BehaviourWorld, index: usize, key: String) -> Result<(), String> {
     let found = field(&row(world, index)?, &key)?;
