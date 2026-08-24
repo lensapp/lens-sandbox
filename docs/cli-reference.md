@@ -120,10 +120,10 @@ arguments, same output:
 | --------------------------- | ------------------------------------- |
 | `lns run [REF]`             | `lns sandbox run [REF]`               |
 | `lns exec <RUN>`            | `lns sandbox exec <RUN>`              |
+| `lns start <RUN>`           | `lns sandbox start <RUN>`             |
 | `lns ps`                    | `lns sandbox ls`                      |
 | `lns kill <RUN>`            | `lns sandbox kill <RUN>`              |
 | `lns stop <RUN>`            | `lns sandbox stop <RUN>`              |
-| `lns start <RUN>`           | `lns sandbox start <RUN>`             |
 | `lns logs <RUN>`            | `lns sandbox logs <RUN>`              |
 | `lns attach <RUN>`          | `lns sandbox attach <RUN>`            |
 | `lns init`                  | `lns artifact init`                   |

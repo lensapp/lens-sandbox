@@ -34,7 +34,11 @@ pub const RUN_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_exec(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::cli::ExecArgs>("exec").hide(true))
+    app.subcommand(
+        subcommand::<crate::cli::ExecArgs>("exec").about(
+            "Run another command inside a running sandbox (shortcut for `lns sandbox exec`).",
+        ),
+    )
 }
 
 pub const EXEC_SPEC: CommandSpec = CommandSpec {
