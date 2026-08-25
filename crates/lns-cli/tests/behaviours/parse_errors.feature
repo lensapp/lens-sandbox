@@ -47,6 +47,18 @@ Feature: clap rejects bad input with exit code 2
     And the output contains "invalid value"
     And the output contains "--format"
 
+  Scenario: lns artifact inspect refuses --format because a document renders as its author wrote it
+    When I run "lns artifact inspect ./lns.yaml --format json"
+    Then the exit code is 2
+    And the output contains "unexpected argument"
+    And the output contains "--format"
+
+  Scenario: the lns inspect shortcut refuses --format the same way as its namespaced artifact spelling
+    When I run "lns inspect ./lns.yaml --format json"
+    Then the exit code is 2
+    And the output contains "unexpected argument"
+    And the output contains "--format"
+
   Scenario: lns policy is not a command — a rule is recorded by answering the run's prompt
     When I run "lns policy list"
     Then the exit code is 2
