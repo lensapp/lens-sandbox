@@ -198,4 +198,16 @@ mod tests {
         assert!(!names_a_document(Some("reviewer")));
         assert!(!names_a_document(Some("ghcr.io/team/hermes:1.4.0")));
     }
+
+    #[tokio::test]
+    async fn a_service_that_cannot_list_the_cache_offers_no_artifact_to_arbitrate() {
+        let svc = crate::test_service::CannedService::new(Response::Error {
+            message: "cache unavailable".to_string(),
+        });
+        let err = which(&svc, "rm", "ghost").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no sandbox and no cached artifact"),
+            "a word the cache cannot vouch for is a miss, not a guess: {err:#}"
+        );
+    }
 }
