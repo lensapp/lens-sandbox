@@ -335,7 +335,7 @@ fn add(args: &ConnectorAddArgs, catalog_path: &Path, writer: &mut impl Write) ->
     writeln!(writer, "Declared connector {:?} in your catalog", args.id)?;
     writeln!(
         writer,
-        "Connect it to a project with `lns connect {}`.",
+        "Connect it to a project with `lns connector connect {}`.",
         args.id
     )?;
     Ok(0)
@@ -869,6 +869,19 @@ mod tests {
             lns_spec::credential::validate_placeholder(&cred.placeholder, "acme"),
             Ok(()),
             "a generated placeholder must satisfy the same rule the catalog enforces on load"
+        );
+    }
+
+    #[test]
+    fn the_add_hint_names_a_spelling_the_cli_recognizes() {
+        let dir = TempDir::new().unwrap();
+        let path = catalog_at(dir.path());
+        let mut out = Vec::new();
+        add(&add_args("acme"), &path, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("`lns connector connect acme`"),
+            "there is no top-level `lns connect`, so the next step must be spelled in full: {text}"
         );
     }
 
