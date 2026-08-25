@@ -61,3 +61,13 @@ Feature: clap rejects bad input with exit code 2
     When I run "lns policy list"
     Then the exit code is 2
     And the output contains "unrecognized subcommand"
+
+  Scenario: ls has one spelling — lns artifact list is not quietly kept working
+    When I run "lns artifact list"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
+
+  Scenario: ls has one spelling — lns sandbox list is not quietly kept working
+    When I run "lns sandbox list"
+    Then the exit code is 2
+    And the output contains "unrecognized subcommand"
