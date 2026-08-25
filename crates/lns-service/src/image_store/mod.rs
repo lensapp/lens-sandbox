@@ -184,24 +184,24 @@ fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
         .map(|r| r.id.clone())
 }
 
-fn kind_of(record: &ImageRecord) -> lns_ipc::CachedKind {
+fn kind_of(record: &ImageRecord) -> Option<lns_ipc::CachedKind> {
     match record.kind {
-        RecordKind::Image => lns_ipc::CachedKind::Image,
-        RecordKind::Sandbox => lns_ipc::CachedKind::Sandbox,
-        RecordKind::Mixin => lns_ipc::CachedKind::Mixin,
+        RecordKind::Image => None,
+        RecordKind::Sandbox => Some(lns_ipc::CachedKind::Sandbox),
+        RecordKind::Mixin => Some(lns_ipc::CachedKind::Mixin),
     }
 }
 
-fn info_from(record: &ImageRecord, active: &[lns_ipc::RunSummary]) -> lns_ipc::ImageInfo {
-    lns_ipc::ImageInfo {
+fn info_from(record: &ImageRecord, active: &[lns_ipc::RunSummary]) -> Option<lns_ipc::ImageInfo> {
+    Some(lns_ipc::ImageInfo {
         reference: record.reference.clone(),
-        kind: kind_of(record),
+        kind: kind_of(record)?,
         digest: record.digest.clone(),
         size_bytes: record.layers.iter().map(|l| l.size_bytes).sum(),
         layers: record.layers.len() as u32,
         pulled: crate::time_fmt::rfc3339_from_unix(record.pulled_unix_secs),
         in_use_by: holder(active, &record.reference),
-    }
+    })
 }
 
 fn layer_keep_set<'a>(records: impl Iterator<Item = &'a ImageRecord>) -> HashSet<String> {
@@ -272,7 +272,7 @@ pub async fn list_with<F: Fs>(
     Ok(load_records(fs, images_root)
         .await?
         .iter()
-        .map(|r| info_from(r, active))
+        .filter_map(|r| info_from(r, active))
         .collect())
 }
 
@@ -286,7 +286,10 @@ pub async fn remove_with<F: Fs, C: Caches>(
 ) -> Result<RemovedImage> {
     let reference = normalize_reference(image)?;
     let records = load_records(fs, images_root).await?;
-    if !records.iter().any(|record| record.reference == reference) {
+    if !records
+        .iter()
+        .any(|record| record.reference == reference && record.kind != RecordKind::Image)
+    {
         bail!("no such image: {reference}");
     }
     if let Some(run_id) = pinning_holder(active, &reference) {
@@ -365,6 +368,9 @@ pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -
     };
     let mut record: ImageRecord =
         serde_json::from_slice(&bytes).context("parsing cached sandbox record")?;
+    if record.kind == RecordKind::Image {
+        bail!("no such cached sandbox: {from_ref}");
+    }
     record.reference = to_ref;
     record_with(fs, images_root, &record).await
 }
@@ -393,7 +399,7 @@ pub async fn list_prunable_with<F: Fs>(
     let (_, removable) = removable_partition(records, active);
     Ok(removable
         .iter()
-        .map(|record| info_from(record, active))
+        .filter_map(|record| info_from(record, active))
         .collect())
 }
 
@@ -418,7 +424,9 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
             caches.remove_manifest(&record.reference)?;
         }
         removable_manifests.insert(pinned);
-        removed.push(record.reference.clone());
+        if record.kind != RecordKind::Image {
+            removed.push(record.reference.clone());
+        }
     }
     for pinned in removable_manifests.difference(&kept_manifests) {
         caches.remove_manifest(pinned)?;
@@ -564,7 +572,7 @@ pub async fn pull_with<F: Fs>(
     active: &[lns_ipc::RunSummary],
 ) -> Result<lns_ipc::ImageInfo> {
     record_with(fs, images_root, record).await?;
-    Ok(info_from(record, active))
+    info_from(record, active).context("a base image is cache-internal and takes no artifact row")
 }
 
 /// Pre-provisioning only buys an offline first start and the run path provisions anyway, so a failure must not throw away a pull whose layers already landed.
@@ -1267,7 +1275,7 @@ mod tests {
         ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "d".repeat(64)),
-            kind: RecordKind::Image,
+            kind: RecordKind::Sandbox,
             dependencies: Vec::new(),
             layers: layers
                 .iter()
@@ -1277,6 +1285,13 @@ mod tests {
                 })
                 .collect(),
             pulled_unix_secs: 1_765_022_400,
+        }
+    }
+
+    fn base_rec(reference: &str, layers: &[(&str, u64)]) -> ImageRecord {
+        ImageRecord {
+            kind: RecordKind::Image,
+            ..rec(reference, layers)
         }
     }
 
@@ -1384,6 +1399,31 @@ mod tests {
         assert!(err.contains("no such cached sandbox"), "got: {err}");
     }
 
+    #[tokio::test]
+    async fn tag_with_refuses_a_base_image_source_as_uncached() {
+        let base = "registry.example.test/team/base:1";
+        let fs = FakeFs::with_records(&[base_rec(base, &[])]);
+
+        let err = tag_with(
+            &fs,
+            Path::new(ROOT),
+            base,
+            "registry.example.test/team/base:2",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("no such cached sandbox"),
+            "a base image is cache-internal, so tagging answers as if it were uncached: {err}"
+        );
+        assert!(!fs.has(&record_path(
+            Path::new(ROOT),
+            "registry.example.test/team/base:2"
+        )));
+    }
+
     #[test]
     fn artifact_record_for_normalizes_the_reference_and_links_its_base_image_and_mixins() {
         let base_reference = format!("registry.example.test/base@sha256:{}", "a".repeat(64));
@@ -1485,6 +1525,22 @@ mod tests {
         assert!(
             msg.contains("registry.example.test/some/image:1.0"),
             "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_with_refuses_a_base_image_record_instead_of_listing_it() {
+        let fs = FakeFs::default();
+        let record = base_rec("registry.example.test/team/base:1", &[]);
+
+        let err = pull_with(&fs, Path::new(ROOT), &record, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("a base image is cache-internal and takes no artifact row"),
+            "got: {err}"
         );
     }
 
@@ -1805,12 +1861,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_reclaims_an_idle_base_image_without_reporting_it() {
+        let sandbox = "registry.example.test/team/sandbox:1";
+        let base = "registry.example.test/team/base:1";
+        let mut sandbox_record = rec(sandbox, &[]);
+        sandbox_record.dependencies.push(base.to_string());
+        let fs =
+            FakeFs::with_records(&[sandbox_record, base_rec(base, &[("sha256:base-layer", 9)])]);
+        let caches = FakeCaches {
+            freed: 9,
+            ..Default::default()
+        };
+
+        let report = prune_with(&fs, &caches, Path::new(ROOT), &no_pins(), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(report.removed, vec![sandbox.to_string()]);
+        assert_eq!(report.reclaimed_bytes, 9);
+        assert!(!fs.has(&record_path(Path::new(ROOT), base)));
+    }
+
+    #[tokio::test]
     async fn prune_keeps_the_base_image_record_and_layers_of_an_active_sandbox() {
         let sandbox = "registry.example.test/team/sandbox:1";
         let base = "registry.example.test/team/base:1";
         let mut sandbox_record = rec(sandbox, &[]);
         sandbox_record.dependencies.push(base.to_string());
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let fs =
+            FakeFs::with_records(&[sandbox_record, base_rec(base, &[("sha256:base-layer", 9)])]);
         let caches = FakeCaches {
             freed: 4,
             ..Default::default()
@@ -1884,7 +1963,8 @@ mod tests {
         let base = "registry.example.test/team/base:1";
         let mut sandbox_record = rec(&sandbox_pinned, &[]);
         sandbox_record.dependencies.push(base.to_string());
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let fs =
+            FakeFs::with_records(&[sandbox_record, base_rec(base, &[("sha256:base-layer", 9)])]);
         let caches = FakeCaches {
             freed: 4,
             ..Default::default()
@@ -1917,7 +1997,8 @@ mod tests {
         let base = "registry.example.test/team/base:1";
         let mut sandbox_record = rec(sandbox, &[]);
         sandbox_record.dependencies.push(base.to_string());
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let fs =
+            FakeFs::with_records(&[sandbox_record, base_rec(base, &[("sha256:base-layer", 9)])]);
         let caches = FakeCaches {
             freed: 9,
             ..Default::default()
@@ -1945,7 +2026,7 @@ mod tests {
         let fs = FakeFs::with_records(&[
             first_record,
             second_record,
-            rec(base, &[("sha256:base-layer", 9)]),
+            base_rec(base, &[("sha256:base-layer", 9)]),
         ]);
 
         remove_with(
@@ -1969,7 +2050,8 @@ mod tests {
         let base = "registry.example.test/team/base:1";
         let mut sandbox_record = rec(sandbox, &[]);
         sandbox_record.dependencies.push(base.to_string());
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[("sha256:base-layer", 9)])]);
+        let fs =
+            FakeFs::with_records(&[sandbox_record, base_rec(base, &[("sha256:base-layer", 9)])]);
 
         remove_with(
             &fs,
@@ -1998,11 +2080,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_recorded_artifact_run_protects_its_base_from_removal() {
+    async fn a_base_recorded_by_an_auto_pull_run_is_answered_as_unknown_on_removal() {
         let base = "registry.example.test/team/base:1";
         let sandbox_record =
             artifact_run_record("registry.example.test/team/agent:1", "sha256:m", base, 7).unwrap();
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
+        let fs = FakeFs::with_records(&[sandbox_record, base_rec(base, &[])]);
 
         let err = remove_with(
             &fs,
@@ -2017,18 +2099,21 @@ mod tests {
         .to_string();
 
         assert!(
-            err.contains("required by cached sandbox"),
-            "a base recorded by an auto-pull-on-run sandbox must not be removable: {err}"
+            err.contains("no such image"),
+            "a base image is cache-internal, so removal answers as if it were unknown: {err}"
         );
+        assert!(fs.has(&record_path(Path::new(ROOT), base)));
     }
 
     #[tokio::test]
-    async fn remove_refuses_a_base_image_required_by_a_cached_sandbox() {
+    async fn remove_refuses_a_mixin_required_by_a_cached_sandbox() {
         let sandbox = "registry.example.test/team/sandbox:1";
-        let base = "registry.example.test/team/base:1";
+        let mixin = "registry.example.test/team/lint:1";
         let mut sandbox_record = rec(sandbox, &[]);
-        sandbox_record.dependencies.push(base.to_string());
-        let fs = FakeFs::with_records(&[sandbox_record, rec(base, &[])]);
+        sandbox_record.dependencies.push(mixin.to_string());
+        let mut mixin_record = rec(mixin, &[]);
+        mixin_record.kind = RecordKind::Mixin;
+        let fs = FakeFs::with_records(&[sandbox_record, mixin_record]);
 
         let err = remove_with(
             &fs,
@@ -2036,14 +2121,14 @@ mod tests {
             Path::new(ROOT),
             &no_pins(),
             &[],
-            base,
+            mixin,
         )
         .await
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("required by cached sandbox"), "got: {err}");
-        assert!(fs.has(&record_path(Path::new(ROOT), base)));
+        assert!(fs.has(&record_path(Path::new(ROOT), mixin)));
     }
 
     #[test]
@@ -2571,22 +2656,30 @@ mod tests {
         };
         record(&pulled).await.unwrap();
 
-        let listed = list().await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].reference, "registry.example.test/cov/lifecycle:1");
-
-        let removed = remove("registry.example.test/cov/lifecycle:1")
-            .await
-            .unwrap();
-        assert_eq!(removed.reference, "registry.example.test/cov/lifecycle:1");
-
-        record(&pulled).await.unwrap();
-        let report = prune().await.unwrap();
-        assert_eq!(
-            report.removed,
-            vec!["registry.example.test/cov/lifecycle:1".to_string()]
+        assert!(
+            list().await.unwrap().is_empty(),
+            "a recorded base image is cache-internal and never lists"
         );
-        assert!(list().await.unwrap().is_empty());
+
+        let err = remove("registry.example.test/cov/lifecycle:1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such image"), "got: {err}");
+
+        let report = prune().await.unwrap();
+        assert!(
+            report.removed.is_empty(),
+            "pruning a base image reclaims it without naming it: {report:?}"
+        );
+        let record_file = record_path(
+            &images_root().unwrap(),
+            "registry.example.test/cov/lifecycle:1",
+        );
+        assert!(
+            !record_file.exists(),
+            "prune must still drop the base image's index record"
+        );
     }
 
     #[tokio::test]

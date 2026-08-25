@@ -207,7 +207,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
-            kind: RecordKind::Image,
+            kind: RecordKind::Sandbox,
             dependencies: Vec::new(),
             layers: vec![LayerRef {
                 digest: digest.to_string(),
@@ -225,12 +225,28 @@ impl ImageRig {
     }
 
     pub async fn seed_layer(&mut self, reference: &str, digest: &str, size: u64) {
+        self.seed_kinded_layer(reference, digest, size, RecordKind::Sandbox)
+            .await;
+    }
+
+    pub async fn seed_base_layer(&mut self, reference: &str, digest: &str, size: u64) {
+        self.seed_kinded_layer(reference, digest, size, RecordKind::Image)
+            .await;
+    }
+
+    async fn seed_kinded_layer(
+        &mut self,
+        reference: &str,
+        digest: &str,
+        size: u64,
+        kind: RecordKind,
+    ) {
         let layers = self.seeded.entry(reference.to_string()).or_default();
         layers.push((digest.to_string(), size));
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
-            kind: RecordKind::Image,
+            kind,
             dependencies: Vec::new(),
             layers: layers
                 .iter()
@@ -372,10 +388,12 @@ impl ImageRig {
     }
 
     pub async fn record_in_index(&self, reference: &str) -> bool {
-        let listed = image_store::list_with(&self.fs, &self.images_root, &self.active)
-            .await
-            .expect("listing the index");
-        listed.iter().any(|i| i.reference == reference)
+        let files = self.fs.files.lock().unwrap();
+        files.iter().any(|(path, bytes)| {
+            path.starts_with(&self.images_root)
+                && serde_json::from_slice::<ImageRecord>(bytes)
+                    .is_ok_and(|record| record.reference == reference)
+        })
     }
 
     pub async fn recorded_digest(&self, reference: &str) -> Option<String> {

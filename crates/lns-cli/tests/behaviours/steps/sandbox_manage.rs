@@ -191,16 +191,6 @@ fn reports_one_held_cached_sandbox(w: &mut BehaviourWorld, reference: String, ru
     });
 }
 
-#[given(regex = r#"^the service reports a cached sandbox "([^"]+)" and a cached image "([^"]+)"$"#)]
-fn reports_a_sandbox_and_an_image(w: &mut BehaviourWorld, sandbox: String, image: String) {
-    w.sandbox.response = Some(Response::ImageList {
-        images: vec![
-            cached(&sandbox, CachedKind::Sandbox, None),
-            cached(&image, CachedKind::Image, None),
-        ],
-    });
-}
-
 #[given(regex = r#"^the service reports a cached sandbox "([^"]+)" and a cached mixin "([^"]+)"$"#)]
 fn reports_a_sandbox_and_a_mixin(w: &mut BehaviourWorld, sandbox: String, mixin: String) {
     w.sandbox.response = Some(Response::ImageList {

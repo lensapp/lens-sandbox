@@ -3948,8 +3948,8 @@ mod tests {
         let after_tag = as_json(handle_request(&Request::ListImages, now).await);
         assert_eq!(
             after_tag["images"].as_array().unwrap().len(),
-            3,
-            "the cached base image and both sandbox references are listed"
+            2,
+            "both sandbox references are listed while the base image stays cache-internal"
         );
         // Drop the tag copy so the original layer-sweep assertions below still hold.
         as_json(
@@ -4102,8 +4102,12 @@ mod tests {
             .map(|i| i["reference"].as_str().unwrap().to_string())
             .collect();
         assert!(
-            refs.contains(&artifact_ref) && refs.contains(&base_ref),
-            "pull must cache the sandbox and prefetch its base image, got {refs:?}"
+            refs.contains(&artifact_ref) && !refs.contains(&base_ref),
+            "pull must cache the sandbox while its prefetched base stays cache-internal, got {refs:?}"
+        );
+        assert!(
+            layer_cache.contains(&layer_digest).unwrap(),
+            "pull must prefetch the base image's layers"
         );
     }
 }
