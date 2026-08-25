@@ -319,7 +319,7 @@ where
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
         SandboxCommand::Start(args) => start(svc, args, term, out, stdout, stderr).await,
-        SandboxCommand::Prune(args) => prune(svc, args, term, input, out).await,
+        SandboxCommand::Prune(args) => prune(svc, args, term, input, out, stderr).await,
         SandboxCommand::Inspect(args) => inspect(svc, &args.run, args.output.format, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -582,14 +582,15 @@ where
     .await
 }
 
-async fn prune<I: std::io::BufRead, W: std::io::Write>(
+async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>(
     svc: &impl SandboxService,
     args: &SandboxPruneArgs,
     term: TermInfo,
     input: &mut I,
     out: &mut W,
+    stderr: &mut E,
 ) -> Result<i32> {
-    if !args.force && !confirm_prune(term, input, out)? {
+    if !args.force && !confirm_prune(term, input, stderr).await? {
         return Ok(0);
     }
     match svc.one_shot(Request::PruneRuns).await? {
@@ -609,27 +610,28 @@ async fn prune<I: std::io::BufRead, W: std::io::Write>(
 }
 
 /// §7.2: with no terminal to ask at, a command that would have asked refuses and names the flag that would have answered it.
-fn confirm_prune<I: std::io::BufRead, W: std::io::Write>(
+async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
     term: TermInfo,
     input: &mut I,
-    out: &mut W,
+    err: &mut E,
 ) -> Result<bool> {
     if !term.stdin_is_tty {
         bail!(
             "this removes every stopped sandbox, writable layers included; there is no terminal to ask at, so pass --force to confirm"
         );
     }
-    write!(
-        out,
-        "This removes every stopped sandbox, writable layers included. Continue? [y/N] "
-    )?;
-    out.flush()?;
+    err.write_all(
+        b"This removes every stopped sandbox, writable layers included. Continue? [y/N] ",
+    )
+    .await?;
+    err.flush().await?;
     let mut line = String::new();
     input.read_line(&mut line)?;
     let answer = line.trim();
     let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
     if !yes {
-        writeln!(out, "Aborted.")?;
+        err.write_all(b"Aborted.\n").await?;
+        err.flush().await?;
     }
     Ok(yes)
 }
@@ -1150,6 +1152,7 @@ mod tests {
             TermInfo::default(),
             &mut std::io::empty(),
             &mut Vec::new(),
+            &mut Vec::new(),
         )
         .await
         .unwrap_err();
@@ -1161,6 +1164,7 @@ mod tests {
             &SandboxPruneArgs { force: true },
             TermInfo::default(),
             &mut std::io::empty(),
+            &mut Vec::new(),
             &mut Vec::new(),
         )
         .await
