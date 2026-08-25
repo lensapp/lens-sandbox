@@ -25,6 +25,17 @@ pub(crate) async fn shutdown_after_session(
     Ok(())
 }
 
+pub(crate) async fn publish_exit_after_quiesce(
+    run_id: &str,
+    code: i32,
+    shutdown: impl std::future::Future<Output = Result<()>>,
+) -> Result<i32> {
+    let quiesce = shutdown.await;
+    crate::run_registry::set_exit_code(run_id, code);
+    quiesce?;
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +144,49 @@ mod tests {
             fake.unbind_instants().len(),
             1,
             "ports still released on panic"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn exit_is_published_only_after_the_vm_quiesce() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let seen = Arc::new(Mutex::new(None));
+        let seen_in_shutdown = seen.clone();
+        let shutdown_id = id.clone();
+        let code = publish_exit_after_quiesce(&id, 7, async move {
+            *seen_in_shutdown.lock().unwrap() = crate::run_registry::status(&shutdown_id);
+            Ok(())
+        })
+        .await;
+        let status_after = crate::run_registry::status(&id);
+        crate::run_registry::deregister(&id);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(lns_ipc::RunStatus::Running),
+            "rm and prune must not see Exited while the VM still holds the writable layer"
+        );
+        assert_eq!(status_after, Some(lns_ipc::RunStatus::Exited { code: 7 }));
+        assert_eq!(code.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_failed_quiesce_still_publishes_the_exit() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let result =
+            publish_exit_after_quiesce(&id, 3, async { anyhow::bail!("vm never stopped") }).await;
+        let status_after = crate::run_registry::status(&id);
+        crate::run_registry::deregister(&id);
+        assert!(result.is_err());
+        assert_eq!(
+            status_after,
+            Some(lns_ipc::RunStatus::Exited { code: 3 }),
+            "a failed quiesce must not leave the run stuck as Running forever"
         );
     }
 }
