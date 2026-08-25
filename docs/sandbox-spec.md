@@ -1407,7 +1407,7 @@ egress, not each contributor's opinion of it.
 
 ## 5. Validation summary
 
-Offline validation (`lns sandbox validate`, and every load path including
+Offline validation (`lns artifact validate`, and every load path including
 `lns run` preflight) enforces, in addition to the per-field rules above:
 
 - **Document**: `apiVersion` is `lns.run/v1`; `kind` is one of the three;
@@ -1468,7 +1468,7 @@ there, because they depend on state no document carries — they run at launch:
 | The resolved source list in [§3.3.2](#332-merge-rules) | The mixin graph — its depth, its cycles, and which source wins each setting — is only known once each mixin, and each mixin it declares, is pulled. |
 
 The last one is why a merge collision refuses the **run** rather than the
-document: `lns sandbox validate` cannot see it.
+document: `lns artifact validate` cannot see it.
 
 ---
 
@@ -1699,5 +1699,5 @@ gave.
 - [Credentials](credentials.md) — placeholders, and the per-machine values a
   credential resolves against.
 - [Connectors](connectors.md) — connecting a workload to an external service.
-- [CLI reference](cli-reference.md) — `lns sandbox init`, `validate`, `inspect`,
+- [CLI reference](cli-reference.md) — `lns artifact init`, `validate`, `inspect`,
   `push`.
