@@ -801,6 +801,20 @@ fn service_received_no_pull(w: &mut BehaviourWorld) {
     );
 }
 
+#[then(regex = r#"^the inspect request names the "([^"]+)" mixin directory by its absolute path$"#)]
+fn inspect_request_roots_the_mixin(w: &mut BehaviourWorld, name: String) {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let mixins = requests
+        .iter()
+        .find_map(|request| match request {
+            Request::InspectImage { mixins, .. } => Some(mixins.clone()),
+            _ => None,
+        })
+        .expect("an inspect request");
+    let expected = w.cwd.as_ref().expect("cwd").path().join(&name);
+    assert_eq!(mixins, vec![expected.to_str().expect("utf-8 path").to_string()]);
+}
+
 #[then("the pull request is bound to the inspected digest")]
 fn pull_is_bound_to_inspected_digest(w: &mut BehaviourWorld) {
     let requests = w.sandbox.requests.lock().unwrap();
@@ -886,12 +900,21 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = if owner == lns_cli::shortcut::Owner::Artifact {
+        let mut inspect_args = lns_cli::artifact::InspectArgs {
+            reference: Some(reference),
+            mixins,
+            file: None,
+        };
+        if !inspect_args.mixins.is_empty() {
+            if w.cwd.is_none() {
+                w.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
+            }
+            inspect_args
+                .root_mixins(w.cwd.as_ref().expect("cwd").path())
+                .expect("root mixins");
+        }
         lns_cli::artifact::run_with_writers(
-            &lns_cli::artifact::ArtifactCommand::Inspect(lns_cli::artifact::InspectArgs {
-                reference: Some(reference),
-                mixins,
-                file: None,
-            }),
+            &lns_cli::artifact::ArtifactCommand::Inspect(inspect_args),
             &svc,
             TermInfo::default(),
             &mut std::io::Cursor::new(""),
