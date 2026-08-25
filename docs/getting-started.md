@@ -211,9 +211,10 @@ To delete that data too, add `--purge`:
 lns uninstall --purge
 ```
 
-`--purge` keeps only files you authored yourself, such as your
-`~/.lns/connectors.yaml` catalog and each project's `lns-local-mixin.yaml`, and prints
-what it left behind.
+`--purge` deletes the whole data directory — including the `~/.lns/connectors.yaml`
+connector catalog and stored credentials — and shows the resolved directory in its
+confirmation prompt. Files in your projects, such as each directory's `lns.yaml`
+and `lns-local-mixin.yaml`, are never touched.
 
 ## Where to go next
 

@@ -62,11 +62,12 @@ async fn build_plan(purge: bool) -> Result<UninstallPlan> {
 }
 
 fn purge_targets_from_env() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    Ok(super::purge_targets(PurgeSources {
+    super::purge_targets(PurgeSources {
         lns_home: lns_ipc::lns_home().context("resolving the lns home directory")?,
+        home: dirs::home_dir(),
         socket: crate::service::socket_path()?,
         socket_overridden: std::env::var_os("LNS_SOCKET_PATH").is_some(),
-    }))
+    })
 }
 
 struct RealUninstallService {

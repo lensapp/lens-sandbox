@@ -37,7 +37,10 @@ pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
     let Ok(reference) = image.parse::<Reference>() else {
         return RegistryAuth::Anonymous;
     };
-    let store = JsonFileRegistryAuthStore::new(lns_ipc::registry_auth_path());
+    let Ok(auth_path) = lns_ipc::registry_auth_path() else {
+        return RegistryAuth::Anonymous;
+    };
+    let store = JsonFileRegistryAuthStore::new(auth_path);
     let Ok(file) = store.load() else {
         return RegistryAuth::Anonymous;
     };

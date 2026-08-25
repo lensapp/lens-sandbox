@@ -87,7 +87,7 @@ where
     A: LoginAgent,
     F: Fs,
 {
-    if !args.yes && !confirm(args.purge, input, writer)? {
+    if !args.yes && !confirm(args.purge, &plan.purge_dirs, input, writer)? {
         writeln!(writer, "Uninstall cancelled.")?;
         return Ok(0);
     }
@@ -104,11 +104,26 @@ where
     Ok(0)
 }
 
-fn confirm(purge: bool, input: &mut dyn BufRead, writer: &mut impl Write) -> Result<bool> {
+fn confirm(
+    purge: bool,
+    purge_dirs: &[PathBuf],
+    input: &mut dyn BufRead,
+    writer: &mut impl Write,
+) -> Result<bool> {
     if purge {
+        let targets = purge_dirs
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let data_clause = if targets.is_empty() {
+            "deletes all local data".to_string()
+        } else {
+            format!("deletes all local data under {targets}")
+        };
         write!(
             writer,
-            "This stops all running sandboxes, removes the lns binaries and background service, and deletes all local data (cached images, named volumes, the audit trail, and stored credentials). Continue? [y/N] "
+            "This stops all running sandboxes, removes the lns binaries and background service, and {data_clause} (cached images, named volumes, the audit trail, and stored credentials). Continue? [y/N] "
         )?;
     } else {
         write!(
@@ -240,11 +255,21 @@ async fn remove_binaries(
 /// What `--purge` clears: the one directory lns keeps everything in, and the socket, which lives with the service rather than with your data.
 pub(crate) struct PurgeSources {
     pub lns_home: PathBuf,
+    pub home: Option<PathBuf>,
     pub socket: PathBuf,
     pub socket_overridden: bool,
 }
 
-pub(crate) fn purge_targets(src: PurgeSources) -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub(crate) fn purge_targets(src: PurgeSources) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    if !src.lns_home.is_absolute()
+        || src.lns_home.parent().is_none()
+        || src.home.as_deref() == Some(src.lns_home.as_path())
+    {
+        bail!(
+            "refusing to purge {}: the lns data root must be an absolute directory of its own, not the filesystem root or your home directory — check LNS_HOME",
+            src.lns_home.display()
+        );
+    }
     let mut dirs = vec![src.lns_home];
     let mut files = Vec::new();
     // A socket at its default lns-owned location takes its whole parent directory; an env-overridden one may live anywhere, so only the socket and the log beside it go.
@@ -257,7 +282,7 @@ pub(crate) fn purge_targets(src: PurgeSources) -> (Vec<PathBuf>, Vec<PathBuf>) {
             files.push(src.socket);
         }
     }
-    (dirs, files)
+    Ok((dirs, files))
 }
 
 #[cfg(test)]
@@ -897,6 +922,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn purge_confirmation_shows_the_resolved_roots_it_will_delete() {
+        let rig = rig(
+            FakeService::default(),
+            stopped_client(),
+            FakeAgent::new(DisableOutcome::WasNotRegistered),
+            FakeFs::default(),
+        );
+        let plan = UninstallPlan {
+            binaries: vec![PathBuf::from("/bin/lns")],
+            purge_dirs: vec![
+                PathBuf::from("/home/me/.lns"),
+                PathBuf::from("/run/user/1000/lns"),
+            ],
+            purge_files: Vec::new(),
+        };
+        let (code, out) = rig.run(&args(true, false), &plan, "n\n").await;
+        assert_eq!(code.unwrap(), 0);
+        assert!(
+            out.contains("/home/me/.lns") && out.contains("/run/user/1000/lns"),
+            "the prompt must show what will actually be deleted: {out}"
+        );
+    }
+
+    #[tokio::test]
     async fn non_purge_confirmation_says_data_is_kept() {
         let rig = rig(
             FakeService::default(),
@@ -1013,14 +1062,56 @@ mod tests {
     fn sources() -> PurgeSources {
         PurgeSources {
             lns_home: PathBuf::from("/home/me/.lns"),
+            home: Some(PathBuf::from("/home/me")),
             socket: PathBuf::from("/run/user/1000/lns/service.sock"),
             socket_overridden: false,
         }
     }
 
     #[test]
+    fn purge_refuses_the_filesystem_root_as_a_data_root() {
+        let err = purge_targets(PurgeSources {
+            lns_home: PathBuf::from("/"),
+            ..sources()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains('/') && err.to_string().contains("refusing"),
+            "an LNS_HOME of / must never become an rm -rf target: {err}"
+        );
+    }
+
+    #[test]
+    fn purge_refuses_your_home_directory_itself_as_a_data_root() {
+        let err = purge_targets(PurgeSources {
+            lns_home: PathBuf::from("/home/me"),
+            ..sources()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("/home/me"),
+            "LNS_HOME=$HOME must be refused, not deleted: {err}"
+        );
+    }
+
+    #[test]
+    fn purge_refuses_a_relative_data_root() {
+        for bad in [".", "relative/dir"] {
+            let err = purge_targets(PurgeSources {
+                lns_home: PathBuf::from(bad),
+                ..sources()
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("refusing"),
+                "{bad:?} must be refused: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn purge_takes_the_one_directory_lns_keeps_everything_in() {
-        let (dirs, files) = purge_targets(sources());
+        let (dirs, files) = purge_targets(sources()).unwrap();
         assert_eq!(
             dirs,
             vec![
@@ -1037,7 +1128,8 @@ mod tests {
         let (dirs, files) = purge_targets(PurgeSources {
             socket_overridden: true,
             ..sources()
-        });
+        })
+        .unwrap();
         assert!(
             !dirs.contains(&PathBuf::from("/run/user/1000/lns")),
             "an override's arbitrary parent must never be rm -rf'd"
@@ -1051,7 +1143,8 @@ mod tests {
         let (dirs, files) = purge_targets(PurgeSources {
             socket: PathBuf::from("/"),
             ..sources()
-        });
+        })
+        .unwrap();
         assert_eq!(dirs, vec![PathBuf::from("/home/me/.lns")]);
         assert_eq!(files, vec![PathBuf::from("/")]);
     }

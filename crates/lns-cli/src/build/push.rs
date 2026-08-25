@@ -7,9 +7,9 @@ use oci_client::{Reference, RegistryOperation, client::ClientConfig, secrets::Re
 use crate::build::push_auth::{auth_error, push_error, select_auth};
 
 /// The stored login for `reference`'s registry, or anonymous when none is recorded.
-fn registry_auth_for(reference: &Reference) -> RegistryAuth {
-    let loaded = JsonFileRegistryAuthStore::new(lns_ipc::registry_auth_path()).load();
-    select_auth(loaded, reference.registry())
+fn registry_auth_for(reference: &Reference) -> Result<RegistryAuth> {
+    let loaded = JsonFileRegistryAuthStore::new(lns_ipc::registry_auth_path()?).load();
+    Ok(select_auth(loaded, reference.registry()))
 }
 
 /// Upload a built artifact's blobs and then its exact manifest bytes to `target`, reusing the stored `lns login` credential (which must carry push scope).
@@ -21,7 +21,7 @@ pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
         protocol: lns_artifact::client_protocol_for(reference.registry()),
         ..Default::default()
     });
-    let auth = registry_auth_for(&reference);
+    let auth = registry_auth_for(&reference)?;
     client
         .auth(&reference, &auth, RegistryOperation::Push)
         .await
