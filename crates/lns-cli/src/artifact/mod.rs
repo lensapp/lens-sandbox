@@ -309,6 +309,14 @@ pub struct InspectArgs {
     pub mixins: Vec<String>,
 }
 
+impl InspectArgs {
+    /// A `--mixin` directory is the user's, so it roots where they typed it; the service reads an absolute path or nothing.
+    pub fn root_mixins(&mut self, cwd: &std::path::Path) -> Result<()> {
+        self.mixins = crate::run::target::root_named_directories(&self.mixins, cwd)?;
+        Ok(())
+    }
+}
+
 #[derive(clap::Args)]
 pub struct RmArgs {
     #[arg(value_name = "REF", help = "Cached artifact reference to remove.")]
@@ -1518,6 +1526,21 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[test]
+    fn a_relative_mixin_directory_roots_at_the_invocation_directory() {
+        let mut args = InspectArgs {
+            reference: Some("ghcr.io/team/hermes:1.4.0".into()),
+            file: None,
+            mixins: vec!["./obs".into(), "ghcr.io/team/obs:1".into()],
+        };
+        args.root_mixins(std::path::Path::new("/project/sub")).unwrap();
+        assert_eq!(
+            args.mixins,
+            vec!["/project/sub/obs".to_string(), "ghcr.io/team/obs:1".to_string()],
+            "a directory roots where the user typed it; a registry reference passes untouched"
+        );
     }
 
     #[test]

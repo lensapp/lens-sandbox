@@ -66,6 +66,12 @@ Feature: inspecting a typed artifact before running it
     Then the exit code is 0
     And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
+  Scenario: a mixin directory named by a relative path is rooted before it reaches the service
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox with launch settings
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin ./obs"
+    Then the exit code is 0
+    And the inspect request names the "obs" mixin directory by its absolute path
+
   Scenario: a mixin the user names reads as the tag and the digest it pinned to
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox the user's mixin "obs-tools:2" resolved into "ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
     When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin obs-tools:2"
