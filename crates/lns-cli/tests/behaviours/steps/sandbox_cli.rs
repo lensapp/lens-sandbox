@@ -169,6 +169,36 @@ fn then_kill_request(w: &mut BehaviourWorld, run_id: u32) -> Result<(), String> 
     }
 }
 
+#[then(regex = r#"^the command's stderr contains "([^"]*)"$"#)]
+fn then_stderr_contains(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let (_, stderr) = w
+        .split_streams
+        .as_ref()
+        .ok_or("no split streams captured")?;
+    if stderr.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected stderr to contain {needle:?}, got {stderr:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the command's stdout does not contain "([^"]*)"$"#)]
+fn then_stdout_does_not_contain(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let (stdout, _) = w
+        .split_streams
+        .as_ref()
+        .ok_or("no split streams captured")?;
+    if stdout.contains(&needle) {
+        Err(format!(
+            "expected stdout not to contain {needle:?}, got {stdout:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[then(regex = r#"^the output does not contain "([^"]*)"$"#)]
 fn then_output_does_not_contain(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
     let output = &w.result.as_ref().ok_or("no CLI run captured")?.output;
@@ -437,6 +467,14 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     )
     .await;
     w.sandbox.workload_stdout = stdout;
+    w.split_streams = Some((
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&w.sandbox.workload_stdout)
+        ),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ));
     out.extend_from_slice(&stderr);
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
@@ -492,6 +530,11 @@ pub(crate) async fn drive_artifact_command(w: &mut BehaviourWorld, cmd: &str) {
         &mut stderr,
     )
     .await;
+    w.split_streams = Some((
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ));
+    out.extend_from_slice(&stderr);
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
             exit_code,

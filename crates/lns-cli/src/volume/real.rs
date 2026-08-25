@@ -13,7 +13,14 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         crate::service::require_running().await?;
         let svc = RealVolumeService::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        crate::volume::run(&args.command, &svc, ctx.input, &mut out).await
+        crate::volume::run(
+            &args.command,
+            &svc,
+            ctx.input,
+            &mut out,
+            &mut tokio::io::stderr(),
+        )
+        .await
     })
 }
 

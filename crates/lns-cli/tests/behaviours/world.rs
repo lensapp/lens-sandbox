@@ -15,6 +15,7 @@ use tokio::io::DuplexStream;
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
     pub result: Option<CliRun>,
+    pub split_streams: Option<(String, String)>,
     /// The stopped run a start scenario targets.
     pub start_target: Option<String>,
     pub argv: Vec<String>,
