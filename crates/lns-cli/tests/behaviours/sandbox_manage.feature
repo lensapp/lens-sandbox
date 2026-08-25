@@ -22,12 +22,17 @@ Feature: managing cached sandboxes
     Then the exit code is 0
     And the output contains "000000030000"
 
-  Scenario: ls --kind lists only the artifacts of that kind
-    Given the service reports a cached sandbox "hermes:1.4.0" and a cached image "alpine:3.20"
-    When the user runs artifact command "ls --kind image"
+  Scenario: ls --kind sandbox lists only the cached sandboxes
+    Given the service reports a cached sandbox "hermes:1.4.0" and a cached mixin "team/lint:1.0"
+    When the user runs artifact command "ls --kind sandbox"
     Then the exit code is 0
-    And the output contains "alpine:3.20"
-    And the output does not contain "hermes:1.4.0"
+    And the output contains "hermes:1.4.0"
+    And the output does not contain "team/lint:1.0"
+
+  Scenario: ls --kind image is no longer a kind the cache admits to
+    When I run "lns artifact ls --kind image"
+    Then the exit code is 2
+    And the output contains "invalid value"
 
   Scenario: ls --kind mixin lists only the cached mixins
     Given the service reports a cached sandbox "hermes:1.4.0" and a cached mixin "team/lint:1.0"
