@@ -74,6 +74,10 @@ pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunF
     Box::pin(async move {
         let started = async {
             let args = ExecArgs::from_arg_matches(matches)?;
+            if let Some(refusal) = crate::sandbox::document_refusal("exec", &args.run) {
+                eprintln!("error: {refusal}");
+                return Ok(2);
+            }
             require_running().await?;
             exec_image(args).await
         };
