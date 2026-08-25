@@ -3740,7 +3740,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn handle_request_pull_of_a_mixin_caches_its_graph_and_records_no_row() {
+    async fn handle_request_pull_of_a_mixin_records_its_graph_in_the_index() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let now = Instant::now();
@@ -3774,10 +3774,23 @@ mod tests {
         );
 
         let listed = as_json(handle_request(&Request::ListImages, now).await);
+        let rows = listed["images"].as_array().unwrap();
         assert_eq!(
-            listed["images"].as_array().unwrap().len(),
-            0,
-            "nothing runs a mixin and nothing has to reclaim it, so it takes no index row"
+            rows.len(),
+            2,
+            "the pulled mixin and the mixin it layers on each take an index row; got {listed}"
+        );
+        for row in rows {
+            assert_eq!(row["kind"], "mixin", "got {row}");
+        }
+        assert!(
+            rows.iter().any(|row| row["reference"] == parent.0.as_str()),
+            "got {listed}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["reference"] == child.0.as_str() && row["digest"] == child.1),
+            "got {listed}"
         );
     }
 

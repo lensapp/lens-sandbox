@@ -13,10 +13,19 @@ use sha2::{Digest, Sha256};
 
 use crate::image::PulledImage;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordKind {
+    Image,
+    Sandbox,
+    Mixin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageRecord {
     pub reference: String,
     pub digest: String,
+    pub kind: RecordKind,
     #[serde(default)]
     pub dependencies: Vec<String>,
     pub layers: Vec<LayerRef>,
@@ -64,14 +73,19 @@ pub fn artifact_record_for(
     sandbox: &crate::image::PulledSandbox,
     base_image: &PulledImage,
     pulled_unix_secs: u64,
-) -> ImageRecord {
-    ImageRecord {
+) -> Result<ImageRecord> {
+    let mut dependencies = vec![base_image.reference.whole()];
+    for mixin in &sandbox.mixins {
+        dependencies.push(normalize_reference(mixin)?);
+    }
+    Ok(ImageRecord {
         reference: sandbox.reference.whole(),
         digest: sandbox.digest.clone(),
-        dependencies: vec![base_image.reference.whole()],
+        kind: RecordKind::Sandbox,
+        dependencies,
         layers: Vec::new(),
         pulled_unix_secs,
-    }
+    })
 }
 
 /// The dependency-only index record a sandbox *run* writes so its base image is protected from `rm`/`prune` while the sandbox is live or cached — the same base linkage `lns pull` persists, minus the base's own layer record (boot writes that).
@@ -84,6 +98,7 @@ fn artifact_run_record(
     Ok(ImageRecord {
         reference: normalize_reference(reference)?,
         digest: digest.to_string(),
+        kind: RecordKind::Sandbox,
         dependencies: vec![normalize_reference(base_image)?],
         layers: Vec::new(),
         pulled_unix_secs,
@@ -94,6 +109,7 @@ pub fn record_for(pulled: &PulledImage, pulled_unix_secs: u64) -> ImageRecord {
     ImageRecord {
         reference: pulled.reference.whole(),
         digest: pulled.digest.clone(),
+        kind: RecordKind::Image,
         dependencies: Vec::new(),
         layers: pulled
             .layer_digests
@@ -168,12 +184,11 @@ fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
         .map(|r| r.id.clone())
 }
 
-/// An artifact record names the base image it needs and carries no layers of its own; a plain image record is the other way round, so the dependency edge is what tells the two apart.
 fn kind_of(record: &ImageRecord) -> lns_ipc::CachedKind {
-    if record.dependencies.is_empty() {
-        lns_ipc::CachedKind::Image
-    } else {
-        lns_ipc::CachedKind::Sandbox
+    match record.kind {
+        RecordKind::Image => lns_ipc::CachedKind::Image,
+        RecordKind::Sandbox => lns_ipc::CachedKind::Sandbox,
+        RecordKind::Mixin => lns_ipc::CachedKind::Mixin,
     }
 }
 
@@ -521,7 +536,25 @@ pub async fn record(pulled: &PulledImage) -> Result<()> {
 pub async fn record_artifact_run(reference: &str, digest: &str, base_image: &str) -> Result<()> {
     let record = artifact_run_record(reference, digest, base_image, now_unix_secs())?;
     let _shared = lock_shared().await;
-    record_with(&real::RealFs, &images_root()?, &record).await
+    record_artifact_run_with(&real::RealFs, &images_root()?, record).await
+}
+
+/// A run's record must not displace what a pull already knew, so an existing record's edges carry over into the rewrite.
+async fn record_artifact_run_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    mut record: ImageRecord,
+) -> Result<()> {
+    if let Ok(bytes) = fs.read(&record_path(images_root, &record.reference)).await
+        && let Ok(existing) = serde_json::from_slice::<ImageRecord>(&bytes)
+    {
+        for dependency in existing.dependencies {
+            if !record.dependencies.contains(&dependency) {
+                record.dependencies.push(dependency);
+            }
+        }
+    }
+    record_with(fs, images_root, &record).await
 }
 
 pub async fn pull_with<F: Fs>(
@@ -604,7 +637,7 @@ pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
     let base_image = crate::image::pull_dependency(&sandbox.base_image, &layer_cache)
         .await
         .with_context(|| format!("fetching the sandbox's base image {}", sandbox.base_image))?;
-    let record = artifact_record_for(&sandbox, &base_image, now_unix_secs());
+    let record = artifact_record_for(&sandbox, &base_image, now_unix_secs())?;
     let (image_info, warnings) = finish_pull_with(
         &real::RealFs,
         &images_root()?,
@@ -621,17 +654,61 @@ pub async fn pull(image: &str, expected_digest: &str) -> Result<PullOutcome> {
     })
 }
 
-/// A mixin is config-only, so pulling one warms the manifest cache for it and every mixin it names — that is what lets a digest-pinned graph resolve offline afterwards. It records no index entry: nothing runs it, and nothing has to reclaim it.
+/// A mixin is config-only, so pulling one warms the manifest cache for it and every mixin it names — that is what lets a digest-pinned graph resolve offline afterwards — and records the graph in the index so `ls`, `rm`, and `prune` see it.
 async fn pull_mixin_graph(image: &str, mixin: crate::image::PulledMixin) -> Result<PullOutcome> {
-    let cached =
+    let warmed =
         crate::artifact::mixin::warm(&mixin.mixins, &crate::artifact::real::RegistryMixins)
             .await
             .with_context(|| format!("caching the mixins {image} layers on"))?;
+    let records = mixin_graph_records(image, &mixin.digest, &warmed, now_unix_secs())?;
+    let images_root = images_root()?;
+    let _shared = lock_shared().await;
+    for record in &records {
+        record_with(&real::RealFs, &images_root, record).await?;
+    }
     Ok(PullOutcome::Mixin {
         reference: image.to_string(),
         digest: mixin.digest,
-        cached_mixins: cached,
+        cached_mixins: warmed.nodes.len(),
     })
+}
+
+/// One index record per document of the pulled graph, edges pinned, so holder tracking and reclamation treat a mixin like any other cached artifact.
+fn mixin_graph_records(
+    reference: &str,
+    digest: &str,
+    warmed: &crate::artifact::mixin::WarmedGraph,
+    pulled_unix_secs: u64,
+) -> Result<Vec<ImageRecord>> {
+    let mut records = vec![ImageRecord {
+        reference: normalize_reference(reference)?,
+        digest: digest.to_string(),
+        kind: RecordKind::Mixin,
+        dependencies: warmed.roots.clone(),
+        layers: Vec::new(),
+        pulled_unix_secs,
+    }];
+    for node in &warmed.nodes {
+        records.push(ImageRecord {
+            reference: normalize_reference(&node.pinned)?,
+            digest: digest_of_pinned(&node.pinned)?,
+            kind: RecordKind::Mixin,
+            dependencies: node.mixins.clone(),
+            layers: Vec::new(),
+            pulled_unix_secs,
+        });
+    }
+    Ok(records)
+}
+
+fn digest_of_pinned(pinned: &str) -> Result<String> {
+    let parsed: oci_client::Reference = pinned
+        .parse()
+        .with_context(|| format!("invalid mixin reference: {pinned}"))?;
+    parsed
+        .digest()
+        .map(str::to_string)
+        .with_context(|| format!("mixin {pinned} resolved without a digest pin"))
 }
 
 #[cfg(test)]
@@ -1190,6 +1267,7 @@ mod tests {
         ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "d".repeat(64)),
+            kind: RecordKind::Image,
             dependencies: Vec::new(),
             layers: layers
                 .iter()
@@ -1307,12 +1385,14 @@ mod tests {
     }
 
     #[test]
-    fn artifact_record_for_normalizes_the_reference_and_links_its_base_image() {
+    fn artifact_record_for_normalizes_the_reference_and_links_its_base_image_and_mixins() {
         let base_reference = format!("registry.example.test/base@sha256:{}", "a".repeat(64));
+        let mixin_reference = format!("registry.example.test/team/lint@sha256:{}", "b".repeat(64));
         let sandbox = crate::image::PulledSandbox {
             reference: "some-sandbox:1.0".parse().unwrap(),
             digest: "sha256:manifest".into(),
             base_image: base_reference.clone(),
+            mixins: vec![mixin_reference.clone()],
             tools: Vec::new(),
         };
         let base_image = PulledImage {
@@ -1328,11 +1408,12 @@ mod tests {
             artifact_type: None,
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
         };
-        let record = artifact_record_for(&sandbox, &base_image, 42);
+        let record = artifact_record_for(&sandbox, &base_image, 42).unwrap();
         assert_eq!(record.reference, "docker.io/library/some-sandbox:1.0");
         assert_eq!(record.digest, "sha256:manifest");
+        assert_eq!(record.kind, RecordKind::Sandbox);
         assert_eq!(record.pulled_unix_secs, 42);
-        assert_eq!(record.dependencies, vec![base_reference]);
+        assert_eq!(record.dependencies, vec![base_reference, mixin_reference]);
         assert_eq!(
             record.layers,
             vec![],
@@ -1966,13 +2047,132 @@ mod tests {
     }
 
     #[test]
-    fn records_written_before_dependency_tracking_deserialize_with_no_dependencies() {
-        let record: ImageRecord = serde_json::from_str(
-            r#"{"reference":"registry.example.test/team/old:1","digest":"sha256:old","layers":[],"pulled_unix_secs":1}"#,
+    fn mixin_graph_records_index_the_pulled_mixin_and_every_document_it_reaches() {
+        let child = format!("registry.example.test/team/lint@sha256:{}", "b".repeat(64));
+        let warmed = crate::artifact::mixin::WarmedGraph {
+            roots: vec![child.clone()],
+            nodes: vec![crate::artifact::mixin::WarmedMixin {
+                pinned: child.clone(),
+                mixins: Vec::new(),
+            }],
+        };
+        let records = mixin_graph_records(
+            "registry.example.test/team/bundle:1",
+            "sha256:r",
+            &warmed,
+            42,
         )
         .unwrap();
 
-        assert!(record.dependencies.is_empty());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].reference, "registry.example.test/team/bundle:1");
+        assert_eq!(records[0].digest, "sha256:r");
+        assert_eq!(records[0].kind, RecordKind::Mixin);
+        assert_eq!(records[0].dependencies, vec![child.clone()]);
+        assert!(
+            records[0].layers.is_empty(),
+            "a config-only artifact holds no reclaimable layers"
+        );
+        assert_eq!(records[0].pulled_unix_secs, 42);
+        assert_eq!(records[1].reference, child);
+        assert_eq!(records[1].digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(records[1].kind, RecordKind::Mixin);
+        assert!(records[1].dependencies.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_mixin_reference_cannot_be_indexed() {
+        let warmed = crate::artifact::mixin::WarmedGraph {
+            roots: Vec::new(),
+            nodes: Vec::new(),
+        };
+        let err = mixin_graph_records("###", "sha256:r", &warmed, 42)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid image reference"), "got: {err}");
+    }
+
+    #[test]
+    fn a_warmed_document_without_a_digest_pin_cannot_be_indexed() {
+        let err = digest_of_pinned("registry.example.test/team/lint:1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolved without a digest pin"), "got: {err}");
+
+        let parse_err = digest_of_pinned("###").unwrap_err().to_string();
+        assert!(
+            parse_err.contains("invalid mixin reference"),
+            "got: {parse_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_record_keeps_the_mixin_edges_a_pull_already_recorded() {
+        let reference = "ghcr.io/team/agent:1";
+        let base = "registry.example.test/team/base:1";
+        let mixin = format!("registry.example.test/team/lint@sha256:{}", "b".repeat(64));
+        let mut pulled = rec(reference, &[]);
+        pulled.kind = RecordKind::Sandbox;
+        pulled.dependencies = vec![mixin.clone()];
+        let fs = FakeFs::with_records(&[pulled]);
+        let run_record = artifact_run_record(reference, "sha256:m", base, 7).unwrap();
+
+        record_artifact_run_with(&fs, Path::new(ROOT), run_record)
+            .await
+            .unwrap();
+
+        let bytes = fs
+            .read(&record_path(Path::new(ROOT), reference))
+            .await
+            .unwrap();
+        let stored: ImageRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored.kind, RecordKind::Sandbox);
+        assert_eq!(stored.dependencies, vec![base.to_string(), mixin]);
+    }
+
+    #[tokio::test]
+    async fn a_run_record_with_no_prior_pull_writes_its_base_edge_as_is() {
+        let fs = FakeFs::default();
+        let run_record = artifact_run_record(
+            "ghcr.io/team/agent:1",
+            "sha256:m",
+            "registry.example.test/team/base:1",
+            7,
+        )
+        .unwrap();
+
+        record_artifact_run_with(&fs, Path::new(ROOT), run_record)
+            .await
+            .unwrap();
+
+        let bytes = fs
+            .read(&record_path(Path::new(ROOT), "ghcr.io/team/agent:1"))
+            .await
+            .unwrap();
+        let stored: ImageRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            stored.dependencies,
+            vec!["registry.example.test/team/base:1".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_record_written_before_kinds_were_explicit_no_longer_parses() {
+        serde_json::from_str::<ImageRecord>(
+            r#"{"reference":"registry.example.test/team/old:1","digest":"sha256:old","layers":[],"pulled_unix_secs":1}"#,
+        )
+        .expect_err("a kindless record is pre-format; the loader skips it and the artifact re-pulls");
+    }
+
+    #[tokio::test]
+    async fn a_listing_skips_a_kindless_record_instead_of_failing() {
+        let fs = FakeFs::default();
+        fs.put(
+            &record_path(Path::new(ROOT), "registry.example.test/team/old:1"),
+            br#"{"reference":"registry.example.test/team/old:1","digest":"sha256:old","layers":[],"pulled_unix_secs":1}"#,
+        );
+        let listed = list_with(&fs, Path::new(ROOT), &[]).await.unwrap();
+        assert!(listed.is_empty(), "got {listed:?}");
     }
 
     #[test]

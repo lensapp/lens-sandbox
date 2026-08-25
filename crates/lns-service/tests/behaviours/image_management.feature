@@ -26,6 +26,25 @@ Feature: image cache lifecycle — list, remove, prune
     When the images are listed
     Then the image listing names "registry.example.test/some/image:1.0" as idle
 
+  Scenario: Listing reports a cached mixin as a mixin
+    Given mixin "registry.example.test/team/lint:1.0" is cached
+    When the images are listed
+    Then the image listing reports "registry.example.test/team/lint:1.0" as a mixin
+
+  Scenario: Removing a mixin a cached sandbox layers on is refused
+    Given mixin "registry.example.test/team/lint:1.0" is cached
+    And sandbox "registry.example.test/team/agent:1.0" is cached layering on mixin "registry.example.test/team/lint:1.0"
+    When image "registry.example.test/team/lint:1.0" is removed
+    Then the request is refused because a cached sandbox requires it
+    And the image record for "registry.example.test/team/lint:1.0" remains in the cache
+
+  Scenario: A mixin a live sandbox layers on is not a prune candidate
+    Given mixin "registry.example.test/team/lint:1.0" is cached
+    And sandbox "registry.example.test/team/agent:1.0" is cached layering on mixin "registry.example.test/team/lint:1.0"
+    And a live run uses image "registry.example.test/team/agent:1.0"
+    When the prunable images are listed
+    Then the prunable listing is empty
+
   Scenario: Tagging within one repository creates another reference to the cached sandbox
     Given image "registry.example.test/team/sandbox:1.0" is cached with layer "sha256:aaa" of 3000 bytes
     When image "registry.example.test/team/sandbox:1.0" is tagged as "registry.example.test/team/sandbox:stable"

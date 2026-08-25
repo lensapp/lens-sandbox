@@ -201,6 +201,16 @@ fn reports_a_sandbox_and_an_image(w: &mut BehaviourWorld, sandbox: String, image
     });
 }
 
+#[given(regex = r#"^the service reports a cached sandbox "([^"]+)" and a cached mixin "([^"]+)"$"#)]
+fn reports_a_sandbox_and_a_mixin(w: &mut BehaviourWorld, sandbox: String, mixin: String) {
+    w.sandbox.response = Some(Response::ImageList {
+        images: vec![
+            cached(&sandbox, CachedKind::Sandbox, None),
+            cached(&mixin, CachedKind::Mixin, None),
+        ],
+    });
+}
+
 #[given(regex = r#"^"([^"]+)" names both a sandbox and a cached artifact$"#)]
 fn names_both(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name.clone());

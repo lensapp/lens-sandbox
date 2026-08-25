@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lns_service::image_store::{
-    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RemovedImage, RuntimeCacheEntryKind,
-    RuntimeCacheFs, RuntimeCacheMetadata,
+    self, Caches, Fs, ImageRecord, LayerRef, PruneReport, RecordKind, RemovedImage,
+    RuntimeCacheEntryKind, RuntimeCacheFs, RuntimeCacheMetadata,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -207,6 +207,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
+            kind: RecordKind::Image,
             dependencies: Vec::new(),
             layers: vec![LayerRef {
                 digest: digest.to_string(),
@@ -229,6 +230,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
+            kind: RecordKind::Image,
             dependencies: Vec::new(),
             layers: layers
                 .iter()
@@ -274,6 +276,7 @@ impl ImageRig {
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: format!("sha256:{}", "f".repeat(64)),
+            kind: RecordKind::Sandbox,
             dependencies: vec![base.to_string()],
             layers: vec![LayerRef {
                 digest: digest.to_string(),
@@ -284,6 +287,34 @@ impl ImageRig {
         image_store::record_with(&self.fs, &self.images_root, &record)
             .await
             .expect("seeding a dependent sandbox record");
+    }
+
+    pub async fn seed_mixin(&mut self, reference: &str) {
+        let record = ImageRecord {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", "e".repeat(64)),
+            kind: RecordKind::Mixin,
+            dependencies: Vec::new(),
+            layers: Vec::new(),
+            pulled_unix_secs: 1_765_022_400,
+        };
+        image_store::record_with(&self.fs, &self.images_root, &record)
+            .await
+            .expect("seeding a mixin record");
+    }
+
+    pub async fn seed_sandbox_on_mixin(&mut self, reference: &str, mixin: &str) {
+        let record = ImageRecord {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", "d".repeat(64)),
+            kind: RecordKind::Sandbox,
+            dependencies: vec![mixin.to_string()],
+            layers: Vec::new(),
+            pulled_unix_secs: 1_765_022_400,
+        };
+        image_store::record_with(&self.fs, &self.images_root, &record)
+            .await
+            .expect("seeding a sandbox record layering on a mixin");
     }
 
     pub async fn list_prunable(&mut self) {
