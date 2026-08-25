@@ -548,9 +548,8 @@ pub fn request_detach(run_id: &str) -> DetachOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveOutcome {
-    Removed,
+    Removed(Box<RunEntry>),
     Running,
     NotFound,
 }
@@ -560,6 +559,12 @@ pub fn remove_if_exited(run_id: &str) -> RemoveOutcome {
     remove_if_exited_from(g.as_mut(), run_id)
 }
 
+/// Puts back an entry `remove_if_exited` handed out, because its files refused to go.
+pub fn restore(run_id: String, entry: RunEntry) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.get_or_insert_with(HashMap::new).insert(run_id, entry);
+}
+
 fn remove_if_exited_from(
     map: Option<&mut HashMap<String, RunEntry>>,
     run_id: &str,
@@ -567,13 +572,13 @@ fn remove_if_exited_from(
     let Some(map) = map else {
         return RemoveOutcome::NotFound;
     };
-    match map.get(run_id) {
+    match map.remove(run_id) {
         None => RemoveOutcome::NotFound,
-        Some(h) if is_exited(h) => {
-            map.remove(run_id);
-            RemoveOutcome::Removed
+        Some(e) if is_exited(&e) => RemoveOutcome::Removed(Box::new(e)),
+        Some(e) => {
+            map.insert(run_id.to_string(), e);
+            RemoveOutcome::Running
         }
-        Some(_) => RemoveOutcome::Running,
     }
 }
 
@@ -1254,7 +1259,7 @@ mod tests {
         let logs = log_buffer(&id).expect("a finished run's logs stay readable while it is listed");
         assert_eq!(logs.read_from(0).chunks[0].bytes, b"done");
 
-        assert_eq!(remove_if_exited(&id), RemoveOutcome::Removed);
+        assert!(matches!(remove_if_exited(&id), RemoveOutcome::Removed(_)));
         assert_eq!(status(&id), None, "rm finally drops the finished run");
     }
 
@@ -1410,31 +1415,34 @@ mod tests {
         let (handle, _rx) = make_handle();
         map.insert("aa01".to_string(), RunEntry::Live(handle));
 
-        assert_eq!(
+        assert!(matches!(
             remove_if_exited_from(Some(&mut map), "aa01"),
             RemoveOutcome::Running
-        );
+        ));
         assert!(
             map.contains_key("aa01"),
             "a running run must not be removed"
         );
 
         set_status(&map, "aa01", RunStatus::Exited { code: 0 });
-        assert_eq!(
+        assert!(matches!(
             remove_if_exited_from(Some(&mut map), "aa01"),
-            RemoveOutcome::Removed
-        );
+            RemoveOutcome::Removed(_)
+        ));
         assert!(!map.contains_key("aa01"), "an exited run must be removed");
     }
 
     #[test]
     fn remove_if_exited_from_reports_not_found_for_absent_id_and_empty_registry() {
-        assert_eq!(remove_if_exited_from(None, "aa01"), RemoveOutcome::NotFound);
+        assert!(matches!(
+            remove_if_exited_from(None, "aa01"),
+            RemoveOutcome::NotFound
+        ));
         let mut empty: HashMap<String, RunEntry> = HashMap::new();
-        assert_eq!(
+        assert!(matches!(
             remove_if_exited_from(Some(&mut empty), "aa01"),
             RemoveOutcome::NotFound
-        );
+        ));
     }
 
     #[tokio::test]
@@ -1467,7 +1475,7 @@ mod tests {
         register(id.clone(), handle);
         set_exit_code(&id, 0);
 
-        assert_eq!(remove_if_exited(&id), RemoveOutcome::Removed);
+        assert!(matches!(remove_if_exited(&id), RemoveOutcome::Removed(_)));
         assert_eq!(status(&id), None);
     }
 
@@ -1477,7 +1485,7 @@ mod tests {
         let (handle, _rx) = make_handle();
         register(id.clone(), handle);
 
-        assert_eq!(remove_if_exited(&id), RemoveOutcome::Running);
+        assert!(matches!(remove_if_exited(&id), RemoveOutcome::Running));
         assert_eq!(status(&id), Some(RunStatus::Running));
 
         deregister(&id);
@@ -1486,7 +1494,7 @@ mod tests {
     #[tokio::test]
     async fn remove_if_exited_reports_not_found_for_an_unknown_run() {
         let id = "deadbeef000000000000000000000011".to_string();
-        assert_eq!(remove_if_exited(&id), RemoveOutcome::NotFound);
+        assert!(matches!(remove_if_exited(&id), RemoveOutcome::NotFound));
     }
 
     fn stopped_record(id: &str, name: &str) -> crate::run_record::RunRecord {
@@ -1565,10 +1573,10 @@ mod tests {
                 record: stopped_record("aa07", "reviewer"),
             }),
         );
-        assert_eq!(
+        assert!(matches!(
             remove_if_exited_from(Some(&mut map), "aa07"),
-            RemoveOutcome::Removed
-        );
+            RemoveOutcome::Removed(_)
+        ));
         map.insert(
             "aa08".to_string(),
             RunEntry::Stopped(StoppedRun {

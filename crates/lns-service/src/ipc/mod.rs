@@ -689,10 +689,18 @@ where
         return Response::Error { message };
     }
     match crate::run_registry::remove_if_exited(id) {
-        crate::run_registry::RemoveOutcome::Removed => {
-            note_removed(id, force);
-            crate::run::reclaim_run_dir(remover, cache_root, id);
-            Response::Acknowledged
+        crate::run_registry::RemoveOutcome::Removed(entry) => {
+            if crate::run::reclaim_run_dir(remover, cache_root, id) {
+                note_removed(id, force);
+                Response::Acknowledged
+            } else {
+                crate::run_registry::restore(id.to_string(), *entry);
+                Response::Error {
+                    message: format!(
+                        "run {id} was not removed: its files could not be deleted; check the service log, then try again"
+                    ),
+                }
+            }
         }
         crate::run_registry::RemoveOutcome::Running => Response::Error {
             message: format!(
@@ -2568,6 +2576,16 @@ mod tests {
         }
     }
 
+    struct StuckRemover;
+    impl crate::run::RemoveDir for StuckRemover {
+        fn remove_dir_all(&self, _dir: &std::path::Path) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        }
+    }
+
     fn kill_acknowledged(id: String, _sig: lns_ipc::SignalKind) -> std::future::Ready<Response> {
         crate::run_registry::set_exit_code(&id, 137);
         std::future::ready(Response::Acknowledged)
@@ -2616,6 +2634,38 @@ mod tests {
         .await;
         assert!(matches!(resp, Response::Acknowledged), "got {resp:?}");
         assert!(crate::run_registry::status(&id).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_removal_whose_files_survive_is_refused_and_forgets_nothing() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        crate::run_registry::set_exit_code(&id, 0);
+        let noted = std::sync::atomic::AtomicBool::new(false);
+        let resp = remove_run_with(
+            &id,
+            false,
+            &StuckRemover,
+            std::path::Path::new("/cache"),
+            kill_acknowledged,
+            |_, _| noted.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("not removed")),
+            "the surviving files refuse the ack: {resp:?}"
+        );
+        assert!(
+            crate::run_registry::status(&id).is_some(),
+            "the run stays listed so its record cannot resurrect beside a namesake"
+        );
+        assert!(
+            !noted.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing is audited as removed"
+        );
+        crate::run_registry::deregister(&id);
     }
 
     #[tokio::test]

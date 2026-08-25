@@ -18,6 +18,7 @@ pub fn reclaim_run_dir<R: RemoveDir>(remover: &R, cache_root: &Path, run_id: &st
     match remover.remove_dir_all(&dir) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => true,
         Err(e) => {
             let dir = dir.display();
             crate::log::warn!("run dir not reclaimed at {dir}: {e}");
@@ -109,6 +110,11 @@ mod tests {
         );
         let (gone, _) = FakeRemover::returning(Some(ErrorKind::NotFound));
         assert!(reclaim_run_dir(&gone, Path::new("/cache"), "aa07"));
+        let (no_parent, _) = FakeRemover::returning(Some(ErrorKind::NotADirectory));
+        assert!(
+            reclaim_run_dir(&no_parent, Path::new("/cache"), "aa07"),
+            "a parent that is not a directory means the run dir never existed"
+        );
         let (denied, _) = FakeRemover::returning(Some(ErrorKind::PermissionDenied));
         assert!(!reclaim_run_dir(&denied, Path::new("/cache"), "aa07"));
     }
