@@ -756,6 +756,9 @@ where
                 .await
             {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if crate::run_registry::status(id).is_some() {
+                        continue;
+                    }
                     crate::run::reclaim_run_dir(remover, cache_root, id);
                     removed.push(id.to_string());
                 }
@@ -2851,6 +2854,52 @@ mod tests {
         async fn remove_file(&self, _p: &std::path::Path) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    struct RegisterDuringScan {
+        dir: std::path::PathBuf,
+        handle: std::sync::Mutex<Option<(String, crate::run_registry::RunHandle)>>,
+    }
+    impl crate::image_store::Fs for RegisterDuringScan {
+        async fn read_dir(
+            &self,
+            _dir: &std::path::Path,
+        ) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Ok(vec![self.dir.clone()])
+        }
+        async fn read(&self, _p: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            if let Some((id, handle)) = self.handle.lock().unwrap().take() {
+                crate::run_registry::register(id, handle);
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, _p: &std::path::Path, _b: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _p: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn prune_spares_a_dir_whose_run_registers_mid_sweep() {
+        use crate::image_store::Fs as _;
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        let root = std::path::Path::new("/cache");
+        let fs = RegisterDuringScan {
+            dir: crate::cache::run_dir(root, &id),
+            handle: std::sync::Mutex::new(Some((id.clone(), handle))),
+        };
+        assert!(fs.write(std::path::Path::new("/x"), b"").await.is_ok());
+        assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
+        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        crate::run_registry::deregister(&id);
+        assert!(
+            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            "a run that registered after the snapshot must not be swept from under its boot: {resp:?}"
+        );
     }
 
     #[tokio::test]
