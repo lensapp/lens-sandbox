@@ -32,8 +32,8 @@ pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir, N: Fn(&str)>(
     }
     if end.auto_remove {
         crate::run_registry::set_exit_code(run_id, end.code);
-        if crate::run_registry::remove_if_exited(run_id)
-            == crate::run_registry::RemoveOutcome::Removed
+        if let crate::run_registry::RemoveOutcome::Removed(_) =
+            crate::run_registry::remove_if_exited(run_id)
         {
             note_removed(run_id);
             reclaim_run_dir(remover, cache_root, run_id);
