@@ -7,13 +7,16 @@ use crate::command::{RunCtx, RunFuture};
 
 pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::artifact::RmArgs::from_arg_matches(matches)?;
+        let args = super::ShortcutRmArgs::from_arg_matches(matches)?;
         crate::service::require_running().await?;
         let svc = crate::service::real::RealSandboxService::new(crate::service::socket_path()?);
-        match which(&svc, "rm", &args.reference).await? {
+        let owner = super::rm_route(which(&svc, "rm", &args.reference).await?, args.force)?;
+        match owner {
             Owner::Artifact => {
                 crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Rm(args),
+                    crate::artifact::ArtifactCommand::Rm(crate::artifact::RmArgs {
+                        reference: args.reference,
+                    }),
                     ctx.input,
                 )
                 .await
@@ -24,7 +27,7 @@ pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunF
                         command: crate::sandbox::SandboxCommand::Rm(
                             crate::sandbox::SandboxRmArgs {
                                 run: args.reference,
-                                force: false,
+                                force: args.force,
                             },
                         ),
                     },
