@@ -496,11 +496,11 @@ pub async fn run_image(
         origin,
         filesets: &args.filesets,
         host_paths: &lns_policy::host_path_decisions::JsonFileHostPathDecisionStore::new(
-            lns_ipc::host_path_decisions_path(),
+            lns_ipc::host_path_decisions_path()?,
         ),
         bind_specs: &bind_specs,
         bind_decisions: &lns_policy::host_bind_decisions::JsonFileHostBindDecisionStore::new(
-            lns_ipc::host_bind_decisions_path(),
+            lns_ipc::host_bind_decisions_path()?,
         ),
         assume_yes: args.assume_yes,
         interactive,

@@ -14,8 +14,8 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
     Box::pin(async move {
         let args = super::ConnectorArgs::from_arg_matches(matches)?;
         let cwd = ctx.cwd()?;
-        let catalog_path = lns_ipc::connectors_path();
-        let grants_path = lns_ipc::workload_grants_path();
+        let catalog_path = lns_ipc::connectors_path()?;
+        let grants_path = lns_ipc::workload_grants_path()?;
         let signin = RealConnectorSignIn::new(crate::service::socket_path()?);
         let mut out = ctx.out;
         crate::connector::run(

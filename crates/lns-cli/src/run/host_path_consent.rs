@@ -101,7 +101,7 @@ fn apply(
     if !entry.optional {
         bail!(
             "declined: {host_path} is required by this sandbox, so there is nothing to run without it — allow it, or edit {}",
-            lns_ipc::host_path_decisions_path().display()
+            lns_ipc::host_path_decisions_path()?.display()
         );
     }
     grant.denied.push(host_path.to_string());
