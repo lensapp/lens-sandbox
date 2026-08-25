@@ -437,6 +437,7 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     )
     .await;
     w.sandbox.workload_stdout = stdout;
+    out.extend_from_slice(&stderr);
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
             exit_code,

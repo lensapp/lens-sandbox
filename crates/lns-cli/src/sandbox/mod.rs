@@ -305,6 +305,13 @@ where
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
 {
+    if let Some(refusal) = wrong_kind_refusal(cmd) {
+        stderr
+            .write_all(format!("error: {refusal}\n").as_bytes())
+            .await?;
+        stderr.flush().await?;
+        return Ok(2);
+    }
     match cmd {
         SandboxCommand::Ls(args) => ps(svc, args, out).await,
         SandboxCommand::Kill(args) => kill(svc, args, out).await,
@@ -318,6 +325,33 @@ where
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
     }
+}
+
+fn run_operand(cmd: &SandboxCommand) -> Option<(&'static str, &str)> {
+    match cmd {
+        SandboxCommand::Exec(args) => Some(("exec", args.run.as_str())),
+        SandboxCommand::Kill(args) => Some(("kill", args.run.as_str())),
+        SandboxCommand::Stop(args) => Some(("stop", args.run.as_str())),
+        SandboxCommand::Start(args) => Some(("start", args.run.as_str())),
+        SandboxCommand::Inspect(args) => Some(("inspect", args.run.as_str())),
+        SandboxCommand::Logs(args) => Some(("logs", args.run.as_str())),
+        SandboxCommand::Attach(args) => Some(("attach", args.run.as_str())),
+        SandboxCommand::Rm(args) => Some(("rm", args.run.as_str())),
+        _ => None,
+    }
+}
+
+pub(crate) fn document_refusal(verb: &str, operand: &str) -> Option<String> {
+    crate::run::target::is_definition_path(operand).then(|| {
+        format!(
+            "`lns sandbox {verb}` takes a RUN — a sandbox id or name — and \"{operand}\" names a document; `lns artifact inspect` is what reads one"
+        )
+    })
+}
+
+pub(crate) fn wrong_kind_refusal(cmd: &SandboxCommand) -> Option<String> {
+    let (verb, operand) = run_operand(cmd)?;
+    document_refusal(verb, operand)
 }
 
 pub(crate) fn run_label(run: &str) -> String {
@@ -822,6 +856,48 @@ mod tests {
     use super::*;
     use crate::test_service::{CannedService, stream_with};
     use lns_ipc::encode_frame;
+
+    fn parsed_command(argv: &[&str]) -> SandboxCommand {
+        let mut full = vec!["lns", "sandbox"];
+        full.extend_from_slice(argv);
+        let args: SandboxArgs = crate::command::parse_args(full).unwrap();
+        args.command
+    }
+
+    #[test]
+    fn every_run_verb_refuses_a_document_operand_by_naming_the_artifact_reader() {
+        for argv in [
+            vec!["exec", "./lns.yaml", "sh"],
+            vec!["kill", "./lns.yaml"],
+            vec!["stop", "../lns.yaml"],
+            vec!["start", "/tmp/lns.yaml"],
+            vec!["inspect", "."],
+            vec!["logs", "sub/lns.yaml"],
+            vec!["attach", ".."],
+            vec!["rm", "./lns.dev.yaml"],
+        ] {
+            let refusal = wrong_kind_refusal(&parsed_command(&argv))
+                .unwrap_or_else(|| panic!("{argv:?} must refuse a document operand"));
+            assert!(refusal.contains("takes a RUN"), "{argv:?}: {refusal}");
+            assert!(
+                refusal.contains("lns artifact inspect"),
+                "{argv:?}: {refusal}"
+            );
+            assert!(
+                refusal.contains(&format!("lns sandbox {}", argv[0])),
+                "{argv:?}: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dotted_name_or_a_verb_without_a_run_operand_is_not_redirected() {
+        assert_eq!(
+            wrong_kind_refusal(&parsed_command(&["inspect", "v1.2-agent"])),
+            None
+        );
+        assert_eq!(wrong_kind_refusal(&parsed_command(&["ls"])), None);
+    }
 
     fn running_run() -> lns_ipc::RunSummary {
         lns_ipc::RunSummary {

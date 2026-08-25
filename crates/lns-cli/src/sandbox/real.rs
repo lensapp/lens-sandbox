@@ -10,6 +10,10 @@ use crate::service::real::RealSandboxService;
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxArgs::from_arg_matches(matches)?;
+        if let Some(refusal) = super::wrong_kind_refusal(&args.command) {
+            eprintln!("error: {refusal}");
+            return Ok(2);
+        }
         match args.command {
             super::SandboxCommand::Run(run_args) => Ok(crate::service::as_pre_start_failure(
                 crate::service::launch_run(*run_args, ctx.debug).await,
@@ -40,6 +44,10 @@ async fn dispatch_command(
     command: super::SandboxCommand,
     input: &mut dyn std::io::BufRead,
 ) -> Result<i32> {
+    if let Some(refusal) = super::wrong_kind_refusal(&command) {
+        eprintln!("error: {refusal}");
+        return Ok(2);
+    }
     crate::service::require_running().await?;
     dispatch(super::SandboxArgs { command }, input).await
 }
