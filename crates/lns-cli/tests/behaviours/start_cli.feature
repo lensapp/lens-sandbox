@@ -3,16 +3,21 @@ Feature: lns start — restart a stopped run from the CLI
   Detached by default: it prints the run's handle and exits; -a attaches
   output and adopts the workload's exit code.
 
+  Scenario: start is registered in the top-level grammar
+    When I run "lns start --help"
+    Then the exit code is 0
+    And the output contains "shortcut for `lns sandbox start`"
+
   Scenario: starting a stopped run detached
     Given a run named "reviewer" that was stopped
-    When I run "lns start reviewer"
+    When I run "lns start" on it
     Then it prints "reviewer"
     And it exits 0
     And the run "reviewer" is running
 
   Scenario: start accepts the numeric id
     Given a stopped run with id 7
-    When I run "lns start 7"
+    When I run "lns start" on it
     Then it exits 0
 
   Scenario: -a attaches and propagates the workload exit code
