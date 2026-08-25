@@ -369,6 +369,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_runs_entry_with_no_readable_name_is_neither_a_record_nor_damage() {
+        let fs = FakeFs {
+            listing: Ok(vec![PathBuf::from("/")]),
+            files: Mutex::new(HashMap::new()),
+            denied: Mutex::new(std::collections::HashSet::new()),
+        };
+        let scan = load_all_with(&fs, Path::new("/cache")).await.unwrap();
+        assert!(scan.records.is_empty());
+        assert!(scan.damaged.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_missing_runs_root_means_no_stopped_runs() {
         let fs = FakeFs {
             listing: Err(io::Error::from(io::ErrorKind::NotFound)),

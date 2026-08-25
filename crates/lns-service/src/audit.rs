@@ -452,6 +452,93 @@ pub fn record_bind_attached(
     )
 }
 
+pub async fn migrate_legacy_run_audit<F: crate::image_store::Fs>(
+    fs: &F,
+    lns_home: &Path,
+) -> Vec<String> {
+    let Ok(entries) = fs.read_dir(&lns_home.join("runs")).await else {
+        return Vec::new();
+    };
+    let mut migrated = Vec::new();
+    for dir in entries {
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if migrate_chain_files(fs, &dir, &lns_home.join("audit").join(id)).await {
+            migrated.push(id.to_string());
+        }
+    }
+    migrated
+}
+
+async fn migrate_chain_files<F: crate::image_store::Fs>(
+    fs: &F,
+    legacy_dir: &Path,
+    new_dir: &Path,
+) -> bool {
+    let mut moved = false;
+    for name in ["audit.jsonl", "audit.anchor"] {
+        moved |= migrate_chain_file(fs, &legacy_dir.join(name), &new_dir.join(name)).await;
+    }
+    moved
+}
+
+async fn migrate_chain_file<F: crate::image_store::Fs>(fs: &F, legacy: &Path, new: &Path) -> bool {
+    let Some(bytes) = readable_legacy_chain(fs, legacy).await else {
+        return false;
+    };
+    if !new_home_is_vacant(fs, legacy, new).await {
+        return false;
+    }
+    place_chain(fs, legacy, new, &bytes).await
+}
+
+async fn readable_legacy_chain<F: crate::image_store::Fs>(
+    fs: &F,
+    legacy: &Path,
+) -> Option<Vec<u8>> {
+    match fs.read(legacy).await {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            let legacy = legacy.display();
+            crate::log::warn!("legacy audit chain at {legacy} is unreadable, left alone: {e}");
+            None
+        }
+    }
+}
+
+async fn new_home_is_vacant<F: crate::image_store::Fs>(fs: &F, legacy: &Path, new: &Path) -> bool {
+    match fs.read(new).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        _ => {
+            let (legacy, new) = (legacy.display(), new.display());
+            crate::log::warn!(
+                "audit chain already exists at {new}; legacy copy at {legacy} left for the operator"
+            );
+            false
+        }
+    }
+}
+
+async fn place_chain<F: crate::image_store::Fs>(
+    fs: &F,
+    legacy: &Path,
+    new: &Path,
+    bytes: &[u8],
+) -> bool {
+    if let Err(e) = fs.write(new, bytes).await {
+        let new = new.display();
+        crate::log::warn!("legacy audit chain not migrated to {new}: {e}");
+        return false;
+    }
+    if let Err(e) = fs.remove_file(legacy).await {
+        let legacy = legacy.display();
+        crate::log::warn!("migrated audit chain's legacy copy at {legacy} not removed: {e}");
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1114,203 @@ mod tests {
         assert!(
             format!("{err:#}").contains("opening"),
             "error must name the failing open: {err:#}"
+        );
+    }
+
+    #[derive(Default)]
+    struct MigrationFs {
+        files: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<u8>>>,
+        dirs: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>>,
+        denied: std::collections::HashSet<PathBuf>,
+        refuse_writes: bool,
+        refuse_removals: bool,
+    }
+
+    impl MigrationFs {
+        fn file(self, p: impl Into<PathBuf>, bytes: &[u8]) -> Self {
+            self.files.lock().unwrap().insert(p.into(), bytes.to_vec());
+            self
+        }
+
+        fn dir(self, p: impl Into<PathBuf>, entries: &[&str]) -> Self {
+            self.dirs
+                .lock()
+                .unwrap()
+                .insert(p.into(), entries.iter().map(PathBuf::from).collect());
+            self
+        }
+
+        fn deny(mut self, p: impl Into<PathBuf>) -> Self {
+            self.denied.insert(p.into());
+            self
+        }
+    }
+
+    impl crate::image_store::Fs for MigrationFs {
+        async fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.dirs
+                .lock()
+                .unwrap()
+                .get(dir)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+            if self.denied.contains(p) {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            self.files
+                .lock()
+                .unwrap()
+                .get(p)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            if self.refuse_writes {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            self.files
+                .lock()
+                .unwrap()
+                .insert(p.to_path_buf(), bytes.to_vec());
+            Ok(())
+        }
+        async fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+            if self.refuse_removals {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            self.files.lock().unwrap().remove(p);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_audit_chain_moves_to_the_home_that_outlives_the_run() {
+        let home = Path::new("/h");
+        let fs = MigrationFs::default()
+            .dir("/h/runs", &["/h/runs/aa01"])
+            .file("/h/runs/aa01/audit.jsonl", b"chain")
+            .file("/h/runs/aa01/audit.anchor", b"anchor");
+        let migrated = migrate_legacy_run_audit(&fs, home).await;
+        assert_eq!(migrated, vec!["aa01".to_string()]);
+        let files = fs.files.lock().unwrap();
+        assert_eq!(
+            files.get(Path::new("/h/audit/aa01/audit.jsonl")),
+            Some(&b"chain".to_vec()),
+            "the chain must land where removing the run cannot reach it"
+        );
+        assert_eq!(
+            files.get(Path::new("/h/audit/aa01/audit.anchor")),
+            Some(&b"anchor".to_vec())
+        );
+        assert!(
+            !files.contains_key(Path::new("/h/runs/aa01/audit.jsonl")),
+            "the legacy copy must go, or the orphan sweep classifies the dir as removable history"
+        );
+        assert!(!files.contains_key(Path::new("/h/runs/aa01/audit.anchor")));
+    }
+
+    #[tokio::test]
+    async fn a_run_dir_with_no_audit_files_is_not_a_migration() {
+        let fs = MigrationFs::default()
+            .dir("/h/runs", &["/h/runs/bb02"])
+            .file("/h/runs/bb02/record.json", b"{}");
+        let migrated = migrate_legacy_run_audit(&fs, Path::new("/h")).await;
+        assert!(migrated.is_empty());
+        assert!(
+            fs.files
+                .lock()
+                .unwrap()
+                .contains_key(Path::new("/h/runs/bb02/record.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_home_with_no_runs_dir_migrates_nothing() {
+        let fs = MigrationFs::default();
+        assert!(
+            migrate_legacy_run_audit(&fs, Path::new("/h"))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chain_already_at_the_new_home_is_never_overwritten() {
+        let fs = MigrationFs::default()
+            .dir("/h/runs", &["/h/runs/cc03"])
+            .file("/h/runs/cc03/audit.jsonl", b"legacy")
+            .file("/h/audit/cc03/audit.jsonl", b"current");
+        let migrated = migrate_legacy_run_audit(&fs, Path::new("/h")).await;
+        assert!(migrated.is_empty());
+        let files = fs.files.lock().unwrap();
+        assert_eq!(
+            files.get(Path::new("/h/audit/cc03/audit.jsonl")),
+            Some(&b"current".to_vec()),
+            "an established chain at the new home wins over a legacy leftover"
+        );
+        assert!(
+            files.contains_key(Path::new("/h/runs/cc03/audit.jsonl")),
+            "the legacy copy stays for the operator rather than being destroyed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_legacy_chain_is_left_for_the_operator() {
+        let fs = MigrationFs::default()
+            .dir("/h/runs", &["/h/runs/dd04"])
+            .file("/h/runs/dd04/audit.jsonl", b"chain")
+            .deny("/h/runs/dd04/audit.jsonl");
+        assert!(
+            migrate_legacy_run_audit(&fs, Path::new("/h"))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_at_the_new_home_keeps_the_legacy_chain() {
+        let fs = MigrationFs {
+            refuse_writes: true,
+            ..Default::default()
+        }
+        .dir("/h/runs", &["/h/runs/ee05"])
+        .file("/h/runs/ee05/audit.jsonl", b"chain");
+        let migrated = migrate_legacy_run_audit(&fs, Path::new("/h")).await;
+        assert!(migrated.is_empty());
+        assert!(
+            fs.files
+                .lock()
+                .unwrap()
+                .contains_key(Path::new("/h/runs/ee05/audit.jsonl")),
+            "a chain that could not land at its new home must survive at the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_of_the_legacy_copy_still_counts_as_migrated() {
+        let fs = MigrationFs {
+            refuse_removals: true,
+            ..Default::default()
+        }
+        .dir("/h/runs", &["/h/runs/ff06"])
+        .file("/h/runs/ff06/audit.jsonl", b"chain");
+        let migrated = migrate_legacy_run_audit(&fs, Path::new("/h")).await;
+        assert_eq!(
+            migrated,
+            vec!["ff06".to_string()],
+            "the chain is safe at its new home; a stuck legacy copy is a warning, not a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_runs_entry_with_no_readable_name_is_skipped() {
+        let fs = MigrationFs::default().dir("/h/runs", &["/"]);
+        assert!(
+            migrate_legacy_run_audit(&fs, Path::new("/h"))
+                .await
+                .is_empty()
         );
     }
 }
