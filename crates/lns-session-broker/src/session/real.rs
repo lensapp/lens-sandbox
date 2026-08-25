@@ -576,7 +576,11 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
     unsafe { libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr()) };
     let failure = io::Error::last_os_error();
     let _ = writeln_stderr(&format!("execvp({:?}): {failure}", spec.argv[0]));
-    child_exit(super::exec_failure_code(failure.kind()));
+    let found =
+        super::command_is_present(&spec.argv[0], std::env::var("PATH").ok().as_deref(), &|p| {
+            p.exists()
+        });
+    child_exit(super::exec_failure_code(failure.kind(), found));
 }
 
 fn set_guest_hostname(hostname: Option<&str>) {
