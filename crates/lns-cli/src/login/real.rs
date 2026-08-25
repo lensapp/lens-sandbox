@@ -6,7 +6,10 @@ use lns_ipc::{Request, Response, decode_frame, encode_frame, read_frame_bytes_as
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use super::{LoginArgs, LoginOutcome, LogoutArgs, RegistryVerifier, WebLoginFlow, WebLoginOutcome};
+use super::{
+    ListLoginsOutcome, LoginArgs, LoginOutcome, LogoutArgs, LogoutOutcome, RegistryAuthClient,
+    WebLoginFlow, WebLoginOutcome,
+};
 use crate::command::{RunCtx, RunFuture};
 use crate::connector::LocalBoxFuture;
 
@@ -14,15 +17,13 @@ pub fn run_login<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutur
     Box::pin(async move {
         let args = LoginArgs::from_arg_matches(matches)?;
         let default_registry = configured_default_registry()?;
-        let auth_path = lns_ipc::registry_auth_path()?;
-        let verifier = RealRegistryVerifier::new(crate::service::socket_path()?);
+        let client = RealRegistryAuthClient::new(crate::service::socket_path()?);
         let input = ctx.input;
         let mut out = ctx.out;
         super::run(
             &args,
             &default_registry,
-            &auth_path,
-            &verifier,
+            &client,
             &RealWebLoginFlow,
             input,
             &mut out,
@@ -35,9 +36,9 @@ pub fn run_logout<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutu
     Box::pin(async move {
         let args = LogoutArgs::from_arg_matches(matches)?;
         let default_registry = configured_default_registry()?;
-        let auth_path = lns_ipc::registry_auth_path()?;
+        let client = RealRegistryAuthClient::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        super::logout(&args, &default_registry, &auth_path, &mut out)
+        super::logout(&args, &default_registry, &client, &mut out).await
     })
 }
 
@@ -82,63 +83,88 @@ impl WebLoginFlow for RealWebLoginFlow {
     }
 }
 
-pub struct RealRegistryVerifier {
+pub struct RealRegistryAuthClient {
     socket: PathBuf,
 }
 
-impl RealRegistryVerifier {
+impl RealRegistryAuthClient {
     pub fn new(socket: PathBuf) -> Self {
         Self { socket }
     }
+
+    async fn roundtrip(&self, request: &Request, what: &str) -> Result<Option<Response>> {
+        let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
+            return Ok(None);
+        };
+        let frame = encode_frame(request).with_context(|| format!("encoding {what} request"))?;
+        stream
+            .write_all(&frame)
+            .await
+            .with_context(|| format!("writing {what} request"))?;
+        let bytes = read_frame_bytes_async(&mut stream)
+            .await
+            .with_context(|| format!("reading {what} response"))?;
+        let response = decode_frame::<Response, _>(&mut &bytes[..])
+            .with_context(|| format!("decoding {what} response"))?;
+        Ok(Some(response))
+    }
 }
 
-impl RegistryVerifier for RealRegistryVerifier {
+impl RegistryAuthClient for RealRegistryAuthClient {
     fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
-                return Ok(false);
-            };
-            let frame = encode_frame(&Request::Ping).context("encoding ping request")?;
-            stream
-                .write_all(&frame)
-                .await
-                .context("writing ping request")?;
-            let bytes = read_frame_bytes_async(&mut stream)
-                .await
-                .context("reading ping response")?;
-            let response =
-                decode_frame::<Response, _>(&mut &bytes[..]).context("decoding ping response")?;
-            Ok(matches!(response, Response::Pong))
+            match self.roundtrip(&Request::Ping, "ping").await? {
+                Some(response) => Ok(matches!(response, Response::Pong)),
+                None => Ok(false),
+            }
         })
     }
 
-    fn verify<'a>(
+    fn login<'a>(
         &'a self,
         registry: &'a str,
         username: &'a str,
         secret: &'a str,
     ) -> LocalBoxFuture<'a, Result<LoginOutcome>> {
         Box::pin(async move {
-            let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
-                return Ok(LoginOutcome::ServiceUnavailable);
-            };
-            let frame = encode_frame(&Request::RegistryLogin {
+            let request = Request::RegistryLogin {
                 registry: registry.to_string(),
                 username: username.to_string(),
                 secret: secret.to_string(),
-            })
-            .context("encoding login request")?;
-            stream
-                .write_all(&frame)
-                .await
-                .context("writing login request")?;
-            let bytes = read_frame_bytes_async(&mut stream)
-                .await
-                .context("reading login response")?;
-            match decode_frame::<Response, _>(&mut &bytes[..]).context("decoding login response")? {
-                Response::RegistryLoginVerified => Ok(LoginOutcome::Verified),
-                Response::Error { message } => Ok(LoginOutcome::Rejected(message)),
-                other => bail!("unexpected response during login: {other:?}"),
+            };
+            match self.roundtrip(&request, "login").await? {
+                None => Ok(LoginOutcome::ServiceUnavailable),
+                Some(Response::RegistryLoginStored) => Ok(LoginOutcome::Stored),
+                Some(Response::Error { message }) => Ok(LoginOutcome::Rejected(message)),
+                Some(other) => bail!("unexpected response during login: {other:?}"),
+            }
+        })
+    }
+
+    fn logout<'a>(&'a self, registry: &'a str) -> LocalBoxFuture<'a, Result<LogoutOutcome>> {
+        Box::pin(async move {
+            let request = Request::RegistryLogout {
+                registry: registry.to_string(),
+            };
+            match self.roundtrip(&request, "logout").await? {
+                None => Ok(LogoutOutcome::ServiceUnavailable),
+                Some(Response::RegistryLoggedOut) => Ok(LogoutOutcome::LoggedOut),
+                Some(Response::Error { message }) => Ok(LogoutOutcome::Failed(message)),
+                Some(other) => bail!("unexpected response during logout: {other:?}"),
+            }
+        })
+    }
+
+    fn list<'a>(&'a self) -> LocalBoxFuture<'a, Result<ListLoginsOutcome>> {
+        Box::pin(async move {
+            match self
+                .roundtrip(&Request::ListRegistryLogins, "login list")
+                .await?
+            {
+                None => Ok(ListLoginsOutcome::ServiceUnavailable),
+                Some(Response::RegistryLogins { logins }) => Ok(ListLoginsOutcome::Logins(logins)),
+                Some(Response::Error { message }) => bail!("listing registry logins: {message}"),
+                Some(other) => bail!("unexpected response during login list: {other:?}"),
             }
         })
     }

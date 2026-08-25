@@ -1,12 +1,13 @@
 Feature: discovering and parsing the registry login subcommands
-  `lns login` stores a verified credential for a private OCI registry so
-  `lns run` and `lns image pull` can fetch its images; `lns logout` removes
-  one. Both must be discoverable from help and parse cleanly, and `lns login`
-  guards three mutually exclusive shapes: `--list` only reports, never logs in,
-  and a secret comes from exactly one of `--password` or `--password-stdin`.
-  The verify-then-store, canonicalization, and list-hides-secrets behaviour is
-  pinned by Layer 3 unit tests, because this harness only parses argv — it
-  never dispatches to the service or the auth store.
+  `lns login` sends a credential to the service, which verifies it against
+  the registry and stores it so `lns run` and `lns image pull` can fetch
+  private images; `lns logout` removes one. Both must be discoverable from
+  help and parse cleanly, and `lns login` guards three mutually exclusive
+  shapes: `--list` only reports, never logs in, and a secret comes from
+  exactly one of `--password` or `--password-stdin`. The service dispatch,
+  canonicalization, and list-hides-secrets behaviour is pinned by Layer 3
+  unit tests, because this harness only parses argv — it never dispatches
+  to the service.
 
   Scenario: top-level help lists login and logout
     When I run "lns --help"

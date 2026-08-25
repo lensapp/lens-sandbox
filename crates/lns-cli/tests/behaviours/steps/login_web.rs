@@ -4,35 +4,22 @@ use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::LocalBoxFuture;
 use lns_cli::login::{
-    self, LoginArgs, LoginOutcome, RegistryVerifier, WebLoginFlow, WebLoginOutcome,
+    self, ListLoginsOutcome, LoginArgs, LoginOutcome, LogoutOutcome, RegistryAuthClient,
+    WebLoginFlow, WebLoginOutcome,
 };
-use lns_policy::registry_auth::RegistryAuthStore;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-fn auth_path(world: &mut BehaviourWorld) -> PathBuf {
-    if world.cwd.is_none() {
-        world.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
-    }
-    world
-        .cwd
-        .as_ref()
-        .unwrap()
-        .path()
-        .join("registry-auth.json")
-}
-
-/// Stands in for the running service's pull-auth handshake: records what it was asked and verifies everything.
-struct RecordingVerifier {
+/// Stands in for the running service: records what it was asked to store and accepts everything.
+struct RecordingAuthClient {
     calls: Arc<Mutex<Vec<(String, String, String)>>>,
 }
-impl RegistryVerifier for RecordingVerifier {
+impl RegistryAuthClient for RecordingAuthClient {
     fn available<'a>(&'a self) -> LocalBoxFuture<'a, anyhow::Result<bool>> {
         Box::pin(async move { Ok(true) })
     }
 
-    fn verify<'a>(
+    fn login<'a>(
         &'a self,
         registry: &'a str,
         username: &'a str,
@@ -43,7 +30,18 @@ impl RegistryVerifier for RecordingVerifier {
             username.to_string(),
             secret.to_string(),
         ));
-        Box::pin(async move { Ok(LoginOutcome::Verified) })
+        Box::pin(async move { Ok(LoginOutcome::Stored) })
+    }
+
+    fn logout<'a>(
+        &'a self,
+        _registry: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<LogoutOutcome>> {
+        Box::pin(async move { Ok(LogoutOutcome::LoggedOut) })
+    }
+
+    fn list<'a>(&'a self) -> LocalBoxFuture<'a, anyhow::Result<ListLoginsOutcome>> {
+        Box::pin(async move { Ok(ListLoginsOutcome::Logins(Vec::new())) })
     }
 }
 
@@ -101,8 +99,7 @@ fn given_web_expired(world: &mut BehaviourWorld) {
 
 #[when(regex = r#"^I log in with "([^"]+)"$"#)]
 async fn when_log_in(world: &mut BehaviourWorld, command: String) {
-    let path = auth_path(world);
-    let verifier = RecordingVerifier {
+    let client = RecordingAuthClient {
         calls: world.web_login.verifier_calls.clone(),
     };
     let web = FakeWebLoginFlow {
@@ -113,17 +110,7 @@ async fn when_log_in(world: &mut BehaviourWorld, command: String) {
         Ok(args) => {
             let mut input: &[u8] = b"";
             let mut out = Vec::<u8>::new();
-            match login::run(
-                &args,
-                "hub.lns.run",
-                &path,
-                &verifier,
-                &web,
-                &mut input,
-                &mut out,
-            )
-            .await
-            {
+            match login::run(&args, "hub.lns.run", &client, &web, &mut input, &mut out).await {
                 Ok(exit_code) => CliRun {
                     exit_code,
                     output: String::from_utf8_lossy(&out).into_owned(),
@@ -142,8 +129,8 @@ async fn when_log_in(world: &mut BehaviourWorld, command: String) {
     world.result = Some(run);
 }
 
-#[then(regex = r#"^the verifier saw the web-issued credential for "([^"]+)"$"#)]
-fn then_verifier_saw(world: &mut BehaviourWorld, username: String) {
+#[then(regex = r#"^the service saw the web-issued credential for "([^"]+)"$"#)]
+fn then_service_saw(world: &mut BehaviourWorld, username: String) {
     let calls = world.web_login.verifier_calls.lock().unwrap();
     assert_eq!(
         calls.as_slice(),
@@ -155,21 +142,11 @@ fn then_verifier_saw(world: &mut BehaviourWorld, username: String) {
     );
 }
 
-#[then(regex = r#"^the credential store holds "([^"]+)" for "([^"]+)"$"#)]
-fn then_store_holds(world: &mut BehaviourWorld, registry: String, username: String) {
-    let path = auth_path(world);
-    let file = lns_policy::registry_auth::JsonFileRegistryAuthStore::new(path)
-        .load()
-        .expect("read the auth store");
-    let cred = file.get(&registry).expect("entry for the registry");
-    assert_eq!(cred.username, username);
-}
-
-#[then("the credential store is empty")]
-fn then_store_empty(world: &mut BehaviourWorld) {
-    let path = auth_path(world);
-    let file = lns_policy::registry_auth::JsonFileRegistryAuthStore::new(path)
-        .load()
-        .expect("read the auth store");
-    assert!(file.is_empty(), "the store must hold nothing: {file:?}");
+#[then("the service stored no credential")]
+fn then_service_stored_nothing(world: &mut BehaviourWorld) {
+    let calls = world.web_login.verifier_calls.lock().unwrap();
+    assert!(
+        calls.is_empty(),
+        "the service must be asked nothing: {calls:?}"
+    );
 }

@@ -305,9 +305,10 @@ See [Running workloads — volumes](running-workloads.md#volumes).
 ## `lns login` / `lns logout`
 
 Store credentials for a private OCI registry so `lns run` and `lns pull` can fetch
-its images. Credentials are verified against the registry before they are saved
-(the background service must be running), and multiple registries can be logged in
-at once.
+its images. The background service keeps the credential store: a login is verified
+against the registry and then saved by the service, and `lns logout` and
+`lns login --list` go through it too, so the service must be running. Multiple
+registries can be logged in at once.
 
 ```bash
 lns login
