@@ -10,7 +10,11 @@ pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunF
         let args = super::ShortcutRmArgs::from_arg_matches(matches)?;
         crate::service::require_running().await?;
         let svc = crate::service::real::RealSandboxService::new(crate::service::socket_path()?);
-        let owner = super::rm_route(which(&svc, "rm", &args.reference).await?, args.force)?;
+        let default_registry = crate::artifact::real::configured_registry()?;
+        let owner = super::rm_route(
+            which(&svc, "rm", &args.reference, default_registry.as_deref()).await?,
+            args.force,
+        )?;
         match owner {
             Owner::Artifact => {
                 crate::artifact::real::dispatch(
@@ -51,7 +55,8 @@ pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) ->
             .expect("a reference-less inspect is a local document, settled above");
         crate::service::require_running().await?;
         let svc = crate::service::real::RealSandboxService::new(crate::service::socket_path()?);
-        match which(&svc, "inspect", &reference).await? {
+        let default_registry = crate::artifact::real::configured_registry()?;
+        match which(&svc, "inspect", &reference, default_registry.as_deref()).await? {
             Owner::Artifact => {
                 crate::artifact::real::dispatch(
                     crate::artifact::ArtifactCommand::Inspect(args),
