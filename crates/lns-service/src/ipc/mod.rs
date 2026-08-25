@@ -497,6 +497,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
+        Request::ListPrunableImages => image_response(
+            crate::image_store::list_prunable()
+                .await
+                .map(|images| Response::ImageList { images }),
+        ),
         Request::ResolveDefinition {
             definition,
             project_dir,
@@ -3721,6 +3726,16 @@ mod tests {
         assert_eq!(resp["type"], "Error", "got {resp}");
         let message = resp["message"].as_str().expect("an error message");
         assert!(message.contains("no such image"), "got: {message}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_prunable_listing_of_an_empty_cache_is_an_empty_image_list() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let resp = as_json(handle_request(&Request::ListPrunableImages, Instant::now()).await);
+        assert_eq!(resp["type"], "ImageList", "got {resp}");
+        assert_eq!(resp["images"], serde_json::json!([]));
     }
 
     #[tokio::test]

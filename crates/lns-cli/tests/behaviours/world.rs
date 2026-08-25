@@ -206,6 +206,10 @@ pub struct SandboxCliRig {
     pub remove_image_response: Option<lns_ipc::Response>,
     /// What the cache holds, so the `lns rm` / `lns inspect` arbitration can ask the store rather than a registry.
     pub cached_references: Vec<String>,
+    /// What a prune would remove right now, served for a `ListPrunableImages` request.
+    pub prunable_references: Vec<String>,
+    /// Response the fake returns for a `ListRuns` request specifically, so prune can canned-serve both the stopped listing and the sweep.
+    pub list_runs_response: Option<lns_ipc::Response>,
     /// Response the fake returns for a `RemoveRun` request, so a scenario can pin the service's own refusal of a running sandbox.
     pub remove_run_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,

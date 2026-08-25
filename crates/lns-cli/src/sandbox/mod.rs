@@ -590,8 +590,21 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32> {
-    if !args.force && !confirm_prune(term, input, stderr).await? {
-        return Ok(0);
+    if !args.force {
+        if !term.stdin_is_tty {
+            bail!(
+                "this removes every stopped sandbox, writable layers included; there is no terminal to ask at, so pass --force to confirm"
+            );
+        }
+        let stopped = stopped_run_names(svc).await?;
+        if stopped.is_empty() {
+            writeln!(out, "No stopped sandboxes.")?;
+            return Ok(0);
+        }
+        crate::output::announce_prune_candidates(&stopped, stderr).await?;
+        if !confirm_prune(input, stderr).await? {
+            return Ok(0);
+        }
     }
     match svc.one_shot(Request::PruneRuns).await? {
         Response::RunsPruned { mut removed } => {
@@ -609,17 +622,32 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
     }
 }
 
-/// §7.2: with no terminal to ask at, a command that would have asked refuses and names the flag that would have answered it.
+async fn stopped_run_names(svc: &impl SandboxService) -> Result<Vec<String>> {
+    match svc.one_shot(Request::ListRuns).await? {
+        Response::RunList { runs } => {
+            let mut names: Vec<String> = runs
+                .into_iter()
+                .filter(|run| !matches!(run.status, lns_ipc::RunStatus::Running))
+                .map(|run| {
+                    if run.name.is_empty() {
+                        lns_ipc::short_run_id(&run.id).to_string()
+                    } else {
+                        run.name
+                    }
+                })
+                .collect();
+            names.sort_unstable();
+            Ok(names)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
 async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
-    term: TermInfo,
     input: &mut I,
     err: &mut E,
 ) -> Result<bool> {
-    if !term.stdin_is_tty {
-        bail!(
-            "this removes every stopped sandbox, writable layers included; there is no terminal to ask at, so pass --force to confirm"
-        );
-    }
     err.write_all(
         b"This removes every stopped sandbox, writable layers included. Continue? [y/N] ",
     )
@@ -1169,6 +1197,52 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    #[tokio::test]
+    async fn stopped_run_names_skip_the_running_and_fall_back_to_the_short_id() {
+        let svc = CannedService::new(Response::RunList {
+            runs: vec![
+                lns_ipc::RunSummary {
+                    id: format!("{:032x}", 0xbeefu32),
+                    name: String::new(),
+                    image: "some-image".into(),
+                    command: "cmd".into(),
+                    status: lns_ipc::RunStatus::Exited { code: 0 },
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+                running_run(),
+                lns_ipc::RunSummary {
+                    id: format!("{:032x}", 3),
+                    name: "scribe".into(),
+                    image: "some-image".into(),
+                    command: "cmd".into(),
+                    status: lns_ipc::RunStatus::Exited { code: 1 },
+                    started: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+        });
+        let names = stopped_run_names(&svc).await.unwrap();
+        assert_eq!(
+            names,
+            vec![
+                lns_ipc::short_run_id(&format!("{:032x}", 0xbeefu32)).to_string(),
+                "scribe".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_run_listing_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let refused = CannedService::new(Response::Error {
+            message: "runs dir unreadable".into(),
+        });
+        let err = stopped_run_names(&refused).await.unwrap_err();
+        assert!(format!("{err:#}").contains("runs dir unreadable"));
+
+        let odd = CannedService::new(Response::Pong);
+        let err = stopped_run_names(&odd).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 

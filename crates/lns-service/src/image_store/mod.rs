@@ -354,6 +354,34 @@ pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -
     record_with(fs, images_root, &record).await
 }
 
+fn removable_partition(
+    records: Vec<ImageRecord>,
+    active: &[lns_ipc::RunSummary],
+) -> (Vec<ImageRecord>, Vec<ImageRecord>) {
+    let active_roots: HashSet<String> = records
+        .iter()
+        .filter(|record| pinning_holder(active, &record.reference).is_some())
+        .map(|record| record.reference.clone())
+        .collect();
+    let kept_references = dependency_closure(&records, &active_roots);
+    records
+        .into_iter()
+        .partition(|record| kept_references.contains(&record.reference))
+}
+
+pub async fn list_prunable_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    active: &[lns_ipc::RunSummary],
+) -> Result<Vec<lns_ipc::ImageInfo>> {
+    let records = load_records(fs, images_root).await?;
+    let (_, removable) = removable_partition(records, active);
+    Ok(removable
+        .iter()
+        .map(|record| info_from(record, active))
+        .collect())
+}
+
 pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
     fs: &F,
     caches: &C,
@@ -362,15 +390,7 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
     active: &[lns_ipc::RunSummary],
 ) -> Result<PruneReport> {
     let records = load_records(fs, images_root).await?;
-    let active_roots: HashSet<String> = records
-        .iter()
-        .filter(|record| pinning_holder(active, &record.reference).is_some())
-        .map(|record| record.reference.clone())
-        .collect();
-    let kept_references = dependency_closure(&records, &active_roots);
-    let (kept, removable): (Vec<_>, Vec<_>) = records
-        .into_iter()
-        .partition(|record| kept_references.contains(&record.reference));
+    let (kept, removable) = removable_partition(records, active);
     let kept_manifests = manifest_keep_set(kept.iter())?;
     let mut removable_manifests = HashSet::new();
     let mut removed = Vec::with_capacity(removable.len());
@@ -642,6 +662,15 @@ mod consent_tests {
 
 pub async fn list() -> Result<Vec<lns_ipc::ImageInfo>> {
     list_with(
+        &real::RealFs,
+        &images_root()?,
+        &crate::run_registry::snapshot(),
+    )
+    .await
+}
+
+pub async fn list_prunable() -> Result<Vec<lns_ipc::ImageInfo>> {
+    list_prunable_with(
         &real::RealFs,
         &images_root()?,
         &crate::run_registry::snapshot(),
