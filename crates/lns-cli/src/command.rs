@@ -64,6 +64,7 @@ pub fn registry() -> Vec<CommandSpec> {
         crate::artifact::PULL_SPEC,
         crate::artifact::TAG_SPEC,
         crate::sandbox::PS_SPEC,
+        crate::sandbox::START_SPEC,
         crate::sandbox::KILL_SPEC,
         crate::sandbox::STOP_SPEC,
         crate::shortcut::RM_SPEC,

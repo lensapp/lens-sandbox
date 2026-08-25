@@ -38,6 +38,12 @@ fn a_stopped_run_exiting_three(w: &mut BehaviourWorld) {
     w.start_target = Some("reviewer".into());
 }
 
+#[when(regex = r#"^I run "lns start" on it$"#)]
+async fn i_run_lns_start_detached(w: &mut BehaviourWorld) {
+    let target = w.start_target.clone().expect("a stopped run was staged");
+    drive_sandbox_command(w, &format!("start {target}")).await;
+}
+
 #[when(regex = r#"^I run "lns start -a" on it$"#)]
 async fn i_run_lns_start_attached(w: &mut BehaviourWorld) {
     let target = w.start_target.clone().expect("a stopped run was staged");
