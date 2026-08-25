@@ -116,16 +116,26 @@ pub fn register_stopped(stopped: StoppedRun) {
         .insert(stopped.record.run_id.clone(), RunEntry::Stopped(stopped));
 }
 
-pub fn rebuild_from_records(records: Vec<crate::run_record::RunRecord>) {
+/// Registers every restartable record as stopped and returns the `--rm` records' ids, whose state must be cleaned up, not resurrected.
+pub fn rebuild_from_records(records: Vec<crate::run_record::RunRecord>) -> Vec<String> {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    rebuild_in(g.get_or_insert_with(HashMap::new), records);
+    rebuild_in(g.get_or_insert_with(HashMap::new), records)
 }
 
-fn rebuild_in(map: &mut HashMap<String, RunEntry>, records: Vec<crate::run_record::RunRecord>) {
+fn rebuild_in(
+    map: &mut HashMap<String, RunEntry>,
+    records: Vec<crate::run_record::RunRecord>,
+) -> Vec<String> {
+    let mut doomed = Vec::new();
     for record in records {
+        if record.args.auto_remove {
+            doomed.push(record.run_id);
+            continue;
+        }
         map.entry(record.run_id.clone())
             .or_insert(RunEntry::Stopped(StoppedRun { record }));
     }
+    doomed
 }
 
 /// Replace a startable entry with the live handle booting over its preserved state; the name carries over.
@@ -1752,6 +1762,27 @@ mod tests {
             stopped_names_in(Some(&map)),
             vec!["builder".to_string(), "reviewer".to_string()]
         );
+    }
+
+    #[test]
+    fn rebuild_in_cleans_up_auto_remove_records_instead_of_registering_them() {
+        let mut map = HashMap::new();
+        let mut doomed_record = stopped_record("aa09", "ephemeral");
+        doomed_record.args.auto_remove = true;
+        let doomed = rebuild_in(
+            &mut map,
+            vec![stopped_record("aa07", "reviewer"), doomed_record],
+        );
+        assert_eq!(
+            doomed,
+            vec!["aa09".to_string()],
+            "a --rm run's record is handed back for cleanup"
+        );
+        assert!(
+            !map.contains_key("aa09"),
+            "a --rm run never comes back as restartable stopped state"
+        );
+        assert_eq!(resolve_in(Some(&map), "reviewer"), Ok("aa07".to_string()));
     }
 
     #[tokio::test]
