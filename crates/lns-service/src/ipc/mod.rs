@@ -2728,13 +2728,16 @@ mod tests {
         crate::run_registry::register(id.clone(), handle);
         crate::run_registry::set_exit_code(&id, 0);
         let noted = std::sync::atomic::AtomicBool::new(false);
+        let note = |_: &str, _: bool| noted.store(true, std::sync::atomic::Ordering::SeqCst);
+        note("probe", false);
+        noted.store(false, std::sync::atomic::Ordering::SeqCst);
         let resp = remove_run_with(
             &id,
             false,
             &StuckRemover,
             std::path::Path::new("/cache"),
             kill_acknowledged,
-            |_, _| noted.store(true, std::sync::atomic::Ordering::SeqCst),
+            note,
         )
         .await;
         assert!(
@@ -2883,6 +2886,24 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(global_runs)]
+    async fn prune_leaves_a_registered_runs_dir_alone() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let root = std::path::Path::new("/cache");
+        let fs = ScriptedRunsDir(vec![crate::cache::run_dir(root, &id)]);
+        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        let still_registered = crate::run_registry::status(&id).is_some();
+        crate::run_registry::deregister(&id);
+        assert!(
+            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            "a registered run's dir is not an orphan: {resp:?}"
+        );
+        assert!(still_registered);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
     async fn prune_spares_a_dir_whose_run_registers_mid_sweep() {
         use crate::image_store::Fs as _;
         let id = crate::run_registry::allocate_run_id();
@@ -2920,17 +2941,19 @@ mod tests {
         assert!(fs.write(std::path::Path::new("/x"), b"").await.is_ok());
         assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
         let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
-        let Response::RunsPruned { removed } = resp else {
-            panic!("expected RunsPruned, got {resp:?}");
-        };
-        assert!(
-            !removed.contains(&"damaged1".to_string()),
-            "a dir whose record cannot be read is damage to surface, not an orphan to sweep: {removed:?}"
-        );
-        assert!(
-            removed.contains(&"orphan2".to_string()),
-            "a recordless dir is still an orphan: {removed:?}"
-        );
+        match resp {
+            Response::RunsPruned { removed } => {
+                assert!(
+                    !removed.contains(&"damaged1".to_string()),
+                    "a dir whose record cannot be read is damage to surface, not an orphan to sweep: {removed:?}"
+                );
+                assert!(
+                    removed.contains(&"orphan2".to_string()),
+                    "a recordless dir is still an orphan: {removed:?}"
+                );
+            }
+            other => unreachable!("expected RunsPruned, got {other:?}"),
+        }
     }
 
     #[tokio::test]

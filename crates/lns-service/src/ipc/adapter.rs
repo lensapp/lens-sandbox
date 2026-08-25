@@ -630,7 +630,16 @@ async fn handle_run(mut stream: UnixStream, args: lns_ipc::RunImageArgs) -> anyh
 const FRAME_CHAN_BUF: usize = 512;
 
 /// Everything a run does once it is going to start: its registry entry, the `RunStarted` its client waits for, and the boot task's frames.
+async fn migrate_legacy_audit_chains() {
+    if let Ok(home) = lns_ipc::lns_home() {
+        for id in crate::audit::migrate_legacy_run_audit(&crate::image_store::RealFs, &home).await {
+            log::info!("Migrated", "audit chain for run {id} to its new home");
+        }
+    }
+}
+
 async fn rebuild_stopped_runs() {
+    migrate_legacy_audit_chains().await;
     let scan = match crate::cache::root() {
         Ok(root) => crate::run_record::load_all_with(&crate::image_store::RealFs, &root).await,
         Err(e) => Err(e),
