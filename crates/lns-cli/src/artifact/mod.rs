@@ -118,7 +118,6 @@ pub enum ArtifactCommand {
     #[command(about = "Add a tag to a cached artifact within its current repository.")]
     Tag(TagArgs),
     #[command(
-        visible_alias = "list",
         about = "List what the local store holds: reference, kind, digest, size, and holder."
     )]
     Ls(LsArgs),

@@ -34,10 +34,7 @@ pub enum SandboxCommand {
     Logs(SandboxLogsArgs),
     #[command(about = "Re-attach to a running sandbox's output (detach chord to leave again).")]
     Attach(SandboxAttachArgs),
-    #[command(
-        visible_alias = "list",
-        about = "List running sandboxes with their state, CPU and memory."
-    )]
+    #[command(about = "List running sandboxes with their state, CPU and memory.")]
     Ls(SandboxLsArgs),
     #[command(about = "Print one sandbox's live state and launch configuration.")]
     Inspect(SandboxInspectArgs),
