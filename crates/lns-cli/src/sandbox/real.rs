@@ -10,11 +10,22 @@ use crate::service::real::RealSandboxService;
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::SandboxArgs::from_arg_matches(matches)?;
-        if let super::SandboxCommand::Run(run_args) = args.command {
-            return crate::service::launch_run(*run_args, ctx.debug).await;
+        match args.command {
+            super::SandboxCommand::Run(run_args) => Ok(crate::service::as_pre_start_failure(
+                crate::service::launch_run(*run_args, ctx.debug).await,
+            )),
+            super::SandboxCommand::Exec(exec_args) => {
+                let started = async {
+                    crate::service::require_running().await?;
+                    crate::service::exec_image(exec_args).await
+                };
+                Ok(crate::service::as_pre_start_failure(started.await))
+            }
+            command => {
+                crate::service::require_running().await?;
+                dispatch(super::SandboxArgs { command }, ctx.input).await
+            }
         }
-        crate::service::require_running().await?;
-        dispatch(args, ctx.input).await
     })
 }
 
@@ -77,12 +88,7 @@ pub fn run_attach<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFutu
 
 // The caller already holds the process-wide stdin lock (run_from_matches), so this must borrow it — a second Stdin::lock on the same thread deadlocks every dispatched verb.
 pub async fn dispatch(args: super::SandboxArgs, input: &mut dyn std::io::BufRead) -> Result<i32> {
-    let command = match args.command {
-        super::SandboxCommand::Exec(exec_args) => {
-            return crate::service::exec_image(exec_args).await;
-        }
-        other => other,
-    };
+    let command = args.command;
     let svc = RealSandboxService::new(crate::service::socket_path()?);
     let term = TermInfo {
         stdin_is_tty: crate::raw_mode::stdin_is_tty(),
