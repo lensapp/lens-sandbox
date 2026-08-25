@@ -143,9 +143,46 @@ pub const RM_SPEC: CommandSpec = CommandSpec {
 };
 
 pub fn augment_inspect(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::artifact::InspectArgs>("inspect").about(
+    app.subcommand(subcommand::<ShortcutInspectArgs>("inspect").about(
         "Inspect a sandbox or an artifact (shortcut for `lns sandbox inspect` / `lns artifact inspect`).",
     ))
+}
+
+#[derive(clap::Args)]
+pub struct ShortcutInspectArgs {
+    #[command(flatten)]
+    pub artifact: crate::artifact::InspectArgs,
+
+    #[arg(
+        long = "format",
+        value_name = "FORMAT",
+        help = "Output format, for a sandbox target. A document or cached artifact renders as itself."
+    )]
+    pub format: Option<crate::output::Format>,
+}
+
+/// What one `lns inspect` settled on, each the exact alias of a different namespaced spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectTarget {
+    Document,
+    Artifact,
+    Sandbox,
+}
+
+/// §1.3: the shortcut carries both namespaces' flags, so one the settled target does not take is refused by name, never dropped.
+pub fn refusal(target: InspectTarget, format: bool, mixin: bool) -> Option<String> {
+    match target {
+        InspectTarget::Document if format => Some(
+            "a local document renders as its author wrote it, so `lns artifact inspect` takes no `--format`; for a sandbox: `lns sandbox inspect <RUN> --format json`".to_string(),
+        ),
+        InspectTarget::Artifact if format => Some(
+            "a cached artifact renders as itself, so `lns artifact inspect` takes no `--format`; for a sandbox: `lns sandbox inspect <RUN> --format json`".to_string(),
+        ),
+        InspectTarget::Sandbox if mixin => Some(
+            "`--mixin` previews a document's composition, so `lns sandbox inspect` takes no `--mixin`; for an artifact: `lns artifact inspect <REF> --mixin <REF>`".to_string(),
+        ),
+        _ => None,
+    }
 }
 
 pub const INSPECT_SPEC: CommandSpec = CommandSpec {
@@ -307,5 +344,32 @@ mod tests {
         assert!(names_a_document(Some("./lns.dev.yaml")));
         assert!(!names_a_document(Some("reviewer")));
         assert!(!names_a_document(Some("ghcr.io/team/hermes:1.4.0")));
+    }
+
+    #[test]
+    fn a_flag_the_settled_target_does_not_take_is_refused_by_name() {
+        let doc = refusal(InspectTarget::Document, true, false).unwrap();
+        assert!(
+            doc.contains("renders as its author wrote it") && doc.contains("--format"),
+            "a document refusal says why the flag has no meaning there: {doc}"
+        );
+        let cached = refusal(InspectTarget::Artifact, true, false).unwrap();
+        assert!(
+            cached.contains("renders as itself") && cached.contains("--format"),
+            "a cached-artifact refusal says why: {cached}"
+        );
+        let run = refusal(InspectTarget::Sandbox, false, true).unwrap();
+        assert!(
+            run.contains("--mixin") && run.contains("lns sandbox inspect"),
+            "a sandbox refusal names the flag and the spelling that lacks it: {run}"
+        );
+    }
+
+    #[test]
+    fn a_flag_the_settled_target_takes_passes_without_a_word() {
+        assert_eq!(refusal(InspectTarget::Sandbox, true, false), None);
+        assert_eq!(refusal(InspectTarget::Document, false, true), None);
+        assert_eq!(refusal(InspectTarget::Artifact, false, true), None);
+        assert_eq!(refusal(InspectTarget::Document, false, false), None);
     }
 }

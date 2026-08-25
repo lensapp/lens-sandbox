@@ -45,11 +45,18 @@ pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunF
 
 pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
-        let args = crate::artifact::InspectArgs::from_arg_matches(matches)?;
-        if args.file.is_some() || names_a_document(args.reference.as_deref()) {
-            return crate::artifact::real::run_inspect_offline(args, ctx);
+        let args = super::ShortcutInspectArgs::from_arg_matches(matches)?;
+        let format_given = args.format.is_some();
+        let mixin_given = !args.artifact.mixins.is_empty();
+        let refuse = |target| super::refusal(target, format_given, mixin_given);
+        if args.artifact.file.is_some() || names_a_document(args.artifact.reference.as_deref()) {
+            if let Some(message) = refuse(super::InspectTarget::Document) {
+                return usage_error(&message);
+            }
+            return crate::artifact::real::run_inspect_offline(args.artifact, ctx);
         }
         let reference = args
+            .artifact
             .reference
             .clone()
             .expect("a reference-less inspect is a local document, settled above");
@@ -58,20 +65,26 @@ pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) ->
         let default_registry = crate::artifact::real::configured_registry()?;
         match which(&svc, "inspect", &reference, default_registry.as_deref()).await? {
             Owner::Artifact => {
+                if let Some(message) = refuse(super::InspectTarget::Artifact) {
+                    return usage_error(&message);
+                }
                 crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Inspect(args),
+                    crate::artifact::ArtifactCommand::Inspect(args.artifact),
                     ctx.input,
                 )
                 .await
             }
             _ => {
+                if let Some(message) = refuse(super::InspectTarget::Sandbox) {
+                    return usage_error(&message);
+                }
                 crate::sandbox::real::dispatch(
                     crate::sandbox::SandboxArgs {
                         command: crate::sandbox::SandboxCommand::Inspect(
                             crate::sandbox::SandboxInspectArgs {
                                 run: reference,
                                 output: crate::output::OutputArgs {
-                                    format: crate::output::Format::Table,
+                                    format: args.format.unwrap_or(crate::output::Format::Table),
                                 },
                             },
                         ),
@@ -82,4 +95,9 @@ pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) ->
             }
         }
     })
+}
+
+fn usage_error(message: &str) -> anyhow::Result<i32> {
+    eprintln!("error: {message}");
+    Ok(2)
 }

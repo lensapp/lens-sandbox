@@ -346,7 +346,7 @@ impl JsonFileGrantStore {
         Self { path }
     }
 
-    /// Suffixed rather than `with_extension`, which would replace the sidecar's own extension on an arbitrary `LNS_WORKLOAD_GRANTS_PATH`.
+    /// Suffixed rather than `with_extension`, which would replace the sidecar's own extension on an arbitrary caller-supplied path.
     fn lock_path(&self) -> PathBuf {
         let mut p = self.path.clone().into_os_string();
         p.push(".lock");
