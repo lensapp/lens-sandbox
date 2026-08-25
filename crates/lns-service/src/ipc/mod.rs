@@ -541,7 +541,14 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             registry,
             username,
             secret,
-        } => login_response(crate::image::verify_login(registry, username, secret).await),
+        } => login_response(
+            crate::image::verify_login(registry, username, secret).await,
+            registry,
+            username,
+            secret,
+        ),
+        Request::RegistryLogout { registry } => logout_response(registry),
+        Request::ListRegistryLogins => list_logins_response(),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
         Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
@@ -794,13 +801,84 @@ fn image_response(result: anyhow::Result<Response>) -> Response {
     })
 }
 
-fn login_response(result: anyhow::Result<()>) -> Response {
-    match result {
-        Ok(()) => Response::RegistryLoginVerified,
+fn login_response(
+    verified: anyhow::Result<()>,
+    registry: &str,
+    username: &str,
+    secret: &str,
+) -> Response {
+    use anyhow::Context;
+    use lns_policy::registry_auth::RegistryAuthStore;
+    let stored = verified.and_then(|()| {
+        let store = registry_auth_store()?;
+        let mut file = store.load().context("reading the registry login store")?;
+        file.insert(
+            lns_policy::registry_auth::canonical_registry(registry),
+            lns_policy::registry_auth::RegistryCredential {
+                username: username.to_string(),
+                secret: secret.to_string(),
+            },
+        );
+        store
+            .save(&file)
+            .context("writing the registry login store")
+    });
+    match stored {
+        Ok(()) => Response::RegistryLoginStored,
         Err(e) => Response::Error {
             message: format!("{e:#}"),
         },
     }
+}
+
+fn logout_response(registry: &str) -> Response {
+    use anyhow::Context;
+    use lns_policy::registry_auth::RegistryAuthStore;
+    let removed = registry_auth_store().and_then(|store| {
+        let mut file = store.load().context("reading the registry login store")?;
+        let canonical = lns_policy::registry_auth::canonical_registry(registry);
+        if file.remove(&canonical).is_none() {
+            anyhow::bail!("not logged in to {canonical}");
+        }
+        store
+            .save(&file)
+            .context("writing the registry login store")
+    });
+    match removed {
+        Ok(()) => Response::RegistryLoggedOut,
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+fn list_logins_response() -> Response {
+    use anyhow::Context;
+    use lns_policy::registry_auth::RegistryAuthStore;
+    let listed = registry_auth_store().and_then(|store| {
+        let file = store.load().context("reading the registry login store")?;
+        let mut logins: Vec<lns_ipc::RegistryLoginSummary> = file
+            .into_iter()
+            .map(|(registry, cred)| lns_ipc::RegistryLoginSummary {
+                registry,
+                username: cred.username,
+            })
+            .collect();
+        logins.sort_by(|a, b| a.registry.cmp(&b.registry));
+        Ok(logins)
+    });
+    match listed {
+        Ok(logins) => Response::RegistryLogins { logins },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+fn registry_auth_store() -> anyhow::Result<lns_policy::registry_auth::JsonFileRegistryAuthStore> {
+    Ok(lns_policy::registry_auth::JsonFileRegistryAuthStore::new(
+        lns_ipc::registry_auth_path()?,
+    ))
 }
 
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -3674,13 +3752,56 @@ mod tests {
     }
 
     #[test]
-    fn login_response_maps_ok_to_verified() {
-        assert_eq!(login_response(Ok(())), Response::RegistryLoginVerified);
+    #[serial_test::serial(env)]
+    fn login_response_stores_the_verified_credential_under_the_services_own_data_root() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", d.path());
+
+        let resp = login_response(Ok(()), "REGISTRY.Example.Test", "someone", "some-secret");
+
+        assert_eq!(resp, Response::RegistryLoginStored);
+        let store = lns_policy::registry_auth::JsonFileRegistryAuthStore::new(
+            d.path().join("registry-auth.json"),
+        );
+        use lns_policy::registry_auth::RegistryAuthStore;
+        let file = store.load().unwrap();
+        let cred = file
+            .get("registry.example.test")
+            .expect("stored under the canonical key the later pull looks up");
+        assert_eq!(cred.username, "someone");
+        assert_eq!(cred.secret, "some-secret");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn login_response_surfaces_a_store_failure_instead_of_claiming_the_login_stuck() {
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/nowhere");
+
+        let resp = as_json(login_response(
+            Ok(()),
+            "registry.example.test",
+            "someone",
+            "some-secret",
+        ));
+
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("LNS_HOME"),
+            "got: {resp}"
+        );
     }
 
     #[test]
     fn login_response_maps_err_to_an_error_carrying_the_reason() {
-        let resp = as_json(login_response(Err(anyhow::anyhow!("credentials rejected"))));
+        let resp = as_json(login_response(
+            Err(anyhow::anyhow!("credentials rejected")),
+            "registry.example.test",
+            "someone",
+            "some-secret",
+        ));
         assert_eq!(resp["type"], "Error", "got {resp}");
         assert!(
             resp["message"]
@@ -3689,6 +3810,109 @@ mod tests {
                 .contains("credentials rejected"),
             "got: {resp}"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_registry_logout_removes_the_stored_login_and_keeps_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", d.path());
+        assert_eq!(
+            login_response(Ok(()), "registry.example.test", "someone", "some-secret"),
+            Response::RegistryLoginStored
+        );
+        assert_eq!(
+            login_response(Ok(()), "other.example.test", "other", "other-secret"),
+            Response::RegistryLoginStored
+        );
+
+        let resp = handle_request(
+            &Request::RegistryLogout {
+                registry: "REGISTRY.Example.Test".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(resp, Response::RegistryLoggedOut);
+        let listed = as_json(handle_request(&Request::ListRegistryLogins, Instant::now()).await);
+        let logins = listed["logins"].as_array().expect("a login list");
+        assert_eq!(logins.len(), 1, "got {listed}");
+        assert_eq!(logins[0]["registry"], "other.example.test");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_registry_logout_of_an_unknown_registry_says_not_logged_in() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", d.path());
+
+        let resp = as_json(
+            handle_request(
+                &Request::RegistryLogout {
+                    registry: "registry.example.test".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+
+        assert_eq!(resp["type"], "Error", "got {resp}");
+        assert!(
+            resp["message"]
+                .as_str()
+                .expect("an error message")
+                .contains("not logged in to registry.example.test"),
+            "got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_list_registry_logins_reports_hosts_and_usernames_sorted_never_secrets()
+    {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", d.path());
+        login_response(Ok(()), "zeta.example.test", "zeta-user", "zeta-secret");
+        login_response(Ok(()), "alpha.example.test", "alpha-user", "alpha-secret");
+
+        let resp = as_json(handle_request(&Request::ListRegistryLogins, Instant::now()).await);
+
+        let logins = resp["logins"].as_array().expect("a login list");
+        assert_eq!(logins.len(), 2, "got {resp}");
+        assert_eq!(logins[0]["registry"], "alpha.example.test");
+        assert_eq!(logins[0]["username"], "alpha-user");
+        assert_eq!(logins[1]["registry"], "zeta.example.test");
+        assert!(
+            !resp.to_string().contains("secret"),
+            "the list surface must never carry secrets; got {resp}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_registry_logout_surfaces_an_unreadable_store() {
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/nowhere");
+
+        let resp = as_json(
+            handle_request(
+                &Request::RegistryLogout {
+                    registry: "registry.example.test".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(resp["type"], "Error", "got {resp}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_list_registry_logins_surfaces_an_unreadable_store() {
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/nowhere");
+
+        let resp = as_json(handle_request(&Request::ListRegistryLogins, Instant::now()).await);
+        assert_eq!(resp["type"], "Error", "got {resp}");
     }
 
     #[tokio::test]

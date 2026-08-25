@@ -127,6 +127,10 @@ pub enum Request {
         username: String,
         secret: String,
     },
+    RegistryLogout {
+        registry: String,
+    },
+    ListRegistryLogins,
 }
 
 /// The value decision a credential bind resolved to: a stored value, the host-detected value, or an explicit deny — all three persist per machine.
@@ -224,7 +228,11 @@ pub enum Response {
     CredentialBindFailed {
         reason: String,
     },
-    RegistryLoginVerified,
+    RegistryLoginStored,
+    RegistryLoggedOut,
+    RegistryLogins {
+        logins: Vec<RegistryLoginSummary>,
+    },
     VolumeList {
         volumes: Vec<VolumeInfo>,
     },
@@ -294,6 +302,12 @@ pub enum Response {
         /// 0 means the size of the work is unknown (render as indeterminate).
         total: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryLoginSummary {
+    pub registry: String,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1713,10 +1727,50 @@ mod tests {
     }
 
     #[test]
-    fn registry_login_verified_response_survives_a_round_trip() {
-        let resp = Response::RegistryLoginVerified;
+    fn registry_login_stored_response_survives_a_round_trip() {
+        let resp = Response::RegistryLoginStored;
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn registry_logout_request_survives_a_round_trip() {
+        let req = Request::RegistryLogout {
+            registry: "registry.example.test".into(),
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn registry_logged_out_response_survives_a_round_trip() {
+        let resp = Response::RegistryLoggedOut;
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn registry_login_list_round_trips_hosts_and_usernames_but_has_no_room_for_secrets() {
+        let req = Request::ListRegistryLogins;
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::RegistryLogins {
+            logins: vec![RegistryLoginSummary {
+                registry: "registry.example.test".into(),
+                username: "someone".into(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("secret"),
+            "the list surface carries hosts and usernames only; got {json}"
+        );
+        let decoded: Response = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, resp);
     }
 
