@@ -33,7 +33,7 @@ fn primary_target(run_id: impl Into<String>) -> lns_ipc::SessionTarget {
 /// §5: a `run` or `exec` that fails is `lns` failing, never the workload — the workload's own status comes back as a code, so an error here is always the 125 case and is never mistaken for a workload that exited 1.
 pub const PRE_START_FAILURE: i32 = 125;
 
-fn as_pre_start_failure(result: Result<i32>) -> i32 {
+pub fn as_pre_start_failure(result: Result<i32>) -> i32 {
     match result {
         Ok(code) => code,
         Err(e) => {
