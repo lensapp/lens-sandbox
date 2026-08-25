@@ -671,10 +671,17 @@ async fn orchestrate(
         vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx).await?;
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
-    crate::run_registry::set_exit_code(&run_id, session_code);
 
-    super::shutdown::shutdown_after_session(forwards, std::time::Duration::from_secs(2), vm_task)
-        .await?;
+    super::shutdown::publish_exit_after_quiesce(
+        &run_id,
+        session_code,
+        super::shutdown::shutdown_after_session(
+            forwards,
+            std::time::Duration::from_secs(2),
+            vm_task,
+        ),
+    )
+    .await?;
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
