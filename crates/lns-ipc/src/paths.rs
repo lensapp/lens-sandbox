@@ -3,36 +3,55 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-#[error(
-    "could not determine your home directory; set LNS_HOME to the directory lns should keep its data in"
-)]
-pub struct NoLnsHome;
+pub enum LnsHomeError {
+    #[error(
+        "could not determine your home directory; set LNS_HOME to the absolute directory lns should keep its data in"
+    )]
+    NoHome,
+    #[error(
+        "LNS_HOME must be a non-empty absolute path, got {0:?}; lns keeps everything in one directory and will not scatter it relative to the working directory"
+    )]
+    NotAbsolute(String),
+}
 
 /// Everything lns keeps for you lives in one directory, so there is one thing to back up and one thing `lns uninstall --purge` removes.
-pub fn lns_home() -> Result<PathBuf, NoLnsHome> {
+pub fn lns_home() -> Result<PathBuf, LnsHomeError> {
     lns_home_with(|key| std::env::var_os(key), dirs::home_dir())
 }
 
 pub fn lns_home_with(
     env: impl Fn(&str) -> Option<OsString>,
     home: Option<PathBuf>,
-) -> Result<PathBuf, NoLnsHome> {
+) -> Result<PathBuf, LnsHomeError> {
     match env("LNS_HOME") {
-        Some(overridden) => Ok(PathBuf::from(overridden)),
-        None => home.map(|home| home.join(".lns")).ok_or(NoLnsHome),
+        Some(overridden) => {
+            let path = PathBuf::from(&overridden);
+            if path.as_os_str().is_empty() || !path.is_absolute() {
+                return Err(LnsHomeError::NotAbsolute(
+                    overridden.to_string_lossy().into_owned(),
+                ));
+            }
+            Ok(path)
+        }
+        None => home
+            .map(|home| home.join(".lns"))
+            .ok_or(LnsHomeError::NoHome),
     }
 }
 
-fn in_lns_home(name: &str) -> PathBuf {
-    under(lns_home(), name)
+/// These paths also feed secret writes, so no resolvable home is a refusal, never a project-relative fallback.
+fn per_machine_path(
+    home: Result<PathBuf, LnsHomeError>,
+    name: &str,
+) -> Result<PathBuf, LnsHomeError> {
+    Ok(home?.join(name))
 }
 
-/// A per-machine file lns keeps for you; with no home to resolve it lands in the working directory rather than failing a command that only wanted to read one that may not exist.
-fn under(home: Result<PathBuf, NoLnsHome>, name: &str) -> PathBuf {
-    home.unwrap_or_else(|_| PathBuf::from(".lns")).join(name)
+fn in_lns_home(name: &str) -> Result<PathBuf, LnsHomeError> {
+    per_machine_path(lns_home(), name)
 }
 
-pub fn build_cache_root() -> Result<PathBuf, NoLnsHome> {
+pub fn build_cache_root() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("builds"))
 }
 
@@ -41,51 +60,51 @@ pub fn short_run_id(id: &str) -> &str {
 }
 
 /// A sandbox's chain outlives the sandbox, so it cannot live in `runs/`, which is what removing one deletes.
-pub fn audit_runs_root() -> Result<PathBuf, NoLnsHome> {
+pub fn audit_runs_root() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("audit"))
 }
 
-pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, NoLnsHome> {
+pub fn audit_log_for_run(run_id: &str) -> Result<PathBuf, LnsHomeError> {
     Ok(audit_runs_root()?.join(run_id).join("audit.jsonl"))
 }
 
-pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, NoLnsHome> {
+pub fn audit_anchor_for_run(run_id: &str) -> Result<PathBuf, LnsHomeError> {
     Ok(audit_runs_root()?.join(run_id).join("audit.anchor"))
 }
 
-pub fn connection_ledger() -> Result<PathBuf, NoLnsHome> {
+pub fn connection_ledger() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("ledger.jsonl"))
 }
 
-pub fn connection_ledger_anchor() -> Result<PathBuf, NoLnsHome> {
+pub fn connection_ledger_anchor() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("ledger.anchor"))
 }
 
-pub fn config_path() -> Result<PathBuf, NoLnsHome> {
+pub fn config_path() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("config.yaml"))
 }
 
-pub fn connectors_path() -> PathBuf {
+pub fn connectors_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("connectors.yaml")
 }
 
-pub fn credentials_path() -> PathBuf {
+pub fn credentials_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("credentials.json")
 }
 
-pub fn registry_auth_path() -> PathBuf {
+pub fn registry_auth_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("registry-auth.json")
 }
 
-pub fn workload_grants_path() -> PathBuf {
+pub fn workload_grants_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("workload-grants.json")
 }
 
-pub fn host_path_decisions_path() -> PathBuf {
+pub fn host_path_decisions_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("host-path-decisions.json")
 }
 
-pub fn host_bind_decisions_path() -> PathBuf {
+pub fn host_bind_decisions_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("host-bind-decisions.json")
 }
 
@@ -107,6 +126,47 @@ mod tests {
     fn short_run_id_truncates_on_a_char_boundary_for_tampered_multibyte_ids() {
         assert_eq!(short_run_id("abcdefghijké"), "abcdefghijké");
         assert_eq!(short_run_id("aaaaaaaaaaaéz"), "aaaaaaaaaaaé");
+    }
+
+    #[test]
+    fn an_empty_lns_home_override_is_rejected_not_a_cwd_relative_root() {
+        let err = lns_home_with(
+            |key| (key == "LNS_HOME").then(|| OsString::from("")),
+            Some(PathBuf::from("/home/dev")),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute"),
+            "an empty override must be refused with the way out named: {err}"
+        );
+    }
+
+    #[test]
+    fn a_relative_lns_home_override_is_rejected_before_it_can_scatter_data() {
+        for bad in ["relative/dir", ".", "./here"] {
+            let err = lns_home_with(
+                |key| (key == "LNS_HOME").then(|| OsString::from(bad)),
+                Some(PathBuf::from("/home/dev")),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("absolute"),
+                "{bad:?} must be refused: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_machine_file_with_no_home_is_an_error_not_a_project_relative_write() {
+        let err = per_machine_path(Err(LnsHomeError::NoHome), "connectors.yaml").unwrap_err();
+        assert!(
+            err.to_string().contains("LNS_HOME"),
+            "these paths feed secret writes, so nowhere to keep them is a refusal: {err}"
+        );
+        assert_eq!(
+            per_machine_path(Ok(PathBuf::from("/home/dev/.lns")), "connectors.yaml").unwrap(),
+            PathBuf::from("/home/dev/.lns/connectors.yaml")
+        );
     }
 
     #[test]
@@ -149,12 +209,12 @@ mod tests {
             connection_ledger().unwrap(),
             connection_ledger_anchor().unwrap(),
             config_path().unwrap(),
-            connectors_path(),
-            credentials_path(),
-            registry_auth_path(),
-            workload_grants_path(),
-            host_path_decisions_path(),
-            host_bind_decisions_path(),
+            connectors_path().unwrap(),
+            credentials_path().unwrap(),
+            registry_auth_path().unwrap(),
+            workload_grants_path().unwrap(),
+            host_path_decisions_path().unwrap(),
+            host_bind_decisions_path().unwrap(),
         ] {
             assert!(
                 path.starts_with(&home),
@@ -183,19 +243,6 @@ mod tests {
         assert_eq!(
             connection_ledger_anchor().unwrap().parent(),
             ledger.parent()
-        );
-    }
-
-    #[test]
-    fn a_per_machine_file_falls_back_to_the_working_directory_rather_than_failing_a_read() {
-        // These callers only ever want to read a file that may not exist, so nowhere to look is an empty answer rather than a broken command.
-        assert_eq!(
-            under(Err(NoLnsHome), "connectors.yaml"),
-            PathBuf::from(".lns/connectors.yaml")
-        );
-        assert_eq!(
-            under(Ok(PathBuf::from("/home/dev/.lns")), "connectors.yaml"),
-            PathBuf::from("/home/dev/.lns/connectors.yaml")
         );
     }
 }

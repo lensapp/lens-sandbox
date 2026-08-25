@@ -208,6 +208,7 @@ async fn orchestrate(
         revocations_at_gate = policy
             .as_deref()
             .map(supervisor::revocations_before_gate)
+            .transpose()?
             .unwrap_or_default();
         signed_in = gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
     }
@@ -702,14 +703,14 @@ async fn gate_declared_sign_ins(
     if credentials.is_empty() {
         return Ok(signed_in);
     }
-    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path())
+    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path()?)
         .unwrap_or_default();
     let catalog = lns_policy::connectors::effective_connectors(&user);
     let declared = sign_in_gate_ids(credentials, &catalog);
     if declared.is_empty() {
         return Ok(signed_in);
     }
-    let state = JsonFileCredentialStore::new(lns_ipc::credentials_path())
+    let state = JsonFileCredentialStore::new(lns_ipc::credentials_path()?)
         .load()
         .unwrap_or_default();
     let plans = plan_declared_connectors(&declared, &catalog, &state);

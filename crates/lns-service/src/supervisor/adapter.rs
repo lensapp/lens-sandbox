@@ -306,16 +306,16 @@ fn record_boot_sign_in_grants(
 }
 
 /// Each connector's forget count as it stands before a run's boot sign-in gate opens, so a `lns connector disconnect` landing during a browser device flow — minutes, not milliseconds — still wins over the grant that sign-in would earn.
-pub(crate) fn revocations_before_gate(policy_path: &Path) -> HashMap<String, u64> {
+pub(crate) fn revocations_before_gate(policy_path: &Path) -> Result<HashMap<String, u64>> {
     let project = project_key(policy_path);
-    JsonFileGrantStore::new(lns_ipc::workload_grants_path())
+    Ok(JsonFileGrantStore::new(lns_ipc::workload_grants_path()?)
         .load()
         .unwrap_or_default()
         .revocations
         .iter()
         .filter(|r| r.project == project)
         .map(|r| (r.connector.clone(), r.count))
-        .collect()
+        .collect())
 }
 
 /// Defaults to an empty user catalog and warns on load error, so a malformed `~/.lns/connectors.yaml` doesn't break a run — the bundled catalog still applies.
@@ -522,7 +522,7 @@ async fn start_credential_subsystem(
     oauth: OauthWiring,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
-    let credentials_path = lns_ipc::credentials_path();
+    let credentials_path = lns_ipc::credentials_path()?;
     let credential_store: Arc<dyn CredentialStore> =
         Arc::new(JsonFileCredentialStore::new(credentials_path.clone()));
     let mut initial_credential_state =
@@ -678,10 +678,10 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let sandbox_credentials = consent.credentials;
     let workload = consent.workload;
-    let connected = connected_in(&lns_ipc::workload_grants_path(), &project_key(policy_path));
+    let connected = connected_in(&lns_ipc::workload_grants_path()?, &project_key(policy_path));
     let (mut policy, own_policy) = running_policies(policy_path, sandbox_policy, connected)?;
     // Applied connectors resolve against the effective catalog (bundled ∪ user) into both wire credentials and allow-routes, captured once at boot so a later edit can't reach an already-forked workload.
-    let user_catalog = load_user_catalog_or_warn(&lns_ipc::connectors_path());
+    let user_catalog = load_user_catalog_or_warn(&lns_ipc::connectors_path()?);
     let catalog = lns_policy::connectors::effective_connectors(&user_catalog);
     let applied = resolve_applied_with_credentials(&policy, sandbox_credentials, &catalog);
     // Un-connected catalog connectors resolve as connectable — detect-only unless definition-declared — so their use offers a live connect.
@@ -714,7 +714,7 @@ pub(super) async fn start(
     log::info!("Approvals", "window ready");
 
     // A machine-global value arms only for a value key this workload holds an allow grant for, so a cloned overlay or a declared credential re-offers at first use instead of silently spending the credential.
-    let grants_path = lns_ipc::workload_grants_path();
+    let grants_path = lns_ipc::workload_grants_path()?;
     let grant_store: Arc<dyn GrantStore> = Arc::new(JsonFileGrantStore::new(grants_path.clone()));
     let mut grants = load_grants_or_warn(grant_store.as_ref(), &grants_path);
     let project = project_key(policy_path);
@@ -1402,7 +1402,7 @@ mod tests {
         seeded_sidecar(dir.path(), &policy_path);
         let _g = crate::test_env::EnvVarGuard::set("LNS_HOME", dir.path());
 
-        let counts = revocations_before_gate(&policy_path);
+        let counts = revocations_before_gate(&policy_path).expect("resolved counts");
 
         assert_eq!(
             counts,
@@ -1420,7 +1420,9 @@ mod tests {
         let _g = crate::test_env::EnvVarGuard::set("LNS_HOME", dir.path());
 
         assert!(
-            revocations_before_gate(&dir.path().join("lns-local-mixin.yaml")).is_empty(),
+            revocations_before_gate(&dir.path().join("lns-local-mixin.yaml"))
+                .expect("resolved counts")
+                .is_empty(),
             "a corrupt sidecar must not stop a launch here; the write that follows surfaces the same corruption with something the developer can act on"
         );
     }
