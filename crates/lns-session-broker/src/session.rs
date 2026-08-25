@@ -241,12 +241,28 @@ pub(crate) fn validate_argv(argv: &[String]) -> Option<Vec<CString>> {
     (cargs.len() == argv.len()).then_some(cargs)
 }
 
-/// A command the sandbox does not have exits 127 and one it has but cannot execute exits 126, so a caller can tell a typo from a file that is there but unusable.
-pub(crate) fn exec_failure_code(kind: io::ErrorKind) -> i32 {
-    match kind {
-        io::ErrorKind::NotFound => 127,
-        _ => 126,
+/// A command the sandbox does not have exits 127 and one it has but cannot execute exits 126, so a caller can tell a typo from a file that is there but unusable; execvp reports ENOENT for a missing interpreter too, so NotFound alone is not enough to claim 127.
+pub(crate) fn exec_failure_code(kind: io::ErrorKind, command_found: bool) -> i32 {
+    if kind == io::ErrorKind::NotFound && !command_found {
+        127
+    } else {
+        126
     }
+}
+
+pub(crate) fn command_is_present(
+    command: &str,
+    path: Option<&str>,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> bool {
+    if command.contains('/') {
+        return exists(std::path::Path::new(command));
+    }
+    path.is_some_and(|entries| {
+        entries
+            .split(':')
+            .any(|dir| exists(&std::path::Path::new(dir).join(command)))
+    })
 }
 
 pub fn read_client_frame(fd: RawFd) -> Option<ClientFrame> {
@@ -746,17 +762,54 @@ mod tests {
 
     #[test]
     fn a_missing_command_is_127_and_one_that_cannot_run_is_126() {
-        assert_eq!(exec_failure_code(io::ErrorKind::NotFound), 127);
+        assert_eq!(exec_failure_code(io::ErrorKind::NotFound, false), 127);
         for kind in [
             io::ErrorKind::PermissionDenied,
             io::ErrorKind::InvalidData,
             io::ErrorKind::IsADirectory,
         ] {
             assert_eq!(
-                exec_failure_code(kind),
+                exec_failure_code(kind, true),
                 126,
                 "{kind:?} means the command was found; only a missing one is 127"
             );
         }
+    }
+
+    #[test]
+    fn a_present_command_whose_interpreter_is_missing_is_126_not_127() {
+        assert_eq!(
+            exec_failure_code(io::ErrorKind::NotFound, true),
+            126,
+            "execvp reports ENOENT for a missing shebang interpreter or ELF loader too; the command itself was found, so it is not the 127 case"
+        );
+    }
+
+    #[test]
+    fn a_pathless_command_is_looked_up_through_every_path_entry() {
+        let exists = |p: &std::path::Path| p == std::path::Path::new("/usr/local/bin/tool");
+        assert!(command_is_present(
+            "tool",
+            Some("/bin:/usr/local/bin"),
+            &exists
+        ));
+        assert!(!command_is_present("tool", Some("/bin:/sbin"), &exists));
+        assert!(
+            !command_is_present("tool", None, &exists),
+            "no PATH means nowhere to find a pathless command"
+        );
+    }
+
+    #[test]
+    fn an_empty_path_entry_means_the_working_directory_like_execvp() {
+        let exists = |p: &std::path::Path| p == std::path::Path::new("tool");
+        assert!(command_is_present("tool", Some(":/bin"), &exists));
+    }
+
+    #[test]
+    fn a_command_with_a_slash_is_checked_directly_and_never_path_searched() {
+        let exists = |p: &std::path::Path| p == std::path::Path::new("./tool");
+        assert!(command_is_present("./tool", Some("/bin"), &exists));
+        assert!(!command_is_present("/bin/tool", Some("/bin"), &exists));
     }
 }
