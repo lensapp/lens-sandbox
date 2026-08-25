@@ -243,6 +243,7 @@ pub struct PulledSandbox {
     pub reference: Reference,
     pub digest: String,
     pub base_image: String,
+    pub mixins: Vec<String>,
     pub tools: Vec<String>,
 }
 
@@ -316,6 +317,7 @@ pub(crate) async fn pull_artifact_with<R: Registry>(
         reference,
         digest: manifest_digest,
         base_image: def.spec.image,
+        mixins: def.spec.mixins,
         tools: def.spec.tools,
     }))
 }
@@ -1238,6 +1240,7 @@ mod tests {
             reference: "registry.example.test/sb:1".parse().unwrap(),
             digest: format!("sha256:{}", "a".repeat(64)),
             base_image: "registry.example.test/base:1".into(),
+            mixins: Vec::new(),
             tools: Vec::new(),
         });
         let mixin = PulledArtifact::Mixin(PulledMixin {
@@ -1251,6 +1254,7 @@ mod tests {
                 reference: "registry.example.test/sb:1".parse().unwrap(),
                 digest: String::new(),
                 base_image: String::new(),
+                mixins: Vec::new(),
                 tools: Vec::new(),
             })
             .mixin()

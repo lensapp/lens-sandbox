@@ -311,12 +311,13 @@ pub struct VolumePruneFailure {
     pub error: String,
 }
 
-/// What a cached entry is: an `lns.run/v1` sandbox artifact, or the plain OCI image one runs on.
+/// What a cached entry is: an `lns.run/v1` sandbox or mixin artifact, or the plain OCI image a sandbox runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CachedKind {
     Image,
     Sandbox,
+    Mixin,
 }
 
 impl CachedKind {
@@ -324,6 +325,7 @@ impl CachedKind {
         match self {
             CachedKind::Image => "image",
             CachedKind::Sandbox => "sandbox",
+            CachedKind::Mixin => "mixin",
         }
     }
 }
@@ -1718,6 +1720,15 @@ mod tests {
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn a_cached_mixin_row_names_its_kind_in_words_and_on_the_wire() {
+        assert_eq!(CachedKind::Mixin.as_str(), "mixin");
+        let json = serde_json::to_value(CachedKind::Mixin).unwrap();
+        assert_eq!(json, serde_json::json!("mixin"));
+        let decoded: CachedKind = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, CachedKind::Mixin);
     }
 
     #[test]

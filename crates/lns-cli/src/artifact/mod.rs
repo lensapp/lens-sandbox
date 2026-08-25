@@ -154,6 +154,7 @@ pub struct LsArgs {
 pub enum CachedKindFilter {
     Image,
     Sandbox,
+    Mixin,
 }
 
 impl CachedKindFilter {
@@ -162,6 +163,7 @@ impl CachedKindFilter {
             (self, kind),
             (CachedKindFilter::Image, lns_ipc::CachedKind::Image)
                 | (CachedKindFilter::Sandbox, lns_ipc::CachedKind::Sandbox)
+                | (CachedKindFilter::Mixin, lns_ipc::CachedKind::Mixin)
         )
     }
 }

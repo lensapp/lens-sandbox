@@ -29,6 +29,13 @@ Feature: managing cached sandboxes
     And the output contains "alpine:3.20"
     And the output does not contain "hermes:1.4.0"
 
+  Scenario: ls --kind mixin lists only the cached mixins
+    Given the service reports a cached sandbox "hermes:1.4.0" and a cached mixin "team/lint:1.0"
+    When the user runs artifact command "ls --kind mixin"
+    Then the exit code is 0
+    And the output contains "team/lint:1.0"
+    And the output does not contain "hermes:1.4.0"
+
   Scenario: ls --kind rejects a kind the cache cannot hold
     When I run "lns artifact ls --kind sorcery"
     Then the exit code is 2
