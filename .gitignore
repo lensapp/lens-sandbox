@@ -37,3 +37,6 @@ bin/
 # `cargo llvm-cov report`. Both are transient build artifacts.
 *.profraw
 *.profdata
+
+# Harness-generated per-directory decisions files; never commit personal grants.
+lns-policy.yaml
