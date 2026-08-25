@@ -8,6 +8,11 @@ async fn image_cached(w: &mut BehaviourWorld, reference: String, digest: String,
     w.image().seed_layer(&reference, &digest, size).await;
 }
 
+#[given(expr = "a base image {string} is cached with layer {string} of {int} bytes")]
+async fn base_image_cached(w: &mut BehaviourWorld, reference: String, digest: String, size: u64) {
+    w.image().seed_base_layer(&reference, &digest, size).await;
+}
+
 #[given(expr = "image {string} also has layer {string} of {int} bytes")]
 async fn image_extra_layer(w: &mut BehaviourWorld, reference: String, digest: String, size: u64) {
     w.image().seed_layer(&reference, &digest, size).await;
@@ -314,4 +319,10 @@ fn prune_removes_nothing(w: &mut BehaviourWorld) {
     let report = w.image().last_prune.clone().expect("a prune report");
     assert!(report.removed.is_empty(), "got {:?}", report.removed);
     assert_eq!(report.reclaimed_bytes, 0);
+}
+
+#[then(expr = "the prune names no removed images")]
+fn prune_names_nothing(w: &mut BehaviourWorld) {
+    let report = w.image().last_prune.clone().expect("a prune report");
+    assert!(report.removed.is_empty(), "got {:?}", report.removed);
 }

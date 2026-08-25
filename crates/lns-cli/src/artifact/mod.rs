@@ -152,7 +152,6 @@ pub struct LsArgs {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum CachedKindFilter {
-    Image,
     Sandbox,
     Mixin,
 }
@@ -161,8 +160,7 @@ impl CachedKindFilter {
     fn matches(self, kind: lns_ipc::CachedKind) -> bool {
         matches!(
             (self, kind),
-            (CachedKindFilter::Image, lns_ipc::CachedKind::Image)
-                | (CachedKindFilter::Sandbox, lns_ipc::CachedKind::Sandbox)
+            (CachedKindFilter::Sandbox, lns_ipc::CachedKind::Sandbox)
                 | (CachedKindFilter::Mixin, lns_ipc::CachedKind::Mixin)
         )
     }

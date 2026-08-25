@@ -26,6 +26,24 @@ Feature: image cache lifecycle — list, remove, prune
     When the images are listed
     Then the image listing names "registry.example.test/some/image:1.0" as idle
 
+  Scenario: A base image is not listed as a cached artifact
+    Given a base image "registry.example.test/library/base:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When the images are listed
+    Then the image listing is empty
+
+  Scenario: Removing a base image directly is answered as unknown
+    Given a base image "registry.example.test/library/base:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When image "registry.example.test/library/base:1.0" is removed
+    Then the request is refused because there is no such image
+    And the image record for "registry.example.test/library/base:1.0" remains in the cache
+
+  Scenario: Pruning reclaims an idle base image without naming it
+    Given a base image "registry.example.test/library/base:1.0" is cached with layer "sha256:aaa" of 3000 bytes
+    When the images are pruned
+    Then the prune names no removed images
+    And layer "sha256:aaa" is gone from the layer cache
+    And the image prune reports 3000 reclaimed bytes
+
   Scenario: Listing reports a cached mixin as a mixin
     Given mixin "registry.example.test/team/lint:1.0" is cached
     When the images are listed
@@ -112,7 +130,7 @@ Feature: image cache lifecycle — list, remove, prune
     And layer "sha256:idle" remains in the layer cache
 
   Scenario: A base image a live sandbox depends on is not a prune candidate
-    Given image "registry.example.test/base/image:1.0" is cached with layer "sha256:base" of 2000 bytes
+    Given a base image "registry.example.test/base/image:1.0" is cached with layer "sha256:base" of 2000 bytes
     And sandbox "registry.example.test/team/agent:1.0" with layer "sha256:app" of 500 bytes is cached on base "registry.example.test/base/image:1.0"
     And a live run uses image "registry.example.test/team/agent:1.0"
     When the prunable images are listed
