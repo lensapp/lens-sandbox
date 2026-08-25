@@ -74,8 +74,35 @@ pub async fn which(svc: &impl SandboxService, verb: &str, operand: &str) -> Resu
     resolve(verb, operand, ask_both(svc, operand).await?)
 }
 
+/// `-f` is `lns sandbox rm`'s flag; on an artifact operand it is refused rather than silently dropped.
+pub fn rm_route(owner: Owner, force: bool) -> Result<Owner> {
+    if owner == Owner::Artifact && force {
+        bail!(
+            "-f only applies to sandboxes: it stops a running one before removing it, and a cached artifact is never running — drop the flag or use `lns artifact rm`"
+        );
+    }
+    Ok(owner)
+}
+
+#[derive(clap::Args)]
+pub struct ShortcutRmArgs {
+    #[arg(
+        value_name = "REF",
+        help = "Sandbox or cached artifact to remove; a running sandbox is refused unless `-f`."
+    )]
+    pub reference: String,
+
+    #[arg(
+        short = 'f',
+        long = "force",
+        default_value_t = false,
+        help = "Stop a running sandbox first, then remove it. Sandboxes only."
+    )]
+    pub force: bool,
+}
+
 pub fn augment_rm(app: clap::Command) -> clap::Command {
-    app.subcommand(subcommand::<crate::artifact::RmArgs>("rm").about(
+    app.subcommand(subcommand::<ShortcutRmArgs>("rm").about(
         "Remove a sandbox or a cached artifact (shortcut for `lns sandbox rm` / `lns artifact rm`).",
     ))
 }
@@ -105,6 +132,26 @@ pub const INSPECT_SPEC: CommandSpec = CommandSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn force_rides_along_when_the_operand_is_a_sandbox() {
+        assert_eq!(rm_route(Owner::Sandbox, true).unwrap(), Owner::Sandbox);
+        assert_eq!(rm_route(Owner::Sandbox, false).unwrap(), Owner::Sandbox);
+    }
+
+    #[test]
+    fn an_artifact_operand_without_force_is_untouched() {
+        assert_eq!(rm_route(Owner::Artifact, false).unwrap(), Owner::Artifact);
+    }
+
+    #[test]
+    fn force_on_an_artifact_operand_is_refused_by_name() {
+        let err = rm_route(Owner::Artifact, true).unwrap_err().to_string();
+        assert!(
+            err.contains("only applies to sandboxes"),
+            "the refusal says what -f is for: {err}"
+        );
+    }
 
     #[test]
     fn a_word_only_one_namespace_knows_settles_without_a_question() {

@@ -136,6 +136,22 @@ Feature: two things carry a name, and every command acts on one of them
     Then the exit code is 0
     And the service received a RemoveRun for "redis"
 
+  Scenario: rm -f reaches the sandbox namespace as its force
+    Given "redis" names a sandbox, and the cache holds nothing
+    When the user runs "lns rm -f redis"
+    Then the exit code is 0
+    And the service received a forced RemoveRun for "redis"
+
+  Scenario: rm -f on a cached artifact is refused, not ignored
+    Given the sandbox "hermes:1.4.0" is cached and no other sandbox shares its base-image layers
+    When the user runs "lns rm -f hermes:1.4.0"
+    Then the command fails with an exit code other than 0
+    And the output contains "only applies to sandboxes"
+
+  Scenario: the top-level rm grammar accepts -f
+    When I run "lns rm -f reviewer"
+    Then the exit code is 0
+
   Scenario: a word neither namespace knows names both as searched
     Given "ghost" names neither a sandbox nor a cached artifact
     When the user runs "lns inspect ghost"
