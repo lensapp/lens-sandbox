@@ -205,16 +205,27 @@ async fn run_volume(world: &mut BehaviourWorld, tail: String) {
                 .unwrap_or_default();
             let mut input = std::io::Cursor::new(stdin_text);
             let mut buf = Vec::<u8>::new();
-            match volume::run(&args.command, &svc, &mut input, &mut buf).await {
-                Ok(exit_code) => CliRun {
-                    exit_code,
-                    output: String::from_utf8_lossy(&buf).into_owned(),
-                },
-                Err(e) => CliRun {
-                    exit_code: 1,
-                    output: format!("{}{e:#}", String::from_utf8_lossy(&buf)),
-                },
-            }
+            let mut err_buf = Vec::<u8>::new();
+            let run =
+                match volume::run(&args.command, &svc, &mut input, &mut buf, &mut err_buf).await {
+                    Ok(exit_code) => CliRun {
+                        exit_code,
+                        output: format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&buf),
+                            String::from_utf8_lossy(&err_buf)
+                        ),
+                    },
+                    Err(e) => CliRun {
+                        exit_code: 1,
+                        output: format!("{}{e:#}", String::from_utf8_lossy(&buf)),
+                    },
+                };
+            world.split_streams = Some((
+                String::from_utf8_lossy(&buf).into_owned(),
+                String::from_utf8_lossy(&err_buf).into_owned(),
+            ));
+            run
         }
         Err(e) => CliRun {
             exit_code: e.exit_code(),

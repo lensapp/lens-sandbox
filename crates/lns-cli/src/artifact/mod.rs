@@ -531,12 +531,13 @@ pub(crate) async fn remove_cached<W: std::io::Write>(
     }
 }
 
-async fn prune<I: std::io::BufRead, W: std::io::Write>(
+async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>(
     svc: &impl SandboxService,
     args: &PruneArgs,
     term: TermInfo,
     input: &mut I,
     out: &mut W,
+    stderr: &mut E,
 ) -> Result<i32> {
     if !args.force {
         if !term.stdin_is_tty {
@@ -544,7 +545,7 @@ async fn prune<I: std::io::BufRead, W: std::io::Write>(
                 "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; there is no terminal to ask at, so pass --force to confirm"
             );
         }
-        if !confirm_prune(input, out)? {
+        if !confirm_prune(input, stderr).await? {
             return Ok(0);
         }
     }
@@ -569,21 +570,22 @@ async fn prune<I: std::io::BufRead, W: std::io::Write>(
     }
 }
 
-fn confirm_prune<I: std::io::BufRead, W: std::io::Write>(
+async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
     input: &mut I,
-    out: &mut W,
+    err: &mut E,
 ) -> Result<bool> {
-    write!(
-        out,
-        "This removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache. Continue? [y/N] "
-    )?;
-    out.flush()?;
+    err.write_all(
+        b"This removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache. Continue? [y/N] ",
+    )
+    .await?;
+    err.flush().await?;
     let mut line = String::new();
     input.read_line(&mut line)?;
     let answer = line.trim();
     let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
     if !yes {
-        writeln!(out, "Aborted.")?;
+        err.write_all(b"Aborted.\n").await?;
+        err.flush().await?;
     }
     Ok(yes)
 }
@@ -808,7 +810,7 @@ where
             inspect_cached(svc, reference, &args.mixins, out).await
         }
         ArtifactCommand::Rm(args) => remove_cached(svc, &args.reference, out).await,
-        ArtifactCommand::Prune(args) => prune(svc, args, term, input, out).await,
+        ArtifactCommand::Prune(args) => prune(svc, args, term, input, out, stderr).await,
     }
 }
 
@@ -1393,6 +1395,7 @@ mod tests {
     async fn declining_the_prune_prompt_reaches_no_service() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
+        let mut err = Vec::new();
         let code = prune(
             &svc,
             &PruneArgs { force: false },
@@ -1402,11 +1405,13 @@ mod tests {
             },
             &mut std::io::Cursor::new(b"n\n".to_vec()),
             &mut out,
+            &mut err,
         )
         .await
         .unwrap();
         assert_eq!(code, 0);
-        assert!(String::from_utf8(out).unwrap().contains("Aborted."));
+        assert!(String::from_utf8(err).unwrap().contains("Aborted."));
+        assert!(out.is_empty());
         assert!(svc.requests.lock().unwrap().is_empty());
     }
 
@@ -1423,6 +1428,7 @@ mod tests {
             TermInfo::default(),
             &mut std::io::empty(),
             &mut out,
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -1445,6 +1451,7 @@ mod tests {
             TermInfo::default(),
             &mut std::io::empty(),
             &mut Vec::new(),
+            &mut Vec::new(),
         )
         .await
         .unwrap_err();
@@ -1455,6 +1462,7 @@ mod tests {
             &PruneArgs { force: true },
             TermInfo::default(),
             &mut std::io::empty(),
+            &mut Vec::new(),
             &mut Vec::new(),
         )
         .await

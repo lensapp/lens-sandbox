@@ -98,13 +98,14 @@ pub async fn run(
     svc: &dyn VolumeService,
     input: &mut dyn BufRead,
     writer: &mut impl Write,
+    err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
     match cmd {
         VolumeCommand::Ls(args) => ls(svc, args, writer).await,
         VolumeCommand::Create(args) => create(svc, &args.name, writer).await,
         VolumeCommand::Inspect(args) => inspect(svc, &args.name, args.output.format, writer).await,
         VolumeCommand::Rm(args) => rm(svc, &args.name, writer).await,
-        VolumeCommand::Prune(args) => prune(svc, args.force, input, writer).await,
+        VolumeCommand::Prune(args) => prune(svc, args.force, input, writer, err).await,
     }
 }
 
@@ -227,8 +228,9 @@ async fn prune(
     force: bool,
     input: &mut dyn BufRead,
     writer: &mut impl Write,
+    err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
-    if !force && !confirm_prune(input, writer)? {
+    if !force && !confirm_prune(input, err).await? {
         return Ok(0);
     }
     match send(svc, Request::PruneVolumes).await? {
@@ -259,18 +261,20 @@ async fn prune(
     }
 }
 
-fn confirm_prune(input: &mut dyn BufRead, writer: &mut impl Write) -> Result<bool> {
-    write!(
-        writer,
-        "This removes every volume not attached to a running sandbox. Continue? [y/N] "
-    )?;
-    writer.flush()?;
+async fn confirm_prune(
+    input: &mut dyn BufRead,
+    err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
+) -> Result<bool> {
+    err.write_all(b"This removes every volume not attached to a running sandbox. Continue? [y/N] ")
+        .await?;
+    err.flush().await?;
     let mut line = String::new();
     input.read_line(&mut line)?;
     let answer = line.trim();
     let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
     if !yes {
-        writeln!(writer, "Aborted.")?;
+        err.write_all(b"Aborted.\n").await?;
+        err.flush().await?;
     }
     Ok(yes)
 }
@@ -341,7 +345,9 @@ mod tests {
     async fn run_cmd(cmd: &VolumeCommand, svc: &dyn VolumeService) -> Result<(i32, String)> {
         let mut input = Cursor::new(String::new());
         let mut buf = Vec::new();
-        let code = run(cmd, svc, &mut input, &mut buf).await?;
+        let mut err_buf = Vec::new();
+        let code = run(cmd, svc, &mut input, &mut buf, &mut err_buf).await?;
+        buf.extend_from_slice(&err_buf);
         Ok((code, String::from_utf8(buf).unwrap()))
     }
 
@@ -399,7 +405,10 @@ mod tests {
         for answer in ["y\n", "Y\n", "yes\n", "YES\n"] {
             let mut input = Cursor::new(answer.to_string());
             let mut buf = Vec::new();
-            assert!(confirm_prune(&mut input, &mut buf).unwrap(), "{answer:?}");
+            assert!(
+                confirm_prune(&mut input, &mut buf).await.unwrap(),
+                "{answer:?}"
+            );
         }
     }
 
@@ -408,7 +417,10 @@ mod tests {
         for answer in ["n\n", "no\n", "\n", "yep\n"] {
             let mut input = Cursor::new(answer.to_string());
             let mut buf = Vec::new();
-            assert!(!confirm_prune(&mut input, &mut buf).unwrap(), "{answer:?}");
+            assert!(
+                !confirm_prune(&mut input, &mut buf).await.unwrap(),
+                "{answer:?}"
+            );
             let out = String::from_utf8(buf).unwrap();
             assert!(out.contains("Aborted."), "got: {out}");
         }
