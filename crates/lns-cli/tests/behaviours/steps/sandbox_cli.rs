@@ -757,7 +757,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
     let svc = fake_sandbox_service(w);
     let Some(reference) = reference else { return };
     // The shortcut asks both namespaces and refuses to guess; only a settled answer runs.
-    let owner = match lns_cli::shortcut::which(&svc, "inspect", &reference).await {
+    let owner = match lns_cli::shortcut::which(&svc, "inspect", &reference, None).await {
         Ok(owner) => owner,
         Err(e) => {
             w.result = Some(CliRun {
@@ -817,7 +817,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
 async fn run_lns_rm(w: &mut BehaviourWorld, force: String, operand: String) {
     let force = !force.is_empty();
     let svc = fake_sandbox_service(w);
-    let routed = match lns_cli::shortcut::which(&svc, "rm", &operand).await {
+    let routed = match lns_cli::shortcut::which(&svc, "rm", &operand, None).await {
         Ok(owner) => lns_cli::shortcut::rm_route(owner, force),
         Err(e) => Err(e),
     };

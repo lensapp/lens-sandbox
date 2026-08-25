@@ -45,17 +45,30 @@ pub fn names_a_document(operand: Option<&str>) -> bool {
 }
 
 /// The artifact namespace is the local store, so the lookup asks what the cache holds. Asking a registry instead would make every word Docker Hub can resolve an artifact, and no sandbox could be named `redis`.
-fn cache_holds(cached: &[lns_ipc::ImageInfo], operand: &str) -> bool {
-    let normalized = operand
-        .parse::<oci_client::Reference>()
-        .ok()
-        .map(|reference| reference.whole());
-    cached
-        .iter()
-        .any(|entry| entry.reference == operand || Some(&entry.reference) == normalized.as_ref())
+fn cache_holds(
+    cached: &[lns_ipc::ImageInfo],
+    operand: &str,
+    default_registry: Option<&str>,
+) -> bool {
+    let qualified = crate::config::resolve_default_registry(operand, default_registry);
+    let tagged = with_default_tag(&qualified);
+    cached.iter().any(|entry| {
+        entry.reference == operand
+            || entry.reference == qualified
+            || Some(&entry.reference) == tagged.as_ref()
+    })
 }
 
-async fn ask_both(svc: &impl SandboxService, operand: &str) -> Result<Owner> {
+fn with_default_tag(reference: &str) -> Option<String> {
+    let name = reference.rsplit('/').next().unwrap_or(reference);
+    (!name.contains(':') && !name.contains('@')).then(|| format!("{reference}:latest"))
+}
+
+async fn ask_both(
+    svc: &impl SandboxService,
+    operand: &str,
+    default_registry: Option<&str>,
+) -> Result<Owner> {
     let is_a_sandbox = matches!(
         svc.one_shot(Request::InspectRun {
             run: operand.to_string(),
@@ -64,14 +77,28 @@ async fn ask_both(svc: &impl SandboxService, operand: &str) -> Result<Owner> {
         Response::RunInspect { .. }
     );
     let is_an_artifact = match svc.one_shot(Request::ListImages).await? {
-        Response::ImageList { images } => cache_holds(&images, operand),
-        _ => false,
+        Response::ImageList { images } => cache_holds(&images, operand, default_registry),
+        Response::Error { message } => {
+            bail!("{operand:?} cannot be arbitrated: listing the cache failed: {message}")
+        }
+        _ => bail!(
+            "{operand:?} cannot be arbitrated: the service gave an unexpected reply to the cache listing"
+        ),
     };
     Ok(owner(is_a_sandbox, is_an_artifact))
 }
 
-pub async fn which(svc: &impl SandboxService, verb: &str, operand: &str) -> Result<Owner> {
-    resolve(verb, operand, ask_both(svc, operand).await?)
+pub async fn which(
+    svc: &impl SandboxService,
+    verb: &str,
+    operand: &str,
+    default_registry: Option<&str>,
+) -> Result<Owner> {
+    resolve(
+        verb,
+        operand,
+        ask_both(svc, operand, default_registry).await?,
+    )
 }
 
 /// `-f` is `lns sandbox rm`'s flag; on an artifact operand it is refused rather than silently dropped.
@@ -209,32 +236,68 @@ mod tests {
     #[test]
     fn a_word_a_registry_could_resolve_is_not_an_artifact_unless_the_cache_holds_it() {
         // Every short word is a real image on Docker Hub. If the lookup asked a registry, no sandbox could be named `redis`.
-        assert!(!cache_holds(&[], "redis"));
+        assert!(!cache_holds(&[], "redis", None));
         assert!(!cache_holds(
             &[cached("ghcr.io/team/hermes:1.4.0")],
-            "redis"
+            "redis",
+            None
         ));
     }
 
     #[test]
-    fn the_cache_answers_for_the_reference_as_typed_and_as_it_stores_it() {
-        let store = [cached("docker.io/library/redis:latest")];
+    fn the_cache_answers_for_the_reference_as_typed_and_as_the_cli_qualifies_it() {
+        let store = [cached("hub.lns.run/redis:latest")];
         assert!(
-            cache_holds(&store, "redis"),
-            "a bare reference means what the store wrote down"
+            cache_holds(&store, "redis", None),
+            "a bare reference lives on the Lens hub, exactly where lns pull would put it"
         );
-        assert!(cache_holds(&store, "docker.io/library/redis:latest"));
+        assert!(cache_holds(&store, "hub.lns.run/redis:latest", None));
         assert!(
-            !cache_holds(&store, "redis:7"),
+            !cache_holds(&store, "redis:7", None),
             "another tag is another artifact"
+        );
+        assert!(
+            cache_holds(&[cached("ghcr.io/redis:latest")], "redis", Some("ghcr.io")),
+            "run.registry decides a bare reference's home"
+        );
+        assert!(
+            !cache_holds(&[cached("docker.io/library/redis:latest")], "redis", None),
+            "Docker Hub defaults would let a Hub name shadow the user's own artifact"
         );
     }
 
     #[test]
-    fn a_reference_the_cache_cannot_parse_matches_only_itself() {
+    fn a_bare_reference_also_answers_for_its_untagged_cache_entry() {
+        assert!(cache_holds(&[cached("hub.lns.run/redis")], "redis", None));
+    }
+
+    #[test]
+    fn an_operand_no_registry_could_parse_still_matches_itself_as_typed() {
         let store = [cached("###")];
-        assert!(cache_holds(&store, "###"));
-        assert!(!cache_holds(&store, "redis"));
+        assert!(cache_holds(&store, "###", None));
+        assert!(!cache_holds(&store, "redis", None));
+    }
+
+    #[tokio::test]
+    async fn a_cache_listing_error_refuses_arbitration_instead_of_guessing() {
+        let svc = crate::test_service::CannedService::new(Response::Error {
+            message: "cache unavailable".to_string(),
+        });
+        let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cache unavailable"),
+            "a lookup failure fails closed and names its cause, never 'no artifact': {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_off_script_cache_reply_refuses_arbitration_too() {
+        let svc = crate::test_service::CannedService::new(Response::Acknowledged);
+        let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot be arbitrated"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -244,17 +307,5 @@ mod tests {
         assert!(names_a_document(Some("./lns.dev.yaml")));
         assert!(!names_a_document(Some("reviewer")));
         assert!(!names_a_document(Some("ghcr.io/team/hermes:1.4.0")));
-    }
-
-    #[tokio::test]
-    async fn a_service_that_cannot_list_the_cache_offers_no_artifact_to_arbitrate() {
-        let svc = crate::test_service::CannedService::new(Response::Error {
-            message: "cache unavailable".to_string(),
-        });
-        let err = which(&svc, "rm", "ghost").await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("no sandbox and no cached artifact"),
-            "a word the cache cannot vouch for is a miss, not a guess: {err:#}"
-        );
     }
 }
