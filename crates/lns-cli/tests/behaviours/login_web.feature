@@ -3,17 +3,17 @@ Feature: browser login when `lns login` is run without credential flags
   browser device flow against the registry: it prints a one-time
   confirmation code, opens the browser, and waits until the registry issues a
   fresh token for the signed-in account. The issued credential then rides the
-  existing verify-then-store path, so a token the service rejects is never
-  saved. Any credential flag keeps the traditional flag-driven path unchanged.
+  existing path through the service, which verifies it against the registry
+  and stores it only when it is accepted. Any credential flag keeps the
+  traditional flag-driven path unchanged.
 
-  Scenario: a flagless login runs the web flow and stores the issued credential
+  Scenario: a flagless login runs the web flow and the service stores the issued credential
     Given the web flow will issue a token for "webuser"
     When I log in with "lns login hub.lns.run"
     Then the exit code is 0
     And the output contains "Your one-time confirmation code is:"
     And the output contains "You are now logged in to hub.lns.run as webuser."
-    And the verifier saw the web-issued credential for "webuser"
-    And the credential store holds "hub.lns.run" for "webuser"
+    And the service saw the web-issued credential for "webuser"
 
   Scenario: credential flags keep the traditional flag-driven path
     Given the web flow would panic if it were consulted
@@ -40,7 +40,7 @@ Feature: browser login when `lns login` is run without credential flags
     When I log in with "lns login hub.lns.run"
     Then the exit code is 1
     And the output contains "denied in the browser"
-    And the credential store is empty
+    And the service stored no credential
 
   Scenario: an expired confirmation code asks the user to retry
     Given the web flow reports the confirmation code expired

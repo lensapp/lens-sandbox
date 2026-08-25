@@ -1,11 +1,7 @@
 use std::io::Write;
-use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use lns_policy::registry_auth::{
-    JsonFileRegistryAuthStore, RegistryAuthStore, RegistryCredential, canonical_registry,
-    validate_registry_host,
-};
+use lns_policy::registry_auth::{canonical_registry, validate_registry_host};
 
 use crate::command::{CommandSpec, subcommand};
 use crate::connector::LocalBoxFuture;
@@ -13,7 +9,7 @@ use crate::connector::LocalBoxFuture;
 mod real;
 mod web;
 
-pub use real::RealRegistryVerifier;
+pub use real::RealRegistryAuthClient;
 pub use web::{
     BrowserOpener, DeviceAuthClient, DeviceAuthorization, DeviceStart, RealDeviceAuthClient,
     TokenPoll, WebLogin,
@@ -55,23 +51,40 @@ pub struct LogoutArgs {
     pub registry: Option<String>,
 }
 
-/// The result of asking the running service to verify a registry credential.
+/// The result of asking the running service to verify and store a registry credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginOutcome {
-    Verified,
+    Stored,
     Rejected(String),
     ServiceUnavailable,
 }
 
-/// Verifies a registry credential by running the pull-auth handshake through the running service.
-pub trait RegistryVerifier {
+/// The result of asking the running service to remove a stored registry credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogoutOutcome {
+    LoggedOut,
+    Failed(String),
+    ServiceUnavailable,
+}
+
+/// The result of asking the running service which registries are logged in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListLoginsOutcome {
+    Logins(Vec<lns_ipc::RegistryLoginSummary>),
+    ServiceUnavailable,
+}
+
+/// The service owns the registry login store, so every credential operation goes through it.
+pub trait RegistryAuthClient {
     fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>>;
-    fn verify<'a>(
+    fn login<'a>(
         &'a self,
         registry: &'a str,
         username: &'a str,
         secret: &'a str,
     ) -> LocalBoxFuture<'a, Result<LoginOutcome>>;
+    fn logout<'a>(&'a self, registry: &'a str) -> LocalBoxFuture<'a, Result<LogoutOutcome>>;
+    fn list<'a>(&'a self) -> LocalBoxFuture<'a, Result<ListLoginsOutcome>>;
 }
 
 /// The terminal result of driving a browser-based device login against a registry.
@@ -123,16 +136,15 @@ pub const LOGOUT_SPEC: CommandSpec = CommandSpec {
 pub async fn run(
     args: &LoginArgs,
     default_registry: &str,
-    auth_path: &Path,
-    verifier: &dyn RegistryVerifier,
+    client: &dyn RegistryAuthClient,
     web: &dyn WebLoginFlow,
     input: &mut dyn std::io::BufRead,
     out: &mut impl Write,
 ) -> Result<i32> {
     if args.list {
-        return list(auth_path, out);
+        return list(client, out).await;
     }
-    login(args, default_registry, auth_path, verifier, web, input, out).await
+    login(args, default_registry, client, web, input, out).await
 }
 
 fn target_registry(positional: Option<&str>, default_registry: &str) -> Result<String> {
@@ -144,76 +156,54 @@ fn target_registry(positional: Option<&str>, default_registry: &str) -> Result<S
 async fn login(
     args: &LoginArgs,
     default_registry: &str,
-    auth_path: &Path,
-    verifier: &dyn RegistryVerifier,
+    client: &dyn RegistryAuthClient,
     web: &dyn WebLoginFlow,
     input: &mut dyn std::io::BufRead,
     out: &mut impl Write,
 ) -> Result<i32> {
     let registry = target_registry(args.registry.as_deref(), default_registry)?;
-    if args.wants_web_login() && !verifier.available().await? {
+    if args.wants_web_login() && !client.available().await? {
         bail!("{SERVICE_REQUIRED}");
     }
     let (username, secret) = resolve_credentials(args, &registry, web, input, out).await?;
 
-    match verifier.verify(&registry, &username, &secret).await? {
+    match client.login(&registry, &username, &secret).await? {
         LoginOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
         LoginOutcome::Rejected(reason) => bail!("login to {registry} was rejected: {reason}"),
-        LoginOutcome::Verified => {}
+        LoginOutcome::Stored => {}
     }
 
-    let store = JsonFileRegistryAuthStore::new(auth_path.to_path_buf());
-    let mut file = store
-        .load()
-        .with_context(|| format!("reading {}", auth_path.display()))?;
-    file.insert(
-        registry.clone(),
-        RegistryCredential {
-            username: username.clone(),
-            secret,
-        },
-    );
-    store
-        .save(&file)
-        .with_context(|| format!("writing {}", auth_path.display()))?;
     writeln!(out, "You are now logged in to {registry} as {username}.")?;
     Ok(0)
 }
 
-pub fn logout(
+pub async fn logout(
     args: &LogoutArgs,
     default_registry: &str,
-    auth_path: &Path,
+    client: &dyn RegistryAuthClient,
     out: &mut impl Write,
 ) -> Result<i32> {
     let registry = target_registry(args.registry.as_deref(), default_registry)?;
-    let store = JsonFileRegistryAuthStore::new(auth_path.to_path_buf());
-    let mut file = store
-        .load()
-        .with_context(|| format!("reading {}", auth_path.display()))?;
-    if file.remove(&registry).is_none() {
-        bail!("not logged in to {registry}");
+    match client.logout(&registry).await? {
+        LogoutOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
+        LogoutOutcome::Failed(reason) => bail!("{reason}"),
+        LogoutOutcome::LoggedOut => {}
     }
-    store
-        .save(&file)
-        .with_context(|| format!("writing {}", auth_path.display()))?;
     writeln!(out, "Logged out of {registry}.")?;
     Ok(0)
 }
 
-fn list(auth_path: &Path, out: &mut impl Write) -> Result<i32> {
-    let store = JsonFileRegistryAuthStore::new(auth_path.to_path_buf());
-    let file = store
-        .load()
-        .with_context(|| format!("reading {}", auth_path.display()))?;
-    if file.is_empty() {
+async fn list(client: &dyn RegistryAuthClient, out: &mut impl Write) -> Result<i32> {
+    let logins = match client.list().await? {
+        ListLoginsOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
+        ListLoginsOutcome::Logins(logins) => logins,
+    };
+    if logins.is_empty() {
         writeln!(out, "Not logged in to any registry.")?;
         return Ok(0);
     }
-    let mut rows: Vec<(&String, &RegistryCredential)> = file.iter().collect();
-    rows.sort_by(|a, b| a.0.cmp(b.0));
-    for (registry, cred) in rows {
-        writeln!(out, "{registry}  {}", cred.username)?;
+    for login in logins {
+        writeln!(out, "{}  {}", login.registry, login.username)?;
     }
     Ok(0)
 }
@@ -224,8 +214,7 @@ impl LoginArgs {
     }
 }
 
-const SERVICE_REQUIRED: &str =
-    "the background service must be running to verify a login; start it with `lns service start`";
+const SERVICE_REQUIRED: &str = "the background service must be running to manage registry logins; start it with `lns service start`";
 
 async fn resolve_credentials(
     args: &LoginArgs,
@@ -292,29 +281,46 @@ fn resolve_secret(args: &LoginArgs, input: &mut dyn std::io::BufRead) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
-    struct FakeVerifier {
-        outcome: LoginOutcome,
+    struct FakeClient {
+        login_outcome: LoginOutcome,
+        logout_outcome: LogoutOutcome,
+        list_outcome: ListLoginsOutcome,
         calls: std::sync::Mutex<Vec<(String, String, String)>>,
+        logout_calls: std::sync::Mutex<Vec<String>>,
     }
 
-    impl FakeVerifier {
-        fn returning(outcome: LoginOutcome) -> Self {
+    impl FakeClient {
+        fn returning(login_outcome: LoginOutcome) -> Self {
             Self {
-                outcome,
+                login_outcome,
+                logout_outcome: LogoutOutcome::LoggedOut,
+                list_outcome: ListLoginsOutcome::Logins(Vec::new()),
                 calls: std::sync::Mutex::new(Vec::new()),
+                logout_calls: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn for_logout(logout_outcome: LogoutOutcome) -> Self {
+            let mut client = Self::returning(LoginOutcome::Stored);
+            client.logout_outcome = logout_outcome;
+            client
+        }
+
+        fn listing(list_outcome: ListLoginsOutcome) -> Self {
+            let mut client = Self::returning(LoginOutcome::Stored);
+            client.list_outcome = list_outcome;
+            client
         }
     }
 
-    impl RegistryVerifier for FakeVerifier {
+    impl RegistryAuthClient for FakeClient {
         fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>> {
-            let up = !matches!(self.outcome, LoginOutcome::ServiceUnavailable);
+            let up = !matches!(self.login_outcome, LoginOutcome::ServiceUnavailable);
             Box::pin(async move { Ok(up) })
         }
 
-        fn verify<'a>(
+        fn login<'a>(
             &'a self,
             registry: &'a str,
             username: &'a str,
@@ -325,7 +331,18 @@ mod tests {
                 username.to_string(),
                 secret.to_string(),
             ));
-            let outcome = self.outcome.clone();
+            let outcome = self.login_outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+
+        fn logout<'a>(&'a self, registry: &'a str) -> LocalBoxFuture<'a, Result<LogoutOutcome>> {
+            self.logout_calls.lock().unwrap().push(registry.to_string());
+            let outcome = self.logout_outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+
+        fn list<'a>(&'a self) -> LocalBoxFuture<'a, Result<ListLoginsOutcome>> {
+            let outcome = self.list_outcome.clone();
             Box::pin(async move { Ok(outcome) })
         }
     }
@@ -380,28 +397,15 @@ mod tests {
         }
     }
 
-    fn store_at(dir: &TempDir) -> std::path::PathBuf {
-        dir.path().join("registry-auth.json")
-    }
-
-    fn loaded(path: &Path) -> lns_policy::registry_auth::RegistryAuthFile {
-        JsonFileRegistryAuthStore::new(path.to_path_buf())
-            .load()
-            .unwrap()
-    }
-
     #[tokio::test]
-    async fn login_verifies_then_stores_the_credential_under_the_canonical_host() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+    async fn login_sends_the_credential_to_the_service_which_verifies_and_stores_it() {
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let code = login(
             &login_args(Some("ghcr.io"), Some("octocat"), Some("ghp_token")),
             "docker.io",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -409,10 +413,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, 0);
-        let file = loaded(&path);
-        let cred = file.get("ghcr.io").expect("entry under ghcr.io");
-        assert_eq!(cred.username, "octocat");
-        assert_eq!(cred.secret, "ghp_token");
+        assert_eq!(
+            client.calls.lock().unwrap()[0],
+            ("ghcr.io".into(), "octocat".into(), "ghp_token".into())
+        );
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -422,53 +426,44 @@ mod tests {
 
     #[tokio::test]
     async fn login_folds_a_docker_hub_alias_onto_the_canonical_key() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         login(
             &login_args(Some("index.docker.io"), Some("hubuser"), Some("hubpass")),
             "docker.io",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
         )
         .await
         .unwrap();
-        assert!(loaded(&path).contains_key("docker.io"));
-        // The verifier is asked about the canonical host, not the alias the user typed.
-        assert_eq!(verifier.calls.lock().unwrap()[0].0, "docker.io");
+        // The service is asked about the canonical host, not the alias the user typed.
+        assert_eq!(client.calls.lock().unwrap()[0].0, "docker.io");
     }
 
     #[tokio::test]
     async fn login_falls_back_to_the_default_registry_when_no_host_is_given() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         login(
             &login_args(None, Some("me"), Some("tok")),
             "ghcr.io",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
         )
         .await
         .unwrap();
-        assert!(loaded(&path).contains_key("ghcr.io"));
+        assert_eq!(client.calls.lock().unwrap()[0].0, "ghcr.io");
     }
 
     #[tokio::test]
     async fn login_reads_the_secret_from_stdin_when_password_stdin_is_set() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut args = login_args(Some("ghcr.io"), Some("me"), None);
         args.password_stdin = true;
         let mut input: &[u8] = b"piped-secret\n";
@@ -476,28 +471,25 @@ mod tests {
         login(
             &args,
             "registry.example.test",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
         )
         .await
         .unwrap();
-        assert_eq!(loaded(&path).get("ghcr.io").unwrap().secret, "piped-secret");
+        assert_eq!(client.calls.lock().unwrap()[0].2, "piped-secret");
     }
 
     #[tokio::test]
     async fn login_requires_a_username() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let err = login(
             &login_args(Some("ghcr.io"), None, Some("tok")),
             "docker.io",
-            &store_at(&dir),
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -508,16 +500,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_rejects_an_invalid_registry_before_verifying() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+    async fn login_rejects_an_invalid_registry_before_asking_the_service() {
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let err = login(
             &login_args(Some("https://ghcr.io"), Some("me"), Some("tok")),
             "docker.io",
-            &store_at(&dir),
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -526,23 +516,20 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("URL"), "got: {err:#}");
         assert!(
-            verifier.calls.lock().unwrap().is_empty(),
-            "must not verify a bad host"
+            client.calls.lock().unwrap().is_empty(),
+            "must not send a bad host to the service"
         );
     }
 
     #[tokio::test]
-    async fn login_does_not_store_when_the_service_rejects_the_credential() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Rejected("401 unauthorized".into()));
+    async fn login_fails_when_the_service_rejects_the_credential() {
+        let client = FakeClient::returning(LoginOutcome::Rejected("401 unauthorized".into()));
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let err = login(
             &login_args(Some("ghcr.io"), Some("me"), Some("wrong")),
             "docker.io",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -551,22 +538,20 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("401 unauthorized"));
         assert!(
-            loaded(&path).is_empty(),
-            "a rejected login must not be stored"
+            !String::from_utf8(out).unwrap().contains("logged in"),
+            "a rejected login must not claim success"
         );
     }
 
     #[tokio::test]
     async fn login_reports_when_the_service_is_unavailable() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::ServiceUnavailable);
+        let client = FakeClient::returning(LoginOutcome::ServiceUnavailable);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let err = login(
             &login_args(Some("ghcr.io"), Some("me"), Some("tok")),
             "docker.io",
-            &store_at(&dir),
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -577,28 +562,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_dispatches_to_list_and_hides_secrets() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
-        for (host, user, pass) in [
-            ("ghcr.io", "octocat", "ghp_secret"),
-            ("quay.io", "robot", "qpw"),
-        ] {
-            let mut input: &[u8] = b"";
-            let mut sink = Vec::new();
-            login(
-                &login_args(Some(host), Some(user), Some(pass)),
-                "docker.io",
-                &path,
-                &verifier,
-                &NoWebLogin,
-                &mut input,
-                &mut sink,
-            )
-            .await
-            .unwrap();
-        }
+    async fn run_dispatches_to_list_and_renders_hosts_and_usernames() {
+        let client = FakeClient::listing(ListLoginsOutcome::Logins(vec![
+            lns_ipc::RegistryLoginSummary {
+                registry: "ghcr.io".into(),
+                username: "octocat".into(),
+            },
+            lns_ipc::RegistryLoginSummary {
+                registry: "quay.io".into(),
+                username: "robot".into(),
+            },
+        ]));
         let mut args = login_args(None, None, None);
         args.list = true;
         let mut input: &[u8] = b"";
@@ -606,8 +580,7 @@ mod tests {
         let code = run(
             &args,
             "registry.example.test",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -615,29 +588,26 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, 0);
-        let text = String::from_utf8(out).unwrap();
         assert_eq!(
-            text, "ghcr.io  octocat\nquay.io  robot\n",
-            "sorted hosts + usernames"
+            String::from_utf8(out).unwrap(),
+            "ghcr.io  octocat\nquay.io  robot\n",
+            "hosts + usernames as the service reported them"
         );
         assert!(
-            !text.contains("ghp_secret") && !text.contains("qpw"),
-            "secrets must never be listed"
+            client.calls.lock().unwrap().is_empty(),
+            "--list only reports, never logs in"
         );
     }
 
     #[tokio::test]
     async fn run_dispatches_to_login_when_list_is_not_set() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let code = run(
             &login_args(Some("ghcr.io"), Some("me"), Some("tok")),
             "docker.io",
-            &path,
-            &verifier,
+            &client,
             &NoWebLogin,
             &mut input,
             &mut out,
@@ -645,14 +615,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, 0);
-        assert!(loaded(&path).contains_key("ghcr.io"));
+        assert_eq!(client.calls.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn list_reports_when_no_registries_are_logged_in() {
-        let dir = TempDir::new().unwrap();
+    #[tokio::test]
+    async fn list_reports_when_no_registries_are_logged_in() {
+        let client = FakeClient::listing(ListLoginsOutcome::Logins(Vec::new()));
         let mut out = Vec::new();
-        let code = list(&store_at(&dir), &mut out).unwrap();
+        let code = list(&client, &mut out).await.unwrap();
         assert_eq!(code, 0);
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -660,32 +630,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn logout_removes_a_stored_credential() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let store = JsonFileRegistryAuthStore::new(path.clone());
-        let mut file = lns_policy::registry_auth::RegistryAuthFile::new();
-        file.insert(
-            "ghcr.io".into(),
-            RegistryCredential {
-                username: "me".into(),
-                secret: "s".into(),
-            },
-        );
-        store.save(&file).unwrap();
+    #[tokio::test]
+    async fn list_requires_the_service_that_keeps_the_logins() {
+        let client = FakeClient::listing(ListLoginsOutcome::ServiceUnavailable);
+        let mut out = Vec::new();
+        let err = list(&client, &mut out).await.unwrap_err();
+        assert!(format!("{err:#}").contains("service must be running"));
+    }
+
+    #[tokio::test]
+    async fn logout_asks_the_service_to_remove_the_stored_credential() {
+        let client = FakeClient::for_logout(LogoutOutcome::LoggedOut);
         let mut out = Vec::new();
         let code = logout(
             &LogoutArgs {
-                registry: Some("ghcr.io".into()),
+                registry: Some("GHCR.IO".into()),
             },
             "docker.io",
-            &path,
+            &client,
             &mut out,
         )
+        .await
         .unwrap();
         assert_eq!(code, 0);
-        assert!(loaded(&path).is_empty());
+        assert_eq!(
+            client.logout_calls.lock().unwrap().as_slice(),
+            ["ghcr.io"],
+            "the service is asked about the canonical host"
+        );
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -693,19 +665,37 @@ mod tests {
         );
     }
 
-    #[test]
-    fn logout_errors_when_not_logged_in() {
-        let dir = TempDir::new().unwrap();
+    #[tokio::test]
+    async fn logout_surfaces_the_services_not_logged_in_answer() {
+        let client =
+            FakeClient::for_logout(LogoutOutcome::Failed("not logged in to ghcr.io".into()));
         let err = logout(
             &LogoutArgs {
                 registry: Some("ghcr.io".into()),
             },
             "docker.io",
-            &store_at(&dir),
+            &client,
             &mut Vec::new(),
         )
+        .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("not logged in to ghcr.io"));
+    }
+
+    #[tokio::test]
+    async fn logout_requires_the_service_that_keeps_the_logins() {
+        let client = FakeClient::for_logout(LogoutOutcome::ServiceUnavailable);
+        let err = logout(
+            &LogoutArgs {
+                registry: Some("ghcr.io".into()),
+            },
+            "docker.io",
+            &client,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("service must be running"));
     }
 
     #[test]
@@ -748,18 +738,13 @@ mod tests {
         );
     }
 
-    async fn flagless_login(
-        web: &dyn WebLoginFlow,
-        verifier: &FakeVerifier,
-        path: &Path,
-    ) -> (Result<i32>, String) {
+    async fn flagless_login(web: &dyn WebLoginFlow, client: &FakeClient) -> (Result<i32>, String) {
         let mut input: &[u8] = b"";
         let mut out = Vec::new();
         let result = login(
             &flagless_args(Some("hub.lns.run")),
             "hub.lns.run",
-            path,
-            verifier,
+            client,
             web,
             &mut input,
             &mut out,
@@ -769,50 +754,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_issued_credential_still_goes_through_the_verifier_and_a_rejection_is_not_stored() {
-        let dir = TempDir::new().unwrap();
-        let path = store_at(&dir);
-        let verifier = FakeVerifier::returning(LoginOutcome::Rejected("401 unauthorized".into()));
+    async fn web_issued_credential_still_goes_through_the_service_and_a_rejection_fails() {
+        let client = FakeClient::returning(LoginOutcome::Rejected("401 unauthorized".into()));
         let web = FakeWebLogin {
             outcome: Ok(WebLoginOutcome::Completed {
                 username: "webuser".into(),
                 secret: "some-web-token".into(),
             }),
         };
-        let (result, _) = flagless_login(&web, &verifier, &path).await;
+        let (result, _) = flagless_login(&web, &client).await;
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("401 unauthorized"));
         assert_eq!(
-            verifier.calls.lock().unwrap()[0],
+            client.calls.lock().unwrap()[0],
             (
                 "hub.lns.run".into(),
                 "webuser".into(),
                 "some-web-token".into()
             )
         );
-        assert!(
-            loaded(&path).is_empty(),
-            "a rejected web credential must not be stored"
-        );
     }
 
     #[tokio::test]
     async fn a_down_service_stops_a_web_login_before_the_browser_flow_starts() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::ServiceUnavailable);
-        let (result, _) = flagless_login(&NoWebLogin, &verifier, &store_at(&dir)).await;
+        let client = FakeClient::returning(LoginOutcome::ServiceUnavailable);
+        let (result, _) = flagless_login(&NoWebLogin, &client).await;
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("service must be running"));
     }
 
     #[tokio::test]
     async fn web_login_transport_error_points_at_the_flag_fallback() {
-        let dir = TempDir::new().unwrap();
-        let verifier = FakeVerifier::returning(LoginOutcome::Verified);
+        let client = FakeClient::returning(LoginOutcome::Stored);
         let web = FakeWebLogin {
             outcome: Err("connection refused".into()),
         };
-        let (result, _) = flagless_login(&web, &verifier, &store_at(&dir)).await;
+        let (result, _) = flagless_login(&web, &client).await;
         let err = format!("{:#}", result.unwrap_err());
         assert!(
             err.contains("starting browser login to hub.lns.run")
@@ -821,8 +798,8 @@ mod tests {
             "got: {err}"
         );
         assert!(
-            verifier.calls.lock().unwrap().is_empty(),
-            "nothing to verify when the flow never started"
+            client.calls.lock().unwrap().is_empty(),
+            "nothing to send when the flow never started"
         );
     }
 
