@@ -241,13 +241,29 @@ fn name_holder(map: &HashMap<String, RunEntry>, name: &str) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
-pub fn resolve(handle: &str) -> Result<String, String> {
+/// A miss and an ambiguity are different answers: a caller may treat the first as settled, never the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    Unknown { handle: String },
+    Ambiguous { handle: String },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown { handle } => write!(f, "no such run: {handle}"),
+            Self::Ambiguous { handle } => write!(f, "ambiguous run id prefix: {handle}"),
+        }
+    }
+}
+
+pub fn resolve(handle: &str) -> Result<String, ResolveError> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     resolve_in(g.as_ref(), handle)
 }
 
 /// Resolve a handle and read its status under one lock, so the answer can never name a run that vanished in between.
-pub fn resolve_status(handle: &str) -> Result<(String, RunStatus), String> {
+pub fn resolve_status(handle: &str) -> Result<(String, RunStatus), ResolveError> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     let id = resolve_in(g.as_ref(), handle)?;
     let status = g
@@ -258,12 +274,18 @@ pub fn resolve_status(handle: &str) -> Result<(String, RunStatus), String> {
     Ok((id, status))
 }
 
-fn resolve_in(map: Option<&HashMap<String, RunEntry>>, handle: &str) -> Result<String, String> {
+fn resolve_in(
+    map: Option<&HashMap<String, RunEntry>>,
+    handle: &str,
+) -> Result<String, ResolveError> {
+    let unknown = || ResolveError::Unknown {
+        handle: handle.to_string(),
+    };
     if handle.is_empty() {
-        return Err(format!("no such run: {handle}"));
+        return Err(unknown());
     }
     let Some(map) = map else {
-        return Err(format!("no such run: {handle}"));
+        return Err(unknown());
     };
     if map.contains_key(handle) {
         return Ok(handle.to_string());
@@ -274,8 +296,10 @@ fn resolve_in(map: Option<&HashMap<String, RunEntry>>, handle: &str) -> Result<S
     let mut prefix_matches = map.keys().filter(|k| k.starts_with(handle));
     match (prefix_matches.next(), prefix_matches.next()) {
         (Some(id), None) => Ok(id.clone()),
-        (Some(_), Some(_)) => Err(format!("ambiguous run id prefix: {handle}")),
-        (None, _) => Err(format!("no such run: {handle}")),
+        (Some(_), Some(_)) => Err(ResolveError::Ambiguous {
+            handle: handle.to_string(),
+        }),
+        (None, _) => Err(unknown()),
     }
 }
 
@@ -291,7 +315,7 @@ fn rename_in(
 ) -> Result<(), String> {
     validate_run_name(new_name)?;
     let map = map.ok_or_else(|| format!("no such run: {handle}"))?;
-    let target = resolve_in(Some(&*map), handle)?;
+    let target = resolve_in(Some(&*map), handle).map_err(|e| e.to_string())?;
     if let Some(holder) = name_holder(map, new_name)
         && holder != target
     {
@@ -774,11 +798,13 @@ mod tests {
         assert!(
             resolve_in(Some(&map), "ghost")
                 .unwrap_err()
+                .to_string()
                 .contains("no such run: ghost")
         );
         assert!(
             resolve_in(None, "reviewer")
                 .unwrap_err()
+                .to_string()
                 .contains("no such run")
         );
     }
@@ -787,7 +813,7 @@ mod tests {
     async fn resolve_in_rejects_an_empty_handle_instead_of_matching_the_only_run() {
         let mut map = HashMap::new();
         named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
-        let err = resolve_in(Some(&map), "").unwrap_err();
+        let err = resolve_in(Some(&map), "").unwrap_err().to_string();
         assert!(
             err.contains("no such run"),
             "an empty handle must not wildcard-match the sole run, got: {err}"
@@ -800,7 +826,16 @@ mod tests {
         named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
         named_handle(&mut map, "1a2b9999000000000000000000000bbb", "auditor").await;
         let err = resolve_in(Some(&map), "1a2b").unwrap_err();
-        assert!(err.contains("ambiguous run id prefix: 1a2b"), "got: {err}");
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                handle: "1a2b".to_string()
+            }
+        );
+        assert!(
+            err.to_string().contains("ambiguous run id prefix: 1a2b"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -819,6 +854,7 @@ mod tests {
         assert!(
             resolve_in(Some(&map), "reviewer")
                 .unwrap_err()
+                .to_string()
                 .contains("no such run")
         );
     }
@@ -1716,7 +1752,12 @@ mod tests {
         assert_eq!(resolved, id);
         assert_eq!(status, RunStatus::Exited { code: 3 });
         deregister(&id);
-        assert!(resolve_status(&id).unwrap_err().contains("no such run"));
+        assert!(
+            resolve_status(&id)
+                .unwrap_err()
+                .to_string()
+                .contains("no such run")
+        );
     }
 
     #[tokio::test]

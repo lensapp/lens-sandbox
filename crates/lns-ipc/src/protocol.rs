@@ -204,6 +204,10 @@ pub enum Response {
     RunInspect {
         details: Box<RunDetails>,
     },
+    /// No run answers to the handle — distinct from `Error` so a caller can treat a miss as an answer, never as a fault.
+    RunUnknown {
+        run: String,
+    },
     RunStats {
         stats: RunStatsInfo,
     },
