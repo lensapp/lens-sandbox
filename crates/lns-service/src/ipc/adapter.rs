@@ -643,7 +643,12 @@ async fn rebuild_stopped_runs() {
                     "run {id} cannot restart and will not be pruned: {reason}; repair or delete its run dir by hand"
                 );
             }
-            crate::run_registry::rebuild_from_records(scan.records)
+            let doomed = crate::run_registry::rebuild_from_records(scan.records);
+            if let Ok(root) = crate::cache::root() {
+                for id in doomed {
+                    crate::run::reclaim_run_dir(&crate::run::RealRemoveDir, &root, &id);
+                }
+            }
         }
         Err(e) => log::warn!("stopped runs not rebuilt; they stay invisible until restart: {e:#}"),
     }
