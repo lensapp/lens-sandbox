@@ -71,6 +71,28 @@ async fn dependent_sandbox_cached(
         .await;
 }
 
+#[given(expr = "mixin {string} is cached")]
+async fn mixin_cached(w: &mut BehaviourWorld, reference: String) {
+    w.image().seed_mixin(&reference).await;
+}
+
+#[given(expr = "sandbox {string} is cached layering on mixin {string}")]
+async fn sandbox_cached_on_mixin(w: &mut BehaviourWorld, reference: String, mixin: String) {
+    w.image().seed_sandbox_on_mixin(&reference, &mixin).await;
+}
+
+#[then(expr = "the image listing reports {string} as a mixin")]
+fn listing_reports_mixin(w: &mut BehaviourWorld, reference: String) {
+    let rig = w.image();
+    assert_eq!(listed(rig, &reference).kind, lns_ipc::CachedKind::Mixin);
+}
+
+#[then(expr = "the request is refused because a cached sandbox requires it")]
+fn removal_refused_cached_sandbox(w: &mut BehaviourWorld) {
+    let err = w.image().last_error.clone().expect("a removal error");
+    assert!(err.contains("required by cached sandbox"), "got: {err}");
+}
+
 #[when(expr = "the prunable images are listed")]
 async fn list_prunable_images(w: &mut BehaviourWorld) {
     w.image().list_prunable().await;

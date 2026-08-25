@@ -415,11 +415,35 @@ pub fn refuse_mixins_without_a_document(extra: &[String]) -> Result<()> {
     )
 }
 
-/// Cache every mixin a pulled one names, so a digest-pinned graph pulled once resolves offline afterwards; answers with how many documents it read.
-pub async fn warm<S: MixinSource>(roots: &[String], source: &S) -> Result<usize> {
+/// One warmed document of a pulled mixin's graph: its pinned identity and the pinned mixins it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmedMixin {
+    pub pinned: String,
+    pub mixins: Vec<String>,
+}
+
+/// What warming a pulled mixin's graph cached: the pinned roots it layers on, and every document the walk reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmedGraph {
+    pub roots: Vec<String>,
+    pub nodes: Vec<WarmedMixin>,
+}
+
+/// Cache every mixin a pulled one names, so a digest-pinned graph pulled once resolves offline afterwards; answers with what it read so the caller can index it.
+pub async fn warm<S: MixinSource>(roots: &[String], source: &S) -> Result<WarmedGraph> {
     let home = Locator::Reference(String::new());
     let fetched = collect(roots, &[], None, &home, source).await?;
-    Ok(fetched.graph.len())
+    Ok(WarmedGraph {
+        roots: fetched.pinned_roots,
+        nodes: fetched
+            .graph
+            .into_iter()
+            .map(|(pinned, spec)| WarmedMixin {
+                pinned,
+                mixins: spec.mixins,
+            })
+            .collect(),
+    })
 }
 
 /// A declared directory roots at the directory the definition was read from, so that root has to name one directory on this machine, whoever sent it.
@@ -1249,12 +1273,24 @@ mod tests {
             ),
             (pinned("b").as_str(), r#"{"tools":["node@22"]}"#),
         ]);
-        let read = warm(&[pinned("a")], &source)
+        let warmed = warm(&[pinned("a")], &source)
             .await
             .expect("a pulled mixin's graph is what makes it resolve offline later");
         assert_eq!(
-            read, 2,
+            warmed.nodes.len(),
+            2,
             "a pull that stopped at the mixin itself would still need the network the first time something merges it"
+        );
+        assert_eq!(warmed.roots, [pinned("a")]);
+        let a = warmed
+            .nodes
+            .iter()
+            .find(|n| n.pinned == pinned("a"))
+            .expect("the root document is part of the warmed graph");
+        assert_eq!(
+            a.mixins,
+            [pinned("b")],
+            "the edges come back pinned so an index built from them survives a moved tag"
         );
     }
 
