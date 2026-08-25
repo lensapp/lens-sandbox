@@ -738,9 +738,23 @@ where
             let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !known.contains(id) && !removed.iter().any(|r| r == id) {
-                crate::run::reclaim_run_dir(remover, cache_root, id);
-                removed.push(id.to_string());
+            if known.contains(id) || removed.iter().any(|r| r == id) {
+                continue;
+            }
+            match fs
+                .read(&crate::run_record::record_path(cache_root, id))
+                .await
+            {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    crate::run::reclaim_run_dir(remover, cache_root, id);
+                    removed.push(id.to_string());
+                }
+                _ => {
+                    let dir = dir.display();
+                    crate::log::warn!(
+                        "run dir {dir} has a record the registry does not know; left alone rather than swept"
+                    );
+                }
             }
         }
     }
@@ -2745,6 +2759,62 @@ mod tests {
         async fn remove_file(&self, _p: &std::path::Path) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    struct RunsDirWithFiles {
+        dirs: Vec<std::path::PathBuf>,
+        files: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+    }
+    impl crate::image_store::Fs for RunsDirWithFiles {
+        async fn read_dir(
+            &self,
+            _dir: &std::path::Path,
+        ) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Ok(self.dirs.clone())
+        }
+        async fn read(&self, p: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            self.files
+                .get(p)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, _p: &std::path::Path, _b: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _p: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn prune_protects_a_dir_whose_record_is_damaged() {
+        use crate::image_store::Fs as _;
+        let root = std::path::Path::new("/cache");
+        let fs = RunsDirWithFiles {
+            dirs: vec![
+                crate::cache::run_dir(root, "damaged1"),
+                crate::cache::run_dir(root, "orphan2"),
+            ],
+            files: std::collections::HashMap::from([(
+                crate::run_record::record_path(root, "damaged1"),
+                b"not json".to_vec(),
+            )]),
+        };
+        assert!(fs.write(std::path::Path::new("/x"), b"").await.is_ok());
+        assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
+        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        let Response::RunsPruned { removed } = resp else {
+            panic!("expected RunsPruned, got {resp:?}");
+        };
+        assert!(
+            !removed.contains(&"damaged1".to_string()),
+            "a dir whose record cannot be read is damage to surface, not an orphan to sweep: {removed:?}"
+        );
+        assert!(
+            removed.contains(&"orphan2".to_string()),
+            "a recordless dir is still an orphan: {removed:?}"
+        );
     }
 
     #[tokio::test]

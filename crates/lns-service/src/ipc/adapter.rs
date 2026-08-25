@@ -631,12 +631,20 @@ const FRAME_CHAN_BUF: usize = 512;
 
 /// Everything a run does once it is going to start: its registry entry, the `RunStarted` its client waits for, and the boot task's frames.
 async fn rebuild_stopped_runs() {
-    let records = match crate::cache::root() {
+    let scan = match crate::cache::root() {
         Ok(root) => crate::run_record::load_all_with(&crate::image_store::RealFs, &root).await,
         Err(e) => Err(e),
     };
-    match records {
-        Ok(records) => crate::run_registry::rebuild_from_records(records),
+    match scan {
+        Ok(scan) => {
+            for damaged in &scan.damaged {
+                let (id, reason) = (&damaged.run_id, &damaged.reason);
+                log::warn!(
+                    "run {id} cannot restart and will not be pruned: {reason}; repair or delete its run dir by hand"
+                );
+            }
+            crate::run_registry::rebuild_from_records(scan.records)
+        }
         Err(e) => log::warn!("stopped runs not rebuilt; they stay invisible until restart: {e:#}"),
     }
 }
