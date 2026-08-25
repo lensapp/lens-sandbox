@@ -813,10 +813,15 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
     });
 }
 
-#[when(regex = r#"^the user runs "lns rm ([^"]+)"$"#)]
-async fn run_lns_rm(w: &mut BehaviourWorld, operand: String) {
+#[when(regex = r#"^the user runs "lns rm( -f)? ([^"]+)"$"#)]
+async fn run_lns_rm(w: &mut BehaviourWorld, force: String, operand: String) {
+    let force = !force.is_empty();
     let svc = fake_sandbox_service(w);
-    let owner = match lns_cli::shortcut::which(&svc, "rm", &operand).await {
+    let routed = match lns_cli::shortcut::which(&svc, "rm", &operand).await {
+        Ok(owner) => lns_cli::shortcut::rm_route(owner, force),
+        Err(e) => Err(e),
+    };
+    let owner = match routed {
         Ok(owner) => owner,
         Err(e) => {
             w.result = Some(CliRun {
@@ -845,7 +850,7 @@ async fn run_lns_rm(w: &mut BehaviourWorld, operand: String) {
         run_with_writers(
             &SandboxCommand::Rm(lns_cli::sandbox::SandboxRmArgs {
                 run: operand,
-                force: false,
+                force,
             }),
             &svc,
             TermInfo::default(),
