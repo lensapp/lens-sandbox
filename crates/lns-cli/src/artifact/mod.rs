@@ -545,6 +545,8 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
                 "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; there is no terminal to ask at, so pass --force to confirm"
             );
         }
+        let candidates = prunable_references(svc).await?;
+        crate::output::announce_prune_candidates(&candidates, stderr).await?;
         if !confirm_prune(input, stderr).await? {
             return Ok(0);
         }
@@ -564,6 +566,19 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
                 crate::output::format_bytes(reclaimed_bytes)
             )?;
             Ok(0)
+        }
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn prunable_references(svc: &impl SandboxService) -> Result<Vec<String>> {
+    match svc.one_shot(Request::ListPrunableImages).await? {
+        Response::ImageList { images } => {
+            let mut references: Vec<String> =
+                images.into_iter().map(|image| image.reference).collect();
+            references.sort_unstable();
+            Ok(references)
         }
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -1392,7 +1407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declining_the_prune_prompt_reaches_no_service() {
+    async fn declining_the_prune_prompt_sends_no_prune() {
         let svc = CannedService::new(Response::Pong);
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1412,7 +1427,42 @@ mod tests {
         assert_eq!(code, 0);
         assert!(String::from_utf8(err).unwrap().contains("Aborted."));
         assert!(out.is_empty());
-        assert!(svc.requests.lock().unwrap().is_empty());
+        let requests = svc.requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|r| matches!(r, Request::PruneImages)),
+            "a declined prune must sweep nothing, got {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prunable_references_come_back_sorted() {
+        let svc = CannedService::with_list_prunable(
+            Response::Pong,
+            Response::ImageList {
+                images: vec![
+                    crate::test_service::cached_info("z:2"),
+                    crate::test_service::cached_info("a:1"),
+                ],
+            },
+        );
+        let references = prunable_references(&svc).await.unwrap();
+        assert_eq!(references, vec!["a:1".to_string(), "z:2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn prunable_listing_surfaces_a_daemon_error_and_rejects_an_unrelated_variant() {
+        let refused = CannedService::with_list_prunable(
+            Response::Pong,
+            Response::Error {
+                message: "index unreadable".into(),
+            },
+        );
+        let err = prunable_references(&refused).await.unwrap_err();
+        assert!(format!("{err:#}").contains("index unreadable"));
+
+        let odd = CannedService::with_list_prunable(Response::Pong, Response::Pong);
+        let err = prunable_references(&odd).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]

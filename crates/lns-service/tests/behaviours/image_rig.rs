@@ -129,6 +129,7 @@ pub struct ImageRig {
     next_run_id: u32,
     seeded: HashMap<String, Vec<(String, u64)>>,
     pub last_list: Option<Vec<lns_ipc::ImageInfo>>,
+    pub last_prunable: Option<Vec<lns_ipc::ImageInfo>>,
     pub last_removed: Option<RemovedImage>,
     pub last_prune: Option<PruneReport>,
     pub last_pull: Option<lns_ipc::ImageInfo>,
@@ -148,6 +149,7 @@ impl ImageRig {
             next_run_id: 1,
             seeded: HashMap::new(),
             last_list: None,
+            last_prunable: None,
             last_removed: None,
             last_prune: None,
             last_pull: None,
@@ -261,6 +263,33 @@ impl ImageRig {
         match image_store::list_with(&self.fs, &self.images_root, &self.active).await {
             Ok(images) => {
                 self.last_list = Some(images);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(e.to_string()),
+        }
+    }
+
+    pub async fn seed_dependent(&mut self, reference: &str, digest: &str, size: u64, base: &str) {
+        self.caches.add_layer(digest, size);
+        let record = ImageRecord {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", "f".repeat(64)),
+            dependencies: vec![base.to_string()],
+            layers: vec![LayerRef {
+                digest: digest.to_string(),
+                size_bytes: size,
+            }],
+            pulled_unix_secs: 1_765_022_400,
+        };
+        image_store::record_with(&self.fs, &self.images_root, &record)
+            .await
+            .expect("seeding a dependent sandbox record");
+    }
+
+    pub async fn list_prunable(&mut self) {
+        match image_store::list_prunable_with(&self.fs, &self.images_root, &self.active).await {
+            Ok(images) => {
+                self.last_prunable = Some(images);
                 self.last_error = None;
             }
             Err(e) => self.last_error = Some(e.to_string()),

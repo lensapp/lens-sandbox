@@ -139,6 +139,25 @@ pub fn format_bytes(n: u64) -> String {
     }
 }
 
+/// The prune candidates ride with the question on stderr, so a piped stdout still shows what's on the line.
+pub async fn announce_prune_candidates<E: tokio::io::AsyncWriteExt + Unpin>(
+    names: &[String],
+    err: &mut E,
+) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let mut block = String::from("Would remove:\n");
+    for name in names {
+        block.push_str("  ");
+        block.push_str(name);
+        block.push('\n');
+    }
+    err.write_all(block.as_bytes()).await?;
+    err.flush().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

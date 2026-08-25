@@ -81,14 +81,24 @@ fn cached_sandbox_sole_owner(w: &mut BehaviourWorld, reference: String) {
 
 #[given("two cached sandboxes and one running sandbox")]
 fn two_cached_one_running(w: &mut BehaviourWorld) {
+    w.sandbox.prunable_references = vec!["hermes:1.0".into(), "scribe:1.0".into()];
     w.sandbox.response = Some(Response::ImagesPruned {
         removed: vec!["hermes:1.0".into(), "scribe:1.0".into()],
         reclaimed_bytes: 64 * 1024 * 1024,
     });
 }
 
+#[given("every cached artifact is held by a running sandbox")]
+fn every_artifact_held(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::ImagesPruned {
+        removed: Vec::new(),
+        reclaimed_bytes: 128 * 1024 * 1024,
+    });
+}
+
 #[given(regex = r#"^a cached sandbox that names a volume "([^"]+)"$"#)]
 fn cached_sandbox_names_a_volume(w: &mut BehaviourWorld, _volume: String) {
+    w.sandbox.prunable_references = vec!["hermes:1.0".into()];
     w.sandbox.response = Some(Response::ImagesPruned {
         removed: vec!["hermes:1.0".into()],
         reclaimed_bytes: 32 * 1024 * 1024,
@@ -306,9 +316,37 @@ fn stats_asked_once(w: &mut BehaviourWorld) -> Result<(), String> {
 
 #[given(regex = r#"^the service will sweep the stopped sandboxes "([^"]+)" and "([^"]+)"$"#)]
 fn service_will_sweep(w: &mut BehaviourWorld, first: String, second: String) {
+    w.sandbox.list_runs_response = Some(Response::RunList {
+        runs: vec![stopped_run(5, &first), stopped_run(6, &second)],
+    });
     w.sandbox.response = Some(Response::RunsPruned {
         removed: vec![first, second],
     });
+}
+
+#[given("the service reports one running sandbox and none stopped")]
+fn one_running_none_stopped(w: &mut BehaviourWorld) {
+    w.sandbox.list_runs_response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: hexid(3),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            started: "2026-01-01T00:00:00Z".into(),
+        }],
+    });
+}
+
+fn stopped_run(n: u32, name: &str) -> RunSummary {
+    RunSummary {
+        id: hexid(n),
+        name: name.into(),
+        image: "some-image".into(),
+        command: "some-command".into(),
+        status: RunStatus::Exited { code: 0 },
+        started: "2026-01-01T00:00:00Z".into(),
+    }
 }
 
 #[given("the service reports no stopped sandboxes to sweep")]

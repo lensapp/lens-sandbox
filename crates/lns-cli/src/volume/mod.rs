@@ -230,8 +230,16 @@ async fn prune(
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
-    if !force && !confirm_prune(input, err).await? {
-        return Ok(0);
+    if !force {
+        let unused = unused_volume_names(svc).await?;
+        if unused.is_empty() {
+            writeln!(writer, "No unused volumes.")?;
+            return Ok(0);
+        }
+        crate::output::announce_prune_candidates(&unused, err).await?;
+        if !confirm_prune(input, err).await? {
+            return Ok(0);
+        }
     }
     match send(svc, Request::PruneVolumes).await? {
         Response::VolumesPruned {
@@ -256,6 +264,21 @@ async fn prune(
                 writeln!(writer, "No unused volumes.")?;
             }
             Ok(if failed.is_empty() { 0 } else { 1 })
+        }
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn unused_volume_names(svc: &dyn VolumeService) -> Result<Vec<String>> {
+    match send(svc, Request::ListVolumes).await? {
+        Response::VolumeList { volumes } => {
+            let mut names: Vec<String> = volumes
+                .into_iter()
+                .filter(|volume| volume.in_use_by.is_none())
+                .map(|volume| volume.name)
+                .collect();
+            names.sort_unstable();
+            Ok(names)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
     }
@@ -389,7 +412,9 @@ mod tests {
 
     #[tokio::test]
     async fn prune_without_force_reads_eof_as_decline() {
-        let svc = CannedService::with([]);
+        let svc = CannedService::with([Some(Response::VolumeList {
+            volumes: vec![volume("scratch")],
+        })]);
         let (code, out) = run_cmd(
             &VolumeCommand::Prune(VolumePruneArgs { force: false }),
             &svc,
@@ -398,6 +423,32 @@ mod tests {
         .unwrap();
         assert_eq!(code, 0);
         assert!(out.contains("Aborted."), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn prune_without_force_says_so_when_every_volume_is_held() {
+        let svc = CannedService::with([Some(Response::VolumeList {
+            volumes: vec![VolumeInfo {
+                in_use_by: Some("aa07".into()),
+                ..volume("held")
+            }],
+        })]);
+        let (code, out) = run_cmd(
+            &VolumeCommand::Prune(VolumePruneArgs { force: false }),
+            &svc,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("No unused volumes."), "got: {out}");
+        assert!(!out.contains("Continue?"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn unused_volume_listing_rejects_an_unrelated_variant() {
+        let svc = CannedService::with([Some(Response::Pong)]);
+        let err = unused_volume_names(&svc).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
     }
 
     #[tokio::test]

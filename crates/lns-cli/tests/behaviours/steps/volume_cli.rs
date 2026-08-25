@@ -119,6 +119,14 @@ fn service_refuses(world: &mut BehaviourWorld, message: String) {
 
 #[given(expr = "the service will prune volumes {string} and {string} reclaiming {int} bytes")]
 fn prune_plan(world: &mut BehaviourWorld, a: String, b: String, bytes: u64) {
+    world
+        .volume
+        .volumes
+        .push(fixture_volume(&a, bytes / 2, None));
+    world
+        .volume
+        .volumes
+        .push(fixture_volume(&b, bytes / 2, None));
     world.volume.prune_plan = Some((vec![a, b], bytes));
 }
 
@@ -136,6 +144,10 @@ fn volume_held_by_running_sandbox(world: &mut BehaviourWorld, name: String) {
 
 #[given(expr = "the volume {string} is held by no running sandbox and named by no cached sandbox")]
 fn volume_is_prunable(world: &mut BehaviourWorld, name: String) {
+    world
+        .volume
+        .volumes
+        .push(fixture_volume(&name, 33_554_432, None));
     let plan = world
         .volume
         .prune_plan
@@ -263,4 +275,13 @@ fn listed_row_ends_with(world: &mut BehaviourWorld, name: String, suffix: String
 fn no_request_sent(world: &mut BehaviourWorld) {
     let requests = world.volume.requests.lock().unwrap();
     assert!(requests.is_empty(), "got {requests:?}");
+}
+
+#[then(expr = "no prune request reached the service")]
+fn no_prune_request_sent(world: &mut BehaviourWorld) {
+    let requests = world.volume.requests.lock().unwrap();
+    assert!(
+        !requests.iter().any(|r| matches!(r, Request::PruneVolumes)),
+        "got {requests:?}"
+    );
 }

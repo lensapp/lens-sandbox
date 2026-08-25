@@ -24,6 +24,8 @@ pub(crate) struct FakeSandboxService {
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
     cached_references: Vec<String>,
+    prunable_references: Vec<String>,
+    list_runs_response: Option<Response>,
     remove_run_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
@@ -61,6 +63,17 @@ impl SandboxService for FakeSandboxService {
                             .collect(),
                     })
                 }),
+            Request::ListPrunableImages => Some(Response::ImageList {
+                images: self
+                    .prunable_references
+                    .iter()
+                    .map(|reference| cached_entry(reference))
+                    .collect(),
+            }),
+            Request::ListRuns => self
+                .list_runs_response
+                .clone()
+                .or_else(|| self.response.clone()),
             Request::RemoveRun { .. } => self
                 .remove_run_response
                 .clone()
@@ -182,6 +195,62 @@ fn then_stderr_contains(w: &mut BehaviourWorld, needle: String) -> Result<(), St
             "expected stderr to contain {needle:?}, got {stderr:?}"
         ))
     }
+}
+
+#[then(regex = r#"^the command's stderr does not contain "([^"]*)"$"#)]
+fn then_stderr_does_not_contain(w: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    let (_, stderr) = w
+        .split_streams
+        .as_ref()
+        .ok_or("no split streams captured")?;
+    if stderr.contains(&needle) {
+        Err(format!(
+            "expected stderr not to contain {needle:?}, got {stderr:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[then(regex = r#"^the command's stderr shows "([^"]*)" before "([^"]*)"$"#)]
+fn then_stderr_order(w: &mut BehaviourWorld, first: String, second: String) -> Result<(), String> {
+    let (_, stderr) = w
+        .split_streams
+        .as_ref()
+        .ok_or("no split streams captured")?;
+    let first_at = stderr
+        .find(&first)
+        .ok_or_else(|| format!("expected stderr to contain {first:?}, got {stderr:?}"))?;
+    let second_at = stderr
+        .find(&second)
+        .ok_or_else(|| format!("expected stderr to contain {second:?}, got {stderr:?}"))?;
+    if first_at < second_at {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {first:?} before {second:?} on stderr, got {stderr:?}"
+        ))
+    }
+}
+
+#[then(regex = r"^the service received no (PruneImages|PruneRuns|ListPrunableImages) request$")]
+fn then_no_such_request(w: &mut BehaviourWorld, variant: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let hit = requests.iter().any(|request| match variant.as_str() {
+        "PruneImages" => matches!(request, Request::PruneImages),
+        "PruneRuns" => matches!(request, Request::PruneRuns),
+        _ => matches!(request, Request::ListPrunableImages),
+    });
+    if hit {
+        Err(format!("expected no {variant} request among {requests:?}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[given("sandbox input is a terminal")]
+fn sandbox_input_is_a_terminal(w: &mut BehaviourWorld) {
+    w.sandbox.stdin_is_tty = true;
 }
 
 #[then(regex = r#"^the command's stdout does not contain "([^"]*)"$"#)]
@@ -426,6 +495,8 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         inspect_image_response: w.sandbox.inspect_image_response.clone(),
         remove_image_response: w.sandbox.remove_image_response.clone(),
         cached_references: w.sandbox.cached_references.clone(),
+        prunable_references: w.sandbox.prunable_references.clone(),
+        list_runs_response: w.sandbox.list_runs_response.clone(),
         remove_run_response: w.sandbox.remove_run_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
