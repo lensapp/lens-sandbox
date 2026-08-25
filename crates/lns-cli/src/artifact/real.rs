@@ -28,6 +28,11 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             )
             .await;
         }
+        if let ArtifactCommand::Inspect(inspect) = &mut args.command
+            && !inspect.mixins.is_empty()
+        {
+            inspect.root_mixins(&ctx.cwd()?)?;
+        }
         crate::service::require_running().await?;
         dispatch(args.command, ctx.input).await
     })

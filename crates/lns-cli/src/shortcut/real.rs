@@ -68,8 +68,12 @@ pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) ->
                 if let Some(message) = refuse(super::InspectTarget::Artifact) {
                     return usage_error(&message);
                 }
+                let mut inspect = args.artifact;
+                if !inspect.mixins.is_empty() {
+                    inspect.root_mixins(&ctx.cwd()?)?;
+                }
                 crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Inspect(args.artifact),
+                    crate::artifact::ArtifactCommand::Inspect(inspect),
                     ctx.input,
                 )
                 .await
