@@ -566,7 +566,11 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
 async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
-        Err(message) => return Response::Error { message },
+        Err(e) => {
+            return Response::Error {
+                message: e.to_string(),
+            };
+        }
     };
     kill_resolved(&id, signal).await
 }
@@ -586,7 +590,11 @@ async fn kill_resolved(id: &str, signal: lns_ipc::SignalKind) -> Response {
 async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
-        Err(message) => return Response::Error { message },
+        Err(e) => {
+            return Response::Error {
+                message: e.to_string(),
+            };
+        }
     };
     stop_run_with(
         &id,
@@ -600,7 +608,12 @@ async fn stop_run_request(run: &str, timeout_secs: u64) -> Response {
 fn inspect_run_request(run: &str) -> Response {
     match crate::run_registry::resolve(run) {
         Ok(id) => inspect_resolved(&id),
-        Err(message) => Response::Error { message },
+        Err(crate::run_registry::ResolveError::Unknown { handle }) => {
+            Response::RunUnknown { run: handle }
+        }
+        Err(ambiguous) => Response::Error {
+            message: ambiguous.to_string(),
+        },
     }
 }
 
@@ -609,8 +622,8 @@ fn inspect_resolved(id: &str) -> Response {
         Some(details) => Response::RunInspect {
             details: Box::new(details),
         },
-        None => Response::Error {
-            message: format!("no active run with id {id}"),
+        None => Response::RunUnknown {
+            run: id.to_string(),
         },
     }
 }
@@ -672,7 +685,11 @@ where
 {
     let id = match crate::run_registry::resolve(run) {
         Ok(id) => id,
-        Err(message) => return Response::Error { message },
+        Err(e) => {
+            return Response::Error {
+                message: e.to_string(),
+            };
+        }
     };
     remove_resolved_run_with(
         &id,
@@ -2172,9 +2189,6 @@ mod tests {
                 run: "ghost".into(),
                 signal: lns_ipc::SignalKind::Term,
             },
-            Request::InspectRun {
-                run: "ghost".into(),
-            },
             Request::RemoveRun {
                 run: "ghost".into(),
                 force: false,
@@ -2186,6 +2200,43 @@ mod tests {
                 }
                 other => unreachable!("expected Error for {req:?}, got {other:?}"),
             }
+        }
+        match handle_request(
+            &Request::InspectRun {
+                run: "ghost".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::RunUnknown { run } => assert_eq!(run, "ghost"),
+            other => unreachable!("an inspect miss is an answer, not a fault, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_inspect_run_keeps_an_ambiguous_prefix_an_error() {
+        let first = "5417ab0000000000000000000000000a";
+        let second = "5417ab0000000000000000000000000b";
+        register_running(first);
+        register_running(second);
+        let resp = handle_request(
+            &Request::InspectRun {
+                run: "5417ab".into(),
+            },
+            Instant::now(),
+        )
+        .await;
+        crate::run_registry::deregister(first);
+        crate::run_registry::deregister(second);
+        match resp {
+            Response::Error { message } => {
+                assert!(
+                    message.contains("ambiguous run id prefix: 5417ab"),
+                    "got: {message}"
+                );
+            }
+            other => unreachable!("an ambiguity is a fault to surface, got {other:?}"),
         }
     }
 
@@ -2641,7 +2692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_request_inspect_run_for_unknown_run_returns_error() {
+    async fn handle_request_inspect_run_for_unknown_run_answers_run_unknown() {
         let resp = handle_request(
             &Request::InspectRun {
                 run: "999998".into(),
@@ -2650,10 +2701,8 @@ mod tests {
         )
         .await;
         match resp {
-            Response::Error { message } => {
-                assert!(message.contains("no such run"), "got: {message}");
-            }
-            other => unreachable!("expected Error, got {other:?}"),
+            Response::RunUnknown { run } => assert_eq!(run, "999998"),
+            other => unreachable!("expected RunUnknown, got {other:?}"),
         }
     }
 
@@ -3154,11 +3203,11 @@ mod tests {
     }
 
     #[test]
-    fn inspect_resolved_reports_no_active_run_when_the_id_vanished_after_resolution() {
+    fn inspect_resolved_answers_run_unknown_when_the_id_vanished_after_resolution() {
         let resp = inspect_resolved("ffffffffffffffffffffffffffffffff");
         assert!(
-            matches!(&resp, Response::Error { message } if message.contains("no active run with id")),
-            "got {resp:?}"
+            matches!(&resp, Response::RunUnknown { run } if run == "ffffffffffffffffffffffffffffffff"),
+            "a run that vanished between resolve and inspect is a miss, not a fault: {resp:?}"
         );
     }
 

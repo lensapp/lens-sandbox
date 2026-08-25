@@ -685,6 +685,7 @@ async fn inspect<W: std::io::Write>(
             render_inspect(&details, policy, format, out)?;
             Ok(0)
         }
+        Response::RunUnknown { run } => bail!("no such run: {run}"),
         Response::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }

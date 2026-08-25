@@ -258,8 +258,8 @@ impl super::StartHost for RealStartHost {
 async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
     let run_id = match crate::run_registry::resolve(&run) {
         Ok(id) => id,
-        Err(message) => {
-            let _ = write_error(&mut stream, message).await;
+        Err(e) => {
+            let _ = write_error(&mut stream, e.to_string()).await;
             return Ok(());
         }
     };
@@ -283,8 +283,8 @@ async fn handle_stats(mut stream: UnixStream, run: String) -> anyhow::Result<()>
 async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyhow::Result<()> {
     let run_id = match crate::run_registry::resolve(&run) {
         Ok(id) => id,
-        Err(message) => {
-            let _ = write_error(&mut stream, message).await;
+        Err(e) => {
+            let _ = write_error(&mut stream, e.to_string()).await;
             return Ok(());
         }
     };
@@ -300,8 +300,8 @@ async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyho
 async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
     let run_id = match crate::run_registry::resolve(&run) {
         Ok(id) => id,
-        Err(message) => {
-            let _ = write_error(&mut stream, message).await;
+        Err(e) => {
+            let _ = write_error(&mut stream, e.to_string()).await;
             return Ok(());
         }
     };
@@ -823,8 +823,8 @@ where
 async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> anyhow::Result<()> {
     let target_run_id = match crate::run_registry::resolve(&args.run) {
         Ok(id) => id,
-        Err(message) => {
-            let _ = write_error(&mut stream, message).await;
+        Err(e) => {
+            let _ = write_error(&mut stream, e.to_string()).await;
             return Ok(());
         }
     };

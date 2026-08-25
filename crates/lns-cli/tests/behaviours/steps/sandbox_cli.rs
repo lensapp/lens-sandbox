@@ -812,7 +812,10 @@ fn inspect_request_roots_the_mixin(w: &mut BehaviourWorld, name: String) {
         })
         .expect("an inspect request");
     let expected = w.cwd.as_ref().expect("cwd").path().join(&name);
-    assert_eq!(mixins, vec![expected.to_str().expect("utf-8 path").to_string()]);
+    assert_eq!(
+        mixins,
+        vec![expected.to_str().expect("utf-8 path").to_string()]
+    );
 }
 
 #[then("the pull request is bound to the inspected digest")]
