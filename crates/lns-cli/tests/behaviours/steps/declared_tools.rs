@@ -87,8 +87,8 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
         mem_mib: None,
         disk_bytes: None,
     };
-    w.sandbox.response = Some(Response::Error {
-        message: format!("no active run with id {TOOLS_REFERENCE}"),
+    w.sandbox.response = Some(Response::RunUnknown {
+        run: TOOLS_REFERENCE.to_string(),
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: ArtifactInspection::Sandbox(Box::new(view.clone())),

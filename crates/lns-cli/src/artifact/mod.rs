@@ -1535,10 +1535,14 @@ mod tests {
             file: None,
             mixins: vec!["./obs".into(), "ghcr.io/team/obs:1".into()],
         };
-        args.root_mixins(std::path::Path::new("/project/sub")).unwrap();
+        args.root_mixins(std::path::Path::new("/project/sub"))
+            .unwrap();
         assert_eq!(
             args.mixins,
-            vec!["/project/sub/obs".to_string(), "ghcr.io/team/obs:1".to_string()],
+            vec![
+                "/project/sub/obs".to_string(),
+                "ghcr.io/team/obs:1".to_string()
+            ],
             "a directory roots where the user typed it; a registry reference passes untouched"
         );
     }

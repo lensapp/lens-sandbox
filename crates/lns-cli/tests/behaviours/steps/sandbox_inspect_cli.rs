@@ -10,8 +10,8 @@ fn full_digest() -> String {
 }
 
 fn not_running(reference: &str) -> Response {
-    Response::Error {
-        message: format!("no active run with id {reference}"),
+    Response::RunUnknown {
+        run: reference.to_string(),
     }
 }
 

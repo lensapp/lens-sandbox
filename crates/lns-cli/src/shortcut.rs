@@ -64,18 +64,23 @@ fn with_default_tag(reference: &str) -> Option<String> {
     (!name.contains(':') && !name.contains('@')).then(|| format!("{reference}:latest"))
 }
 
+/// Only an explicit miss counts as one: an ambiguity or a failed probe must reach the user, or the other namespace acts on a word it never settled.
 async fn ask_both(
     svc: &impl SandboxService,
     operand: &str,
     default_registry: Option<&str>,
 ) -> Result<Owner> {
-    let is_a_sandbox = matches!(
-        svc.one_shot(Request::InspectRun {
+    let is_a_sandbox = match svc
+        .one_shot(Request::InspectRun {
             run: operand.to_string(),
         })
-        .await?,
-        Response::RunInspect { .. }
-    );
+        .await?
+    {
+        Response::RunInspect { .. } => true,
+        Response::RunUnknown { .. } => false,
+        Response::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    };
     let is_an_artifact = match svc.one_shot(Request::ListImages).await? {
         Response::ImageList { images } => cache_holds(&images, operand, default_registry),
         Response::Error { message } => {
@@ -316,20 +321,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cache_listing_error_refuses_arbitration_instead_of_guessing() {
-        let svc = crate::test_service::CannedService::new(Response::Error {
-            message: "cache unavailable".to_string(),
-        });
-        let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("cache unavailable"),
-            "a lookup failure fails closed and names its cause, never 'no artifact': {err:#}"
-        );
-    }
-
-    #[tokio::test]
     async fn an_off_script_cache_reply_refuses_arbitration_too() {
-        let svc = crate::test_service::CannedService::new(Response::Acknowledged);
+        let svc = crate::test_service::CannedService::with_list_images(
+            Response::RunUnknown {
+                run: "ghost".to_string(),
+            },
+            Response::Acknowledged,
+        );
         let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("cannot be arbitrated"),
@@ -371,5 +369,67 @@ mod tests {
         assert_eq!(refusal(InspectTarget::Document, false, true), None);
         assert_eq!(refusal(InspectTarget::Artifact, false, true), None);
         assert_eq!(refusal(InspectTarget::Document, false, false), None);
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_run_prefix_is_surfaced_never_settled_as_an_artifact() {
+        let svc = crate::test_service::CannedService::with_list_images(
+            Response::Error {
+                message: "ambiguous run id prefix: 1a2b".to_string(),
+            },
+            Response::ImageList {
+                images: vec![cached("1a2b")],
+            },
+        );
+        let err = which(&svc, "rm", "1a2b", None).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("ambiguous run id prefix: 1a2b"),
+            "an ambiguity must reach the user, or `lns rm` deletes an artifact it never named: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_miss_is_an_answer_so_the_cached_artifact_wins_arbitration() {
+        let svc = crate::test_service::CannedService::with_list_images(
+            Response::RunUnknown {
+                run: "hermes:1.4.0".to_string(),
+            },
+            Response::ImageList {
+                images: vec![cached("ghcr.io/team/hermes:1.4.0")],
+            },
+        );
+        assert_eq!(
+            which(&svc, "inspect", "ghcr.io/team/hermes:1.4.0", None)
+                .await
+                .unwrap(),
+            Owner::Artifact
+        );
+    }
+
+    #[tokio::test]
+    async fn a_service_that_cannot_list_the_cache_fails_the_arbitration_aloud() {
+        let svc = crate::test_service::CannedService::with_list_images(
+            Response::RunUnknown {
+                run: "ghost".to_string(),
+            },
+            Response::Error {
+                message: "cache unavailable".to_string(),
+            },
+        );
+        let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cache unavailable"),
+            "an operational failure is not a miss — `rm` must not fall through to the sandbox namespace: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_reply_to_either_probe_is_refused_by_name() {
+        let svc = crate::test_service::CannedService::new(Response::Pong);
+        let err = which(&svc, "rm", "ghost", None).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unexpected response"),
+            "a reply neither probe understands cannot settle ownership: {err:#}"
+        );
     }
 }

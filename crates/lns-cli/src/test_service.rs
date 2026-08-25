@@ -15,6 +15,7 @@ pub(crate) struct CannedService {
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
     list_prunable_response: Option<Response>,
+    list_images_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     pub requests: Arc<Mutex<Vec<Request>>>,
 }
@@ -27,8 +28,16 @@ impl CannedService {
             inspect_image_response: None,
             remove_image_response: None,
             list_prunable_response: None,
+            list_images_response: None,
             frames: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn with_list_images(response: Response, list_images: Response) -> Self {
+        Self {
+            list_images_response: Some(list_images),
+            ..Self::new(response)
         }
     }
 
@@ -146,6 +155,10 @@ impl SandboxService for CannedService {
                 .list_prunable_response
                 .clone()
                 .unwrap_or(Response::ImageList { images: Vec::new() }),
+            Request::ListImages => self
+                .list_images_response
+                .clone()
+                .unwrap_or_else(|| self.response.clone()),
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);
