@@ -663,8 +663,8 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
 }
 
 async fn recorded_run_pins() -> Result<HashSet<String>> {
-    let records = crate::run_record::load_all_with(&real::RealFs, &crate::cache::root()?).await?;
-    Ok(crate::run_record::pinned_digests(&records))
+    let scan = crate::run_record::load_all_with(&real::RealFs, &crate::cache::root()?).await?;
+    Ok(crate::run_record::pinned_digests(&scan.records))
 }
 
 pub async fn tag(from: &str, to: &str) -> Result<()> {

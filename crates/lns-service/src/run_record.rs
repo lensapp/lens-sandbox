@@ -58,23 +58,65 @@ pub fn pinned_digests(records: &[RunRecord]) -> std::collections::HashSet<String
         .collect()
 }
 
-pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<Vec<RunRecord>> {
+pub struct RecordScan {
+    pub records: Vec<RunRecord>,
+    pub damaged: Vec<DamagedRecord>,
+}
+
+/// A run dir whose record exists but cannot be trusted; its files must outlive every sweep.
+pub struct DamagedRecord {
+    pub run_id: String,
+    pub reason: String,
+}
+
+pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<RecordScan> {
     let entries = match fs.read_dir(&cache_root.join("runs")).await {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RecordScan {
+                records: Vec::new(),
+                damaged: Vec::new(),
+            });
+        }
         Err(e) => return Err(anyhow::Error::from(e).context("listing the runs dir")),
     };
-    let mut records = Vec::new();
+    let mut scan = RecordScan {
+        records: Vec::new(),
+        damaged: Vec::new(),
+    };
     for dir in entries {
-        if let Ok(bytes) = fs.read(&dir.join("record.json")).await
-            && let Ok(record) = serde_json::from_slice::<RunRecord>(&bytes)
-            && record.version == CURRENT_VERSION
-        {
-            records.push(record);
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        match fs.read(&dir.join("record.json")).await {
+            Ok(bytes) => scan_record(&mut scan, id, &bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => scan.damaged.push(DamagedRecord {
+                run_id: id.to_string(),
+                reason: format!("its record cannot be read: {e}"),
+            }),
         }
     }
-    records.sort_by(|a, b| a.run_id.cmp(&b.run_id));
-    Ok(records)
+    scan.records.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    scan.damaged.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    Ok(scan)
+}
+
+fn scan_record(scan: &mut RecordScan, id: &str, bytes: &[u8]) {
+    match serde_json::from_slice::<RunRecord>(bytes) {
+        Ok(record) if record.version == CURRENT_VERSION => scan.records.push(record),
+        Ok(record) => scan.damaged.push(DamagedRecord {
+            run_id: id.to_string(),
+            reason: format!(
+                "its record is format version {}, but this build reads version {CURRENT_VERSION}",
+                record.version
+            ),
+        }),
+        Err(e) => scan.damaged.push(DamagedRecord {
+            run_id: id.to_string(),
+            reason: format!("its record does not parse: {e}"),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +134,7 @@ mod tests {
     struct FakeFs {
         listing: io::Result<Vec<PathBuf>>,
         files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+        denied: Mutex<std::collections::HashSet<PathBuf>>,
     }
 
     impl FakeFs {
@@ -99,6 +142,7 @@ mod tests {
             Self {
                 listing: Ok(Vec::new()),
                 files: Mutex::new(HashMap::new()),
+                denied: Mutex::new(std::collections::HashSet::new()),
             }
         }
 
@@ -109,11 +153,16 @@ mod tests {
                     .map(|id| crate::cache::run_dir(root, id))
                     .collect()),
                 files: Mutex::new(HashMap::new()),
+                denied: Mutex::new(std::collections::HashSet::new()),
             }
         }
 
         fn stash(&self, path: PathBuf, bytes: Vec<u8>) {
             self.files.lock().unwrap().insert(path, bytes);
+        }
+
+        fn deny(&self, path: PathBuf) {
+            self.denied.lock().unwrap().insert(path);
         }
     }
 
@@ -126,6 +175,9 @@ mod tests {
         }
 
         async fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+            if self.denied.lock().unwrap().contains(p) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
             self.files
                 .lock()
                 .unwrap()
@@ -306,7 +358,7 @@ mod tests {
                 serde_json::to_vec(&sample_record(id)).unwrap(),
             );
         }
-        let records = load_all_with(&fs, root).await.unwrap();
+        let records = load_all_with(&fs, root).await.unwrap().records;
         assert_eq!(
             records
                 .iter()
@@ -321,11 +373,13 @@ mod tests {
         let fs = FakeFs {
             listing: Err(io::Error::from(io::ErrorKind::NotFound)),
             files: Mutex::new(HashMap::new()),
+            denied: Mutex::new(std::collections::HashSet::new()),
         };
         assert!(
             load_all_with(&fs, Path::new("/cache"))
                 .await
                 .unwrap()
+                .records
                 .is_empty()
         );
     }
@@ -335,6 +389,7 @@ mod tests {
         let fs = FakeFs {
             listing: Err(io::Error::from(io::ErrorKind::PermissionDenied)),
             files: Mutex::new(HashMap::new()),
+            denied: Mutex::new(std::collections::HashSet::new()),
         };
         assert!(load_all_with(&fs, Path::new("/cache")).await.is_err());
     }
@@ -347,13 +402,17 @@ mod tests {
             record_path(root, "aa01"),
             serde_json::to_vec(&sample_record("aa01")).unwrap(),
         );
-        let records = load_all_with(&fs, root).await.unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].run_id, "aa01");
+        let scan = load_all_with(&fs, root).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].run_id, "aa01");
+        assert!(
+            scan.damaged.is_empty(),
+            "a dir that never had a record is an orphan, not damage"
+        );
     }
 
     #[tokio::test]
-    async fn an_unparseable_record_is_skipped_not_fatal() {
+    async fn an_unparseable_record_is_surfaced_as_damaged_not_dropped() {
         let root = Path::new("/cache");
         let fs = FakeFs::with_run_dirs(root, &["aa01", "bb02"]);
         fs.stash(record_path(root, "aa01"), b"not json".to_vec());
@@ -361,13 +420,36 @@ mod tests {
             record_path(root, "bb02"),
             serde_json::to_vec(&sample_record("bb02")).unwrap(),
         );
-        let records = load_all_with(&fs, root).await.unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].run_id, "bb02");
+        let scan = load_all_with(&fs, root).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].run_id, "bb02");
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].run_id, "aa01");
+        assert!(
+            scan.damaged[0].reason.contains("does not parse"),
+            "the damage names its cause: {}",
+            scan.damaged[0].reason
+        );
     }
 
     #[tokio::test]
-    async fn a_record_from_a_future_format_version_is_left_alone() {
+    async fn an_unreadable_record_is_damage_with_the_io_error_named() {
+        let root = Path::new("/cache");
+        let fs = FakeFs::with_run_dirs(root, &["aa01"]);
+        fs.deny(record_path(root, "aa01"));
+        let scan = load_all_with(&fs, root).await.unwrap();
+        assert!(scan.records.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].run_id, "aa01");
+        assert!(
+            scan.damaged[0].reason.contains("cannot be read"),
+            "the damage names its cause: {}",
+            scan.damaged[0].reason
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_from_a_future_format_version_is_damage_not_absence() {
         let root = Path::new("/cache");
         let fs = FakeFs::with_run_dirs(root, &["aa01"]);
         let mut future = sample_record("aa01");
@@ -376,6 +458,13 @@ mod tests {
             record_path(root, "aa01"),
             serde_json::to_vec(&future).unwrap(),
         );
-        assert!(load_all_with(&fs, root).await.unwrap().is_empty());
+        let scan = load_all_with(&fs, root).await.unwrap();
+        assert!(scan.records.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        assert!(
+            scan.damaged[0].reason.contains("format version 2"),
+            "the damage names the newer version: {}",
+            scan.damaged[0].reason
+        );
     }
 }
