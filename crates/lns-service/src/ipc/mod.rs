@@ -75,6 +75,16 @@ where
         return Ok(());
     };
     match status {
+        lns_ipc::RunStatus::Running if options.attach => {
+            let _ = write_error(
+                stream,
+                format!(
+                    "run {run_id} is already running; join its session with `lns attach {run}`"
+                ),
+            )
+            .await;
+            Ok(())
+        }
         lns_ipc::RunStatus::Running => {
             let frame = encode_frame(&Response::RunStarted { run_id })?;
             stream.write_all(&frame).await?;
@@ -2420,8 +2430,16 @@ mod tests {
     }
 
     async fn drive_start_stopped(host: &ScriptedStartHost, handle: &str) -> Vec<Response> {
+        drive_start_stopped_with(host, handle, StartOptions::default()).await
+    }
+
+    async fn drive_start_stopped_with(
+        host: &ScriptedStartHost,
+        handle: &str,
+        options: StartOptions,
+    ) -> Vec<Response> {
         let (mut client, mut server) = tokio::io::duplex(64 * 1024);
-        start_stopped_run(&mut server, handle, host, StartOptions::default())
+        start_stopped_run(&mut server, handle, host, options)
             .await
             .expect("a refusal is an answer, not a transport failure");
         drop(server);
@@ -2432,6 +2450,55 @@ mod tests {
             }
         }
         frames
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn an_attached_start_of_a_running_run_points_at_attach_instead_of_hanging_up() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = ScriptedStartHost {
+            record: None,
+            served: served.clone(),
+        };
+        let frames = drive_start_stopped_with(
+            &host,
+            &id,
+            StartOptions {
+                attach: true,
+                stdin: false,
+            },
+        )
+        .await;
+        crate::run_registry::deregister(&id);
+        assert!(
+            matches!(&frames[0], Response::Error { message }
+                if message.contains("already running") && message.contains("lns attach")),
+            "an attached start of a running run must not answer a bare RunStarted the attach driver chokes on: {frames:?}"
+        );
+        assert!(!served.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(global_runs)]
+    async fn a_detached_start_of_a_running_run_answers_run_started_unchanged() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = ScriptedStartHost {
+            record: None,
+            served: served.clone(),
+        };
+        let frames = drive_start_stopped(&host, &id).await;
+        crate::run_registry::deregister(&id);
+        assert!(
+            matches!(&frames[0], Response::RunStarted { run_id } if *run_id == id),
+            "got {frames:?}"
+        );
+        assert!(!served.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
