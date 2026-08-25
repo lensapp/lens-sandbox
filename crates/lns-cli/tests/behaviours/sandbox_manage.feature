@@ -103,7 +103,7 @@ Feature: managing cached sandboxes
     When the user runs artifact command "prune"
     Then the exit code is 0
     And the output contains "Aborted."
-    And the service received no request
+    And the service received no PruneImages request
 
   Scenario: prune never removes a named volume
     Given a cached sandbox that names a volume "claude-home"
@@ -156,7 +156,7 @@ Feature: managing cached sandboxes
     When the user runs sandbox command "prune"
     Then the exit code is 0
     And the output contains "Aborted."
-    And the service received no request
+    And the service received no PruneRuns request
 
   Scenario: with no terminal to ask at, prune refuses rather than assuming
     Given the service will sweep the stopped sandboxes "scribe" and "hermes"

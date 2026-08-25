@@ -233,7 +233,7 @@ bare reference is qualified by `run.registry`, else the Lens hub (`hub.lns.run`)
 | `ls`       | —            | List what the local store holds — reference, kind, digest, size, and the sandbox holding each. `--kind` filters to `sandbox` (a pulled or built artifact) or `image` (the base OCI image one runs on). Alias: `list`. |
 | `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. |
 | `rm`       | `lns rm`     | Remove one cached artifact and free its now-unreferenced layers. |
-| `prune`    | —            | Remove every cached artifact nothing holds and, when no sandbox is live, reclaim the provisioned tool cache. Asks first, unless `-f`/`--force`. |
+| `prune`    | —            | Remove every cached artifact nothing holds and, when no sandbox is live, reclaim the provisioned tool cache. Lists what it would remove and asks first, unless `-f`/`--force`. |
 
 The `./lns.yaml` document (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
@@ -278,7 +278,7 @@ workload does.
 | `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
 | `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
 | `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. Refuses a running one; `-f`/`--force` stops it first. |
-| `prune`    | —            | Remove every stopped sandbox, writable layers included. Asks first, unless `-f`/`--force`. |
+| `prune`    | —            | Remove every stopped sandbox, writable layers included. Lists them and asks first, unless `-f`/`--force`. |
 
 ## `lns volume`
 
@@ -298,7 +298,7 @@ lns volume prune [-f]
 | `create <NAME>`  | Create a named volume ahead of its first `lns run -v` attach. No-op if it exists.    |
 | `inspect <NAME>` | Show a volume's capacity, on-disk bytes, age, and holder.                            |
 | `rm <NAME>`      | Remove a volume and its data; refused while a run holds it.                          |
-| `prune`          | Remove every volume not attached to a running sandbox. Prompts unless `-f`/`--force`.|
+| `prune`          | Remove every volume not attached to a running sandbox. Lists them and asks first, unless `-f`/`--force`.|
 
 See [Running workloads — volumes](running-workloads.md#volumes).
 

@@ -97,6 +97,8 @@ pub enum Request {
         image: String,
     },
     PruneImages,
+    /// The references `PruneImages` would remove right now, so a prune can list them and ask first.
+    ListPrunableImages,
     /// Resolve a local definition's mixins, since only the service can pull a reference and read a directory the same way a run will.
     ResolveDefinition {
         definition: String,
@@ -1637,6 +1639,7 @@ mod tests {
                 image: "registry.example.test/some/image:1.0".into(),
             },
             Request::PruneImages,
+            Request::ListPrunableImages,
         ] {
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

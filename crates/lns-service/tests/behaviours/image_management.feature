@@ -84,6 +84,25 @@ Feature: image cache lifecycle — list, remove, prune
     When the images are pruned
     Then the prune removes no images
 
+  Scenario: Listing prune candidates names removable images without touching them
+    Given image "registry.example.test/held/image:1.0" is cached with layer "sha256:held" of 3000 bytes
+    And image "registry.example.test/idle/image:1.0" is cached with layer "sha256:idle" of 1000 bytes
+    And a live run uses image "registry.example.test/held/image:1.0"
+    When the prunable images are listed
+    Then the prunable listing names only "registry.example.test/idle/image:1.0"
+    And layer "sha256:idle" remains in the layer cache
+
+  Scenario: A base image a live sandbox depends on is not a prune candidate
+    Given image "registry.example.test/base/image:1.0" is cached with layer "sha256:base" of 2000 bytes
+    And sandbox "registry.example.test/team/agent:1.0" with layer "sha256:app" of 500 bytes is cached on base "registry.example.test/base/image:1.0"
+    And a live run uses image "registry.example.test/team/agent:1.0"
+    When the prunable images are listed
+    Then the prunable listing is empty
+
+  Scenario: An empty cache has no prune candidates
+    When the prunable images are listed
+    Then the prunable listing is empty
+
   Scenario: Pruning reclaims the provisioned tool cache
     Given a provisioned tool cache of 700 bytes
     When the images are pruned

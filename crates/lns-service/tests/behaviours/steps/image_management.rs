@@ -58,6 +58,47 @@ async fn prune_images(w: &mut BehaviourWorld) {
     w.image().prune().await;
 }
 
+#[given(expr = "sandbox {string} with layer {string} of {int} bytes is cached on base {string}")]
+async fn dependent_sandbox_cached(
+    w: &mut BehaviourWorld,
+    reference: String,
+    digest: String,
+    size: u64,
+    base: String,
+) {
+    w.image()
+        .seed_dependent(&reference, &digest, size, &base)
+        .await;
+}
+
+#[when(expr = "the prunable images are listed")]
+async fn list_prunable_images(w: &mut BehaviourWorld) {
+    w.image().list_prunable().await;
+}
+
+#[then(expr = "the prunable listing names only {string}")]
+fn prunable_names_only(w: &mut BehaviourWorld, reference: String) {
+    let rig = w.image();
+    let listed: Vec<&str> = rig
+        .last_prunable
+        .as_deref()
+        .expect("a prunable listing was taken")
+        .iter()
+        .map(|i| i.reference.as_str())
+        .collect();
+    assert_eq!(listed, vec![reference.as_str()]);
+}
+
+#[then(expr = "the prunable listing is empty")]
+fn prunable_empty(w: &mut BehaviourWorld) {
+    let rig = w.image();
+    let listed = rig
+        .last_prunable
+        .as_deref()
+        .expect("a prunable listing was taken");
+    assert!(listed.is_empty(), "got {listed:?}");
+}
+
 fn listing(rig: &ImageRig) -> &[lns_ipc::ImageInfo] {
     rig.last_list.as_deref().expect("a listing was taken")
 }

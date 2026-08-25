@@ -14,6 +14,7 @@ pub(crate) struct CannedService {
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
+    list_prunable_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     pub requests: Arc<Mutex<Vec<Request>>>,
 }
@@ -25,8 +26,16 @@ impl CannedService {
             stats_response: None,
             inspect_image_response: None,
             remove_image_response: None,
+            list_prunable_response: None,
             frames: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn with_list_prunable(response: Response, list_prunable: Response) -> Self {
+        Self {
+            list_prunable_response: Some(list_prunable),
+            ..Self::new(response)
         }
     }
 
@@ -90,6 +99,18 @@ pub(crate) fn sandbox_inspection_with_digest(tools: Vec<String>, digest: String)
     }
 }
 
+pub(crate) fn cached_info(reference: &str) -> lns_ipc::ImageInfo {
+    lns_ipc::ImageInfo {
+        reference: reference.to_string(),
+        kind: lns_ipc::CachedKind::Sandbox,
+        digest: format!("sha256:{}", "a".repeat(64)),
+        size_bytes: 0,
+        layers: 0,
+        pulled: "2026-01-01T00:00:00Z".into(),
+        in_use_by: None,
+    }
+}
+
 pub(crate) fn pulled_response() -> Response {
     Response::ImagePulled {
         image: lns_ipc::ImageInfo {
@@ -121,6 +142,10 @@ impl SandboxService for CannedService {
                 .remove_image_response
                 .clone()
                 .unwrap_or_else(|| self.response.clone()),
+            Request::ListPrunableImages => self
+                .list_prunable_response
+                .clone()
+                .unwrap_or(Response::ImageList { images: Vec::new() }),
             _ => self.response.clone(),
         };
         self.requests.lock().unwrap().push(request);
