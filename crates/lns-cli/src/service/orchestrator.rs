@@ -1428,7 +1428,7 @@ where
             )?;
             Ok(PrePhaseStep::Continue)
         }
-        WireFrame::Json(Response::RunExit { code }) => Ok(PrePhaseStep::EarlyExit(code)),
+        WireFrame::Json(Response::RunExit { .. }) => Ok(PrePhaseStep::EarlyExit(PRE_START_FAILURE)),
         WireFrame::Json(Response::Error { message }) => {
             anyhow::bail!("daemon error: {message}")
         }
@@ -1884,7 +1884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_pre_phase_returns_early_exit_when_run_exits_before_session_ready() {
+    async fn a_run_exit_before_session_ready_is_lns_failing_never_the_workload() {
         let (mut client, mut server) = tokio::io::duplex(4096);
         tokio::spawn(async move {
             write_response(&mut server, run_log("Resolving", "ubuntu:latest")).await;
@@ -1894,7 +1894,11 @@ mod tests {
         let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
             .await
             .unwrap();
-        assert_eq!(outcome, PrePhaseOutcome::EarlyExit(42));
+        assert_eq!(
+            outcome,
+            PrePhaseOutcome::EarlyExit(PRE_START_FAILURE),
+            "the workload never started, so its encoded code must not leak through as a workload status"
+        );
     }
 
     #[tokio::test]
