@@ -74,7 +74,9 @@ parse the human table:
 
 `table` is the default everywhere, including the two `inspect` verbs — the table is
 a summary a reader scans, the JSON is the record. `lns artifact inspect` renders a
-document as its author wrote it and takes no `--format`.
+document as its author wrote it and takes no `--format`. The `lns inspect` shortcut
+takes it, passes it through when the target settles as a sandbox, and refuses it —
+saying why — when the target is a document or a cached artifact.
 
 `lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
 its machine-readable form is one JSON event per line. The older `--json` spelling still
