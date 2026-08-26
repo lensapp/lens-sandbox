@@ -5,12 +5,6 @@ use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::credential_flow::session::{
-    CredentialDecisionRequest, CredentialPendingPrompt, DenyScope,
-};
-use crate::credential_flow::store::CredentialEntry;
-use crate::oauth::SignInPivot;
-use lns_policy::connectors::TokenFallback;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
@@ -18,57 +12,12 @@ pub struct DecisionDelivery {
     pub action: RequestAction,
 }
 
-/// What the user chose on a network card: one of the wire decisions, accepting the connector offer via its interactive connect, or connecting it with a pasted token. The latter two are host-only actions that drive a connect rather than a per-request verdict.
+/// What the user chose on a network card: one of the wire decisions, or a closed card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
     /// A closed card: fail the held request, but record nothing — the developer made no decision.
     Dismiss,
-    ConnectConnector,
-    UseToken {
-        value: String,
-    },
-}
-
-/// Carries the full [`CredentialDecisionRequest`] rather than a bare enum so the typed credential value threads through to `record_decision`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialDecisionDelivery {
-    pub id: String,
-    pub request: CredentialDecisionRequest,
-}
-
-/// Its `host_value_available` flag is set only when the per-service [`crate::credential_flow::detection::HostDetector`] returned `Some` at present time; `oauth_display_name` is `Some` for an oauth connector, making the card a browser-sign-in consent rather than a value prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialCardPrompt {
-    pub id: String,
-    pub credential_id: String,
-    pub action: String,
-    pub host_value_available: bool,
-    /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::bound_value_available`]: a value is already bound on this machine, so the card can grant it rather than rebind.
-    pub bound_value_available: bool,
-    pub oauth_display_name: Option<String>,
-    pub token_fallback: Option<TokenFallback>,
-    pub env_var: Option<String>,
-    pub injection_domains: Vec<String>,
-    pub is_project_defined: bool,
-    /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::deny_scope`]: how far this card's "Deny" reaches.
-    pub deny_scope: DenyScope,
-    /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
-    pub run: Option<String>,
-}
-
-/// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignInCard {
-    pub credential_id: String,
-    pub display_name: String,
-    pub user_code: Option<String>,
-    pub verification_uri: String,
-    pub token_fallback: Option<TokenFallback>,
-    pub env_var: Option<String>,
-    pub injection_domains: Vec<String>,
-    pub is_project_defined: bool,
-    pub run: Option<String>,
 }
 
 pub struct WindowState {
@@ -78,10 +27,7 @@ pub struct WindowState {
 #[derive(Default)]
 struct WindowInner {
     pending: Vec<PendingEntry>,
-    pending_credentials: Vec<CredentialPendingEntry>,
-    pending_sign_ins: Vec<SignInEntry>,
     informs: Vec<InformEntry>,
-    connecting: Vec<ConnectingEntry>,
     next_seq: u64,
 }
 
@@ -90,14 +36,6 @@ impl WindowInner {
         let seq = self.next_seq;
         self.next_seq += 1;
         seq
-    }
-
-    fn take_connecting(&mut self, display_name: &str) -> Option<u64> {
-        let idx = self
-            .connecting
-            .iter()
-            .position(|e| e.display_name == display_name)?;
-        Some(self.connecting.remove(idx).seq)
     }
 
     fn order(&self) -> Vec<StackItem> {
@@ -109,18 +47,6 @@ impl WindowInner {
         keyed.extend(seq_keyed(
             self.pending.iter().map(|e| e.seq),
             StackItem::Network,
-        ));
-        keyed.extend(seq_keyed(
-            self.pending_sign_ins.iter().map(|e| e.seq),
-            StackItem::SignIn,
-        ));
-        keyed.extend(seq_keyed(
-            self.pending_credentials.iter().map(|e| e.seq),
-            StackItem::Credential,
-        ));
-        keyed.extend(seq_keyed(
-            self.connecting.iter().map(|e| e.seq),
-            StackItem::Connecting,
         ));
         keyed.sort_by_key(|(seq, _)| *seq);
         keyed.into_iter().map(|(_, item)| item).collect()
@@ -140,26 +66,8 @@ struct PendingEntry {
     seq: u64,
 }
 
-struct CredentialPendingEntry {
-    prompt: CredentialCardPrompt,
-    decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
-    seq: u64,
-}
-
-struct SignInEntry {
-    card: SignInCard,
-    cancel: tokio::sync::oneshot::Sender<SignInPivot>,
-    seq: u64,
-}
-
 struct InformEntry {
     msg: String,
-    seq: u64,
-}
-
-/// Holds an accepted offer's slot in the stack while its connect is in flight, so the card doesn't vanish and re-emerge somewhere else.
-struct ConnectingEntry {
-    display_name: String,
     seq: u64,
 }
 
@@ -191,108 +99,6 @@ impl WindowState {
         self.lock().pending.retain(|e| e.prompt.id != id);
     }
 
-    /// Duplicate ids are silently coalesced (dedup invariant S11).
-    pub fn insert_credential_pending(
-        &self,
-        prompt: CredentialPendingPrompt,
-        host_value_available: bool,
-        decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
-    ) {
-        self.try_insert_credential_pending(prompt, host_value_available, decision_tx);
-    }
-
-    /// Insert a credential card only if no card with the same id is already pending, atomically under one lock; returns `false` (inserting nothing) on a duplicate so a concurrent bind can be refused rather than coalescing into — and later tearing down — the first card.
-    pub fn try_insert_credential_pending(
-        &self,
-        prompt: CredentialPendingPrompt,
-        host_value_available: bool,
-        decision_tx: mpsc::UnboundedSender<CredentialDecisionDelivery>,
-    ) -> bool {
-        let mut g = self.lock();
-        if g.pending_credentials
-            .iter()
-            .any(|e| e.prompt.id == prompt.id)
-        {
-            return false;
-        }
-        let seq = g.alloc_seq();
-        g.pending_credentials.push(CredentialPendingEntry {
-            prompt: CredentialCardPrompt {
-                id: prompt.id,
-                credential_id: prompt.credential_id,
-                action: prompt.action,
-                host_value_available,
-                bound_value_available: prompt.bound_value_available,
-                oauth_display_name: prompt.oauth_display_name,
-                token_fallback: prompt.token_fallback,
-                env_var: prompt.env_var,
-                injection_domains: prompt.injection_domains,
-                is_project_defined: prompt.is_project_defined,
-                deny_scope: prompt.deny_scope,
-                run: prompt.run,
-            },
-            decision_tx,
-            seq,
-        });
-        true
-    }
-
-    pub fn remove_credential_pending(&self, id: &str) {
-        self.lock()
-            .pending_credentials
-            .retain(|e| e.prompt.id != id);
-    }
-
-    /// Coalesces by `credential_id`; the `cancel` sender aborts the in-flight device-flow poll (or pivots it to a pasted token) when the card resolves. The card takes over a matching connecting placeholder's slot so it appears where the accepted card was.
-    pub fn insert_sign_in(
-        &self,
-        card: SignInCard,
-        cancel: tokio::sync::oneshot::Sender<SignInPivot>,
-    ) {
-        let mut g = self.lock();
-        if g.pending_sign_ins
-            .iter()
-            .any(|e| e.card.credential_id == card.credential_id)
-        {
-            return;
-        }
-        let seq = g
-            .take_connecting(&card.display_name)
-            .unwrap_or_else(|| g.alloc_seq());
-        g.pending_sign_ins.push(SignInEntry { card, cancel, seq });
-    }
-
-    pub fn remove_sign_in(&self, credential_id: &str) {
-        self.lock()
-            .pending_sign_ins
-            .retain(|e| e.card.credential_id != credential_id);
-    }
-
-    /// Drops the card and aborts the in-flight device-flow poll; returns whether a card was present.
-    pub fn cancel_sign_in(&self, credential_id: &str) -> bool {
-        self.resolve_sign_in(credential_id, SignInPivot::Cancel)
-    }
-
-    /// Drops the card and pivots the in-flight device flow to the pasted token, so the held request is released without restarting the connect.
-    pub fn pivot_sign_in(&self, credential_id: &str, value: String) -> bool {
-        self.resolve_sign_in(credential_id, SignInPivot::UseToken(value))
-    }
-
-    /// Drops the sign-in card and fires its cancel channel with `pivot`; returns whether a card was present.
-    fn resolve_sign_in(&self, credential_id: &str, pivot: SignInPivot) -> bool {
-        let mut g = self.lock();
-        let Some(idx) = g
-            .pending_sign_ins
-            .iter()
-            .position(|e| e.card.credential_id == credential_id)
-        else {
-            return false;
-        };
-        let entry = g.pending_sign_ins.remove(idx);
-        let _ = entry.cancel.send(pivot);
-        true
-    }
-
     pub fn push_inform(&self, msg: String) {
         let mut g = self.lock();
         let seq = g.alloc_seq();
@@ -314,26 +120,13 @@ impl WindowState {
         let g = self.lock();
         Snapshot {
             pending: g.pending.iter().map(|e| e.prompt.clone()).collect(),
-            pending_credentials: g
-                .pending_credentials
-                .iter()
-                .map(|e| e.prompt.clone())
-                .collect(),
-            sign_ins: g.pending_sign_ins.iter().map(|e| e.card.clone()).collect(),
             informs: g.informs.iter().map(|e| e.msg.clone()).collect(),
-            connecting: g
-                .connecting
-                .iter()
-                .map(|e| e.display_name.clone())
-                .collect(),
             order: g.order(),
         }
     }
 
-    /// Total pending across every flow.
     pub fn pending_count(&self) -> usize {
-        let g = self.lock();
-        g.pending.len() + g.pending_credentials.len() + g.pending_sign_ins.len()
+        self.lock().pending.len()
     }
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
@@ -343,39 +136,6 @@ impl WindowState {
     /// Drops the card and fails its held request without recording a decision. See [`RequestAction::Dismiss`].
     pub fn dismiss(&self, id: &str) -> bool {
         self.deliver(id, RequestAction::Dismiss)
-    }
-
-    /// Accepts the connector offer via its interactive connect (browser sign-in or straight credential connect). See [`Self::route_offer`].
-    pub fn connect_offer(&self, id: &str) -> bool {
-        self.route_offer(id, RequestAction::ConnectConnector)
-    }
-
-    /// Accepts the connector offer by connecting it with a pasted token. See [`Self::route_offer`].
-    pub fn use_offer_token(&self, id: &str, value: String) -> bool {
-        self.route_offer(id, RequestAction::UseToken { value })
-    }
-
-    /// Routes one connect action for the clicked request and immediately drops every other offer card for the same connector, so no sibling card flashes up before the in-flight connect releases them all. The clicked card's slot is kept by a connecting placeholder until the connect resolves.
-    fn route_offer(&self, id: &str, action: RequestAction) -> bool {
-        let mut g = self.lock();
-        let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
-            return false;
-        };
-        let offer = g.pending[idx].prompt.offer.clone();
-        let entry = g.pending.remove(idx);
-        let _ = entry.decision_tx.send(DecisionDelivery {
-            id: id.to_string(),
-            action,
-        });
-        if let Some(name) = offer {
-            g.pending
-                .retain(|e| e.prompt.offer.as_deref() != Some(name.as_str()));
-            g.connecting.push(ConnectingEntry {
-                display_name: name,
-                seq: entry.seq,
-            });
-        }
-        true
     }
 
     fn deliver(&self, id: &str, action: RequestAction) -> bool {
@@ -391,59 +151,6 @@ impl WindowState {
         true
     }
 
-    /// Declines the connector offer: clears the offer on every held request for that connector so each falls back to the plain allow/deny (rather than re-offering via a sibling card) without resolving them; returns whether an offer was present to clear.
-    pub fn decline_offer(&self, id: &str) -> bool {
-        let mut g = self.lock();
-        let Some(name) = g
-            .pending
-            .iter()
-            .find(|e| e.prompt.id == id)
-            .and_then(|e| e.prompt.offer.clone())
-        else {
-            return false;
-        };
-        for entry in g
-            .pending
-            .iter_mut()
-            .filter(|e| e.prompt.offer.as_deref() == Some(name.as_str()))
-        {
-            entry.prompt.offer = None;
-        }
-        true
-    }
-
-    /// Mirror of [`Self::decide`] for the credential flow. A browser-consent accept on an oauth card keeps the card's slot via a connecting placeholder, because its device sign-in arrives asynchronously.
-    pub fn decide_credential(&self, id: &str, request: CredentialDecisionRequest) -> bool {
-        let mut g = self.lock();
-        let Some(idx) = g.pending_credentials.iter().position(|e| e.prompt.id == id) else {
-            return false;
-        };
-        let entry = g.pending_credentials.remove(idx);
-        if let Some(name) = consent_connect_name(&entry.prompt, &request) {
-            g.connecting.push(ConnectingEntry {
-                display_name: name,
-                seq: entry.seq,
-            });
-        }
-        let _ = entry.decision_tx.send(CredentialDecisionDelivery {
-            id: id.to_string(),
-            request,
-        });
-        true
-    }
-
-    /// Drops every connecting placeholder for `display_name` once its connect has resolved.
-    pub fn clear_connecting(&self, display_name: &str) {
-        self.lock()
-            .connecting
-            .retain(|e| e.display_name != display_name);
-    }
-
-    /// Drops every connecting placeholder regardless of connector; used on run teardown so an in-flight connect can't keep the window pinned after the workload is gone.
-    pub fn clear_all_connecting(&self) {
-        self.lock().connecting.clear();
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, WindowInner> {
         self.inner.lock().expect("window state mutex poisoned")
     }
@@ -452,11 +159,7 @@ impl WindowState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub pending: Vec<PendingPrompt>,
-    pub pending_credentials: Vec<CredentialCardPrompt>,
-    pub sign_ins: Vec<SignInCard>,
     pub informs: Vec<String>,
-    /// Display names of connectors whose accepted connect is still in flight, each holding its card's slot.
-    pub connecting: Vec<String>,
     /// Every entry above in arrival order, so a card keeps its place in the stack as others come and go.
     pub order: Vec<StackItem>,
 }
@@ -466,22 +169,6 @@ pub struct Snapshot {
 pub enum StackItem {
     Inform(usize),
     Network(usize),
-    SignIn(usize),
-    Credential(usize),
-    Connecting(usize),
-}
-
-/// The placeholder name for a consent-card decision that drives an asynchronous device sign-in — a browser-consent accept on an oauth card; a pasted token or a deny resolves synchronously and holds no slot.
-fn consent_connect_name(
-    prompt: &CredentialCardPrompt,
-    request: &CredentialDecisionRequest,
-) -> Option<String> {
-    let name = prompt.oauth_display_name.as_ref()?;
-    match request {
-        CredentialDecisionRequest::Allow(CredentialEntry::Stored { .. }) => None,
-        CredentialDecisionRequest::Allow(_) => Some(name.clone()),
-        _ => None,
-    }
 }
 
 static GLOBAL: OnceLock<Arc<WindowState>> = OnceLock::new();
@@ -637,7 +324,6 @@ fn read_host_fonts() -> HostFonts {
 mod tests {
     use super::*;
     use crate::approval_flow::protocol::Treatment;
-    use crate::credential_flow::store::CredentialEntry;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn prompt(id: &str, host: &str) -> PendingPrompt {
@@ -645,26 +331,8 @@ mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
-            offer: None,
-            token_fallback: None,
             treatment: Treatment::Inspected,
             run: None,
-        }
-    }
-
-    fn cred_prompt(id: &str, credential_id: &str) -> CredentialPendingPrompt {
-        CredentialPendingPrompt {
-            id: id.into(),
-            credential_id: credential_id.into(),
-            action: format!("use of {credential_id} placeholder"),
-            oauth_display_name: None,
-            token_fallback: None,
-            env_var: None,
-            injection_domains: vec![],
-            is_project_defined: false,
-            bound_value_available: false,
-            deny_scope: DenyScope::Workload,
-            run: Some("some-run".into()),
         }
     }
 
@@ -679,12 +347,14 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_card_keeps_the_run_its_prompt_names() {
+    fn a_network_card_keeps_the_run_its_prompt_names() {
         let s = WindowState::new();
         let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), false, tx);
+        let mut named = prompt("r1", "a.test");
+        named.run = Some("some-run".into());
+        s.insert_pending(named, tx);
         assert_eq!(
-            s.snapshot().pending_credentials[0].run.as_deref(),
+            s.snapshot().pending[0].run.as_deref(),
             Some("some-run"),
             "the window must not drop the attribution the service put on the prompt"
         );
@@ -830,171 +500,6 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    fn offer_prompt(id: &str, host: &str, name: &str) -> PendingPrompt {
-        PendingPrompt {
-            id: id.into(),
-            host: host.into(),
-            action: format!("CONNECT {host}:443"),
-            offer: Some(name.into()),
-            token_fallback: None,
-            treatment: Treatment::Inspected,
-            run: None,
-        }
-    }
-
-    #[test]
-    fn connect_offer_drops_the_card_and_routes_a_connect_action() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.connect_offer("r1"));
-        assert_eq!(s.pending_count(), 0, "accepting the offer clears the card");
-        let got = rx.try_recv().expect("delivery");
-        assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectConnector);
-    }
-
-    #[test]
-    fn connect_offer_hides_every_sibling_offer_card_synchronously() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.connect_offer("r1"));
-        assert_eq!(
-            s.pending_count(),
-            0,
-            "the clicked card and its siblings vanish on the same frame, so none flashes up"
-        );
-        let got = rx.try_recv().expect("delivery");
-        assert_eq!(got.id, "r1");
-        assert_eq!(got.action, RequestAction::ConnectConnector);
-        assert!(
-            rx.try_recv().is_err(),
-            "only one connect is routed; the in-flight connect releases the siblings"
-        );
-    }
-
-    #[test]
-    fn connect_offer_leaves_unrelated_cards_pending() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(prompt("r2", "example.com"), tx);
-        assert!(s.connect_offer("r1"));
-        let snap = s.snapshot();
-        assert_eq!(snap.pending.len(), 1);
-        assert_eq!(
-            snap.pending[0].id, "r2",
-            "an unrelated plain request stays pending"
-        );
-    }
-
-    #[test]
-    fn connect_offer_returns_false_for_unknown_id() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(!s.connect_offer("nope"));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn use_offer_token_routes_a_use_token_action_and_drops_sibling_offer_cards() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.use_offer_token("r1", "some-pasted-token".into()));
-        assert_eq!(
-            s.pending_count(),
-            0,
-            "the clicked card and its siblings vanish so none flashes up before the connect releases them"
-        );
-        let got = rx.try_recv().expect("delivery");
-        assert_eq!(got.id, "r1");
-        assert_eq!(
-            got.action,
-            RequestAction::UseToken {
-                value: "some-pasted-token".into()
-            }
-        );
-        assert!(rx.try_recv().is_err(), "only one connect is routed");
-    }
-
-    #[test]
-    fn use_offer_token_returns_false_for_unknown_id() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(!s.use_offer_token("nope", "some-pasted-token".into()));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn decline_offer_clears_the_offer_and_keeps_the_request_pending() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.decline_offer("r1"));
-        let snap = s.snapshot();
-        assert_eq!(
-            snap.pending.len(),
-            1,
-            "declining keeps the request for a plain decision"
-        );
-        assert_eq!(
-            snap.pending[0].offer, None,
-            "the offer is cleared so the network card shows next"
-        );
-    }
-
-    #[test]
-    fn decline_offer_clears_every_card_for_the_same_connector() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(offer_prompt("r2", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.decline_offer("r1"));
-        let snap = s.snapshot();
-        assert!(
-            snap.pending.iter().all(|p| p.offer.is_none()),
-            "declining the offer clears it for every held GitHub request, not just the clicked one"
-        );
-        assert_eq!(
-            snap.pending.len(),
-            2,
-            "the requests stay pending as plain cards"
-        );
-    }
-
-    #[test]
-    fn decline_offer_is_false_when_there_is_no_offer_to_clear() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(prompt("r1", "example.com"), tx);
-        assert!(
-            !s.decline_offer("r1"),
-            "a plain request has no offer to decline"
-        );
-        assert!(
-            !s.decline_offer("nope"),
-            "an unknown id has no offer to decline"
-        );
-    }
-
     #[test]
     fn install_publishes_state_and_ctx_and_getters_return_them() {
         let s = WindowState::new();
@@ -1003,464 +508,6 @@ mod tests {
         let got_state = get().expect("global state should be installed");
         assert!(Arc::ptr_eq(&s, &got_state) || Arc::strong_count(&got_state) >= 2);
         assert!(ctx().is_some(), "global ctx should be installed");
-    }
-
-    #[test]
-    fn insert_credential_pending_dedupes_by_id() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
-        assert_eq!(s.snapshot().pending_credentials.len(), 2);
-    }
-
-    #[test]
-    fn try_insert_credential_pending_reports_the_first_insert_and_refuses_a_duplicate() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        assert!(
-            s.try_insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone()),
-            "the first insert of an id succeeds"
-        );
-        assert!(
-            !s.try_insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx),
-            "a concurrent duplicate is refused, not coalesced"
-        );
-        assert_eq!(
-            s.snapshot().pending_credentials.len(),
-            1,
-            "the refused duplicate left the first card intact"
-        );
-    }
-
-    #[test]
-    fn insert_credential_pending_carries_host_value_flag() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
-        let snap = s.snapshot();
-        assert!(snap.pending_credentials[0].host_value_available);
-        assert!(!snap.pending_credentials[1].host_value_available);
-    }
-
-    #[test]
-    fn insert_credential_pending_carries_the_token_fallback() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        let mut prompt = cred_prompt("c1", "some-oauth");
-        prompt.token_fallback = Some(TokenFallback {
-            help: Some("https://example.com/pat".into()),
-            command: None,
-        });
-        s.insert_credential_pending(prompt, false, tx);
-        assert_eq!(
-            s.snapshot().pending_credentials[0].token_fallback,
-            Some(TokenFallback {
-                help: Some("https://example.com/pat".into()),
-                command: None,
-            }),
-            "the card carries the prompt's token fallback so the consent card can offer the pivot"
-        );
-    }
-
-    #[test]
-    fn remove_credential_pending_drops_only_matching_id() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
-        s.remove_credential_pending("c1");
-        let snap = s.snapshot();
-        assert_eq!(snap.pending_credentials.len(), 1);
-        assert_eq!(snap.pending_credentials[0].id, "c2");
-    }
-
-    #[test]
-    fn remove_credential_unknown_id_is_a_noop() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
-        s.remove_credential_pending("never-was");
-        assert_eq!(s.snapshot().pending_credentials.len(), 1);
-    }
-
-    #[test]
-    fn pending_count_sums_network_and_credential_lists() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        let (ctx, _crx) = unbounded_channel();
-        s.insert_pending(prompt("r1", "a.test"), tx);
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, ctx);
-        assert_eq!(s.pending_count(), 2);
-    }
-
-    #[test]
-    fn snapshot_returns_pending_credentials_in_insertion_order() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx.clone());
-        s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx);
-        let snap = s.snapshot();
-        assert_eq!(snap.pending_credentials.len(), 2);
-        assert_eq!(snap.pending_credentials[0].id, "c1");
-        assert_eq!(snap.pending_credentials[1].id, "c2");
-    }
-
-    #[test]
-    fn decide_credential_sends_delivery_on_matching_tx_and_removes_entry() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
-        assert!(s.decide_credential(
-            "c1",
-            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
-        ));
-        assert_eq!(s.snapshot().pending_credentials.len(), 0);
-        let got = rx.try_recv().expect("delivery");
-        assert_eq!(got.id, "c1");
-        assert_eq!(
-            got.request,
-            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
-        );
-    }
-
-    #[test]
-    fn decide_credential_routes_to_the_tx_supplied_at_insert_not_a_sibling() {
-        let s = WindowState::new();
-        let (tx1, mut rx1) = unbounded_channel();
-        let (tx2, mut rx2) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx1);
-        s.insert_credential_pending(cred_prompt("c2", "openai"), false, tx2);
-        assert!(s.decide_credential("c1", CredentialDecisionRequest::Deny));
-        assert_eq!(
-            rx1.try_recv().expect("rx1").request,
-            CredentialDecisionRequest::Deny
-        );
-        assert!(rx2.try_recv().is_err());
-    }
-
-    #[test]
-    fn decide_credential_returns_false_for_unknown_id_and_emits_no_delivery() {
-        let s = WindowState::new();
-        let (tx, mut rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
-        assert!(!s.decide_credential("nope", CredentialDecisionRequest::Deny));
-        assert_eq!(s.snapshot().pending_credentials.len(), 1);
-        assert!(rx.try_recv().is_err());
-    }
-
-    fn sign_in_card(credential_id: &str) -> SignInCard {
-        SignInCard {
-            credential_id: credential_id.into(),
-            display_name: "GitHub".into(),
-            user_code: Some("WXYZ-1234".into()),
-            verification_uri: "https://some-oauth.example/login/device".into(),
-            token_fallback: None,
-            env_var: None,
-            injection_domains: vec![],
-            is_project_defined: false,
-            run: None,
-        }
-    }
-
-    #[test]
-    fn insert_sign_in_shows_in_snapshot_and_counts_toward_pending() {
-        let s = WindowState::new();
-        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        let snap = s.snapshot();
-        assert_eq!(snap.sign_ins.len(), 1);
-        assert_eq!(snap.sign_ins[0].display_name, "GitHub");
-        assert_eq!(snap.sign_ins[0].user_code.as_deref(), Some("WXYZ-1234"));
-        assert_eq!(s.pending_count(), 1, "a sign-in card keeps the window up");
-    }
-
-    #[test]
-    fn insert_sign_in_dedupes_by_credential_id() {
-        let s = WindowState::new();
-        let (tx1, _r1) = tokio::sync::oneshot::channel();
-        let (tx2, _r2) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), tx1);
-        s.insert_sign_in(sign_in_card("some-oauth"), tx2);
-        assert_eq!(s.snapshot().sign_ins.len(), 1);
-    }
-
-    #[test]
-    fn remove_sign_in_drops_the_card_without_firing_cancel() {
-        let s = WindowState::new();
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        s.remove_sign_in("some-oauth");
-        assert!(s.snapshot().sign_ins.is_empty());
-        // remove drops the sender without sending a cancel, so the receiver observes a closed channel.
-        let recv = cancel_rx.try_recv();
-        assert_eq!(recv, Err(tokio::sync::oneshot::error::TryRecvError::Closed));
-    }
-
-    #[test]
-    fn cancel_sign_in_drops_the_card_and_fires_cancel() {
-        let s = WindowState::new();
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        assert!(s.cancel_sign_in("some-oauth"));
-        assert!(s.snapshot().sign_ins.is_empty());
-        assert_eq!(cancel_rx.try_recv(), Ok(SignInPivot::Cancel));
-    }
-
-    #[test]
-    fn cancel_sign_in_for_unknown_id_is_false() {
-        let s = WindowState::new();
-        assert!(!s.cancel_sign_in("nope"));
-    }
-
-    #[test]
-    fn pivot_sign_in_drops_the_card_and_fires_the_pasted_token() {
-        let s = WindowState::new();
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        assert!(s.pivot_sign_in("some-oauth", "some-pasted-token".into()));
-        assert!(s.snapshot().sign_ins.is_empty());
-        assert_eq!(
-            cancel_rx.try_recv(),
-            Ok(SignInPivot::UseToken("some-pasted-token".into())),
-            "the in-flight device flow receives the pasted token, not a cancel"
-        );
-    }
-
-    #[test]
-    fn pivot_sign_in_for_unknown_id_is_false() {
-        let s = WindowState::new();
-        assert!(!s.pivot_sign_in("nope", "some-x-token".into()));
-    }
-
-    #[test]
-    fn snapshot_order_interleaves_kinds_by_arrival() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        let (cred_tx, _crx) = unbounded_channel();
-        s.insert_pending(prompt("r1", "a.test"), tx.clone());
-        s.push_inform("warn".into());
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), false, cred_tx);
-        s.insert_pending(prompt("r2", "b.test"), tx);
-        assert_eq!(
-            s.snapshot().order,
-            vec![
-                StackItem::Network(0),
-                StackItem::Inform(0),
-                StackItem::Credential(0),
-                StackItem::Network(1),
-            ],
-            "the stack is ordered by arrival, not regrouped by kind, so cards never jump"
-        );
-    }
-
-    #[test]
-    fn connect_offer_keeps_the_clicked_cards_slot_with_a_connecting_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(prompt("r2", "example.com"), tx);
-        assert!(s.connect_offer("r1"));
-        let snap = s.snapshot();
-        assert_eq!(snap.connecting, vec!["GitHub".to_string()]);
-        assert_eq!(
-            snap.order,
-            vec![StackItem::Connecting(0), StackItem::Network(0)],
-            "accepting the offer leaves a placeholder in the card's slot instead of collapsing the stack"
-        );
-    }
-
-    #[test]
-    fn use_offer_token_keeps_the_clicked_cards_slot_with_a_connecting_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.use_offer_token("r1", "some-pasted-token".into()));
-        assert_eq!(s.snapshot().connecting, vec!["GitHub".to_string()]);
-    }
-
-    #[test]
-    fn decline_offer_leaves_no_connecting_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        assert!(s.decline_offer("r1"));
-        assert!(s.snapshot().connecting.is_empty());
-    }
-
-    #[test]
-    fn insert_sign_in_takes_over_a_matching_connecting_placeholders_slot() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(prompt("r2", "example.com"), tx);
-        s.connect_offer("r1");
-        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        let snap = s.snapshot();
-        assert!(
-            snap.connecting.is_empty(),
-            "the sign-in card replaces the placeholder"
-        );
-        assert_eq!(
-            snap.order,
-            vec![StackItem::SignIn(0), StackItem::Network(0)],
-            "the sign-in card appears where the accepted card was, not underneath the other request"
-        );
-    }
-
-    #[test]
-    fn insert_sign_in_without_a_placeholder_appends_at_the_bottom() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(prompt("r1", "a.test"), tx);
-        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
-        s.insert_sign_in(sign_in_card("some-oauth"), cancel_tx);
-        assert_eq!(
-            s.snapshot().order,
-            vec![StackItem::Network(0), StackItem::SignIn(0)]
-        );
-    }
-
-    #[test]
-    fn clear_connecting_drops_only_the_named_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(
-            offer_prompt("r2", "api.other-oauth.example", "Other Service"),
-            tx,
-        );
-        s.connect_offer("r1");
-        s.connect_offer("r2");
-        s.clear_connecting("GitHub");
-        assert_eq!(s.snapshot().connecting, vec!["Other Service".to_string()]);
-    }
-
-    #[test]
-    fn clear_connecting_for_an_unknown_name_is_a_noop() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(offer_prompt("r1", "api.some-oauth.example", "GitHub"), tx);
-        s.connect_offer("r1");
-        s.clear_connecting("Other Service");
-        assert_eq!(s.snapshot().connecting, vec!["GitHub".to_string()]);
-    }
-
-    #[test]
-    fn clear_all_connecting_drops_every_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_pending(
-            offer_prompt("r1", "api.some-oauth.example", "GitHub"),
-            tx.clone(),
-        );
-        s.insert_pending(
-            offer_prompt("r2", "api.other-oauth.example", "Other Service"),
-            tx,
-        );
-        s.connect_offer("r1");
-        s.connect_offer("r2");
-        s.clear_all_connecting();
-        assert!(
-            s.snapshot().connecting.is_empty(),
-            "run teardown takes down every in-flight placeholder so the window can close"
-        );
-    }
-
-    fn oauth_cred_prompt(id: &str, name: &str) -> CredentialPendingPrompt {
-        CredentialPendingPrompt {
-            id: id.into(),
-            credential_id: "some-oauth".into(),
-            action: "use of some-oauth placeholder".into(),
-            oauth_display_name: Some(name.into()),
-            token_fallback: None,
-            env_var: None,
-            injection_domains: vec![],
-            is_project_defined: false,
-            bound_value_available: false,
-            deny_scope: DenyScope::Workload,
-            run: None,
-        }
-    }
-
-    #[test]
-    fn consent_accept_keeps_the_cards_slot_with_a_connecting_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(oauth_cred_prompt("c1", "GitHub"), false, tx);
-        assert!(s.decide_credential(
-            "c1",
-            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
-        ));
-        let snap = s.snapshot();
-        assert_eq!(
-            snap.connecting,
-            vec!["GitHub".to_string()],
-            "the consent card's slot waits for the sign-in card its accept will produce"
-        );
-        assert_eq!(snap.order, vec![StackItem::Connecting(0)]);
-    }
-
-    #[test]
-    fn consent_accept_with_a_pasted_token_leaves_no_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(oauth_cred_prompt("c1", "GitHub"), false, tx);
-        assert!(s.decide_credential(
-            "c1",
-            CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                value: "some-pasted-token".into()
-            })
-        ));
-        assert!(
-            s.snapshot().connecting.is_empty(),
-            "a pasted token arms synchronously, so no slot needs holding"
-        );
-    }
-
-    #[test]
-    fn consent_reusing_an_existing_sign_in_leaves_no_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(oauth_cred_prompt("c1", "GitHub"), false, tx);
-        assert!(s.decide_credential("c1", CredentialDecisionRequest::AllowBound));
-        assert!(
-            s.snapshot().connecting.is_empty(),
-            "granting the token already bound arms synchronously — there is no sign-in to wait on, so nothing should spin"
-        );
-    }
-
-    #[test]
-    fn consent_deny_leaves_no_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(oauth_cred_prompt("c1", "GitHub"), false, tx);
-        assert!(s.decide_credential("c1", CredentialDecisionRequest::Deny));
-        assert!(s.snapshot().connecting.is_empty());
-    }
-
-    #[test]
-    fn plain_credential_accept_leaves_no_placeholder() {
-        let s = WindowState::new();
-        let (tx, _rx) = unbounded_channel();
-        s.insert_credential_pending(cred_prompt("c1", "some-provider"), true, tx);
-        assert!(s.decide_credential(
-            "c1",
-            CredentialDecisionRequest::Allow(CredentialEntry::HostDetect)
-        ));
-        assert!(s.snapshot().connecting.is_empty());
     }
 
     #[test]

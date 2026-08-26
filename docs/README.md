@@ -22,14 +22,10 @@ You drive everything through one binary: the `lns` CLI.
   variables, volumes, published ports, interactive vs. detached sessions,
   and the stopped-run lifecycle.
 - **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
-  manifest, seed config, network allowlist, and credential wiring.
+  manifest, seed config, and network allowlist.
 - **[Policy and approvals](policy.md)** — the `lns-local-mixin.yaml` file, being asked
   about what no rule decides, closing a directory, the approval window, and editing
   the rules by hand.
-- **[Credentials](credentials.md)** — how placeholders keep real secrets out of
-  the workload, and the per-machine value decisions that bind the real value.
-- **[Connectors](connectors.md)** — connect workloads to external services
-  (credential injection + the routes they need) with `lns connector connect`.
 - **[Audit](audit.md)** — the per-run audit chain and verifying it with
   `lns audit`.
 - **[The background service](service.md)** — what `lns-service` does and managing

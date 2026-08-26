@@ -1,17 +1,8 @@
 Feature: adjacent commands reshaped around the sandbox
   The own-top-level groups keep their mechanisms but are reframed around the
-  single sandbox noun: connector connect only binds credentials, config
-  keeps only the run gap-fillers, and volumes stay durable and never swept by
-  sandbox GC. (The audit chain labels a run `sandbox_run`, pinned at Layer 3
+  single sandbox noun: config keeps only the run gap-fillers, and volumes
+  stay durable and never swept by sandbox GC. (The audit chain labels a run `sandbox_run`, pinned at Layer 3
   in audit/mod.rs, since the audit CLI reads the on-disk chain.)
-
-  Scenario: connector connect binds a credential and does not declare
-    Given the connector "some-provider" is in the catalog
-    When the user runs connector command "connect some-provider"
-    Then the exit code is 0
-    And the output describes binding a credential value
-    And the output does not claim to add the connector to a sandbox
-
   Scenario: config set accepts only the run gap-filler keys
     When the user runs config command "set run.registry ghcr.io"
     Then the exit code is 0

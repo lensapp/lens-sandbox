@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use lns_ipc::{Method, PlatformInfo};
 
 use super::{FLAG_FALLBACK, WebLoginFlow, WebLoginOutcome};
-use crate::connector::LocalBoxFuture;
+use crate::local_future::LocalBoxFuture;
 
 /// RFC 8628 §3.5: a `slow_down` response bumps the poll interval by 5 seconds.
 const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);

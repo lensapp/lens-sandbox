@@ -2,7 +2,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// Atomically installs `contents` at a `.json` `path` with mode 0600 via a NOFOLLOW create-new tmp + rename, so a stale tmp or planted symlink cannot leak the secret through broader perms.
 pub fn write_json_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -44,69 +43,6 @@ fn fill_and_rename(mut f: fs::File, tmp: &Path, path: &Path, contents: &[u8]) ->
     f.sync_all()?;
     drop(f);
     fs::rename(tmp, path)
-}
-
-pub struct SidecarLock {
-    _file: fs::File,
-}
-
-/// How long a contended sidecar lock is waited out: far longer than any real read-modify-write of a small JSON file, but bounded, because the service takes this lock from async tasks where a live-but-wedged holder would otherwise park a runtime worker indefinitely.
-const LOCK_WAIT: Duration = Duration::from_secs(5);
-const LOCK_POLL: Duration = Duration::from_millis(20);
-
-/// One attempt at the advisory lock, injected so the kernel refusing to lock at all — an error no test can provoke on a working filesystem — can be driven deterministically.
-trait TryLocker {
-    fn try_lock(&self, file: &fs::File) -> Result<(), fs::TryLockError>;
-}
-
-struct KernelLock;
-
-impl TryLocker for KernelLock {
-    fn try_lock(&self, file: &fs::File) -> Result<(), fs::TryLockError> {
-        file.try_lock()
-    }
-}
-
-/// Takes the exclusive advisory lock that serializes a sidecar's read-modify-write across processes, on a companion file (never the sidecar itself, whose inode a rename-install replaces); the lock is the kernel's, so it releases when the guard drops and a crashed holder can never wedge later writers.
-pub fn lock_sidecar_exclusive(path: &Path) -> io::Result<SidecarLock> {
-    lock_sidecar_exclusive_within(path, LOCK_WAIT)
-}
-
-fn lock_sidecar_exclusive_within(path: &Path, wait: Duration) -> io::Result<SidecarLock> {
-    lock_sidecar_exclusive_with(path, wait, &KernelLock)
-}
-
-fn lock_sidecar_exclusive_with(
-    path: &Path,
-    wait: Duration,
-    locker: &dyn TryLocker,
-) -> io::Result<SidecarLock> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match locker.try_lock(&file) {
-            Ok(()) => return Ok(SidecarLock { _file: file }),
-            Err(fs::TryLockError::Error(e)) => return Err(e),
-            Err(fs::TryLockError::WouldBlock) => {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("{} is still held", path.display()),
-                    ));
-                };
-                std::thread::sleep(LOCK_POLL.min(remaining));
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -241,117 +177,5 @@ mod tests {
         write_json_secret_atomic(&path, b"a").unwrap();
         write_json_secret_atomic(&path, b"b").unwrap();
         assert!(path.exists());
-    }
-
-    #[test]
-    fn lock_excludes_an_independent_open_file_description_until_the_guard_drops() {
-        // A second open of the same path is a distinct open-file-description, which flock treats exactly as another process would — so this pins the cross-process exclusion without spawning one.
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("sidecar.json.lock");
-        let guard = lock_sidecar_exclusive(&path).unwrap();
-
-        let contender = fs::File::open(&path).unwrap();
-        assert!(
-            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
-            "a second holder must be excluded while the guard lives"
-        );
-        drop(contender);
-
-        drop(guard);
-        let after = fs::File::open(&path).unwrap();
-        assert!(
-            after.try_lock().is_ok(),
-            "dropping the guard must release the lock, so a crashed holder can never wedge later writers"
-        );
-    }
-
-    #[test]
-    fn lock_creates_the_lockfile_and_missing_parents_at_mode_0600() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("a/b/sidecar.json.lock");
-        let _guard = lock_sidecar_exclusive(&path).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "got 0o{mode:o}, want 0o600");
-    }
-
-    #[test]
-    fn lock_fails_when_the_lock_path_is_occupied_by_a_directory() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("sidecar.json.lock");
-        fs::create_dir(&path).unwrap();
-        assert!(
-            lock_sidecar_exclusive(&path).is_err(),
-            "an unopenable lock path must fail closed rather than yield an unlocked guard"
-        );
-    }
-
-    #[test]
-    fn lock_gives_up_on_a_holder_that_never_releases_rather_than_parking_the_caller() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("sidecar.json.lock");
-        let _wedged = lock_sidecar_exclusive(&path).unwrap();
-
-        let outcome = lock_sidecar_exclusive_within(&path, Duration::from_millis(50))
-            .err()
-            .map(|e| e.kind());
-
-        assert_eq!(
-            outcome,
-            Some(io::ErrorKind::WouldBlock),
-            "a wedged holder must surface as an error the caller can report, never a second guard over the same lock nor an unbounded wait on a thread the service needs back"
-        );
-    }
-
-    #[test]
-    fn lock_surfaces_a_kernel_refusal_to_lock_rather_than_yielding_an_unlocked_guard() {
-        // A filesystem that refuses advisory locks (a network mount, say) answers neither Ok nor WouldBlock; the caller must hear about it, because a guard handed back here would let two processes read-modify-write the sidecar at once.
-        struct RefusingLocker;
-        impl TryLocker for RefusingLocker {
-            fn try_lock(&self, _file: &fs::File) -> Result<(), fs::TryLockError> {
-                Err(fs::TryLockError::Error(io::Error::from_raw_os_error(
-                    libc::ENOLCK,
-                )))
-            }
-        }
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("sidecar.json.lock");
-
-        let outcome = lock_sidecar_exclusive_with(&path, Duration::from_secs(5), &RefusingLocker)
-            .err()
-            .map(|e| e.raw_os_error());
-
-        assert_eq!(
-            outcome,
-            Some(Some(libc::ENOLCK)),
-            "a refusal must surface the kernel's own reason so the caller can report it, never a guard over a lock nobody holds"
-        );
-    }
-
-    #[test]
-    fn kernel_locker_takes_the_real_lock_so_the_injected_seam_is_the_shipping_path() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("sidecar.json.lock");
-        let file = fs::File::create(&path).unwrap();
-        KernelLock.try_lock(&file).expect("an unheld lock is taken");
-
-        let contender = fs::File::open(&path).unwrap();
-        assert!(
-            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
-            "the port really locks the file rather than reporting success without one"
-        );
-    }
-
-    #[test]
-    fn lock_does_not_follow_a_symlink_planted_at_the_lock_path() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let attacker_target = dir.path().join("attacker-target");
-        let path = dir.path().join("sidecar.json.lock");
-        std::os::unix::fs::symlink(&attacker_target, &path).unwrap();
-
-        assert!(lock_sidecar_exclusive(&path).is_err());
-        assert!(
-            !attacker_target.exists(),
-            "a symlink at the lock path must not redirect the create"
-        );
     }
 }

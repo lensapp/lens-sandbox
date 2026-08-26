@@ -158,7 +158,6 @@ fn composed_workload_env(w: &BehaviourWorld) -> Result<Vec<String>, String> {
         &rig.sandbox_env,
         None,
         None,
-        &[],
         &lns_service::workload_env::ToolRuntime {
             bin_paths: ensured.bin_paths.clone(),
             env: ensured.env.clone(),

@@ -382,7 +382,6 @@ pub fn on_the_wire(
         .iter()
         .map(|c| lns_ipc::SourceContribution {
             block: match c.block {
-                lns_artifact::merge::Block::Credential => lns_ipc::ContributionBlock::Credential,
                 lns_artifact::merge::Block::Tool => lns_ipc::ContributionBlock::Tool,
                 lns_artifact::merge::Block::Mount => lns_ipc::ContributionBlock::Mount,
                 lns_artifact::merge::Block::Port => lns_ipc::ContributionBlock::Port,
@@ -688,7 +687,7 @@ mod tests {
             r#"{"image":"x:1","mixins":["obs"]}"#,
             &[(
                 "obs",
-                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow","description":"approved during a run"}]}}"#,
+                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow","description":"approved during a run"}]}}"#,
             )],
         );
         let refs: Vec<(&str, &str)> = documents
@@ -705,7 +704,6 @@ mod tests {
             (lns_ipc::ContributionBlock::Tool, "node"),
             (lns_ipc::ContributionBlock::Mount, "/cache"),
             (lns_ipc::ContributionBlock::Port, "8080"),
-            (lns_ipc::ContributionBlock::Credential, "SOME_TOKEN"),
             (
                 lns_ipc::ContributionBlock::Egress,
                 "allow api.some-provider.example",
@@ -713,7 +711,7 @@ mod tests {
         ] {
             assert!(
                 found.contains(&expected),
-                "§1.5 names every rule, mount, tool and credential, so a block that never reaches the wire is a line the disclosure cannot attribute; missing {expected:?} from {found:?}"
+                "§1.5 names every rule, mount and tool, so a block that never reaches the wire is a line the disclosure cannot attribute; missing {expected:?} from {found:?}"
             );
         }
         let noted = wire

@@ -5,7 +5,7 @@ small background process that runs in your menu bar / system tray. It owns:
 
 - the microVM lifecycle (booting, attaching, tearing down runs),
 - the OCI image and layer caches,
-- the approval window and credential prompts,
+- the approval window,
 - the per-run [audit](audit.md) writer.
 
 `lns run`, `lns ps`, `lns exec`, and `lns stop` all talk to it over a local Unix
@@ -36,10 +36,8 @@ Two environment variables override the defaults (mostly useful for development):
 - `LNS_SOCKET_PATH` — use a specific socket path.
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
 - `LNS_HEADLESS=1` — run without the tray or approval window even when a
-  display is present. Interactive prompts can't be shown headless: approvals
-  need pre-authorized rules in `lns-local-mixin.yaml`, and `lns connector
-  connect` for a credential connector fails immediately instead of waiting
-  on a card that can never appear.
+  display is present. Interactive prompts can't be shown headless, so
+  approvals need pre-authorized rules in `lns-local-mixin.yaml`.
 
 ## Updating
 

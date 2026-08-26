@@ -9,12 +9,8 @@ use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::Instrument;
 
-use crate::approval_flow::protocol::{
-    Credential, GuestFrame, HostFrame, PolicyMessage, WireNetwork,
-};
+use crate::approval_flow::protocol::{GuestFrame, HostFrame, PolicyMessage, WireNetwork};
 use crate::approval_flow::session::ApprovalSession;
-use crate::credential_flow::registry::expand_credentials_for_wire_with_custom;
-use crate::credential_flow::session::CredentialSession;
 use lns_policy::Policy;
 
 mod adapter;
@@ -91,7 +87,6 @@ pub fn spawn(
     run_id: &str,
     microvm: &str,
     session: Arc<ApprovalSession>,
-    credential_session: Arc<CredentialSession>,
     frame_rx: mpsc::UnboundedReceiver<HostFrame>,
     user_env: Vec<String>,
 ) -> Result<Relay> {
@@ -113,7 +108,6 @@ pub fn spawn(
             adapter::accept_loop(
                 fd_rx,
                 session,
-                credential_session,
                 frame_rx,
                 token_clone,
                 audit_clone,
@@ -133,20 +127,10 @@ pub fn spawn(
     })
 }
 
-/// `credentials` must be the registry-expanded set, or the supervisor's `on_policy` never seeds the workload env and the credential flow is silently dead.
-pub(super) fn initial_policy_frame(policy: &Policy, credentials: Vec<Credential>) -> HostFrame {
+pub(super) fn initial_policy_frame(policy: &Policy) -> HostFrame {
     HostFrame::Policy(PolicyMessage {
         network: Some(WireNetwork::seeded(policy.network.clone())),
-        credentials: Some(credentials),
     })
-}
-
-pub(super) fn current_credentials(session: &CredentialSession) -> Vec<Credential> {
-    expand_credentials_for_wire_with_custom(
-        &session.current_state(),
-        session.custom_providers(),
-        &session.armed_ids(),
-    )
 }
 
 pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
@@ -158,7 +142,7 @@ pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::An
 }
 
 impl<L: crate::audit::AuditLog, S: crate::audit::AnchorSink> AuditWriter<'_, L, S> {
-    fn ctx(&self, clock: &dyn crate::oauth::Clock) -> crate::ocsf_audit::OcsfCtx {
+    fn ctx(&self, clock: &dyn crate::clock::Clock) -> crate::ocsf_audit::OcsfCtx {
         crate::ocsf_audit::OcsfCtx::at_unix(
             self.run.to_string(),
             self.microvm.to_string(),
@@ -183,11 +167,10 @@ async fn write_chain_line<L: crate::audit::AuditLog, S: crate::audit::AnchorSink
 
 pub(super) async fn write_run_env_event<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     user_env: &[String],
-    extra_managed: &[String],
     writer: &mut AuditWriter<'_, L, S>,
-    clock: &dyn crate::oauth::Clock,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<()> {
-    let Some(env) = crate::workload_env::injected_env(user_env, extra_managed) else {
+    let Some(env) = crate::workload_env::injected_env(user_env) else {
         return Ok(());
     };
     let cx = writer.ctx(clock);
@@ -231,10 +214,9 @@ fn guest_egress_to_ocsf(
 pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::AnchorSink>(
     msg: Message,
     session: &Arc<ApprovalSession>,
-    credential_session: &Arc<CredentialSession>,
     writer: &mut AuditWriter<'_, L, S>,
     budget: &AuditBudget,
-    clock: &dyn crate::oauth::Clock,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<bool> {
     let text = match msg {
         Message::Text(text) => text,
@@ -270,13 +252,6 @@ pub(super) async fn handle_inbound<L: crate::audit::AuditLog, S: crate::audit::A
                 session.submit_pending(req, Instant::now());
             }
         }
-        Some("credential_pending") => {
-            if let Ok(GuestFrame::CredentialPending(req)) =
-                serde_json::from_value::<GuestFrame>(Value::Object(obj))
-            {
-                credential_session.submit_pending(req, Instant::now());
-            }
-        }
         _ => {}
     }
     Ok(false)
@@ -294,15 +269,11 @@ pub(super) async fn supersede_connection(
     }
 }
 
-pub(super) fn seed_frames(
-    mut buffered: Vec<HostFrame>,
-    current_policy: &Policy,
-    credentials: Vec<Credential>,
-) -> Vec<HostFrame> {
+pub(super) fn seed_frames(mut buffered: Vec<HostFrame>, current_policy: &Policy) -> Vec<HostFrame> {
     if buffered.iter().any(|f| matches!(f, HostFrame::Policy(_))) {
         return buffered;
     }
-    buffered.insert(0, initial_policy_frame(current_policy, credentials));
+    buffered.insert(0, initial_policy_frame(current_policy));
     buffered
 }
 
@@ -353,7 +324,7 @@ mod tests {
     use tempfile::tempdir;
 
     struct FixedClock(u64);
-    impl crate::oauth::Clock for FixedClock {
+    impl crate::clock::Clock for FixedClock {
         fn now_unix(&self) -> u64 {
             self.0
         }
@@ -402,33 +373,6 @@ mod tests {
             tx,
             Duration::from_secs(30),
         ))
-    }
-
-    fn credential_session_with_dummy_sink() -> Arc<CredentialSession> {
-        credential_session_seeding(Vec::new())
-    }
-
-    fn credential_session_seeding(
-        custom: Vec<crate::credential_flow::providers::DefProvider>,
-    ) -> Arc<CredentialSession> {
-        use crate::credential_flow::notification::NoopCredentialNotifier;
-        use crate::credential_flow::store::{CredentialStateFile, JsonFileCredentialStore};
-        // Real store (not an inline fake) keeps its trait impl out of the coverage gap.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let store = Arc::new(JsonFileCredentialStore::new(dir.path().join("creds.json")));
-        // Leak the tempdir to keep it alive for the session; fine in test-only code.
-        Box::leak(Box::new(dir));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        Arc::new(
-            CredentialSession::new(
-                CredentialStateFile::new(),
-                Arc::new(NoopCredentialNotifier),
-                store,
-                tx,
-                Duration::from_secs(30),
-            )
-            .with_custom_providers(Arc::new(custom)),
-        )
     }
 
     #[test]
@@ -481,7 +425,7 @@ mod tests {
     fn policy_with_rule(host: &str) -> HostFrame {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host(host));
-        initial_policy_frame(&p, Vec::new())
+        initial_policy_frame(&p)
     }
 
     #[test]
@@ -522,10 +466,7 @@ mod tests {
         use crate::approval_flow::protocol::Decision;
         let mut buf: Vec<HostFrame> = Vec::new();
 
-        buffer_frame(
-            &mut buf,
-            initial_policy_frame(&Policy::default(), Vec::new()),
-        );
+        buffer_frame(&mut buf, initial_policy_frame(&Policy::default()));
         buffer_frame(&mut buf, decision_frame("r1", Decision::AllowOnce));
         buffer_frame(&mut buf, policy_with_rule("later.example"));
         buffer_frame(&mut buf, decision_frame("r2", Decision::DenyOnce));
@@ -551,12 +492,12 @@ mod tests {
             decision_frame("r1", Decision::AllowOnce),
             decision_frame("r2", Decision::DenyOnce),
         ];
-        let seeded = seed_frames(buffered, &current, Vec::new());
+        let seeded = seed_frames(buffered, &current);
 
         assert_eq!(
             seeded,
             vec![
-                initial_policy_frame(&current, Vec::new()),
+                initial_policy_frame(&current),
                 decision_frame("r1", Decision::AllowOnce),
                 decision_frame("r2", Decision::DenyOnce),
             ],
@@ -574,7 +515,7 @@ mod tests {
             policy_with_rule("hotswap.example"),
             decision_frame("r2", Decision::DenyOnce),
         ];
-        let seeded = seed_frames(buffered.clone(), &Policy::default(), Vec::new());
+        let seeded = seed_frames(buffered.clone(), &Policy::default());
 
         let policy_count = seeded
             .iter()
@@ -595,7 +536,7 @@ mod tests {
     fn seed_frames_on_empty_buffer_emits_just_the_initial_policy() {
         let mut current = Policy::default();
         current.add_rule(RouteRule::allow_host("fresh.example"));
-        let seeded = seed_frames(Vec::new(), &current, Vec::new());
+        let seeded = seed_frames(Vec::new(), &current);
         assert_eq!(seeded.len(), 1);
         assert!(matches!(seeded[0], HostFrame::Policy(_)));
     }
@@ -604,72 +545,13 @@ mod tests {
     fn initial_policy_frame_carries_session_network() {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("api.linear.app"));
-        let frame = initial_policy_frame(&p, Vec::new());
+        let frame = initial_policy_frame(&p);
         let json = serde_json::to_value(&frame).expect("serialise");
         assert_eq!(json["type"], "policy");
         assert_eq!(
             json["network"]["egress"]["http"][0]["match"],
             "api.linear.app"
         );
-    }
-
-    #[test]
-    fn initial_policy_frame_carries_registry_credentials_so_supervisor_seeds_env_at_boot() {
-        let p = Policy::default();
-        let creds = vec![Credential {
-            id: "some-provider".into(),
-            env_var: Some("SOME_TOKEN".into()),
-            placeholder: Some("some-placeholder-0000".into()),
-            injections: Vec::new(),
-        }];
-        let frame = initial_policy_frame(&p, creds);
-        let json = serde_json::to_value(&frame).expect("serialise");
-        let credentials = &json["credentials"];
-        assert!(
-            credentials.is_array(),
-            "credentials must be present on the initial Policy frame, got {json}"
-        );
-        let ids: Vec<&str> = credentials
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c["id"].as_str().unwrap())
-            .collect();
-        assert!(ids.contains(&"some-provider"), "got {ids:?}");
-    }
-
-    #[tokio::test]
-    async fn accept_loop_seeded_policy_includes_credentials_from_credential_session() {
-        use crate::credential_flow::providers::DefProvider;
-        use lns_policy::providers::{InjectionDef, InjectionKind, ProviderDef};
-        let session = session_with_dummy_sink();
-        let credential_session = credential_session_seeding(vec![DefProvider::new(ProviderDef {
-            id: "some-provider".into(),
-            env_var: "SOME_TOKEN".into(),
-            placeholder: "some-placeholder-0000".into(),
-            injections: vec![InjectionDef {
-                kind: InjectionKind::BearerHeader,
-                domain: "api.some-provider.example".into(),
-                header: None,
-            }],
-        })]);
-
-        let seeded = seed_frames(
-            Vec::new(),
-            &session.current_policy(),
-            current_credentials(&credential_session),
-        );
-
-        assert_eq!(seeded.len(), 1);
-        let json = serde_json::to_value(&seeded[0]).expect("serialise");
-        assert_eq!(json["type"], "policy");
-        let ids: Vec<&str> = json["credentials"]
-            .as_array()
-            .expect("credentials array present on the seeded Policy")
-            .iter()
-            .map(|c| c["id"].as_str().unwrap())
-            .collect();
-        assert!(ids.contains(&"some-provider"), "got {ids:?}");
     }
 
     #[tokio::test]
@@ -697,7 +579,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -742,7 +623,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -792,7 +672,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -823,7 +702,6 @@ mod tests {
         let mut anchor = MemAnchor::default();
         write_run_env_event(
             &["CLAUDE_CODE_USE_BEDROCK=1".into()],
-            &[],
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -866,7 +744,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -905,7 +782,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -938,7 +814,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -972,7 +847,6 @@ mod tests {
         let mut anchor = MemAnchor::default();
         write_run_env_event(
             &[],
-            &[],
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -989,82 +863,6 @@ mod tests {
             anchor.anchors.is_empty(),
             "no audit line → no anchor update"
         );
-    }
-
-    #[tokio::test]
-    async fn handle_inbound_credential_pending_routes_into_credential_session() {
-        use crate::approval_flow::protocol::CredentialPending;
-        use crate::credential_flow::session::{CredentialNotifier, CredentialPendingPrompt};
-        use crate::credential_flow::store::{CredentialStateFile, JsonFileCredentialStore};
-        use std::sync::Mutex as StdMutex;
-
-        #[derive(Default)]
-        struct Recorder {
-            seen: StdMutex<Vec<String>>,
-        }
-        impl CredentialNotifier for Recorder {
-            fn present(&self, p: &CredentialPendingPrompt) {
-                self.seen.lock().unwrap().push(p.credential_id.clone());
-            }
-            fn dismiss(&self, _: &str) {}
-            fn inform(&self, _: &str) {}
-            fn clear_informs(&self) {}
-        }
-        // Real store (not an inline fake) keeps its trait impl out of the coverage gap.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let store = Arc::new(JsonFileCredentialStore::new(dir.path().join("creds.json")));
-        let notifier = Arc::new(Recorder::default());
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let credential_session = Arc::new(CredentialSession::new(
-            CredentialStateFile::new(),
-            notifier.clone(),
-            store,
-            tx,
-            Duration::from_secs(30),
-        ));
-
-        let session = session_with_dummy_sink();
-        let mut chain = lns_ipc::AuditChain::new();
-        let mut log = MemLog::default();
-        let mut anchor = MemAnchor::default();
-
-        let raw = r#"{"type":"credential_pending","id":"c1","credentialId":"some-provider","action":"use of some-provider placeholder","reason":"placeholder-unauthorized"}"#;
-        let exhausted_budget = AuditBudget::new(0, 0);
-        let stop = handle_inbound(
-            Message::Text(raw.into()),
-            &session,
-            &credential_session,
-            &mut AuditWriter {
-                chain: &mut chain,
-                log: &mut log,
-                anchor: &mut anchor,
-                run: "test-run",
-                microvm: "calm-finch",
-            },
-            &exhausted_budget,
-            &CLOCK,
-        )
-        .await
-        .unwrap();
-
-        assert!(!stop);
-        let seen = notifier.seen.lock().unwrap();
-        assert_eq!(seen.as_slice(), &["some-provider".to_string()]);
-        assert!(
-            log.bytes.is_empty(),
-            "credential_pending must not hit audit chain"
-        );
-        assert!(anchor.anchors.is_empty());
-        let _ = CredentialPending {
-            id: "c1".into(),
-            credential_id: "some-provider".into(),
-            action: "x".into(),
-            reason: "y".into(),
-        };
-        // Exercise the rest of the notifier trait so its empty bodies aren't a coverage hole.
-        notifier.dismiss("unused");
-        notifier.inform("unused");
-        notifier.clear_informs();
     }
 
     #[tokio::test]
@@ -1088,7 +886,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Text(raw.into()),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1118,7 +915,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Close(None),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1148,7 +944,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Text(r#"{"type":"something_else"}"#.into()),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1180,7 +975,6 @@ mod tests {
             let stop = handle_inbound(
                 msg,
                 &session,
-                &credential_session_with_dummy_sink(),
                 &mut AuditWriter {
                     chain: &mut chain,
                     log: &mut log,
@@ -1208,7 +1002,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Text(r#"this is not json but "type":"audit_event" appears"#.into()),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1251,7 +1044,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Text(raw.into()),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1287,7 +1079,6 @@ mod tests {
         let stop = handle_inbound(
             Message::Text(r#"{"type":"watch","payload":{}}"#.into()),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,
@@ -1315,15 +1106,7 @@ mod tests {
         let _home = home_for(&temp);
         let session = session_with_dummy_sink();
         let (_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
-        let relay = spawn(
-            "aa1234",
-            "calm-finch",
-            session,
-            credential_session_with_dummy_sink(),
-            frame_rx,
-            vec![],
-        )
-        .expect("spawn");
+        let relay = spawn("aa1234", "calm-finch", session, frame_rx, vec![]).expect("spawn");
         assert_eq!(
             relay.url,
             format!("vsock://host:{VSOCK_PORT}/v1/sandbox"),
@@ -1423,7 +1206,6 @@ mod tests {
                     .into(),
             ),
             &session,
-            &credential_session_with_dummy_sink(),
             &mut AuditWriter {
                 chain: &mut chain,
                 log: &mut log,

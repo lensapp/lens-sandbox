@@ -67,17 +67,17 @@ mod tests {
     use super::*;
 
     fn sample_line() -> String {
-        lns_ocsf::credential_use(
+        lns_ocsf::approval(
             &lns_ocsf::Context {
                 time_unix_secs: 1_780_000_000,
                 ts_rfc3339: "2026-06-29T14:05:30Z",
                 run: "5e6f7a8b0000000000000000000000bb",
                 microvm: "calm-finch",
             },
-            "some-provider",
-            "apikey",
-            Some("9c2f1a3d"),
-            &["api.some-provider.example".into()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
+            None,
         )
         .to_string()
     }
@@ -118,8 +118,8 @@ mod tests {
         let events = collect(&path).unwrap();
         assert_eq!(events.len(), 1);
         let event = &events[0];
-        assert_eq!(event["class_uid"], 3002);
-        assert_eq!(event["unmapped"]["lns_kind"], "credential");
+        assert_eq!(event["class_uid"], 2004);
+        assert_eq!(event["unmapped"]["lns_kind"], "approval");
         assert_eq!(event.get("prev_hash"), None, "chain link leaked: {event:?}");
     }
 

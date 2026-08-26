@@ -225,7 +225,7 @@ fn read_resolved_definition(definition: &str) -> Result<lns_artifact::sandbox::D
 }
 
 /// A local run sends the merged document, so the mixins that produced it are already in it; a published one sends the pins its preflight showed, because the service merges them itself.
-/// What a run request says about mixins: the boot merges `to_merge`, and a connector grant keys on `composed`.
+/// What a run request says about mixins: the boot merges `to_merge`, and `composed` records the whole composition the run ran.
 struct RunMixins {
     to_merge: Vec<String>,
     composed: Vec<String>,
@@ -1405,25 +1405,6 @@ where
                 Ok(PrePhaseStep::Continue)
             }
         }
-        WireFrame::Json(Response::OauthVerification {
-            verification_uri,
-            user_code,
-            expires_in_secs,
-        }) => {
-            writeln!(
-                writer,
-                "Open {verification_uri} and enter code {user_code} (expires in {}m)",
-                expires_in_secs / 60
-            )?;
-            Ok(PrePhaseStep::Continue)
-        }
-        WireFrame::Json(Response::OauthBrowserOpened { authorization_url }) => {
-            writeln!(
-                writer,
-                "Opening your browser to authorize… (if it didn't open, visit {authorization_url})"
-            )?;
-            Ok(PrePhaseStep::Continue)
-        }
         WireFrame::Json(Response::RunExit { .. }) => Ok(PrePhaseStep::EarlyExit(PRE_START_FAILURE)),
         WireFrame::Json(Response::Error { message }) => {
             Err(crate::service::reply::failure(&message))
@@ -1595,7 +1576,7 @@ mod tests {
         assert_eq!(
             mixins_for_the_run(&local, &pinned).composed,
             pinned,
-            "a local run is still composed of what it merged, and a connector grant keys on that — sending nothing here spends the bare run's grant on a mixin the user added"
+            "a local run is still composed of what it merged, so the record must name every mixin the user added"
         );
     }
 
@@ -1631,9 +1612,7 @@ mod tests {
                     guest_path: "/root/.agent/skills".into(),
                     owner: lns_ipc::SandboxFilesetOwner::Workload,
                 }],
-                connectors: Vec::new(),
                 env: Vec::new(),
-                credentials: Vec::new(),
                 tools: Vec::new(),
                 scripts: Vec::new(),
                 policy_flags: Vec::new(),
@@ -1701,9 +1680,7 @@ mod tests {
                 mounts: Vec::new(),
                 ports: Vec::new(),
                 filesets: Vec::new(),
-                connectors: Vec::new(),
                 env: Vec::new(),
-                credentials: Vec::new(),
                 tools: Vec::new(),
                 scripts: Vec::new(),
                 policy_flags: Vec::new(),
@@ -1929,58 +1906,6 @@ mod tests {
             .await
             .expect_err("stdout before SessionReady is a protocol violation");
         assert!(format!("{err:#}").contains("unexpected frame"));
-    }
-
-    #[tokio::test]
-    async fn drive_pre_phase_renders_a_device_sign_in_prompt_and_continues() {
-        let (mut client, mut server) = tokio::io::duplex(4096);
-        tokio::spawn(async move {
-            write_response(
-                &mut server,
-                Response::OauthVerification {
-                    verification_uri: "https://api.some-oauth.example/device".into(),
-                    user_code: "SOME-CODE".into(),
-                    expires_in_secs: 900,
-                },
-            )
-            .await;
-            write_response(&mut server, run_log("SessionReady", "")).await;
-        });
-        let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
-            .await
-            .unwrap();
-        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
-        let s = String::from_utf8(buf).unwrap();
-        assert!(
-            s.contains("Open https://api.some-oauth.example/device and enter code SOME-CODE (expires in 15m)"),
-            "got: {s}"
-        );
-    }
-
-    #[tokio::test]
-    async fn drive_pre_phase_renders_a_browser_sign_in_line_and_continues() {
-        let (mut client, mut server) = tokio::io::duplex(4096);
-        tokio::spawn(async move {
-            write_response(
-                &mut server,
-                Response::OauthBrowserOpened {
-                    authorization_url: "https://api.some-oauth.example/authorize".into(),
-                },
-            )
-            .await;
-            write_response(&mut server, run_log("SessionReady", "")).await;
-        });
-        let mut buf = Vec::<u8>::new();
-        let outcome = drive_pre_phase(&mut client, &mut buf, &mut no_progress(), false)
-            .await
-            .unwrap();
-        assert_eq!(outcome, PrePhaseOutcome::SessionReady);
-        let s = String::from_utf8(buf).unwrap();
-        assert!(
-            s.contains("visit https://api.some-oauth.example/authorize"),
-            "got: {s}"
-        );
     }
 
     #[tokio::test]

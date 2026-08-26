@@ -6,7 +6,7 @@ use lns_ipc::{Request, Response};
 
 use super::{Deps, Fs, LoginAgent, PurgeSources, UninstallArgs, UninstallPlan, UninstallService};
 use crate::command::{RunCtx, RunFuture};
-use crate::connector::LocalBoxFuture;
+use crate::local_future::LocalBoxFuture;
 use crate::service::real::RealServiceClient;
 use crate::service::{DisableOutcome, disable_login_agent};
 

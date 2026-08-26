@@ -55,7 +55,6 @@ fn compose_run_env(world: &mut BehaviourWorld, cmd: &str, agent_command: Option<
         &user_env,
         agent_command,
         workdir.as_deref(),
-        &world.managed_vars,
         &Default::default(),
     ));
 }

@@ -85,13 +85,6 @@ Feature: a run resolves the mixins its document declares
     When the published sandbox is resolved and launched
     Then a workload request to "api.some-provider.example" is denied by policy
 
-  Scenario: a credential a mixin contributes is unarmed until a value is bound
-    Given a mixin declaring the credential "MIXIN_TOKEN" for "api.some-provider.example"
-    And the sandbox definition declares that mixin
-    When the published sandbox is resolved and launched
-    Then the workload's environment contains the placeholder under "MIXIN_TOKEN"
-    And no value-decision prompt is shown before the workload starts
-
   Scenario: a mixin that cannot be pulled refuses the run
     Given the sandbox definition declares a mixin nothing can resolve
     When the published sandbox is resolved and launched

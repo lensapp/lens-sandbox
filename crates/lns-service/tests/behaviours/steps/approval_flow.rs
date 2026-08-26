@@ -217,18 +217,11 @@ fn when_no_decision_before_timeout(world: &mut BehaviourWorld) {
         let past_deadline = Instant::now() + rig.timeout + Duration::from_secs(1);
         rig.session.tick_timeouts(past_deadline);
     }
-    if let Some(rig) = world.credential.as_mut() {
-        let past_deadline = Instant::now() + rig.timeout + Duration::from_secs(1);
-        rig.session.tick_timeouts(past_deadline);
-    }
 }
 
 #[when("the workload exits before a decision is recorded")]
 fn when_workload_exits(world: &mut BehaviourWorld) {
     if let Some(rig) = world.approval.as_mut() {
-        rig.session.withdraw_run();
-    }
-    if let Some(rig) = world.credential.as_mut() {
         rig.session.withdraw_run();
     }
 }
@@ -292,40 +285,11 @@ fn when_then_decision_resolves_both(world: &mut BehaviourWorld) -> Result<(), St
         }
         return Ok(());
     }
-    if let Some(rig) = world.credential.as_mut() {
-        let snap = rig.window_state.snapshot();
-        let id = snap
-            .pending_credentials
-            .last()
-            .ok_or("no credential card visible")?
-            .id
-            .clone();
-        rig.session
-            .record_decision(&id, crate::credential_rig::resolve_request());
-        let mut frames = Vec::new();
-        while let Ok(f) = rig.frames.try_recv() {
-            frames.push(f);
-        }
-        let decisions: Vec<_> = frames
-            .iter()
-            .filter_map(|f| match f {
-                HostFrame::CredentialDecision(d) => Some(d),
-                _ => None,
-            })
-            .collect();
-        if decisions.len() != 2 {
-            return Err(format!(
-                "expected both held requests to resolve under one decision, got {} frames",
-                decisions.len()
-            ));
-        }
-        return Ok(());
-    }
     Err("no rig touched in scenario".into())
 }
 
 #[then(
-    "an entry appears in the approval window showing the destination, the originating sandbox, and any credential involved"
+    "an entry appears in the approval window showing the destination and the originating sandbox"
 )]
 fn then_notification_appears(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.approval();
@@ -343,20 +307,6 @@ fn then_request_held(world: &mut BehaviourWorld) -> Result<(), String> {
         let frames = drain_frames(rig);
         if last_decision_frame(&frames).is_some() {
             return Err("a decision was emitted while the request should still be pending".into());
-        }
-    }
-    if let Some(rig) = world.credential.as_mut() {
-        let mut frames = Vec::new();
-        while let Ok(f) = rig.frames.try_recv() {
-            frames.push(f);
-        }
-        if frames
-            .iter()
-            .any(|f| matches!(f, HostFrame::CredentialDecision(_)))
-        {
-            return Err(
-                "a credential decision was emitted while the request should still be held".into(),
-            );
         }
     }
     Ok(())
@@ -797,17 +747,7 @@ fn then_inform_persist_failure(world: &mut BehaviourWorld) -> Result<(), String>
             return Ok(());
         }
     }
-    if let Some(rig) = world.credential.as_mut() {
-        let snap = rig.window_state.snapshot();
-        if snap
-            .informs
-            .iter()
-            .any(|m| m.contains("not persisted") || m.contains("could not be persisted"))
-        {
-            return Ok(());
-        }
-    }
-    Err("expected an inform mentioning persistence failure in either rig".into())
+    Err("expected an inform mentioning persistence failure".into())
 }
 
 #[then("no restart of the workload is required")]
@@ -815,4 +755,46 @@ fn then_no_restart_required(world: &mut BehaviourWorld) -> Result<(), String> {
     // no-op: in-process session is the same Arc; no restart concept exists at this layer.
     let _ = world.approval();
     Ok(())
+}
+
+#[when("the developer closes the card without choosing")]
+fn when_developer_closes_the_card(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    let id = rig
+        .notifier
+        .presented
+        .lock()
+        .unwrap()
+        .last()
+        .expect("a card must be visible before it can be closed")
+        .id
+        .clone();
+    rig.session.dismiss_request(&id);
+}
+
+#[then(regex = r#"^the audit chain records no approval for "([^"]+)"$"#)]
+fn then_audit_records_no_approval(
+    world: &mut BehaviourWorld,
+    target_id: String,
+) -> Result<(), String> {
+    let recorded: Vec<lns_ipc::LedgerEvent> = world
+        .approval
+        .as_ref()
+        .map(|r| r.ledger.events.lock().unwrap().clone())
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            matches!(
+                e,
+                lns_ipc::LedgerEvent::Approval { target, .. } if target == &target_id
+            )
+        })
+        .collect();
+    if recorded.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "a closed card is not a decision, so nothing may be recorded against {target_id}; got {recorded:?}"
+        ))
+    }
 }

@@ -4,7 +4,7 @@ use crate::runner::CliRun;
 use crate::world::{BehaviourWorld, ScriptedTerminal};
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::connector::LocalBoxFuture;
+use lns_cli::local_future::LocalBoxFuture;
 use lns_cli::volume::VolumeArgs;
 use lns_cli::volume::{self, VolumeService};
 use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};

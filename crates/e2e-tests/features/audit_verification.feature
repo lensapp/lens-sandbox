@@ -41,47 +41,47 @@ Feature: lns audit shows one unified timeline across all sandboxes
     Then the exit code is non-zero
     And the output does not contain "panicked"
 
-  Scenario: the unified timeline lists ledger connection events
+  Scenario: the unified timeline lists ledger approval events
     Given a clean lns cache home
-    And a connection ledger with sample events
+    And an approval ledger with sample events
     When I run "lns audit"
     Then the exit code is 0
-    And the output contains "some-oauth"
-    And the output contains "some-provider"
+    And the output contains "api.some-vendor.example"
+    And the output contains "docs.some-vendor.example"
 
   Scenario: reading a tampered ledger still lists events but warns about integrity
     Given a clean lns cache home
-    And a connection ledger with a tampered event
+    And an approval ledger with a tampered event
     When I run "lns audit"
     Then the exit code is 0
     And the output contains "integrity"
-    And the output contains "some-oauth"
+    And the output contains "api.some-vendor.example"
 
   Scenario: a run's per-run log and its ledger events merge into one timeline, newest first
     Given a clean lns cache home
     And a run "41aaaaaa000000000000000000000000" with a guest egress event
-    And a connection ledger with sample events
+    And an approval ledger with sample events
     When I run "lns audit 41aaaaaa000000000000000000000000"
     Then the exit code is 0
-    And the output contains "some-oauth"
+    And the output contains "api.some-vendor.example"
     And the output contains "GET api.example.test:443"
-    And the output does not contain "some-provider"
-    And the output shows "some-oauth" before "api.example.test"
+    And the output does not contain "docs.some-vendor.example"
+    And the output shows "api.some-vendor.example" before "api.example.test"
 
   Scenario: --format jsonl emits raw events and suppresses the table
     Given a clean lns cache home
-    And a connection ledger with sample events
+    And an approval ledger with sample events
     When I run "lns audit --format jsonl"
     Then the exit code is 0
-    And the output contains "some-oauth"
+    And the output contains "api.some-vendor.example"
     And the output contains "class_uid"
     And the output does not contain "WHEN"
 
   Scenario: --kind narrows the timeline to a single event kind
     Given a clean lns cache home
     And a run "41aaaaaa000000000000000000000000" with a guest egress event
-    And a connection ledger with sample events
-    When I run "lns audit 41aaaaaa000000000000000000000000 --kind connection"
+    And an approval ledger with sample events
+    When I run "lns audit 41aaaaaa000000000000000000000000 --kind approval"
     Then the exit code is 0
-    And the output contains "some-oauth"
+    And the output contains "api.some-vendor.example"
     And the output does not contain "api.example.test"

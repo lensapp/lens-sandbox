@@ -43,7 +43,7 @@ fn ctx<'a>(ts: &'a str, run: &'a str, microvm: &'a str) -> lns_ocsf::Context<'a>
     }
 }
 
-fn ocsf_row(ts: &str, run: &str, connector: Option<&str>, raw: Value) -> TimelineRow {
+fn ocsf_row(ts: &str, run: &str, raw: Value) -> TimelineRow {
     let kind = raw["unmapped"]["lns_kind"]
         .as_str()
         .unwrap_or_default()
@@ -56,7 +56,6 @@ fn ocsf_row(ts: &str, run: &str, connector: Option<&str>, raw: Value) -> Timelin
         kind,
         detail,
         raw,
-        connector: connector.map(str::to_string),
     }
 }
 
@@ -91,55 +90,26 @@ fn seed_rows() -> Vec<TimelineRow> {
         ocsf_row(
             "2026-06-29T13:00:00Z",
             RUN_B,
-            None,
             lns_ocsf::workload_launch(
                 &ctx("2026-06-29T13:00:00Z", RUN_B, "calm-finch"),
                 "alpine:latest",
             ),
         ),
         ocsf_row(
-            "2026-06-29T15:12:00Z",
-            RUN_A,
-            Some("some-provider"),
-            lns_ocsf::credential_use(
-                &ctx("2026-06-29T15:12:00Z", RUN_A, "bold-otter"),
-                "some-provider",
-                "apikey",
-                Some("9c2f1a3d"),
-                &["api.some-provider.example".into()],
-            ),
-        ),
-        ocsf_row(
-            "2026-06-29T14:00:00Z",
-            RUN_B,
-            Some("some-oauth"),
-            lns_ocsf::connection(
-                &ctx("2026-06-29T14:00:00Z", RUN_B, "calm-finch"),
-                "some-oauth",
-                "oauth",
-                Some("@user"),
-                &["repo".into(), "read:org".into()],
-                Some("2026-07-29T00:00:00Z"),
-            ),
-        ),
-        ocsf_row(
             "2026-06-29T13:32:00Z",
             RUN_B,
-            None,
             lns_ocsf::approval(
                 &ctx("2026-06-29T13:32:00Z", RUN_B, "calm-finch"),
                 "network",
                 "api.example.test:443",
                 "allow_always",
                 Some("policy-ambiguous"),
-                None,
             ),
         ),
-        ocsf_row("2026-06-29T13:30:00Z", RUN_B, None, seed_egress()),
+        ocsf_row("2026-06-29T13:30:00Z", RUN_B, seed_egress()),
         ocsf_row(
             "2026-06-29T13:05:00Z",
             RUN_B,
-            None,
             lns_ocsf::volume_mount(
                 &ctx("2026-06-29T13:05:00Z", RUN_B, "calm-finch"),
                 "data",
@@ -149,7 +119,6 @@ fn seed_rows() -> Vec<TimelineRow> {
         ocsf_row(
             "2026-06-29T13:00:01Z",
             RUN_B,
-            None,
             lns_ocsf::run_env(&ctx("2026-06-29T13:00:01Z", RUN_B, "calm-finch"), &env),
         ),
     ]

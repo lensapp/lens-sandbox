@@ -132,7 +132,7 @@ impl RunTarget {
         }
     }
 
-    /// The local definition's canonical JSON for the wire, so the service applies its command, env, policy, connectors, and resources like a published sandbox's.
+    /// The local definition's canonical JSON for the wire, so the service applies its command, env, policy, and resources like a published sandbox's.
     pub fn definition_json(&self) -> Option<String> {
         match self {
             RunTarget::Reference(_) => None,

@@ -149,7 +149,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
     fn resolve<'a>(
         &'a self,
         tool: &'a lns_artifact::tools::ToolRef,
-    ) -> crate::connector::LocalBoxFuture<'a, Result<String>> {
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<String>> {
         Box::pin(async move {
             let url = lns_artifact::tools::version_index_url(&tool.name);
             let response = reqwest::Client::builder()
@@ -179,7 +179,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
     fn verify<'a>(
         &'a self,
         tool: &'a lns_artifact::tools::ToolRef,
-    ) -> crate::connector::LocalBoxFuture<'a, super::distribute::IndexVerification> {
+    ) -> crate::local_future::LocalBoxFuture<'a, super::distribute::IndexVerification> {
         use super::distribute::IndexVerification;
         Box::pin(async move {
             let url = lns_artifact::tools::version_index_url(&tool.name);
@@ -243,7 +243,7 @@ impl super::distribute::Producer for RealProducer {
         &'a self,
         built: &'a lns_artifact::build::BuiltArtifact,
         reference: &'a str,
-    ) -> crate::connector::LocalBoxFuture<'a, Result<()>> {
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
         Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
     }
 }

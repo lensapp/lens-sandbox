@@ -399,8 +399,6 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::PruneVolumes
         | Request::RunImage(_)
         | Request::ExecImage(_)
-        | Request::BeginConnectorSignIn { .. }
-        | Request::BindConnectorCredential { .. }
         | Request::StartRun { .. }
         | Request::RunLogs { .. }
         | Request::AttachRun { .. }
@@ -640,7 +638,7 @@ async fn remove_run_request(run: &str, force: bool) -> anyhow::Result<Response> 
         },
         |id, forced| {
             if let Err(e) =
-                crate::audit::record_run_removed(id, forced, false, &crate::oauth::RealClock)
+                crate::audit::record_run_removed(id, forced, false, &crate::clock::RealClock)
             {
                 crate::log::warn!("run removal not audited: {e:#}");
             }
@@ -658,7 +656,7 @@ async fn prune_runs_request() -> anyhow::Result<Response> {
         |removed| {
             for id in removed {
                 if let Err(e) =
-                    crate::audit::record_runs_pruned(id, removed, &crate::oauth::RealClock)
+                    crate::audit::record_runs_pruned(id, removed, &crate::clock::RealClock)
                 {
                     crate::log::warn!("run prune not audited: {e:#}");
                 }
@@ -1186,30 +1184,6 @@ mod tests {
                 packed_filesets: Vec::new(),
                 denied_host_paths: Vec::new(),
             })),
-            Instant::now(),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "has a handler of its own")]
-    async fn begin_connector_sign_in_via_handle_request_panics() {
-        let _ = handle_request(
-            &Request::BeginConnectorSignIn {
-                id: "some-oauth".into(),
-            },
-            Instant::now(),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "has a handler of its own")]
-    async fn bind_connector_credential_via_handle_request_panics() {
-        let _ = handle_request(
-            &Request::BindConnectorCredential {
-                id: "some-provider".into(),
-            },
             Instant::now(),
         )
         .await;
@@ -2290,12 +2264,12 @@ mod tests {
         let (cancel_tx, _cancel_rx) = oneshot::channel();
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
+            connector: None,
             cancel_tx,
             detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: None,
             exec_sessions: Default::default(),
-            connector: None,
             name: String::new(),
             image: "test-image".into(),
             command: "".into(),
@@ -2326,12 +2300,12 @@ mod tests {
         let (detach_tx, detach_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
+            connector: None,
             cancel_tx,
             detach_tx: Mutex::new(Some(detach_tx)),
             task,
             input_tx: None,
             exec_sessions: Default::default(),
-            connector: None,
             name: String::new(),
             image: "detach-test".into(),
             command: "".into(),
@@ -2383,12 +2357,12 @@ mod tests {
         let (cancel_tx, _cancel_rx) = oneshot::channel();
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
+            connector: None,
             cancel_tx,
             detach_tx: std::sync::Mutex::new(None),
             task,
             input_tx: Some(input_tx),
             exec_sessions: Default::default(),
-            connector: None,
             name: String::new(),
             image: "closed-channel-test".into(),
             command: "".into(),
@@ -3538,7 +3512,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &tools,
         );
         let workload_path = workload
@@ -3596,7 +3569,6 @@ mod tests {
                     "/.lens/tools/some-tool/1.2.3/home".into(),
                 )],
             },
-            ..Default::default()
         };
         crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
 

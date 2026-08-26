@@ -36,9 +36,6 @@ pub struct BehaviourWorld {
     pub attached_status: Vec<u8>,
     pub attached_stdout_is_terminal: Option<bool>,
     pub uc: UpdateCheckRig,
-    pub signin_outcome: Option<lns_cli::connector::SignInOutcome>,
-    /// True when the connector under test signs in via the pkce browser redirect, so the fake sign-in renders the browser-opened prompt instead of a device code.
-    pub signin_is_pkce: bool,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,

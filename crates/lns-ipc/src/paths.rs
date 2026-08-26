@@ -84,20 +84,8 @@ pub fn config_path() -> Result<PathBuf, LnsHomeError> {
     Ok(lns_home()?.join("config.yaml"))
 }
 
-pub fn connectors_path() -> Result<PathBuf, LnsHomeError> {
-    in_lns_home("connectors.yaml")
-}
-
-pub fn credentials_path() -> Result<PathBuf, LnsHomeError> {
-    in_lns_home("credentials.json")
-}
-
 pub fn registry_auth_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("registry-auth.json")
-}
-
-pub fn workload_grants_path() -> Result<PathBuf, LnsHomeError> {
-    in_lns_home("workload-grants.json")
 }
 
 pub fn host_path_decisions_path() -> Result<PathBuf, LnsHomeError> {
@@ -158,14 +146,14 @@ mod tests {
 
     #[test]
     fn a_per_machine_file_with_no_home_is_an_error_not_a_project_relative_write() {
-        let err = per_machine_path(Err(LnsHomeError::NoHome), "connectors.yaml").unwrap_err();
+        let err = per_machine_path(Err(LnsHomeError::NoHome), "registry-auth.json").unwrap_err();
         assert!(
             err.to_string().contains("LNS_HOME"),
             "these paths feed secret writes, so nowhere to keep them is a refusal: {err}"
         );
         assert_eq!(
-            per_machine_path(Ok(PathBuf::from("/home/dev/.lns")), "connectors.yaml").unwrap(),
-            PathBuf::from("/home/dev/.lns/connectors.yaml")
+            per_machine_path(Ok(PathBuf::from("/home/dev/.lns")), "registry-auth.json").unwrap(),
+            PathBuf::from("/home/dev/.lns/registry-auth.json")
         );
     }
 
@@ -209,10 +197,7 @@ mod tests {
             connection_ledger().unwrap(),
             connection_ledger_anchor().unwrap(),
             config_path().unwrap(),
-            connectors_path().unwrap(),
-            credentials_path().unwrap(),
             registry_auth_path().unwrap(),
-            workload_grants_path().unwrap(),
             host_path_decisions_path().unwrap(),
             host_bind_decisions_path().unwrap(),
         ] {

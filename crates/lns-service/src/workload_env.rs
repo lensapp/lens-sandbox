@@ -3,36 +3,23 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkloadEnv {
     pub env: Vec<String>,
-    pub refused: Vec<String>,
-}
-
-/// A var is managed when the run's providers — its custom providers and the catalog connectors — declare it; managed vars are seeded as placeholders, never carried from `-e`.
-fn is_run_managed(env_var: &str, extra_managed: &[String]) -> bool {
-    extra_managed.iter().any(|m| m == env_var)
 }
 
 pub const REDACTED_ENV_VALUE: &str = "<redacted>";
 
 /// The audit record needs the set of injected var names, never their values — a mistyped secret in `-e KEY=VALUE` must not become durable audit data, so every value is redacted.
-pub fn injected_env(user_env: &[String], extra_managed: &[String]) -> Option<Map<String, Value>> {
+pub fn injected_env(user_env: &[String]) -> Option<Map<String, Value>> {
     let mut env = Map::new();
     for kv in user_env {
         let Some((k, _v)) = kv.split_once('=') else {
             continue;
         };
-        if is_run_managed(k, extra_managed) {
-            continue;
-        }
         env.insert(k.to_string(), Value::String(REDACTED_ENV_VALUE.to_string()));
     }
     if env.is_empty() { None } else { Some(env) }
 }
 
-pub fn compose_workload_env(
-    image_env: Option<&[String]>,
-    user_env: &[String],
-    extra_managed: &[String],
-) -> WorkloadEnv {
+pub fn compose_workload_env(image_env: Option<&[String]>, user_env: &[String]) -> WorkloadEnv {
     let mut entries: Vec<(String, String)> = Vec::new();
     if let Some(image) = image_env {
         for kv in image {
@@ -41,16 +28,11 @@ pub fn compose_workload_env(
             }
         }
     }
-    let mut refused = Vec::new();
     for kv in user_env {
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
         if is_internal(k) {
-            continue;
-        }
-        if is_run_managed(k, extra_managed) {
-            refused.push(k.to_string());
             continue;
         }
         upsert(&mut entries, k, v);
@@ -60,7 +42,6 @@ pub fn compose_workload_env(
             .into_iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect(),
-        refused,
     }
 }
 
@@ -109,7 +90,7 @@ fn proxy_env() -> [(&'static str, &'static str); 4] {
     ]
 }
 
-/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, the proxy and CA bundle the workload is given, and last the credential placeholders — which override, because the workload's real env carries the placeholder for those vars too.
+/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, and the proxy and CA bundle the workload is given.
 pub fn exec_session_env(
     exec_environment: &crate::run_registry::ExecEnvironment,
     exec_env: &[String],
@@ -126,12 +107,9 @@ pub fn exec_session_env(
         .filter(|entry| !is_session_only(entry))
         .cloned()
         .collect();
-    let mut env = compose_workload_env(Some(&joined), &caller, &[]).env;
+    let mut env = compose_workload_env(Some(&joined), &caller).env;
     compose_guest_tool_env(&mut env, &exec_environment.tools);
     for (key, value) in proxy_env().into_iter().chain(ca_bundle_env()) {
-        overwrite(&mut env, key, value);
-    }
-    for (key, value) in &exec_environment.placeholders {
         overwrite(&mut env, key, value);
     }
     env
@@ -215,10 +193,9 @@ pub fn run_workload_env(
     user_env: &[String],
     agent_command: Option<&str>,
     workdir: Option<&str>,
-    extra_managed: &[String],
     tools: &ToolRuntime,
 ) -> WorkloadEnv {
-    let mut composed = compose_workload_env(image_env, user_env, extra_managed);
+    let mut composed = compose_workload_env(image_env, user_env);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
     compose_guest_tool_env(&mut composed.env, tools);
     if let Some(agent_command) = agent_command {
@@ -256,10 +233,6 @@ fn declared<'a>(user_env: &'a [String], key: &str) -> Option<&'a str> {
         .find_map(|entry| entry.strip_prefix(&prefix))
 }
 
-pub fn refusal_warning(key: &str) -> String {
-    format!("{key} not set: it is a managed credential — use the credential flow, not -e")
-}
-
 fn upsert(entries: &mut Vec<(String, String)>, key: &str, value: &str) {
     match entries.iter_mut().find(|(k, _)| k == key) {
         Some(slot) => slot.1 = value.to_string(),
@@ -284,105 +257,63 @@ mod tests {
 
     #[test]
     fn a_single_user_var_is_carried() {
-        let c = compose_workload_env(None, &["CLAUDE_CODE_USE_BEDROCK=1".into()], &[]);
+        let c = compose_workload_env(None, &["CLAUDE_CODE_USE_BEDROCK=1".into()]);
         assert_eq!(env(&c), ["CLAUDE_CODE_USE_BEDROCK=1"]);
-        assert!(c.refused.is_empty());
     }
 
     #[test]
     fn multiple_user_vars_are_all_carried() {
-        let c = compose_workload_env(None, &["A=1".into(), "B=2".into()], &[]);
+        let c = compose_workload_env(None, &["A=1".into(), "B=2".into()]);
         assert!(c.env.contains(&"A=1".to_string()));
         assert!(c.env.contains(&"B=2".to_string()));
     }
 
     #[test]
     fn value_is_split_on_the_first_equals_only() {
-        let c = compose_workload_env(None, &["DSN=user=admin;pw=x".into()], &[]);
+        let c = compose_workload_env(None, &["DSN=user=admin;pw=x".into()]);
         assert_eq!(env(&c), ["DSN=user=admin;pw=x"]);
     }
 
     #[test]
     fn an_empty_value_is_preserved() {
-        let c = compose_workload_env(None, &["FEATURE_X=".into()], &[]);
+        let c = compose_workload_env(None, &["FEATURE_X=".into()]);
         assert_eq!(env(&c), ["FEATURE_X="]);
     }
 
     #[test]
     fn user_value_overrides_the_image_env() {
-        let c = compose_workload_env(Some(&["PORT=3003".into()]), &["PORT=4000".into()], &[]);
+        let c = compose_workload_env(Some(&["PORT=3003".into()]), &["PORT=4000".into()]);
         assert_eq!(env(&c), ["PORT=4000"]);
     }
 
     #[test]
     fn image_vars_not_overridden_are_kept() {
-        let c = compose_workload_env(Some(&["FOO=bar".into()]), &["BAZ=1".into()], &[]);
+        let c = compose_workload_env(Some(&["FOO=bar".into()]), &["BAZ=1".into()]);
         assert!(c.env.contains(&"FOO=bar".to_string()));
         assert!(c.env.contains(&"BAZ=1".to_string()));
     }
 
     #[test]
-    fn a_user_override_of_a_managed_credential_is_refused_and_dropped() {
-        let c = compose_workload_env(
-            None,
-            &["SOME_TOKEN=some-real".into()],
-            &["SOME_TOKEN".to_string()],
-        );
-        assert!(c.env.is_empty(), "credential var must not reach workload");
-        assert_eq!(c.refused, ["SOME_TOKEN"]);
-    }
-
-    #[test]
-    fn a_connected_connectors_env_var_is_refused_and_dropped() {
-        let c = compose_workload_env(
-            None,
-            &["GITLAB_TOKEN=glpat_real".into(), "SAFE=1".into()],
-            &["GITLAB_TOKEN".to_string()],
-        );
-        assert_eq!(
-            c.env,
-            ["SAFE=1"],
-            "the connector token must not reach the workload"
-        );
-        assert_eq!(c.refused, ["GITLAB_TOKEN"]);
-    }
-
-    #[test]
     fn a_malformed_user_entry_without_equals_is_ignored() {
-        let c = compose_workload_env(None, &["NOTANASSIGNMENT".into()], &[]);
+        let c = compose_workload_env(None, &["NOTANASSIGNMENT".into()]);
         assert!(c.env.is_empty());
-        assert!(c.refused.is_empty());
     }
 
     #[test]
     fn a_malformed_image_entry_without_equals_is_ignored() {
-        let c = compose_workload_env(Some(&["JUSTAKEY".into()]), &[], &[]);
+        let c = compose_workload_env(Some(&["JUSTAKEY".into()]), &[]);
         assert!(c.env.is_empty());
     }
 
     #[test]
     fn run_workload_env_carries_user_env_for_an_unsupervised_run() {
-        let c = run_workload_env(
-            None,
-            &["FOO=bar".into()],
-            None,
-            None,
-            &[],
-            &Default::default(),
-        );
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &Default::default());
         assert_eq!(c.env, ["FOO=bar"], "user -e must reach a policy-less run");
     }
 
     #[test]
     fn run_workload_env_adds_no_supervisor_vars_when_unsupervised() {
-        let c = run_workload_env(
-            None,
-            &["FOO=bar".into()],
-            None,
-            None,
-            &[],
-            &Default::default(),
-        );
+        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &Default::default());
         assert!(
             !c.env
                 .iter()
@@ -399,7 +330,6 @@ mod tests {
             &["FOO=bar".into()],
             Some("echo hi"),
             None,
-            &[],
             &Default::default(),
         );
         assert!(c.env.contains(&"FOO=bar".to_string()), "got: {:?}", c.env);
@@ -414,7 +344,6 @@ mod tests {
             &["TERM=dumb".into()],
             Some("sh"),
             None,
-            &[],
             &Default::default(),
         );
         let last_term = c.env.iter().rposition(|e| e.starts_with("TERM=")).unwrap();
@@ -422,43 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn run_workload_env_surfaces_refused_credentials() {
-        let c = run_workload_env(
-            None,
-            &["SOME_TOKEN=x".into()],
-            None,
-            None,
-            &["SOME_TOKEN".to_string()],
-            &Default::default(),
-        );
-        assert_eq!(c.refused, ["SOME_TOKEN"]);
-        assert!(c.env.is_empty());
-    }
-
-    #[test]
-    fn run_workload_env_refuses_a_connected_connector_var_via_extra_managed() {
-        let c = run_workload_env(
-            None,
-            &["GITLAB_TOKEN=real".into()],
-            None,
-            None,
-            &["GITLAB_TOKEN".to_string()],
-            &Default::default(),
-        );
-        assert_eq!(c.refused, ["GITLAB_TOKEN"]);
-        assert!(c.env.is_empty());
-    }
-
-    #[test]
     fn run_workload_env_pins_workspace_path_for_a_supervised_run() {
-        let c = run_workload_env(
-            None,
-            &[],
-            Some("sh"),
-            Some("/app"),
-            &[],
-            &Default::default(),
-        );
+        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &Default::default());
         assert!(
             c.env.contains(&"WORKSPACE_PATH=/app".to_string()),
             "got: {:?}",
@@ -468,7 +362,7 @@ mod tests {
 
     #[test]
     fn run_workload_env_omits_workspace_path_without_a_workdir() {
-        let c = run_workload_env(None, &[], Some("sh"), None, &[], &Default::default());
+        let c = run_workload_env(None, &[], Some("sh"), None, &Default::default());
         assert!(
             !c.env.iter().any(|e| e.starts_with("WORKSPACE_PATH=")),
             "got: {:?}",
@@ -483,7 +377,6 @@ mod tests {
             &["WORKSPACE_PATH=/evil".into()],
             Some("sh"),
             Some("/app"),
-            &[],
             &Default::default(),
         );
         let last = c
@@ -500,11 +393,33 @@ mod tests {
 
     #[test]
     fn run_workload_env_adds_no_workspace_path_when_unsupervised() {
-        let c = run_workload_env(None, &[], None, Some("/app"), &[], &Default::default());
+        let c = run_workload_env(None, &[], None, Some("/app"), &Default::default());
         assert!(
             c.env.is_empty(),
             "an unsupervised run's cwd travels via the session, not env: {:?}",
             c.env
+        );
+    }
+
+    #[test]
+    fn the_ca_bundle_outranks_a_session_that_already_names_one() {
+        // An image or `-e` that sets SSL_CERT_FILE must not outrank the proxy's bundle, or the exec session quietly stops trusting the interception CA.
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["SSL_CERT_FILE=/etc/ssl/image-bundle.pem".into()],
+            ..Default::default()
+        };
+
+        let env = exec_session_env(&run, &[]);
+
+        let seen: Vec<&String> = env
+            .iter()
+            .filter(|kv| kv.starts_with("SSL_CERT_FILE="))
+            .collect();
+        assert_eq!(seen.len(), 1, "one variable holds one value: {env:?}");
+        assert_eq!(
+            seen[0],
+            &format!("SSL_CERT_FILE={}", lns_session::SYSTEM_CA_BUNDLE_PATH),
+            "got: {env:?}"
         );
     }
 
@@ -717,36 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_placeholder_overrides_whatever_the_run_env_holds_for_that_var() {
-        let run = crate::run_registry::ExecEnvironment {
-            session_env: vec!["SOME_TOKEN=an-image-baked-value".into()],
-            placeholders: vec![(
-                "SOME_TOKEN".to_string(),
-                "some-provider_LNSPLACEHOLDER0000".to_string(),
-            )],
-            ..Default::default()
-        };
-
-        let env = exec_session_env(&run, &[]);
-
-        assert!(
-            env.contains(&"SOME_TOKEN=some-provider_LNSPLACEHOLDER0000".to_string()),
-            "the workload's own env carries the placeholder for a managed var, so an exec must match: {env:?}"
-        );
-        assert!(
-            !env.iter().any(|kv| kv.contains("an-image-baked-value")),
-            "got: {env:?}"
-        );
-    }
-
-    #[test]
     fn tool_bin_paths_prepend_and_beat_the_image_path() {
         let c = run_workload_env(
             Some(&["PATH=/usr/bin".into()]),
             &[],
             None,
             None,
-            &[],
             &ToolRuntime {
                 bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
                 env: Vec::new(),
@@ -762,7 +653,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &ToolRuntime {
                 bin_paths: vec!["/t/bin".into()],
                 env: Vec::new(),
@@ -779,7 +669,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &tools(&["/t/bin"]),
         );
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
@@ -792,7 +681,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &tools(&["/t/bin"]),
         );
         assert_eq!(c.env, ["PATH=/t/bin:/usr/bin"]);
@@ -806,7 +694,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &Default::default(),
         );
         assert_eq!(c.env, ["PATH=/usr/bin"]);
@@ -815,7 +702,7 @@ mod tests {
     #[test]
     fn a_run_with_no_tools_and_no_image_path_is_left_to_the_kernel_default() {
         // Composing one here would put a second copy of the same value in the env for no reason; lns-init already exports it.
-        let c = run_workload_env(None, &[], None, None, &[], &Default::default());
+        let c = run_workload_env(None, &[], None, None, &Default::default());
         assert!(
             !c.env.iter().any(|kv| kv.starts_with("PATH=")),
             "got: {:?}",
@@ -832,7 +719,6 @@ mod tests {
             &[],
             None,
             None,
-            &[],
             &ToolRuntime {
                 bin_paths: vec!["/t/bin".into()],
                 env: Vec::new(),
@@ -843,14 +729,7 @@ mod tests {
 
     #[test]
     fn tool_bin_paths_keep_declaration_order_and_precede_the_supervisor_appends() {
-        let c = run_workload_env(
-            None,
-            &[],
-            Some("sh"),
-            None,
-            &[],
-            &tools(&["/t/a/bin", "/t/b"]),
-        );
+        let c = run_workload_env(None, &[], Some("sh"), None, &tools(&["/t/a/bin", "/t/b"]));
         let path = c.env.iter().position(|e| e.starts_with("PATH=")).unwrap();
         assert!(
             c.env[path].starts_with("PATH=/t/a/bin:/t/b:"),
@@ -866,15 +745,8 @@ mod tests {
     }
 
     #[test]
-    fn refusal_warning_names_the_key_and_the_reason() {
-        let msg = refusal_warning("OPENAI_API_KEY");
-        assert!(msg.contains("OPENAI_API_KEY"));
-        assert!(msg.contains("managed credential"));
-    }
-
-    #[test]
-    fn injected_env_records_non_credential_var_names() {
-        let env = injected_env(&["CLAUDE_CODE_USE_BEDROCK=1".into()], &[]).expect("env built");
+    fn injected_env_records_the_injected_var_names() {
+        let env = injected_env(&["CLAUDE_CODE_USE_BEDROCK=1".into()]).expect("env built");
         assert_eq!(
             env.get("CLAUDE_CODE_USE_BEDROCK").unwrap(),
             REDACTED_ENV_VALUE
@@ -883,8 +755,8 @@ mod tests {
 
     #[test]
     fn injected_env_redacts_values_so_a_mistyped_secret_never_persists() {
-        let env = injected_env(&["SOME_PRIVATE_TOKEN=super-secret-value".into()], &[])
-            .expect("env built");
+        let env =
+            injected_env(&["SOME_PRIVATE_TOKEN=super-secret-value".into()]).expect("env built");
         assert!(
             env.contains_key("SOME_PRIVATE_TOKEN"),
             "the var name is still recorded for the audit trail"
@@ -897,39 +769,13 @@ mod tests {
     }
 
     #[test]
-    fn injected_env_omits_managed_credentials() {
-        let env = injected_env(
-            &["A=1".into(), "SOME_TOKEN=x".into()],
-            &["SOME_TOKEN".to_string()],
-        )
-        .expect("env built");
-        assert!(env.contains_key("A"));
-        assert!(!env.contains_key("SOME_TOKEN"));
-    }
-
-    #[test]
-    fn injected_env_omits_a_connected_connectors_value_from_the_log() {
-        let env = injected_env(
-            &["A=1".into(), "GITLAB_TOKEN=glpat_real".into()],
-            &["GITLAB_TOKEN".to_string()],
-        )
-        .expect("env built");
-        assert!(env.contains_key("A"));
-        assert!(
-            !env.contains_key("GITLAB_TOKEN"),
-            "a connected connector's real token must never land in the audit log"
-        );
-    }
-
-    #[test]
     fn injected_env_is_none_when_nothing_is_injected() {
-        assert!(injected_env(&[], &[]).is_none());
-        assert!(injected_env(&["SOME_TOKEN=x".into()], &["SOME_TOKEN".to_string()]).is_none());
+        assert!(injected_env(&[]).is_none());
     }
 
     #[test]
     fn injected_env_skips_malformed_entries() {
-        let env = injected_env(&["NOEQUALS".into(), "A=1".into()], &[]).expect("env built");
+        let env = injected_env(&["NOEQUALS".into(), "A=1".into()]).expect("env built");
         assert!(!env.contains_key("NOEQUALS"));
         assert!(env.contains_key("A"));
     }

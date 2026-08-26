@@ -83,7 +83,7 @@ async fn the_local_sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
         }
         Err(e) => Err(e),
     };
-    crate::steps::declared_connectors::launch_resolved(w, planned);
+    crate::steps::declared_launch::launch_resolved(w, planned);
 }
 
 #[then(regex = r#"^the resolution names the mixin "([^"]+)"$"#)]

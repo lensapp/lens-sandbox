@@ -24,11 +24,8 @@ pub struct E2eWorld {
     pub pushed_ref: Option<String>,
     pub pushed_digest: Option<String>,
     pub project: Option<TempDir>,
-    pub project_connectors: Vec<String>,
     pub project_command: Option<String>,
     pub project_env: Vec<(String, String)>,
-    /// Declared credentials as (env var, injection domain); the placeholder is derived so a guest assertion can name it.
-    pub project_credentials: Vec<(String, String)>,
     /// Ports the project definition declares, as (host, container).
     pub project_ports: Vec<(Option<u16>, u16)>,
     /// Path filesets the project declares, as (directory, file inside it, guestPath).

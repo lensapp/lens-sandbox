@@ -40,11 +40,6 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
 }
 
 fn matches_filter(row: &TimelineRow, args: &AuditArgs) -> bool {
-    if let Some(connector) = &args.connector
-        && row.connector.as_deref() != Some(connector.as_str())
-    {
-        return false;
-    }
     if let Some(kind) = args.kind
         && row.kind != kind.label()
     {
@@ -155,13 +150,12 @@ mod tests {
         }
     }
 
-    fn connection(run: &str, ts: &str) -> String {
-        lns_ocsf::connection(
+    fn approval(run: &str, ts: &str) -> String {
+        lns_ocsf::approval(
             &octx(run, ts),
-            "some-oauth",
-            "oauth",
-            Some("@hchen"),
-            &["repo".to_string()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
             None,
         )
         .to_string()
@@ -175,17 +169,6 @@ mod tests {
             "22.11.0",
             Some("nodejs.org"),
             "core:node",
-        )
-        .to_string()
-    }
-
-    fn credential_use(run: &str, ts: &str) -> String {
-        lns_ocsf::credential_use(
-            &octx(run, ts),
-            "some-provider",
-            "apikey",
-            Some("9c2f1a3d"),
-            &["api.some-provider.example".to_string()],
         )
         .to_string()
     }
@@ -279,7 +262,6 @@ mod tests {
     fn args() -> AuditArgs {
         AuditArgs {
             sandbox: None,
-            connector: None,
             kind: None,
             format: None,
         }
@@ -302,10 +284,7 @@ mod tests {
                 ),
             ],
         );
-        fix.write_ledger(&[
-            connection(RUN, "2026-06-29T14:00:00Z"),
-            credential_use(RUN, "2026-06-29T15:00:00Z"),
-        ]);
+        fix.write_ledger(&[approval(RUN, "2026-06-29T14:00:00Z")]);
         let text = fix.render(&args());
         assert!(text.contains("WHEN") && text.contains("DETAIL"), "{text}");
         assert!(text.contains("injected: FOO"), "{text}");
@@ -314,11 +293,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("connect some-oauth (oauth) @hchen [repo]"),
-            "{text}"
-        );
-        assert!(
-            text.contains("use some-provider fp 9c2f1a3d → api.some-provider.example"),
+            text.contains("network allow-always api.some-vendor.example:443"),
             "{text}"
         );
     }
@@ -328,7 +303,7 @@ mod tests {
         let fix = Fixture::new();
         fix.write_ledger(&[
             tool_provision(RUN, "2026-06-29T14:00:00Z"),
-            connection(RUN, "2026-06-29T15:00:00Z"),
+            approval(RUN, "2026-06-29T15:00:00Z"),
         ]);
         let filtered = AuditArgs {
             kind: Some(KindArg::Tool),
@@ -380,7 +355,7 @@ mod tests {
     fn an_exact_run_id_scopes_to_that_run() {
         let fix = Fixture::new();
         fix.write_run(RUN, &[volume(RUN, "2026-06-29T13:00:00Z", "data", "/data")]);
-        fix.write_ledger(&[connection(
+        fix.write_ledger(&[approval(
             "5e6f7a8b0000000000000000000000bb",
             "2026-06-29T14:00:00Z",
         )]);
@@ -390,13 +365,13 @@ mod tests {
         };
         let text = fix.render(&scoped);
         assert!(text.contains("data → /data"), "{text}");
-        assert!(!text.contains("some-oauth"), "{text}");
+        assert!(!text.contains("api.some-vendor.example"), "{text}");
     }
 
     #[test]
     fn a_run_name_scopes_to_the_matching_run() {
         let fix = Fixture::new();
-        fix.write_ledger(&[connection(
+        fix.write_ledger(&[approval(
             "5e6f7a8b0000000000000000000000bb",
             "2026-06-29T14:00:00Z",
         )]);
@@ -404,7 +379,7 @@ mod tests {
             sandbox: Some("calm-finch".into()),
             ..args()
         };
-        assert!(fix.render(&scoped).contains("some-oauth"));
+        assert!(fix.render(&scoped).contains("api.some-vendor.example"));
     }
 
     #[test]
@@ -414,9 +389,9 @@ mod tests {
         let newer = "2222222200000000000000000000bbbb";
         let middle = "3333333300000000000000000000cccc";
         fix.write_ledger(&[
-            connection(older, "2026-06-29T10:00:00Z"),
-            connection(newer, "2026-06-29T20:00:00Z"),
-            connection(middle, "2026-06-29T15:00:00Z"),
+            approval(older, "2026-06-29T10:00:00Z"),
+            approval(newer, "2026-06-29T20:00:00Z"),
+            approval(middle, "2026-06-29T15:00:00Z"),
         ]);
         let resolved = resolve_scope("calm-finch", &fix.runs_root, &fix.ledger_path).unwrap();
         assert_eq!(
@@ -441,7 +416,7 @@ mod tests {
     #[test]
     fn resolve_scope_skips_corrupt_ledger_lines_instead_of_failing_every_lookup() {
         let fix = Fixture::new();
-        let good = connection(RUN, "2026-06-29T14:00:00Z");
+        let good = approval(RUN, "2026-06-29T14:00:00Z");
         let unreadable = r#"{"class_uid":1,"unmapped":{"lns_run":"x"}}"#;
         std::fs::write(
             &fix.ledger_path,
@@ -502,31 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn the_connector_filter_keeps_only_matching_ledger_events() {
-        let fix = Fixture::new();
-        fix.write_run(
-            RUN,
-            &[egress(
-                RUN,
-                "2026-06-29T13:00:00Z",
-                "http://api.example.test:443/",
-                None,
-            )],
-        );
-        fix.write_ledger(&[
-            connection(RUN, "2026-06-29T14:00:00Z"),
-            credential_use(RUN, "2026-06-29T15:00:00Z"),
-        ]);
-        let filtered = AuditArgs {
-            connector: Some("some-oauth".into()),
-            ..args()
-        };
-        let rows = fix.collect(&filtered).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, "connection");
-    }
-
-    #[test]
     fn the_kind_filter_keeps_only_the_named_kind() {
         let fix = Fixture::new();
         fix.write_run(
@@ -551,23 +501,10 @@ mod tests {
     }
 
     #[test]
-    fn the_kind_filter_accepts_credential_for_credential_use_events() {
-        let fix = Fixture::new();
-        fix.write_ledger(&[credential_use(RUN, "2026-06-29T15:00:00Z")]);
-        let filtered = AuditArgs {
-            kind: Some(KindArg::Credential),
-            ..args()
-        };
-        let rows = fix.collect(&filtered).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, "credential");
-    }
-
-    #[test]
     fn jsonl_emits_one_ocsf_object_per_event_in_sorted_order() {
         let fix = Fixture::new();
         fix.write_run(RUN, &[run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"])]);
-        fix.write_ledger(&[connection(RUN, "2026-06-29T14:00:00Z")]);
+        fix.write_ledger(&[approval(RUN, "2026-06-29T14:00:00Z")]);
         let jsonl = AuditArgs {
             format: Some(AuditFormat::Jsonl),
             ..args()
@@ -576,8 +513,8 @@ mod tests {
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2);
         let newest: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(newest["unmapped"]["lns_kind"], "connection", "newest first");
-        assert_eq!(newest["class_uid"], 3002, "emitted as OCSF");
+        assert_eq!(newest["unmapped"]["lns_kind"], "approval", "newest first");
+        assert_eq!(newest["class_uid"], 2004, "emitted as OCSF");
         let oldest: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(oldest["unmapped"]["lns_kind"], "env");
         assert_eq!(oldest["run"], RUN, "the per-run event carries its run id");

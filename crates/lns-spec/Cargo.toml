@@ -10,10 +10,6 @@ publish = false
 doctest = false
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-serde_yaml = "0.9"
 
 [lints.clippy]
 cognitive_complexity = { level = "deny", priority = 1 }

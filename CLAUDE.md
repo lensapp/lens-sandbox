@@ -4,7 +4,7 @@ Lens Sandbox is a local desktop app for running AI agents, commands, OCI images,
 
 - **Start here:** `docs/README.md` — the first-party user documentation index.
 - **Product language:** the Product Vision above and `docs/` are the source of truth for terminology and framing; keep naming consistent with them. `docs/` is user-facing documentation only — no internal sales/marketing material lives in this repo.
-- **Concepts:** approvals drive policy authoring; a per-directory decisions file (`lns-local-mixin.yaml`, a `kind: mixin` document auto-created empty; a destination no rule decides is asked about) holds the network rules, while which connectors a project connected is per machine and lives in the grant sidecar, custom credential-provider declarations live in a separate user catalog (`~/.lns/connectors.yaml`), and per-machine credential values are stored separately again so secrets aren't committed; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload via credential-shaped placeholders.
+- **Concepts:** approvals drive policy authoring; a per-directory decisions file (`lns-local-mixin.yaml`, a `kind: mixin` document auto-created empty; a destination no rule decides is asked about) holds the network rules; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload.
 - **Target format:** `docs/sandbox-spec.md` is the normative specification for the `lns.run/v1` document format and the decisions behind it. **The code does not implement all of it** — see [Transitional mode](#transitional-mode) before you touch a document-format surface.
 - **Sibling product:** Lens Agents is the centrally managed counterpart for IT teams. Same policy model.
 
@@ -14,7 +14,7 @@ Before proposing new features or architecture, consider whether they preserve th
 
 **The document format has an agreed target that the code has not reached.** `docs/sandbox-spec.md` states that target and states it as settled. This section is the contributor rule for the gap between them. It is temporary and shrinks as the gap closes.
 
-Read this before changing anything that parses, validates, publishes, resolves, or merges an `lns.yaml`, a connector, or the per-directory decisions file.
+Read this before changing anything that parses, validates, publishes, resolves, or merges an `lns.yaml` or the per-directory decisions file.
 
 ### Which document wins
 
@@ -120,14 +120,6 @@ Scenarios that require booting a real microVM (`lns run <image>`) need Vz/KVM an
 - Scenarios stay focused — each scenario is one user story.
 - Layer 2 features live under `crates/<prod>/tests/behaviours/`; Layer 1 features live under `crates/<prod>/e2e/` and are picked up by the `crates/e2e-tests/` harness.
 - Adding a new `.feature` to an existing layer doesn't require a new test bin — the layer's cucumber harness recursively globs its features dir. If a step phrasing doesn't exist yet, add it to the layer's `steps/` module alongside the existing ones.
-
-### Fixtures: synthetic test-values, not shipped ids
-
-Generic credential / connector / oauth tests (Layer 2 **and** Layer 3) exercise the *mechanism* against a clearly-synthetic fixture — never a real shipped provider or connector id. Use obvious test-values: `some-provider` (credential), `some-oauth` (oauth connector), `SOME_TOKEN` / `SOME_OAUTH_TOKEN`, `some-secret` / `some-access` / `some-refresh`, `api.some-provider.example` / `api.some-oauth.example`; injection-kind and parser sample data uses neutral hosts (`api.example.test`, `example.com`).
-
-Real shipped ids (`github`, `openai`, `anthropic`, `linear`, `telegram`, `gitlab`, …) belong in exactly two places: the catalog source of truth (`crates/lns-policy/src/connectors.yaml`) and **one** lns-policy contract test per entry that pins what the shipped catalog ships (env var, placeholder shape, injection kinds, token fallback). Network-policy *user docs* may still use a recognizable host like `api.github.com` as a destination example — that's illustration, not provider coupling.
-
-The reason is the same one that motivates the builtins → connectors migration: the shipped set shrinks over time, so a test pinned to a real id churns every time one is removed. Re-pointing `github` → `openai` is not a fix — `openai` leaves too; only a synthetic fixture is durable. When a test names a real provider/connector as its example, replace it with a synthetic fixture unless the test's job is literally to validate the shipped manifest/catalog.
 
 ## Commands
 

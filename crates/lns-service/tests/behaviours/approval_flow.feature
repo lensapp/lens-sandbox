@@ -16,7 +16,7 @@ Feature: lns-service approval flow
     Given a workload is running in the sandbox
     And the policy has no rule for "api.linear.app"
     When the workload makes a request to "api.linear.app"
-    Then an entry appears in the approval window showing the destination, the originating sandbox, and any credential involved
+    Then an entry appears in the approval window showing the destination and the originating sandbox
     And the workload's request is held pending a decision
 
   Scenario: Allow once resolves a single request without changing policy

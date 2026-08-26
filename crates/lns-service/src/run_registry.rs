@@ -90,8 +90,6 @@ pub struct ExecEnvironment {
     pub session_env: Vec<String>,
     /// What this run's declared tools contribute, so `lns exec` resolves them the way the workload does.
     pub tools: crate::workload_env::ToolRuntime,
-    /// `env_var=placeholder` for each connector that seeds one, so an exec can exercise a token path the workload uses without ever holding the real value.
-    pub placeholders: Vec<(String, String)>,
     /// The workload's working directory; `docker exec` inherits it, and an exec in `/` makes `sh -lc` write to the wrong place.
     pub workdir: Option<String>,
     /// Which identity vars (`HOME`, `USER`) the author declared, so an exec keeps them the way the supervisor honors `LENS_SANDBOX_WORKLOAD_*` — an image's own ENV must not outrank the run-as identity.
@@ -647,12 +645,12 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
     let task = tokio::spawn(std::future::pending::<()>());
     (
         RunHandle {
+            connector: None,
             cancel_tx,
             detach_tx: Mutex::new(None),
             task,
             input_tx: None,
             exec_sessions: Default::default(),
-            connector: None,
             name: String::new(),
             image: String::new(),
             command: String::new(),
@@ -925,10 +923,6 @@ mod tests {
         ExecEnvironment {
             session_env: vec!["HOME=/workspace".to_string()],
             tools: tool_runtime(),
-            placeholders: vec![(
-                "SOME_TOKEN".to_string(),
-                "some-provider_LNSPLACEHOLDER0000".to_string(),
-            )],
             workdir: Some("/workspace".to_string()),
             declared_identity_keys: vec!["HOME".to_string()],
         }

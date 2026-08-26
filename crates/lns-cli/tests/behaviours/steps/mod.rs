@@ -1,7 +1,5 @@
 pub mod cli;
 pub mod config_cli;
-pub mod connector_cli;
-pub mod connector_grants;
 pub mod declarative_filesets;
 pub mod declarative_ports;
 pub mod declarative_run;

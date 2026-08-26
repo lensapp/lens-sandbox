@@ -21,8 +21,8 @@ Lens Sandbox boots a real microVM under a hardware hypervisor:
   virtualization so WSL2 can start virtual machines. Windows 11 turns this on by
   default.
 
-The security model is identical everywhere: the same per-directory policy, the same
-credential-shaped placeholders, the same "policy you run into, not write."
+The security model is identical everywhere: the same per-directory policy and the
+same "policy you run into, not write."
 
 ## Platform support
 
@@ -114,8 +114,7 @@ working directory comes from `spec.workdir` when declared, otherwise from the im
 ## Define a sandbox
 
 The sandbox you keep is its **definition** — a `./lns.yaml` file that pins the base
-image plus its command, environment, policy, and connectors. One directory is
-one sandbox. Scaffold it with `lns init`:
+image plus its command, environment, and policy. One directory is one sandbox. Scaffold it with `lns init`:
 
 ```bash
 lns init
@@ -137,8 +136,6 @@ spec:
     memory: 512Mi
   egress:
     http: []
-  connectors: []
-  credentials: []
   volumes:
     - type: bind
       source: .
@@ -207,8 +204,7 @@ lns uninstall
 This stops any running sandboxes, stops the background service, removes the login
 auto-start entry, and deletes the installed `lns` and `lns-service` binaries. It
 asks for confirmation first; pass `-y`/`--yes` to skip the prompt. Your local data
-— cached images, named volumes, the audit trail, config, and stored credentials —
-is left in place so a reinstall picks up where you left off.
+— cached images, named volumes, the audit trail, and config — is left in place so a reinstall picks up where you left off.
 
 To delete that data too, add `--purge`:
 
@@ -216,8 +212,7 @@ To delete that data too, add `--purge`:
 lns uninstall --purge
 ```
 
-`--purge` deletes the whole data directory — including the `~/.lns/connectors.yaml`
-connector catalog and stored credentials — and shows the resolved directory in its
+`--purge` deletes the whole data directory and shows the resolved directory in its
 confirmation prompt. Files in your projects, such as each directory's `lns.yaml`
 and `lns-local-mixin.yaml`, are never touched.
 
@@ -228,5 +223,3 @@ and `lns-local-mixin.yaml`, are never touched.
   [Running workloads](running-workloads.md).
 - Pre-author rules instead of approving them interactively:
   [Policy and approvals](policy.md).
-- Give the workload credential-shaped placeholders while real secrets stay
-  outside it: [Credentials](credentials.md).

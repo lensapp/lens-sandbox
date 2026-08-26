@@ -7,7 +7,6 @@ use crate::approval_rig::ApprovalRig;
 use crate::artifact_rig::ArtifactRig;
 use crate::assembly_rig::AssemblyRig;
 use crate::bind_rig::BindRig;
-use crate::credential_rig::CredentialRig;
 use crate::declared_rig::DeclaredRig;
 use crate::forward_rig::ForwardFake;
 use crate::image_rig::ImageRig;
@@ -22,18 +21,6 @@ pub struct BehaviourWorld {
     pub response: Option<Response>,
     pub approval: Option<ApprovalRig>,
 
-    /// Lazily-built credential-flow rig — see `BehaviourWorld::credential`.
-    pub credential: Option<CredentialRig>,
-
-    /// The oauth connector id under test, set when an oauth sign-in scenario builds its rig.
-    pub oauth_id: Option<String>,
-
-    /// Set when a sign-in scenario needs the accept step to spawn the sign-in so a later step can cancel it mid-flight.
-    pub spawn_connect: bool,
-
-    /// The in-flight sign-in spawned by an accept step, awaited by the cancel step.
-    pub connect_task: Option<tokio::task::JoinHandle<()>>,
-
     pub image_env: Option<Vec<String>>,
     pub image_user: Option<String>,
     pub spec_user: Option<String>,
@@ -44,8 +31,6 @@ pub struct BehaviourWorld {
     pub user_env: Vec<String>,
     /// `spec.env` entries, merged ahead of `-e` exactly as `sandbox_launch` merges them.
     pub definition_env: Vec<String>,
-    /// Env vars a connected connector manages for the run; `-e` overrides of these are refused.
-    pub managed_vars: Vec<String>,
 
     pub forward_fake: Option<Arc<ForwardFake>>,
     pub forward_specs: Vec<PortPublish>,
@@ -182,13 +167,6 @@ impl BehaviourWorld {
             self.approval = Some(ApprovalRig::new());
         }
         self.approval.as_mut().expect("approval rig must exist")
-    }
-
-    pub fn credential(&mut self) -> &mut CredentialRig {
-        if self.credential.is_none() {
-            self.credential = Some(CredentialRig::new());
-        }
-        self.credential.as_mut().expect("credential rig must exist")
     }
 
     pub fn forward_fake(&mut self) -> Arc<ForwardFake> {

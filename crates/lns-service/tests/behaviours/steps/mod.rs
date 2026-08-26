@@ -1,8 +1,6 @@
 pub mod approval_flow;
 pub mod artifact_dispatch;
-pub mod credential_at_boot;
-pub mod credential_flow;
-pub mod declared_connectors;
+pub mod declared_launch;
 pub mod declared_tools;
 pub mod env_injection;
 pub mod exec_session_routing;
@@ -14,8 +12,6 @@ pub mod ipc;
 pub mod mixin_directory;
 pub mod mixin_flag;
 pub mod mixin_resolution;
-pub mod oauth_connector;
-pub mod pkce_connector;
 pub mod policy_guardrail;
 pub mod rootfs_assembly;
 pub mod run_as_env;

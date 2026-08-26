@@ -20,7 +20,6 @@ pub const ROOT_LABEL: &str = "the sandbox";
 /// The blocks a disclosure attributes, which are the ones §1.5 names plus `ports`, whose winners already have to answer for one another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Block {
-    Credential,
     Tool,
     Mount,
     Port,
@@ -193,20 +192,9 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
         take_over(&mut spec.workdir, &source.spec.workdir);
         take_over(&mut spec.user, &source.spec.user);
         take_over(&mut spec.resources, &source.spec.resources);
-        if !source.spec.connectors.is_empty() {
-            spec.connectors = source.spec.connectors.clone();
-        }
     }
 
     let mut contributions = Vec::new();
-    spec.credentials = fold(
-        sources,
-        |s| &s.credentials,
-        |c| c.env_var.clone(),
-        |c| c.env_var.clone(),
-        Block::Credential,
-        &mut contributions,
-    );
     spec.tools = fold(
         sources,
         |s| &s.tools,
@@ -860,25 +848,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_credential_a_mixin_contributes_names_the_mixin() {
-        let found = contribution(
-            &sources(&[
-                (ROOT_LABEL, r#"{"image":"x:1"}"#),
-                (
-                    "obs",
-                    r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}"#,
-                ),
-            ]),
-            Block::Credential,
-            "SOME_TOKEN",
-        );
-        assert_eq!(
-            found.source, "obs",
-            "a credential the sandbox never asked for is exactly what a reader has to be able to trace to its mixin"
-        );
-    }
-
     const EXPLAINED_EGRESS: &str = r#"{"egress":{"http":[{"match":"api.base.example","verdict":"allow","description":"approved during a run"}],"tcp":[{"match":"db.base.example:5432","verdict":"allow","description":"the project database"}]}}"#;
 
     #[test]
@@ -1260,26 +1229,6 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_is_replaced_whole_rather_than_field_by_field() {
-        let merged = merged(&sources(&[
-            (
-                "base",
-                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-base","injections":[{"kind":"bearer_header","domain":"api.base.example"}]}]}"#,
-            ),
-            (
-                "later",
-                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-later"}]}"#,
-            ),
-        ]));
-        assert_eq!(merged.credentials.len(), 1);
-        assert_eq!(merged.credentials[0].placeholder, "lns-placeholder-later");
-        assert!(
-            merged.credentials[0].injections.is_empty(),
-            "half of one entry and half of another would inject a placeholder the workload never holds"
-        );
-    }
-
-    #[test]
     fn a_tool_is_keyed_by_name_so_a_later_version_replaces_it() {
         let merged = merged(&sources(&[
             ("base", r#"{"tools":["node@20","python@3.12"]}"#),
@@ -1484,22 +1433,6 @@ mod tests {
     }
 
     #[test]
-    fn a_resolved_sandbox_keeps_the_connector_list_its_own_document_declared() {
-        let merged = merged(&sources(&[
-            (
-                "the sandbox",
-                r#"{"image":"x:1","connectors":["some-provider"]}"#,
-            ),
-            ("later", r#"{"tools":["node@22"]}"#),
-        ]));
-        assert_eq!(
-            merged.connectors,
-            ["some-provider"],
-            "no mixin can name a connector, so resolution must not lose the list the sandbox itself carries"
-        );
-    }
-
-    #[test]
     fn one_documents_own_order_survives_inside_its_own_entries() {
         let merged = merged(&sources(&[(
             "base",
@@ -1547,7 +1480,7 @@ mod tests {
     fn a_merged_document_round_trips_through_its_own_serialization() {
         let merged = merged(&sources(&[(
             "base",
-            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some"}],"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]},"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y jq","description":"the jq the prompts assume"}]}"#,
+            r#"{"image":"x:1","command":"agent","workdir":"/w","user":"node","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"tools":["node@22"],"volumes":[{"type":"bind","source":".","target":"/w"}],"filesets":[{"inline":{"a.md":"x"},"guestPath":"/notes"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]},"scripts":[{"when":"pre-start","user":"root","run":"apt-get install -y jq","description":"the jq the prompts assume"}]}"#,
         )]));
         let json = serde_json::to_string(&merged).expect("a merged spec serializes");
         assert_eq!(

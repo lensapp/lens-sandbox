@@ -13,7 +13,6 @@ pub struct TimelineRow {
     pub kind: String,
     pub detail: String,
     pub raw: Value,
-    pub connector: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -76,7 +75,6 @@ fn read_ledger_row(
         run: row.run,
         kind: row.kind,
         detail: row.detail,
-        connector: row.connector,
         raw: Value::Object(event),
     })
 }
@@ -137,7 +135,6 @@ fn read_run_row(line: &str, run_id: &str) -> std::result::Result<TimelineRow, St
         run: run_id.to_string(),
         kind: row.kind,
         detail: row.detail,
-        connector: row.connector,
         raw: Value::Object(obj),
     })
 }
@@ -216,25 +213,13 @@ mod tests {
         }
     }
 
-    fn connection(run: &str, ts: &str) -> String {
-        lns_ocsf::connection(
+    fn approval(run: &str, ts: &str) -> String {
+        lns_ocsf::approval(
             &octx(run, ts),
-            "some-oauth",
-            "oauth",
-            Some("@some-user"),
-            &["repo".to_string()],
-            None,
-        )
-        .to_string()
-    }
-
-    fn credential(run: &str, ts: &str) -> String {
-        lns_ocsf::credential_use(
-            &octx(run, ts),
-            "some-provider",
-            "apikey",
-            Some("9c2f1a3d"),
-            &["api.some-provider.example".to_string()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
+            Some("policy-ambiguous"),
         )
         .to_string()
     }
@@ -301,14 +286,13 @@ mod tests {
                 "http://api.example.test:443/",
             )],
         );
-        fix.write_ledger(&[connection("aa01", "2026-06-29T14:02:11Z")]);
+        fix.write_ledger(&[approval("aa01", "2026-06-29T14:02:11Z")]);
 
         let timeline = fix.collect(None);
 
         assert_eq!(timeline.rows.len(), 2);
-        assert_eq!(timeline.rows[0].kind, "connection", "14:02:11 is newest");
+        assert_eq!(timeline.rows[0].kind, "approval", "14:02:11 is newest");
         assert_eq!(timeline.rows[1].kind, "egress");
-        assert_eq!(timeline.rows[0].connector.as_deref(), Some("some-oauth"));
         assert_eq!(timeline.rows[1].detail, "GET api.example.test:443");
         assert!(timeline.warnings.is_empty());
     }
@@ -325,22 +309,14 @@ mod tests {
             &[egress("bb02", "2026-06-29T14:03:00Z", "http://y/")],
         );
         fix.write_ledger(&[
-            connection("aa01", "2026-06-29T14:02:11Z"),
-            credential("bb02", "2026-06-29T14:03:30Z"),
+            approval("aa01", "2026-06-29T14:02:11Z"),
+            approval("bb02", "2026-06-29T14:03:30Z"),
         ]);
 
         let timeline = fix.collect(Some("aa01"));
 
         assert!(timeline.rows.iter().all(|r| r.run == "aa01"));
         assert_eq!(timeline.rows.len(), 2);
-    }
-
-    #[test]
-    fn a_credential_use_event_renders_as_the_credential_kind() {
-        let fix = Fixture::new();
-        fix.write_ledger(&[credential("aa01", "2026-06-29T14:03:30Z")]);
-        let timeline = fix.collect(None);
-        assert_eq!(timeline.rows[0].kind, "credential");
     }
 
     #[test]
@@ -353,7 +329,6 @@ mod tests {
                 kind: "env".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                connector: None,
             },
             TimelineRow {
                 ts: "t".into(),
@@ -362,7 +337,6 @@ mod tests {
                 kind: "volume".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                connector: None,
             },
             TimelineRow {
                 ts: "t".into(),
@@ -371,7 +345,6 @@ mod tests {
                 kind: "env".into(),
                 detail: String::new(),
                 raw: Value::Null,
-                connector: None,
             },
         ];
         sort_newest_first(&mut rows);
@@ -487,9 +460,13 @@ mod tests {
     #[test]
     fn a_tampered_ledger_still_lists_events_but_warns() {
         let fix = Fixture::new();
-        fix.write_ledger(&[connection("aa01", "2026-06-29T14:02:11Z")]);
+        fix.write_ledger(&[approval("aa01", "2026-06-29T14:02:11Z")]);
         let good = std::fs::read_to_string(&fix.ledger_path).unwrap();
-        std::fs::write(&fix.ledger_path, good.replacen("some-oauth", "tampered", 1)).unwrap();
+        std::fs::write(
+            &fix.ledger_path,
+            good.replacen("api.some-vendor.example", "tampered", 1),
+        )
+        .unwrap();
 
         let timeline = fix.collect(None);
 
@@ -570,7 +547,7 @@ mod tests {
     #[test]
     fn a_torn_ledger_line_is_skipped_while_the_good_ledger_events_still_list() {
         let fix = Fixture::new();
-        let (mut payload, anchor) = chained(&[connection("aa01", "2026-06-29T14:02:11Z")]);
+        let (mut payload, anchor) = chained(&[approval("aa01", "2026-06-29T14:02:11Z")]);
         payload.push_str("torn-partial-append\n");
         std::fs::write(&fix.ledger_path, payload).unwrap();
         std::fs::write(
@@ -582,7 +559,7 @@ mod tests {
         let timeline = fix.collect(None);
 
         assert_eq!(timeline.rows.len(), 1, "the good ledger event still lists");
-        assert_eq!(timeline.rows[0].kind, "connection");
+        assert_eq!(timeline.rows[0].kind, "approval");
         assert!(
             timeline
                 .warnings

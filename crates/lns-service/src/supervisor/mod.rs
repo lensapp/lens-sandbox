@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::relay::Relay;
 
 pub(crate) mod adapter;
-pub(crate) use adapter::revocations_before_gate;
 mod real;
 mod traits;
 
@@ -64,20 +63,6 @@ pub struct SupervisorSession {
     pub assets: SupervisorAssets,
     pub relay: Relay,
     pub watcher: Option<crate::approval_flow::watcher::PolicyWatcher>,
-    // Mirror of `watcher` for the credential state file.
-    pub credential_watcher: Option<crate::credential_flow::watcher::CredentialWatcher>,
-    // Env vars of the run's custom providers + connected connectors, stripped from `-e` so a real secret can't bypass the placeholder.
-    pub managed_env_vars: Vec<String>,
-    // `env_var=placeholder` for each provider that seeds one, captured at boot exactly as the workload's own set is, so an `lns exec` sees the same token path.
-    pub placeholder_env: Vec<(String, String)>,
-}
-
-/// The run's consent inputs: the definition's declared credentials, the identity its grants key against, the connector ids whose boot-gate sign-in the user completed this launch, and each connector's forget count as the gate found it.
-pub struct RunConsent<'a> {
-    pub credentials: &'a [lns_spec::Credential],
-    pub workload: lns_policy::grants::WorkloadIdentity,
-    pub signed_in: Vec<String>,
-    pub revocations_at_gate: std::collections::HashMap<String, u64>,
 }
 
 impl SupervisorSession {
@@ -86,15 +71,13 @@ impl SupervisorSession {
         microvm_name: String,
         policy: Option<&Path>,
         sandbox_policy: Option<&lns_policy::Policy>,
-        consent: RunConsent<'_>,
         guest_tools_root: PathBuf,
         user_env: Vec<String>,
     ) -> Result<Self> {
         let Some(policy_path) = policy else {
             bail!(
                 "no local policy path was resolved for this run; refusing to launch it \
-                 unsupervised (there would be no approval gate, no network enforcement, and no \
-                 credential injection)"
+                 unsupervised (there would be no approval gate and no network enforcement)"
             );
         };
         adapter::start(
@@ -102,7 +85,6 @@ impl SupervisorSession {
             microvm_name,
             policy_path,
             sandbox_policy,
-            consent,
             guest_tools_root,
             user_env,
         )
@@ -308,7 +290,6 @@ mod tests {
             "vm-42".into(),
             None,
             None,
-            test_consent(&[]),
             PathBuf::from("/tmp"),
             vec![],
         )
@@ -539,155 +520,6 @@ mod tests {
         );
     }
 
-    fn test_consent(credentials: &[lns_spec::Credential]) -> RunConsent<'_> {
-        RunConsent {
-            credentials,
-            workload: lns_policy::grants::WorkloadIdentity::definition("/proj"),
-            signed_in: vec![],
-            revocations_at_gate: std::collections::HashMap::new(),
-        }
-    }
-
-    /// An isolated `HOME` holding a one-oauth-connector user catalog and an ask-by-default policy, so `start` drives a declared credential's boot sign-in through the real grant sidecar.
-    struct BootSignInFixture {
-        dir: tempfile::TempDir,
-        policy_path: PathBuf,
-        credential: lns_spec::Credential,
-        _guards: Vec<crate::test_env::EnvVarGuard>,
-    }
-
-    fn boot_sign_in_fixture() -> BootSignInFixture {
-        use crate::approval_flow::window::{self, WindowState};
-        use crate::test_env::EnvVarGuard;
-        window::install(WindowState::new());
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let supervisor_bin = dir.path().join("supervisor.real");
-        std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
-        let guards = vec![
-            EnvVarGuard::set("LNS_HOME", dir.path()),
-            EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin),
-        ];
-        let policy_path = dir.path().join("lns-local-mixin.yaml");
-        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
-        lns_policy::connectors::Catalog {
-            connectors: vec![lns_policy::connectors::Connector {
-                id: "some-oauth".into(),
-                name: None,
-                auth_kind: lns_policy::connectors::AuthKind::Oauth,
-                routes: Vec::new(),
-                credential: None,
-                oauth: Some(lns_policy::connectors::OauthAuth {
-                    flow: lns_policy::connectors::OauthFlow::Device,
-                    client_id: Some("some-client".into()),
-                    client_secret: None,
-                    scopes: Vec::new(),
-                    device_authorization_endpoint: Some(
-                        "https://api.some-oauth.example/device".into(),
-                    ),
-                    authorization_endpoint: None,
-                    token_endpoint: "https://api.some-oauth.example/token".into(),
-                    userinfo_endpoint: None,
-                    account_field: None,
-                    env_var: "CATALOG_DEFAULT_TOKEN".into(),
-                    placeholder: "some-oauth-LNSPLACEHOLDER0000".into(),
-                    injections: vec![lns_policy::providers::InjectionDef {
-                        kind: lns_policy::providers::InjectionKind::BearerHeader,
-                        domain: "api.some-oauth.example".into(),
-                        header: None,
-                    }],
-                }),
-                token_fallback: None,
-            }],
-        }
-        .save_atomic(&dir.path().join("connectors.yaml"))
-        .expect("user catalog");
-        BootSignInFixture {
-            dir,
-            policy_path,
-            credential: lns_spec::Credential {
-                env_var: "SOME_OAUTH_TOKEN".into(),
-                placeholder: "lns-placeholder-some-oauth".into(),
-                injections: vec![lns_spec::InjectionDef {
-                    kind: lns_spec::InjectionKind::BearerHeader,
-                    domain: "api.some-oauth.example".into(),
-                    header: None,
-                }],
-            },
-            _guards: guards,
-        }
-    }
-
-    async fn start_with_boot_sign_in(
-        fixture: &BootSignInFixture,
-        workload: &lns_policy::grants::WorkloadIdentity,
-    ) -> SupervisorSession {
-        SupervisorSession::start(
-            "deadbeef00000000000000000000aa97".to_string(),
-            "calm-finch".into(),
-            Some(&fixture.policy_path),
-            None,
-            RunConsent {
-                credentials: std::slice::from_ref(&fixture.credential),
-                workload: workload.clone(),
-                signed_in: vec!["some-oauth".into()],
-                revocations_at_gate: std::collections::HashMap::new(),
-            },
-            fixture.dir.path().to_path_buf(),
-            vec![],
-        )
-        .await
-        .expect("start")
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn start_persists_a_boot_sign_in_grant_to_the_sidecar() {
-        use lns_policy::grants::{
-            GrantStore, GrantVerdict, JsonFileGrantStore, WorkloadIdentity, project_key,
-        };
-        let fixture = boot_sign_in_fixture();
-        let workload = WorkloadIdentity::definition("/proj");
-
-        let session = start_with_boot_sign_in(&fixture, &workload).await;
-
-        let sidecar = JsonFileGrantStore::new(fixture.dir.path().join("workload-grants.json"));
-        let grants = sidecar.load().expect("sidecar readable");
-        let grant = grants
-            .lookup(&project_key(&fixture.policy_path), &workload, "some-oauth")
-            .expect("the boot sign-in must persist a grant so the next run skips the sign-in");
-        assert_eq!(grant.verdict, GrantVerdict::Allow);
-        assert_eq!(
-            grant.env_var, "SOME_OAUTH_TOKEN",
-            "the grant pins the declaration's own env var, not the catalog default"
-        );
-        drop(session);
-        tokio::task::yield_now().await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn start_tells_the_user_when_a_boot_sign_in_grant_cannot_be_persisted() {
-        use crate::approval_flow::window;
-        let fixture = boot_sign_in_fixture();
-        // An unopenable lockfile path fails the sidecar update closed, standing in for any machine where it can't be written.
-        std::fs::create_dir(fixture.dir.path().join("workload-grants.json.lock"))
-            .expect("occupy the lock path");
-
-        let session = start_with_boot_sign_in(
-            &fixture,
-            &lns_policy::grants::WorkloadIdentity::definition("/proj"),
-        )
-        .await;
-
-        let informs = window::get().expect("window installed").snapshot().informs;
-        assert!(
-            informs.iter().any(|m| m.contains("sign in again")),
-            "the developer who just walked a device flow must be told in the window that it won't stick, not only in the service log; got: {informs:?}"
-        );
-        drop(session);
-        tokio::task::yield_now().await;
-    }
-
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn start_with_policy_threads_through_adapter_to_supervisor_session() {
@@ -707,7 +539,6 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             None,
-            test_consent(&[]),
             d.path().to_path_buf(),
             vec![],
         )
@@ -740,7 +571,6 @@ mod tests {
             "calm-finch".into(),
             Some(&policy_path),
             Some(&sandbox_policy),
-            test_consent(&[]),
             d.path().to_path_buf(),
             vec![],
         )

@@ -18,7 +18,6 @@ Feature: two things carry a name, and every command acts on one of them
     And the output contains "sandbox"
     And the output contains "artifact"
     And the output contains "volume"
-    And the output contains "connector"
 
   Scenario: the front page carries no verb that has no shortcut
     When I run "lns --help"

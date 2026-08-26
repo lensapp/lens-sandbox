@@ -168,7 +168,7 @@ pub struct RunArgs {
         long = "env",
         value_name = "KEY=VALUE",
         value_parser = parse_env_kv,
-        help = "Set a non-secret environment variable in the workload (repeatable). Secrets belong in the credential flow, not -e."
+        help = "Set a non-secret environment variable in the workload (repeatable)."
     )]
     pub env: Vec<String>,
 

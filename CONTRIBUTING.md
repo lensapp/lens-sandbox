@@ -25,19 +25,6 @@ make dev    # debug build of lns + lns-service, skips cross-builds
 make test   # cargo test --workspace --exclude e2e-tests (uninstrumented)
 ```
 
-### Testing OAuth connectors locally
-
-The official OAuth app ids are baked into release binaries from CI and are deliberately absent from the source tree, so a local build ships an empty `clientId` and OAuth connectors fall back to a pasted personal access token — enough to exercise the connect/inject path without any setup.
-
-To test the live browser device flow, register your own throwaway GitHub OAuth app and point the build-time var at it before building:
-
-```bash
-export LNS_OAUTH_CLIENT_ID_GITHUB=<your-app-id>   # or a gitignored .envrc via direnv
-make dev
-```
-
-The build script re-bakes when this var changes, so a rebuild picks it up.
-
 ## The Verification Gate
 
 Run the full pre-push gate from the workspace root before opening a pull request:
@@ -74,10 +61,10 @@ Use Conventional Commits. Do not add a `Co-Authored-By` trailer or a generated-w
 
 - `feat: add lns sandbox validate`
 - `fix: deny request when no policy rule matches`
-- `docs: explain the credential placeholder flow`
+- `docs: explain the approval card flow`
 - `test: cover the audit-chain verifier`
 - `ci: add the kernel-pin drift check`
 
 ## Security-Sensitive Changes
 
-Changes touching the microVM boundary, policy enforcement, credential exchange, the audit chain, or the host IPC surface should include a short explanation of the security impact in the pull request description. For vulnerability reports, follow [SECURITY.md](SECURITY.md).
+Changes touching the microVM boundary, policy enforcement, the audit chain, or the host IPC surface should include a short explanation of the security impact in the pull request description. For vulnerability reports, follow [SECURITY.md](SECURITY.md).

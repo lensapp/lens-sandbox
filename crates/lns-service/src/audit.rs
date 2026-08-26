@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use lns_ipc::Anchor;
 use serde_json::{Map, Value};
 
-use crate::oauth::Clock;
+use crate::clock::Clock;
 
 pub fn audit_path(run_id: &str) -> Result<PathBuf> {
     Ok(lns_ipc::audit_log_for_run(run_id)?)
@@ -336,12 +336,11 @@ pub fn record_sandbox_run_at(
     cx: &crate::ocsf_audit::OcsfCtx,
     reference: &str,
     digest: &str,
-    connectors: &[String],
     policy_hash: &str,
 ) -> Result<()> {
     append_ocsf_at(
         path,
-        crate::ocsf_audit::sandbox_run_event(cx, reference, digest, connectors, policy_hash),
+        crate::ocsf_audit::sandbox_run_event(cx, reference, digest, policy_hash),
     )
 }
 
@@ -350,7 +349,6 @@ pub fn record_sandbox_run(
     microvm: &str,
     reference: &str,
     digest: &str,
-    connectors: &[String],
     policy_hash: &str,
     clock: &dyn Clock,
 ) -> Result<()> {
@@ -359,7 +357,6 @@ pub fn record_sandbox_run(
         &run_ctx(run_id, microvm, clock),
         reference,
         digest,
-        connectors,
         policy_hash,
     )
 }
@@ -592,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn record_sandbox_run_writes_the_reference_digest_connectors_and_policy_hash() {
+    fn record_sandbox_run_writes_the_reference_digest_and_policy_hash() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
         record_sandbox_run_at(
@@ -600,7 +597,6 @@ mod tests {
             &cx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
-            &["some-connector".to_string()],
             "sha256:po1icy",
         )
         .unwrap();
@@ -620,10 +616,6 @@ mod tests {
         );
         assert!(
             content.contains("\"lns_policy_hash\":\"sha256:po1icy\""),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"lns_connectors\":[\"some-connector\"]"),
             "{content}"
         );
         assert!(content.contains("\"lns_origin\":\"host\""), "{content}");
@@ -652,7 +644,6 @@ mod tests {
             "calm-finch",
             "reg/some-agent:1",
             "sha256:beef",
-            &[],
             "sha256:po1icy",
             &CLOCK,
         )

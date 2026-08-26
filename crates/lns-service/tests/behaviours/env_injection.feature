@@ -1,12 +1,9 @@
-Feature: lns-service injects user env into the workload without breaching the credential boundary
+Feature: lns-service injects user env into the workload
   `lns run -e KEY=VALUE` carries non-secret configuration into the
   workload, the same role `docker run -e` plays. The service merges the
   user-supplied variables into the environment it hands the guest,
-  layered so user values override the image's baked-in ENV. Real
-  secrets stay out of scope: a variable owned by the credential
-  registry is never overridden — the seeded placeholder stands and the
-  override is refused with a warning, so the credential boundary is
-  preserved. Injected variables are recorded in the run's audit entry.
+  layered so user values override the image's baked-in ENV. Injected
+  variables are recorded in the run's audit entry.
 
   Scenario: A single env var reaches the workload
     When the user runs `lns run -e CLAUDE_CODE_USE_BEDROCK=1 someimage`
@@ -28,13 +25,6 @@ Feature: lns-service injects user env into the workload without breaching the cr
     Given the image declares ENV PORT=3003
     When the user runs `lns run -e PORT=4000 someimage`
     Then the workload's environment contains PORT set to "4000"
-
-  Scenario: -e for a managed credential var is refused; the placeholder stands
-    Given a connected connector manages the "SOME_TOKEN" credential variable
-    When the user runs `lns run -e SOME_TOKEN=some-secret someimage`
-    Then the workload's SOME_TOKEN override is dropped and refused
-    And a warning states the SOME_TOKEN override was refused because it is a managed credential
-    And the run still starts
 
   Scenario: A policy-less run still injects -e (no supervisor required)
     When the user runs `lns run -e A=1 someimage`

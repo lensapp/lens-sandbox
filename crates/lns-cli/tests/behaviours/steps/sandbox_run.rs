@@ -83,9 +83,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),
-            connectors: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -113,7 +111,6 @@ fn registry_serves_mixin(w: &mut BehaviourWorld, reference: String) {
             ports: Vec::new(),
             filesets: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: vec!["some-tool@1.2.3".into()],
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -132,7 +129,6 @@ fn registry_serves_a_digestless_mixin(w: &mut BehaviourWorld, reference: String)
             ports: Vec::new(),
             filesets: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -233,16 +229,16 @@ fn surface_service_refusal(message: &str) -> CliRun {
     }
 }
 
-#[given("a valid lns.yaml declaring egress, connectors, and resources")]
-fn lns_yaml_with_policy_connectors_resources(w: &mut BehaviourWorld) {
+#[given("a valid lns.yaml declaring egress and resources")]
+fn lns_yaml_with_policy_and_resources(w: &mut BehaviourWorld) {
     w.author_files.insert(
         PathBuf::from("/work/lns.yaml"),
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  egress:\n    http: []\n  connectors:\n    - some-provider\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  egress:\n    http: []\n  resources:\n    cpu: 2\n    memory: 1Gi\n"
             .to_string(),
     );
 }
 
-#[then("the service request carries the definition's egress, connectors, and resources")]
+#[then("the service request carries the definition's egress and resources")]
 fn request_carries_definition(w: &mut BehaviourWorld) -> Result<(), String> {
     let json = w
         .sandbox_run
@@ -252,9 +248,9 @@ fn request_carries_definition(w: &mut BehaviourWorld) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("definition was not json: {e}"))?;
     let spec = &value["spec"];
-    if spec["egress"].is_null() || spec["connectors"].is_null() || spec["resources"].is_null() {
+    if spec["egress"].is_null() || spec["resources"].is_null() {
         return Err(format!(
-            "expected egress, connectors, and resources in the definition, got: {spec}"
+            "expected egress and resources in the definition, got: {spec}"
         ));
     }
     Ok(())

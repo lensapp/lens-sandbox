@@ -25,23 +25,22 @@ fn write_chained(dir: &Path, log: &str, anchor: &str, lines: &[String]) {
     fs::write(dir.join(anchor), chain.anchor().unwrap().to_line()).expect("write anchor");
 }
 
-fn connection_ledger_events() -> [String; 2] {
+fn ledger_events() -> [String; 2] {
     [
-        lns_ocsf::connection(
+        lns_ocsf::approval(
             &octx("41aaaaaa000000000000000000000000", "2026-06-29T14:02:11Z"),
-            "some-oauth",
-            "oauth",
-            Some("@some-user"),
-            &["repo".to_string(), "read:org".to_string()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
             None,
         )
         .to_string(),
-        lns_ocsf::credential_use(
+        lns_ocsf::approval(
             &octx("49bbbbbb000000000000000000000000", "2026-06-29T14:05:30Z"),
-            "some-provider",
-            "apikey",
-            Some("9c2f1a3d"),
-            &["api.some-provider.example".to_string()],
+            "network",
+            "docs.some-vendor.example:443",
+            "deny_always",
+            None,
         )
         .to_string(),
     ]
@@ -85,25 +84,20 @@ fn guest_egress(world: &mut E2eWorld, run_id: String) {
     write_chained(&dir, "audit.jsonl", "audit.anchor", &[event]);
 }
 
-#[given("a connection ledger with sample events")]
-fn connection_ledger(world: &mut E2eWorld) {
+#[given("an approval ledger with sample events")]
+fn approval_ledger(world: &mut E2eWorld) {
     write_chained(
         &ledger_dir(world),
         "ledger.jsonl",
         "ledger.anchor",
-        &connection_ledger_events(),
+        &ledger_events(),
     );
 }
 
-#[given("a connection ledger with a tampered event")]
-fn tampered_connection_ledger(world: &mut E2eWorld) {
+#[given("an approval ledger with a tampered event")]
+fn tampered_approval_ledger(world: &mut E2eWorld) {
     let dir = ledger_dir(world);
-    write_chained(
-        &dir,
-        "ledger.jsonl",
-        "ledger.anchor",
-        &connection_ledger_events(),
-    );
+    write_chained(&dir, "ledger.jsonl", "ledger.anchor", &ledger_events());
     let good = fs::read_to_string(dir.join("ledger.jsonl")).unwrap();
     fs::write(
         dir.join("ledger.jsonl"),

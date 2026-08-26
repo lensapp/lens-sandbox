@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use lns_policy::registry_auth::{canonical_registry, validate_registry_host};
 
 use crate::command::{CommandSpec, subcommand};
-use crate::connector::LocalBoxFuture;
+use crate::local_future::LocalBoxFuture;
 
 mod real;
 mod web;
