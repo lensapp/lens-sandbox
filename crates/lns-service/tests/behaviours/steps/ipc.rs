@@ -79,6 +79,14 @@ fn then_error(world: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
+#[then(expr = "the response is RunUnknown for run {string}")]
+fn then_run_unknown(world: &mut BehaviourWorld, run: String) -> Result<(), String> {
+    match world.response.as_ref().ok_or("no response captured")? {
+        lns_ipc::Response::RunUnknown { run: named } if *named == run => Ok(()),
+        other => Err(format!("expected RunUnknown for {run:?}, got {other:?}")),
+    }
+}
+
 #[then("the response is Acknowledged")]
 fn then_acknowledged(world: &mut BehaviourWorld) -> Result<(), String> {
     match world.response.as_ref().ok_or("no response captured")? {

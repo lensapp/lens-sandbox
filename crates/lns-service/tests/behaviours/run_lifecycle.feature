@@ -16,11 +16,10 @@ Feature: run lifecycle — graceful stop over IPC
     When a StopRun request for that run arrives
     Then the response is RunStopped without force
 
-  Scenario: Inspecting an unknown run surfaces an Error
+  Scenario: Inspecting an unknown run answers a typed RunUnknown
     Given a fresh service handler
     When an InspectRun request for run 99999 arrives
-    Then the response is Error
-    And the error message contains "no such run: 99999"
+    Then the response is RunUnknown for run "99999"
 
   Scenario: Inspecting a registered run reports its state and launch configuration
     Given a registered run launched from "some-image:1" with 2 cpus and 1024 MiB
