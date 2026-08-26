@@ -1,5 +1,91 @@
 # Changelog
 
+## [0.21.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.20.0...lns-v0.21.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* keep an ambiguous run prefix out of rm and inspect arbitration
+* make the service own the registry login store
+* refuse unsafe LNS_HOME roots and show what --purge deletes
+* keep base images out of the artifact surfaces
+* **lns-session-broker:** keep 126 for a found command whose interpreter is missing
+* **lns-cli:** answer 125 for a run that exits before its session is ready
+* **lns-cli:** give ls one spelling — the list alias is removed
+* **lns-cli:** let the inspect shortcut carry both namespaces' flags
+* **lns-cli:** answer 125 for a pre-start failure in the sandbox spellings of run and exec
+* **lns-cli:** give the CLI the stopped sandbox — start, rm -f, ls -a, prune
+* give the CLI docker-start parity — start, rm for runs, rmi for images
+* answer lns start over the wire, failing closed on every conflict
+* **lns-cli:** split `lns artifact` from `lns sandbox`
+* one directory, ~/.lns, and LNS_HOME to move it
+* **lns-cli:** give the inspect verbs a --format, and run/exec the exit codes §5 names
+* **lns-cli:** cut `lns run` to the flags §3.2.1 names
+* **lns-cli:** drop `lns policy`, leaving the run's prompt and the file
+
+### Features
+
+* a stopped run keeps the image it will boot from ([fe3cff8](https://github.com/lensapp/lens-sandbox/commit/fe3cff893113e41feb499b173922c4ef656fdc23))
+* answer lns start over the wire, failing closed on every conflict ([647aed6](https://github.com/lensapp/lens-sandbox/commit/647aed68a884d77b0570c105a2a8725aae638bfb))
+* audit the whole run lifecycle on one chain that outlives the run ([61bc1e5](https://github.com/lensapp/lens-sandbox/commit/61bc1e5fc02b9f9e6f70444a6a3744b0ccd4aa17))
+* boot a stopped run back onto its preserved writable layer ([99a1c51](https://github.com/lensapp/lens-sandbox/commit/99a1c51aedc0bc782e1ab5734a5e31993d679603))
+* disclose a run's pre-start scripts before it boots ([4ee47ad](https://github.com/lensapp/lens-sandbox/commit/4ee47adde056ab378e991f446bbb3f1bfbe841ef))
+* give the CLI docker-start parity — start, rm for runs, rmi for images ([ee55608](https://github.com/lensapp/lens-sandbox/commit/ee55608c44095e7a0f86f34184009c7f2665f996))
+* keep base images out of the artifact surfaces ([4090961](https://github.com/lensapp/lens-sandbox/commit/4090961c918ee47616373c7eec55f930085e9d99))
+* let the registry hold a run that is stopped, not just one that is alive ([5862742](https://github.com/lensapp/lens-sandbox/commit/58627420bda5eb0d03808c386ef40885890da87b))
+* **lns-cli:** close the artifact-verb gaps §3.1 names ([0479211](https://github.com/lensapp/lens-sandbox/commit/0479211859ae77306e2ff95f187cd5aa1ebbd09e))
+* **lns-cli:** cut `lns run` to the flags §3.2.1 names ([8b427f4](https://github.com/lensapp/lens-sandbox/commit/8b427f473e77edec9c09f8b0aab0cf516dbd014b))
+* **lns-cli:** drop `lns policy`, leaving the run's prompt and the file ([b9e22fa](https://github.com/lensapp/lens-sandbox/commit/b9e22faf8c160d5b77c94ced43bd5666f6772ba5)), closes [#187](https://github.com/lensapp/lens-sandbox/issues/187)
+* **lns-cli:** give the CLI the stopped sandbox — start, rm -f, ls -a, prune ([18d4fe7](https://github.com/lensapp/lens-sandbox/commit/18d4fe7332da37c5df9c08ce381197a847ec7c87))
+* **lns-cli:** give the inspect verbs a --format, and run/exec the exit codes §5 names ([8106070](https://github.com/lensapp/lens-sandbox/commit/8106070c5130c54d47a7bc481166eb50f03e8978))
+* **lns-cli:** plan the local-mixin subtree a push publishes ([0b1302a](https://github.com/lensapp/lens-sandbox/commit/0b1302a70dc745220191cfca4f5b4c84e34ae529))
+* **lns-cli:** publish a sandbox's local mixins before the sandbox itself ([f8553ba](https://github.com/lensapp/lens-sandbox/commit/f8553ba11acf8f2b8124bb76dd8e3d321625af0b))
+* **lns-cli:** put `lns exec` and `lns start` on the front page ([fc65d2b](https://github.com/lensapp/lens-sandbox/commit/fc65d2b9ddd1ba1a900e7252fb011a79bfff32a9))
+* **lns-cli:** say which command takes a document when a RUN verb gets one ([0fe0b79](https://github.com/lensapp/lens-sandbox/commit/0fe0b790421bf5068ed2042ca0328233d6b2132f))
+* **lns-cli:** split `lns artifact` from `lns sandbox` ([f321348](https://github.com/lensapp/lens-sandbox/commit/f3213483f406628006f3ce3b873339985b1e7253))
+* one directory, ~/.lns, and LNS_HOME to move it ([c7563b6](https://github.com/lensapp/lens-sandbox/commit/c7563b628374abfc6873c92aa4506796dbf7432a))
+* publish README.md beside the document as a text/markdown layer ([c171fcf](https://github.com/lensapp/lens-sandbox/commit/c171fcf22d7ae92749741c17d69e6a975ae477cc))
+* read and stage a document's pre-start scripts ([8483891](https://github.com/lensapp/lens-sandbox/commit/848389106d4bae84a0b4ae5feaeefa4ecaceb04b))
+* reclaim a run's disk when its run leaves the registry ([ad53876](https://github.com/lensapp/lens-sandbox/commit/ad53876a619e1cfaade705c7db45fd643d633a8b))
+* record pulled mixin graphs in the artifact index ([a8b1868](https://github.com/lensapp/lens-sandbox/commit/a8b1868377f204e551c0b1a96cdfcd115f6c8236))
+* relist stopped runs when the service comes back ([48a8dcb](https://github.com/lensapp/lens-sandbox/commit/48a8dcbd22d31da46bfd955088899ee67b9cdbee))
+* run a document's pre-start scripts before the workload ([79aa0d7](https://github.com/lensapp/lens-sandbox/commit/79aa0d775e8a2e1ef94486e44499ff4ff1d59595))
+* write down what a run launched with, beside its writable layer ([ee71362](https://github.com/lensapp/lens-sandbox/commit/ee71362f53196e09ff6b28ccdd67b1145bdfca20))
+
+
+### Bug Fixes
+
+* cover what the lifecycle work added, and re-point the e2e cache verbs ([5d3789b](https://github.com/lensapp/lens-sandbox/commit/5d3789b7b9483ed9b7e99148ea1cb72218914915))
+* keep an ambiguous run prefix out of rm and inspect arbitration ([7d81573](https://github.com/lensapp/lens-sandbox/commit/7d815733a1f38bf4dd5c25ef36a7652b47b604ef))
+* **lns-cli:** answer 125 for a pre-start failure in the sandbox spellings of run and exec ([b16abdb](https://github.com/lensapp/lens-sandbox/commit/b16abdbf952764a8efceda2b3cf4ee7ff7e24dd5))
+* **lns-cli:** answer 125 for a run that exits before its session is ready ([8748497](https://github.com/lensapp/lens-sandbox/commit/87484971798496af186b723f71ea50dd9ad2d8b2))
+* **lns-cli:** arbitrate bare references at their real home and fail closed ([a43fa38](https://github.com/lensapp/lens-sandbox/commit/a43fa389c6fe198b629043e39ccc8628cdfeedd6))
+* **lns-cli:** give ls one spelling — the list alias is removed ([9429e40](https://github.com/lensapp/lens-sandbox/commit/9429e4089f2c8a403b31a437afa97a37ce0bfbf1))
+* **lns-cli:** keep both namespaces at 100%, and split the shortcuts' wiring out ([cf2fa1c](https://github.com/lensapp/lens-sandbox/commit/cf2fa1c641d51cac53190ddedebf5b5e7f8381b3))
+* **lns-cli:** let the add hint name a spelling the CLI recognizes ([cd21e50](https://github.com/lensapp/lens-sandbox/commit/cd21e50233b9f7d003a1534ec2697d3dc710290b))
+* **lns-cli:** let the arbitration ask the cache, not a registry ([238b2a7](https://github.com/lensapp/lens-sandbox/commit/238b2a765d4ac6e72209749f719efeac26ee412c))
+* **lns-cli:** let the inspect shortcut carry both namespaces' flags ([2d85582](https://github.com/lensapp/lens-sandbox/commit/2d855821f02f9f71249752f8b2fb1bbfe4555e0e))
+* **lns-cli:** let the top-level `lns rm` take -f, as documented ([17337ad](https://github.com/lensapp/lens-sandbox/commit/17337adc43bded0c6dbde3008273b97889a5cbde))
+* **lns-cli:** list what a prune would remove before asking ([2e3ebea](https://github.com/lensapp/lens-sandbox/commit/2e3ebea6d817fda80fdc282baca8ecce99e10d44)), closes [#291](https://github.com/lensapp/lens-sandbox/issues/291)
+* **lns-cli:** move the prune prompt to stderr where §4.1 says it lives ([de4fc72](https://github.com/lensapp/lens-sandbox/commit/de4fc72f23d41f7ea3c0bf2e63ef645988e31a86))
+* **lns-cli:** name the real problem when a pushed mixin is a local directory ([8c3ad9d](https://github.com/lensapp/lens-sandbox/commit/8c3ad9d895b6d3fa40c83b8c97e26c854a2303c7))
+* **lns-cli:** refuse a prune with no terminal to ask at, and re-point the e2e cache table ([505c5b7](https://github.com/lensapp/lens-sandbox/commit/505c5b7fb1dfa2ea2e3acbd130cf78261212ef0c))
+* **lns-cli:** register the top-level `lns start` shortcut ([75f02a4](https://github.com/lensapp/lens-sandbox/commit/75f02a4a47f7463c829d9103a7fa4bd3a45a1fa5))
+* **lns-cli:** resolve a bare cache-verb reference against the Lens hub ([a3d68e4](https://github.com/lensapp/lens-sandbox/commit/a3d68e491dda7c838597d2c0017400f12e46b908))
+* **lns-cli:** root a relative --mixin before artifact inspect dispatches it ([6882bd6](https://github.com/lensapp/lens-sandbox/commit/6882bd697677f1e9543211832ab46cd48d068be3))
+* **lns-service:** clean up --rm records at rebuild instead of reviving them ([9db6606](https://github.com/lensapp/lens-sandbox/commit/9db66069bc9a1da802814674bffa4ddf733dabf7))
+* **lns-service:** make durable deletion a condition of rm's ack ([82dee2f](https://github.com/lensapp/lens-sandbox/commit/82dee2fcef21d2682c3209367910fc3c8cd0b11d))
+* **lns-service:** migrate legacy audit chains out of runs/ at service start ([202373f](https://github.com/lensapp/lens-sandbox/commit/202373fca55c72682d065b19163e1972754c406b))
+* **lns-service:** protect damaged run records from the orphan sweep ([dfc84dc](https://github.com/lensapp/lens-sandbox/commit/dfc84dcea4e58749eb580c6e8ceb5f7ab8052a67))
+* **lns-service:** publish a run's exit only after its VM quiesces ([976b734](https://github.com/lensapp/lens-sandbox/commit/976b734829c2e4a89c07935eb36d338def339343))
+* **lns-service:** refuse `start -a` on a running run instead of hanging up ([592a813](https://github.com/lensapp/lens-sandbox/commit/592a813386b7b0f557017f1fec4a41e26afc2929))
+* **lns-service:** revalidate prune orphans against the registry before sweeping ([53ef91c](https://github.com/lensapp/lens-sandbox/commit/53ef91cef2b1662eb3682b5c57ced111deadc7ac))
+* **lns-session-broker:** keep 126 for a found command whose interpreter is missing ([983ab31](https://github.com/lensapp/lens-sandbox/commit/983ab31050b24bf0930f317ae7518bae9815d666))
+* **lns-supervisor:** a pre-start script reads no stdin ([d47a91e](https://github.com/lensapp/lens-sandbox/commit/d47a91e2abe5e488f1fe5d4166137cf1c847de93))
+* make the service own the registry login store ([083f740](https://github.com/lensapp/lens-sandbox/commit/083f740e0849833e9c48fc77ccc2fad251c75d46))
+* refuse a symlinked README and preflight every README before the first upload ([58dc1c8](https://github.com/lensapp/lens-sandbox/commit/58dc1c8c83db4fe61aaf81582c3d432752fabef8))
+* refuse unsafe LNS_HOME roots and show what --purge deletes ([03224e5](https://github.com/lensapp/lens-sandbox/commit/03224e5a608e3709569351dcc734219df6b7f249))
+
 ## [0.20.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.19.0...lns-v0.20.0) (2026-08-20)
 
 
