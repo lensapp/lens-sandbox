@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::Instrument;
 
-use crate::approval_flow::protocol::{GuestFrame, HostFrame, PolicyMessage, WireNetwork};
+use crate::approval_flow::protocol::{GuestFrame, HostFrame, PolicyMessage};
 use crate::approval_flow::session::ApprovalSession;
 use lns_policy::Policy;
 
@@ -128,9 +128,7 @@ pub fn spawn(
 }
 
 pub(super) fn initial_policy_frame(policy: &Policy) -> HostFrame {
-    HostFrame::Policy(PolicyMessage {
-        network: Some(WireNetwork::seeded(policy.network.clone())),
-    })
+    HostFrame::Policy(PolicyMessage::seeded(policy.clone()))
 }
 
 pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
@@ -277,9 +275,12 @@ pub(super) fn seed_frames(mut buffered: Vec<HostFrame>, current_policy: &Policy)
     buffered
 }
 
+/// Keeps the one surviving policy at the head, because a decision the reconnected guest reads first releases a request the table has not granted yet.
 pub(super) fn buffer_frame(pending: &mut Vec<HostFrame>, frame: HostFrame) {
     if matches!(frame, HostFrame::Policy(_)) {
         pending.retain(|f| !matches!(f, HostFrame::Policy(_)));
+        pending.insert(0, frame);
+        return;
     }
     pending.push(frame);
 }
@@ -462,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn buffer_frame_preserves_decision_frames_when_collapsing_policy_frames() {
+    fn buffer_frame_keeps_the_surviving_policy_ahead_of_every_buffered_decision() {
         use crate::approval_flow::protocol::Decision;
         let mut buf: Vec<HostFrame> = Vec::new();
 
@@ -474,12 +475,40 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                decision_frame("r1", Decision::AllowOnce),
                 policy_with_rule("later.example"),
+                decision_frame("r1", Decision::AllowOnce),
                 decision_frame("r2", Decision::DenyOnce),
             ],
-            "stale Policy frames coalesce away; decisions and the newer \
-             Policy survive in arrival order"
+            "stale Policy frames coalesce away, and the survivor leads: a \
+             decision the reconnected guest reads before the rule it needs \
+             releases a request the table would still hold"
+        );
+    }
+
+    #[test]
+    fn a_reconnecting_guest_applies_a_policy_before_any_decision_taken_while_it_was_away() {
+        use crate::approval_flow::protocol::Decision;
+        let mut buf: Vec<HostFrame> = Vec::new();
+        for frame in [
+            policy_with_rule("first.example"),
+            decision_frame("r1", Decision::AllowAlways),
+            policy_with_rule("second.example"),
+            decision_frame("r2", Decision::AllowAlways),
+        ] {
+            buffer_frame(&mut buf, frame);
+        }
+
+        let seeded = seed_frames(buf, &Policy::default());
+
+        assert_eq!(
+            seeded,
+            vec![
+                policy_with_rule("second.example"),
+                decision_frame("r1", Decision::AllowAlways),
+                decision_frame("r2", Decision::AllowAlways),
+            ],
+            "each decision released a request the guest re-evaluates against \
+             the table, so no decision may reach it ahead of the policy"
         );
     }
 
