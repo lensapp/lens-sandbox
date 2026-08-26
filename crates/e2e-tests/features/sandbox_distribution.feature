@@ -11,7 +11,7 @@ Feature: distributing a sandbox through a registry end to end
     And the Lens Sandbox service is running in that home
     And the user pushes a sandbox built from ./lns.yaml in one step
 
-  Scenario: pull fetches the pushed sandbox and its base image into the daemon cache
+  Scenario: pull fetches the pushed sandbox; its base image stays cache-internal
     When I run lns "pull <pushed-ref>" against the service
     Then the exit code is 0
     And the output contains "pulled"
@@ -19,9 +19,9 @@ Feature: distributing a sandbox through a registry end to end
     When I run lns "artifact ls" against the service
     Then the exit code is 0
     And the output contains the pushed reference
-    And the output contains "/e2e-base@sha256:"
     And the output contains "sandbox"
-    And the output contains "image"
+    And the output does not contain "/e2e-base@sha256:"
+    And the output does not contain "image"
 
   Scenario: tag re-references the cached sandbox under a new tag
     When I run lns "pull <pushed-ref>" against the service
