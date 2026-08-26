@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use lns_artifact::build::BuiltArtifact;
 
 use super::author::Fs;
-use crate::connector::LocalBoxFuture;
+use crate::local_future::LocalBoxFuture;
 
 /// Uploads a built OCI artifact — its config blob, every packed fileset layer, then the manifest; the real impl reuses the `lns login` credential, a fake drives the push scenarios offline.
 pub trait Producer {

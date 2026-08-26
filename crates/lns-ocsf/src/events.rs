@@ -5,10 +5,6 @@ use crate::base::{
     http_method_activity, severity, status,
 };
 
-fn auth_protocol_id(auth: &str) -> u8 {
-    if auth == "oauth" { 6 } else { 99 }
-}
-
 fn microvm_device(ctx: &Context) -> Value {
     json!({"type_id": device_type::VIRTUAL, "name": ctx.microvm})
 }
@@ -71,98 +67,12 @@ fn dst_endpoint(url: &str) -> Value {
     }
 }
 
-pub fn connection(
-    ctx: &Context,
-    connector: &str,
-    auth: &str,
-    account: Option<&str>,
-    scopes: &[String],
-    expires: Option<&str>,
-) -> Value {
-    let mut ev = Event::new(
-        "connection",
-        class::AUTHENTICATION,
-        category::IAM,
-        activity::LOGON,
-        severity::INFORMATIONAL,
-        ctx,
-    )
-    .set(
-        "message",
-        format!(
-            "connect {connector} ({auth}) {} [{}]",
-            account.unwrap_or("-"),
-            scopes.join(", ")
-        )
-        .into(),
-    )
-    .set("user", json!({"name": account.unwrap_or(connector)}))
-    .set("service", json!({"name": connector}))
-    .set("auth_protocol_id", auth_protocol_id(auth).into())
-    .note("lns_connector", connector.into())
-    .note("lns_auth", auth.into());
-    if let Some(account) = account {
-        ev = ev.note("lns_account", account.into());
-    }
-    if !scopes.is_empty() {
-        ev = ev.note("lns_scopes", json!(scopes));
-    }
-    if let Some(expires) = expires {
-        ev = ev.note("lns_expires", expires.into());
-    }
-    ev.build()
-}
-
-pub fn credential_use(
-    ctx: &Context,
-    connector: &str,
-    auth: &str,
-    fingerprint: Option<&str>,
-    dest: &[String],
-) -> Value {
-    let mut ev = Event::new(
-        "credential",
-        class::AUTHENTICATION,
-        category::IAM,
-        activity::LOGON,
-        severity::INFORMATIONAL,
-        ctx,
-    )
-    .set(
-        "message",
-        format!(
-            "use {connector}{} → {}",
-            fingerprint
-                .map(|fp| format!(" fp {fp}"))
-                .unwrap_or_default(),
-            dest.join(", ")
-        )
-        .into(),
-    )
-    .set("user", json!({"name": connector}))
-    .set("auth_protocol_id", auth_protocol_id(auth).into())
-    .note("lns_connector", connector.into())
-    .note("lns_auth", auth.into());
-    match dest.first() {
-        Some(first) => ev = ev.set("dst_endpoint", json!({"domain": first})),
-        None => ev = ev.set("service", json!({"name": connector})),
-    }
-    if let Some(fingerprint) = fingerprint {
-        ev = ev.note("lns_fp", fingerprint.into());
-    }
-    if !dest.is_empty() {
-        ev = ev.note("lns_dest", json!(dest));
-    }
-    ev.build()
-}
-
 pub fn approval(
     ctx: &Context,
     approval_kind: &str,
     target: &str,
     decision: &str,
     reason: Option<&str>,
-    connector: Option<&str>,
 ) -> Value {
     let allowed = decision.starts_with("allow");
     let sev = if allowed {
@@ -199,9 +109,6 @@ pub fn approval(
     .note("lns_target", target.into());
     if let Some(reason) = reason {
         ev = ev.note("lns_reason", reason.into());
-    }
-    if let Some(connector) = connector {
-        ev = ev.note("lns_connector", connector.into());
     }
     ev.build()
 }
@@ -318,10 +225,7 @@ pub fn workload_restart(ctx: &Context, image: &str) -> Value {
     )
     .set(
         "message",
-        format!(
-            "restarted {image} on its preserved state; policy and credentials re-resolved live"
-        )
-        .into(),
+        format!("restarted {image} on its preserved state; policy re-resolved live").into(),
     )
     .set("process", json!({"uid": ctx.run, "name": "workload"}))
     .set("device", microvm_device(ctx))
@@ -520,14 +424,8 @@ pub fn bind_mount(
     ev.build()
 }
 
-pub fn sandbox_run(
-    ctx: &Context,
-    reference: &str,
-    digest: &str,
-    connectors: &[String],
-    policy_hash: &str,
-) -> Value {
-    let mut ev = Event::new(
+pub fn sandbox_run(ctx: &Context, reference: &str, digest: &str, policy_hash: &str) -> Value {
+    let ev = Event::new(
         "sandbox_run",
         class::PROCESS_ACTIVITY,
         category::SYSTEM,
@@ -543,9 +441,6 @@ pub fn sandbox_run(
     .note("lns_sandbox", reference.into())
     .note("lns_sandbox_digest", digest.into())
     .note("lns_policy_hash", policy_hash.into());
-    if !connectors.is_empty() {
-        ev = ev.note("lns_connectors", json!(connectors));
-    }
     ev.build()
 }
 
@@ -561,42 +456,6 @@ mod tests {
             run: "9e8d7c6b0000",
             microvm: "calm-finch",
         }
-    }
-
-    #[test]
-    fn connection_is_an_authentication_with_a_user_and_service() {
-        let ev = connection(
-            &ctx(),
-            "some-oauth",
-            "oauth",
-            Some("@user"),
-            &["repo".into(), "read:org".into()],
-            Some("2026-07-29T00:00:00Z"),
-        );
-        assert_schema_valid(&ev);
-        assert_eq!(ev["class_uid"], 3002);
-        assert_eq!(
-            ev["message"],
-            "connect some-oauth (oauth) @user [repo, read:org]"
-        );
-        assert_eq!(ev["user"]["name"], "@user");
-        assert_eq!(ev["service"]["name"], "some-oauth");
-        assert_eq!(ev["auth_protocol_id"], 6);
-        assert_eq!(ev["unmapped"]["lns_kind"], "connection");
-        assert_eq!(ev["unmapped"]["lns_account"], "@user");
-        assert_eq!(ev["unmapped"]["lns_scopes"][1], "read:org");
-        assert_eq!(ev["unmapped"]["lns_expires"], "2026-07-29T00:00:00Z");
-    }
-
-    #[test]
-    fn connection_without_an_account_names_the_user_after_the_connector() {
-        let ev = connection(&ctx(), "some-oauth", "apikey", None, &[], None);
-        assert_schema_valid(&ev);
-        assert_eq!(ev["user"]["name"], "some-oauth");
-        assert_eq!(ev["auth_protocol_id"], 99);
-        assert!(ev["unmapped"].get("lns_account").is_none());
-        assert!(ev["unmapped"].get("lns_scopes").is_none());
-        assert!(ev["unmapped"].get("lns_expires").is_none());
     }
 
     #[test]
@@ -671,36 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn credential_use_targets_a_destination_endpoint() {
-        let ev = credential_use(
-            &ctx(),
-            "some-provider",
-            "apikey",
-            Some("9c2f1a3d"),
-            &["api.some-provider.example".into()],
-        );
-        assert_schema_valid(&ev);
-        assert_eq!(ev["unmapped"]["lns_kind"], "credential");
-        assert_eq!(
-            ev["message"],
-            "use some-provider fp 9c2f1a3d → api.some-provider.example"
-        );
-        assert_eq!(ev["dst_endpoint"]["domain"], "api.some-provider.example");
-        assert_eq!(ev["unmapped"]["lns_fp"], "9c2f1a3d");
-        assert_eq!(ev["unmapped"]["lns_dest"][0], "api.some-provider.example");
-    }
-
-    #[test]
-    fn credential_use_with_no_destination_falls_back_to_a_service() {
-        let ev = credential_use(&ctx(), "some-provider", "oauth", None, &[]);
-        assert_schema_valid(&ev);
-        assert_eq!(ev["service"]["name"], "some-provider");
-        assert!(ev.get("dst_endpoint").is_none());
-        assert!(ev["unmapped"].get("lns_fp").is_none());
-        assert!(ev["unmapped"].get("lns_dest").is_none());
-    }
-
-    #[test]
     fn an_allowed_approval_is_an_informational_finding_with_allowed_disposition() {
         let ev = approval(
             &ctx(),
@@ -708,7 +537,6 @@ mod tests {
             "api.example.test:443",
             "allow_always",
             Some("policy-ambiguous"),
-            None,
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["class_uid"], 2004);
@@ -734,19 +562,17 @@ mod tests {
     fn a_denied_approval_raises_severity_and_blocks_and_titles_after_the_kind() {
         let ev = approval(
             &ctx(),
-            "credential",
-            "some-provider",
+            "network",
+            "api.example.test:443",
             "deny_always",
             None,
-            Some("some-provider"),
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["severity_id"], 3);
         assert_eq!(ev["disposition_id"], 2);
         assert_eq!(ev["disposition"], "Blocked");
-        assert_eq!(ev["finding_info"]["title"], "credential");
+        assert_eq!(ev["finding_info"]["title"], "network");
         assert_eq!(ev["unmapped"]["lns_decision"], "deny_always");
-        assert_eq!(ev["unmapped"]["lns_connector"], "some-provider");
         assert!(ev["unmapped"].get("lns_reason").is_none());
     }
 
@@ -891,12 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_run_records_the_reference_resolved_digest_and_connectors() {
+    fn sandbox_run_records_the_reference_and_the_digest_that_actually_ran() {
         let ev = sandbox_run(
             &ctx(),
             "some-registry.example/some-agent:research",
             "sha256:beef",
-            &["some-connector".into()],
             "sha256:po1icy",
         );
         assert_schema_valid(&ev);
@@ -912,15 +737,6 @@ mod tests {
             "the audit must pin which bytes actually ran, not just the mutable tag"
         );
         assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:po1icy");
-        assert_eq!(ev["unmapped"]["lns_connectors"][0], "some-connector");
-    }
-
-    #[test]
-    fn sandbox_run_omits_the_connectors_note_when_there_are_none() {
-        let ev = sandbox_run(&ctx(), "reg/some-agent:1", "sha256:beef", &[], "sha256:p");
-        assert_schema_valid(&ev);
-        assert!(ev["unmapped"].get("lns_connectors").is_none());
-        assert_eq!(ev["unmapped"]["lns_policy_hash"], "sha256:p");
     }
 
     #[test]

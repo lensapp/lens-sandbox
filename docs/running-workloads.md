@@ -1,8 +1,8 @@
 # Running workloads
 
 Two things carry a name. An **artifact** is one `lns.run/v1` document — a
-`./lns.yaml` that pins a base OCI image plus its command, environment, policy, and
-connectors, or a mixin layered onto one. A **sandbox** is what a sandbox artifact
+`./lns.yaml` that pins a base OCI image plus its command, environment, and policy,
+or a mixin layered onto one. A **sandbox** is what a sandbox artifact
 becomes when it runs. One directory is one sandbox.
 
 Each has its own namespace:
@@ -44,8 +44,6 @@ spec:
     memory: 512Mi
   egress:
     http: []
-  connectors: []
-  credentials: []
   volumes:
     - type: bind
       source: .
@@ -69,8 +67,6 @@ The `spec` fields:
 | `user`         | The run-as user the sandbox needs, `USER[:GROUP]` like `-u`, so a definition that needs root is runnable as published. A per-run `-u` still wins, and the image's own `USER` is the fallback when this is unset. |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `egress`       | Where the workload may reach — the `http` and `tcp` rule tables (see [Policy](policy.md)). |
-| `connectors` | Ids of the [connectors](connectors.md) the sandbox would like to use. Declaring seeds the connector's placeholder env var but is not a grant: a declared id is offered on first use (accept its connect card to arm it), never armed automatically — so an untrusted published sandbox can't open a route or spend a bound credential behind your back. An id the machine's catalog doesn't know refuses the launch. |
-| `credentials`  | The secrets the workload needs, one entry each: the variable it reads (`envVar`), the fake value it holds (`placeholder`, which must contain `placeholder` or `lns` and be at least 16 characters), and the destinations the real value may travel to (`injections[]`, each a `kind` and a `domain`, which may name a host family but never the catch-all `*`). An `api_key_header` injection also names the `header` it sets. A declaration names no connector — this machine decides how the value is obtained. A connector whose own claim covers a declared domain supplies it: an `oauth`-kind one blocks the launch on its sign-in, a credential-kind one binds through the ordinary first-use value decision. With no catalog entry claiming the domain, the first request asks for a pasted value. Two entries may not share an `envVar`. See [Credentials](credentials.md#value-decisions). |
 | `resources`    | vCPUs, memory, and disk the sandbox boots with. `cpu` and `memory` take a unit suffix or `N%` of the host, and per-run `--cpus` / `--mem` flags win. `disk` sizes the writable disk the run throws away when it ends; it takes an absolute size only (`40Gi`, minimum `20Mi`), defaults to `10Gi`, and no flag overrides it. A named volume sizes itself with its own `size` — see [Declarative mounts](#declarative-mounts). |
 | `volumes`      | Named volumes and host binds mounted into the guest; a bind may `exclude` subpaths it must not expose, and a named volume may set its `size`. See [Declarative mounts](#declarative-mounts). |
 | `filesets`     | Files the guest is seeded with at `guestPath`, owned by the workload user unless pinned with `owner: root`. Two directions: shipped inside the artifact (`inline` content, or a `path` directory packed into a layer of the same artifact at push), or read off the machine that runs the sandbox (a single-file `hostPath`, never packed). See [Filesets](#filesets--files-shipped-inside-the-artifact). |
@@ -355,8 +351,7 @@ host variables through implicitly would be a silent leak channel. Environment th
 should always apply belongs in the sandbox definition's `spec.env`.
 
 Secrets do **not** belong in either flag — `-e` and `--env-file` values are
-plain environment variables visible to the workload. Use the
-[credential flow](credentials.md) so real secrets stay outside the sandbox.
+plain environment variables visible to the workload.
 
 ### Volumes
 
@@ -600,8 +595,8 @@ spec:
   refuses `validate`, `run`, and `push` outright: a fileset is baked
   into the artifact, so there is no keep/drop prompt to catch it later — real
   secrets stay outside the workload. Ship the tool's *configuration* in a
-  fileset and bind its *credential* through `spec.credentials`, so the
-  published artifact stays secret-free on every machine that pulls it.
+  fileset only, so the published artifact stays secret-free on every machine
+  that pulls it.
 
 The trust model is one digest plus disclosure: the files travel in the artifact
 you approved, so nothing a fileset mounts is fetched from anywhere else — and
@@ -623,7 +618,7 @@ spec:
 
 A mixin is a document of `kind: mixin`. It may carry anything a sandbox can
 except the blocks that describe one launch — `image`, `command`, `workdir`,
-`user`, `resources` — and it may not name a connector.
+`user`, `resources`.
 
 You publish one the same way you publish a sandbox, because it is the same kind
 of thing:
@@ -698,8 +693,8 @@ before it reports it, so the summary names the exact bytes you approved:
 ```
 
 A composed run is a document you did not write in full, so the summary says
-where each line came from — and lists the rules and credentials the merge
-produced, which an uncomposed run has no second author to attribute:
+where each line came from — and lists the rules the merge produced, which an
+uncomposed run has no second author to attribute:
 
 ```
   Mixins:    /work/mixins/debug-tools, lns-local-mixin.yaml
@@ -708,7 +703,6 @@ produced, which an uncomposed run has no second author to attribute:
   Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]  approved during a run
              allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
              deny docs.vendor.example  [from the sandbox]
-  Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
 ```
 
 A directory that has decided something is one of those sources, so its file is
@@ -897,8 +891,7 @@ else is a named volume, so `-v build-cache:/cache` is still a volume.
 #### Secrets in a bind
 
 A bind exposes everything in the directory — including `.env` files, SSH keys, and
-other credentials that the [credential flow](credentials.md) is designed to keep
-*outside* the workload. Before the run starts, `lns` scans the **top level** of each
+other credentials that belong *outside* the workload. Before the run starts, `lns` scans the **top level** of each
 bind for secret-shaped files (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.npmrc`,
 `.netrc`, `.ssh/`, `.aws/`, …) and asks you, once per file, whether to **keep** it
 (expose the real file) or **drop** it (hide it from the workload). Your choice is
@@ -1168,13 +1161,12 @@ but optional.
 An exec **joins the run it names**, so a diagnostic command sees the same sandbox
 the workload does: the run's resolved environment (base image `ENV`, `spec.env`,
 `-e`, and its declared tools on `PATH`), its working directory, the CA bundle its
-runtimes trust, and the credential placeholders — so a request you make from an
-exec goes through the same policy and the same credential swap. You never have to
-re-export the environment by hand, and `~` means what it means to the workload.
+runtimes trust — so a request you make from an exec goes through the same policy.
+You never have to re-export the environment by hand, and `~` means what it means
+to the workload.
 
 The supervisor's own handshake variables stay out, so a piped exec is not told it
-has a colour terminal. Real credential values stay out too: an exec is handed the
-same placeholder the workload holds, never the secret behind it.
+has a colour terminal.
 
 ### Stopping vs killing
 
@@ -1204,9 +1196,8 @@ policy live**:
 - The launch configuration replays verbatim from the sandbox's record: the image
   (pinned by digest), command, env, mounts, published ports, resources, and run-as
   identity. Editing `lns.yaml` affects new sandboxes only.
-- Network policy and credentials re-resolve live, exactly as a fresh boot would:
-  a rule you added to the decisions file since applies, a revoked grant asks
-  again.
+- Network policy re-resolves live, exactly as a fresh boot would: a rule you
+  added to the decisions file since applies.
 - Processes and `/tmp` never survive — the entrypoint runs again from the start.
   Files the workload wrote anywhere else are there, because the writable layer is.
 
@@ -1255,8 +1246,8 @@ primarily a live view of its output.
 and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
 the contents of its policy file when that file is readable on this machine. For a
 **cached** reference it prints the artifact's kind and definition — a plain `image`,
-or a `sandbox`'s image, workdir, mounts, declared ports, filesets, and connectors,
-flagging a permissive default policy.
+or a `sandbox`'s image, workdir, mounts, declared ports, and filesets, flagging a
+permissive default policy.
 
 ### Listing resource use
 
@@ -1295,13 +1286,12 @@ sandbox is not: its writable layer goes with it.
 [`examples/claude-code/`](examples/claude-code/) is a complete recipe that ties
 these pieces together: it runs Claude Code inside a sandbox using `spec.image`
 plus node declared under `spec.tools`, `spec.env`, a tight `spec.egress` allowlist,
-the `claude-code-subscription` connector, a `.` bind at `/workspace`, and a
-self-contained inline fileset that seeds the agent's home. Copy its `lns.yaml`
+a `.` bind at `/workspace`, and a self-contained inline fileset that seeds the
+agent's home. Copy its `lns.yaml`
 into your project and `lns run`.
 
 ## See also
 
 - [Claude Code example](examples/claude-code/) — a full agent recipe.
 - [Policy and approvals](policy.md) — control what the workload may reach.
-- [Credentials](credentials.md) — give the workload placeholders, not secrets.
 - [CLI reference](cli-reference.md) — the full flag list.

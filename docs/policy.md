@@ -385,9 +385,5 @@ shared approvals are already in place — no one has to re-approve them.
 
 ## See also
 
-- [Credentials](credentials.md) — credential decisions live alongside network
-  policy and follow the same allow / deny / ask model.
-- [Connectors](connectors.md) — connecting a connector records it under
-  `connectors:` and allows the routes it declares.
 - [Running workloads](running-workloads.md) — the run summary and what it lists.
 - [CLI reference](cli-reference.md) — every command and flag as it ships today.

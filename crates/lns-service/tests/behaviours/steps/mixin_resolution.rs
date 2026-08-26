@@ -94,16 +94,6 @@ fn mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
     );
 }
 
-#[given(regex = r#"^a mixin declaring the credential "([^"]+)" for "([^"]+)"$"#)]
-fn mixin_declaring_a_credential(w: &mut BehaviourWorld, env_var: String, domain: String) {
-    install(
-        w,
-        &format!(
-            r#"{{"credentials":[{{"envVar":"{env_var}","placeholder":"lns-placeholder-{env_var}","injections":[{{"kind":"bearer_header","domain":"{domain}"}}]}}]}}"#
-        ),
-    );
-}
-
 #[given(regex = r#"^the directory's own decisions declare the tool "([^"]+)"$"#)]
 fn local_mixin_declaring_a_tool(w: &mut BehaviourWorld, tool: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
@@ -283,7 +273,7 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
         }
         Err(e) => Err(e),
     };
-    crate::steps::declared_connectors::launch_resolved(w, planned);
+    crate::steps::declared_launch::launch_resolved(w, planned);
 }
 
 #[then(regex = r#"^the run installs "([^"]+)"$"#)]

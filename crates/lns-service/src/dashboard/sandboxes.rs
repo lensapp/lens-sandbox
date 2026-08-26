@@ -69,7 +69,6 @@ mod tests {
             kind: "egress".into(),
             detail: String::new(),
             raw: Value::Null,
-            connector: None,
         }
     }
 

@@ -93,27 +93,6 @@ fn service_is_running_headless_in_home(world: &mut E2eWorld) {
     start_service_with(world, &[("LNS_HEADLESS", "1")]);
 }
 
-#[when(regex = r#"^the user connects connector "([^"]+)"$"#)]
-fn connect_connector(world: &mut E2eWorld, id: String) {
-    let home = world
-        .home
-        .as_ref()
-        .expect("a home holds the connector catalog")
-        .path()
-        .to_path_buf();
-    let mut envs: Vec<(&str, std::ffi::OsString)> = vec![("HOME", home.clone().into())];
-    if let Some(sock) = &world.service_socket {
-        envs.push(("LNS_SOCKET_PATH", sock.clone().into()));
-    }
-    let result = crate::specutil::run_cli_with_timeout_in_dir(
-        &home,
-        vec!["connector".to_string(), "connect".to_string(), id],
-        envs,
-        std::time::Duration::from_secs(30),
-    );
-    world.result = Some(result);
-}
-
 #[when("I run `lns service start`")]
 fn run_service_start(world: &mut E2eWorld) {
     world.ensure_service_dir();

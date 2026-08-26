@@ -5,7 +5,6 @@ use serde_json::{Map, Value};
 pub struct Row {
     pub kind: String,
     pub detail: String,
-    pub connector: Option<String>,
     pub run: String,
     pub ts: String,
 }
@@ -19,7 +18,6 @@ pub fn read(event: &Map<String, Value>) -> Result<Row> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        connector: opt(um, "lns_connector"),
         run: text(um, "lns_run"),
         ts: text(um, "lns_ts"),
     })
@@ -57,10 +55,6 @@ fn text(um: &Map<String, Value>, key: &str) -> String {
         .to_string()
 }
 
-fn opt(um: &Map<String, Value>, key: &str) -> Option<String> {
-    um.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,31 +74,28 @@ mod tests {
 
     #[test]
     fn reads_the_kind_identity_and_the_events_message_as_the_detail() {
-        let ev = lns_ocsf::connection(
+        let ev = lns_ocsf::approval(
             &octx("9e8d7c6b0000"),
-            "some-oauth",
-            "oauth",
-            Some("@user"),
-            &["repo".to_string()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
             None,
         );
         let row = read(&obj(&ev)).unwrap();
-        assert_eq!(row.kind, "connection");
+        assert_eq!(row.kind, "approval");
         assert_eq!(row.run, "9e8d7c6b0000");
         assert_eq!(row.ts, "2026-06-29T14:00:00Z");
-        assert_eq!(row.connector.as_deref(), Some("some-oauth"));
         assert_eq!(
-            row.detail, "connect some-oauth (oauth) @user [repo]",
+            row.detail, "network allow-always api.some-vendor.example:443",
             "detail is the event's own message, not re-derived by the reader"
         );
     }
 
     #[test]
-    fn a_per_run_event_has_no_connector_and_surfaces_its_message() {
+    fn a_per_run_event_surfaces_its_message() {
         let row = read(&obj(&lns_ocsf::volume_mount(&octx("r"), "data", "/data"))).unwrap();
         assert_eq!(row.kind, "volume");
         assert_eq!(row.detail, "data → /data");
-        assert!(row.connector.is_none());
     }
 
     #[test]

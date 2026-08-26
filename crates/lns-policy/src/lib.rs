@@ -6,15 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::matching::{port_shaped, split_destination};
 
-pub mod connectors;
-pub mod credentials;
 pub mod decision_store;
-mod env_subst;
-pub mod grants;
 pub mod host_bind_decisions;
 pub mod host_path_decisions;
 pub mod matching;
-pub mod providers;
 pub mod registry_auth;
 mod secure_file;
 #[cfg(test)]
@@ -25,9 +20,6 @@ mod test_env;
 pub struct Policy {
     #[serde(default)]
     pub network: NetworkPolicy,
-    /// The run's connected set, filled from the per-machine sidecar rather than this file: connecting is a per-machine risk acceptance, and a file that travels must not carry one.
-    #[serde(skip)]
-    pub connectors: Vec<String>,
     /// What the document on disk called itself, kept so writing a decision back does not rename the developer's own file.
     #[serde(skip)]
     pub name: Option<String>,
@@ -203,7 +195,7 @@ pub struct RouteRule {
     pub binaries: Option<Vec<String>>,
 }
 
-/// One raw-TCP egress rule: a port-scoped destination the guest splices through untouched — no TLS interception, no HTTP rules, no credential injection.
+/// One raw-TCP egress rule: a port-scoped destination the guest splices through untouched — no TLS interception and no HTTP rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TcpEgressRule {
@@ -434,7 +426,6 @@ impl Policy {
             network: NetworkPolicy {
                 egress: doc.spec.egress,
             },
-            connectors: Vec::new(),
             name: Some(doc.name),
             rest: doc.spec.rest,
         };
@@ -480,13 +471,6 @@ impl Policy {
             .first_shadowing_tcp_rule(&rule)
             .map(|(index, shadowing)| (index, shadowing.clone()));
         place_approved(&mut self.network.egress.tcp, rule, shadowing)
-    }
-
-    pub fn connect(&mut self, id: impl Into<String>) {
-        let id = id.into();
-        if !self.connectors.contains(&id) {
-            self.connectors.push(id);
-        }
     }
 }
 
@@ -1728,45 +1712,6 @@ egress:
             2,
             "a binary-scoped grant is a different grant, not a duplicate of the open one"
         );
-    }
-
-    #[test]
-    fn the_decisions_file_never_carries_which_connectors_are_connected() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
-        Policy {
-            connectors: vec!["some-provider".into()],
-            ..Policy::default()
-        }
-        .save_atomic(&path)
-        .unwrap();
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("connectors"),
-            "connecting is a per-machine risk acceptance, and this file is meant to be committed; got:\n{text}"
-        );
-        assert!(
-            Policy::load_or_default(&path)
-                .unwrap()
-                .connectors
-                .is_empty(),
-            "what a run may spend is read from the sidecar, never from a file that travels"
-        );
-    }
-
-    #[test]
-    fn connect_adds_an_connector_id() {
-        let mut p = Policy::default();
-        p.connect("github");
-        assert_eq!(p.connectors, ["github"]);
-    }
-
-    #[test]
-    fn connect_is_idempotent_and_does_not_duplicate() {
-        let mut p = Policy::default();
-        p.connect("some-provider");
-        p.connect("some-provider");
-        assert_eq!(p.connectors, ["some-provider"]);
     }
 
     #[test]

@@ -29,11 +29,11 @@ Feature: running a sandbox
     Then the exit code is 0
     And the service received a request to run a sandbox
 
-  Scenario: run carries the local definition's egress, connectors, and resources to the service
-    Given a valid lns.yaml declaring egress, connectors, and resources
+  Scenario: run carries the local definition's egress and resources to the service
+    Given a valid lns.yaml declaring egress and resources
     When the user runs "lns run"
     Then the exit code is 0
-    And the service request carries the definition's egress, connectors, and resources
+    And the service request carries the definition's egress and resources
 
   Scenario: run with no reference and no lns.yaml fails clearly
     Given the current directory has no lns.yaml

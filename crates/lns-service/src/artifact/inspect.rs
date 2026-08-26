@@ -113,7 +113,6 @@ pub(crate) fn project_inspection(
                 ports: declared_view_ports(&mixin.spec.ports)?,
                 filesets: declared_view_filesets(&mixin.spec),
                 env: declared_view_env(&mixin.spec),
-                credentials: mixin.spec.credentials.clone(),
                 tools: mixin.spec.tools.clone(),
                 scripts: declared_view_scripts(&mixin.spec),
                 policy_flags: declared_policy_flags(&lns_policy::Policy {
@@ -149,8 +148,6 @@ pub(crate) fn project_inspection(
                     ports: declared_view_ports(&def.spec.ports)?,
                     filesets: declared_view_filesets(&def.spec),
                     env: declared_view_env(&def.spec),
-                    connectors: def.spec.connectors.clone(),
-                    credentials: def.spec.credentials.clone(),
                     tools: def.spec.tools.clone(),
                     scripts: declared_view_scripts(&def.spec),
                     policy_flags: resolved
@@ -356,9 +353,7 @@ mod tests {
             mounts,
             ports: Vec::new(),
             filesets: Vec::new(),
-            connectors: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -381,9 +376,7 @@ mod tests {
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),
-            connectors: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -406,9 +399,7 @@ mod tests {
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets,
-            connectors: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -443,7 +434,6 @@ mod tests {
                 ports: Vec::new(),
                 filesets: Vec::new(),
                 env: vec!["MODE=research".into()],
-                credentials: Vec::new(),
                 tools: vec!["node@22".into()],
                 scripts: Vec::new(),
                 policy_flags: Vec::new(),
@@ -732,55 +722,12 @@ mod tests {
                         owner: lns_ipc::SandboxFilesetOwner::Root,
                     },
                 ],
-                connectors: vec![],
                 env: vec![],
-                credentials: vec![],
                 tools: vec![],
                 scripts: Vec::new(),
                 policy_flags: vec![
                     "wildcard allow — a catch-all or whole-suffix host pattern is permitted".into()
                 ],
-                cpus: None,
-                mem_mib: None,
-                disk_bytes: None,
-            }))
-        );
-    }
-
-    #[test]
-    fn a_sandbox_projects_declared_credentials_and_no_flags_without_a_policy() {
-        let config = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}}"#;
-
-        let inspection = project_sandbox(config).unwrap();
-
-        assert_eq!(
-            inspection,
-            ArtifactInspection::Sandbox(Box::new(SandboxView {
-                mixins: Vec::new(),
-                pinned_mixins: Vec::new(),
-                contributions: Vec::new(),
-                reference: "registry.example.test/team/sandbox:latest".into(),
-                digest: digest(),
-                image: "registry.example.test/runtime:1".into(),
-                workdir: None,
-                user: None,
-                mounts: vec![],
-                ports: vec![],
-                filesets: vec![],
-                connectors: vec![],
-                env: vec![],
-                credentials: vec![lns_spec::Credential {
-                    env_var: "SOME_TOKEN".into(),
-                    placeholder: "lns-placeholder-some-token".into(),
-                    injections: vec![lns_spec::InjectionDef {
-                        kind: lns_spec::InjectionKind::BearerHeader,
-                        domain: "api.some-provider.example".into(),
-                        header: None,
-                    }],
-                }],
-                tools: vec![],
-                scripts: Vec::new(),
-                policy_flags: vec![],
                 cpus: None,
                 mem_mib: None,
                 disk_bytes: None,
@@ -808,9 +755,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
-                connectors: vec![],
                 env: vec![],
-                credentials: vec![],
                 tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
                 scripts: Vec::new(),
                 policy_flags: vec![],
@@ -841,9 +786,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
-                connectors: vec![],
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
-                credentials: vec![],
                 tools: vec![],
                 scripts: Vec::new(),
                 policy_flags: vec![],

@@ -71,12 +71,6 @@ pub enum Request {
         new_name: String,
     },
     PruneRuns,
-    BeginConnectorSignIn {
-        id: String,
-    },
-    BindConnectorCredential {
-        id: String,
-    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -131,15 +125,6 @@ pub enum Request {
         registry: String,
     },
     ListRegistryLogins,
-}
-
-/// The value decision a credential bind resolved to: a stored value, the host-detected value, or an explicit deny — all three persist per machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CredentialBindDecision {
-    Stored,
-    HostDetect,
-    Denied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,24 +198,6 @@ pub enum Response {
     },
     RunsPruned {
         removed: Vec<String>,
-    },
-    OauthVerification {
-        verification_uri: String,
-        user_code: String,
-        expires_in_secs: u64,
-    },
-    OauthBrowserOpened {
-        authorization_url: String,
-    },
-    OauthSignInComplete,
-    OauthSignInFailed {
-        reason: String,
-    },
-    CredentialBindComplete {
-        decision: CredentialBindDecision,
-    },
-    CredentialBindFailed {
-        reason: String,
     },
     RegistryLoginStored,
     RegistryLoggedOut,
@@ -389,8 +356,6 @@ pub struct MixinView {
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
-    pub credentials: Vec<lns_spec::Credential>,
-    #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
     pub scripts: Vec<SandboxScript>,
@@ -402,7 +367,6 @@ pub struct MixinView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ContributionBlock {
-    Credential,
     Tool,
     Mount,
     Port,
@@ -466,11 +430,7 @@ pub struct SandboxView {
     #[serde(default)]
     pub filesets: Vec<SandboxFileset>,
     #[serde(default)]
-    pub connectors: Vec<String>,
-    #[serde(default)]
     pub env: Vec<String>,
-    #[serde(default)]
-    pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
@@ -645,7 +605,7 @@ pub struct RunImageArgs {
     /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
     #[serde(default)]
     pub mixins: Vec<String>,
-    /// The same references, still named for a local run whose document the preflight already merged: a connector grant keys on the composition, so layering one more mixin is asked about instead of inheriting the bare run's answer.
+    /// The same references, still named for a local run whose document the preflight already merged, so the composition the run ran is recorded whole.
     #[serde(default)]
     pub composed_mixins: Vec<String>,
     #[serde(default)]
@@ -696,10 +656,10 @@ pub struct RunImageArgs {
     /// True when `image` is a reference the service must classify (refusing a plain OCI image that is not a sandbox); false for a local sandbox's base image, which the CLI has already resolved and the service runs directly.
     #[serde(default)]
     pub verify_sandbox: bool,
-    /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy, connectors, and resources apply.
+    /// A local sandbox definition as canonical JSON; the service plans it like a published sandbox so its policy and resources apply.
     #[serde(default)]
     pub definition: Option<String>,
-    /// The local definition's absolute directory, keying its per-workload connector grants; absent for a published reference (which keys by repo@digest instead).
+    /// The local definition's absolute directory; absent for a published reference, which the service resolves by repo@digest instead.
     #[serde(default)]
     pub definition_dir: Option<String>,
     /// What the preflight resolved from every source but this directory's own, as JSON egress: the gate folds the live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
@@ -1594,48 +1554,6 @@ mod tests {
     }
 
     #[test]
-    fn begin_connector_sign_in_survives_a_request_round_trip() {
-        let req = Request::BeginConnectorSignIn {
-            id: "some-oauth".into(),
-        };
-        let frame = crate::encode_frame(&req).unwrap();
-        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
-    fn bind_connector_credential_survives_a_request_round_trip() {
-        let req = Request::BindConnectorCredential {
-            id: "some-provider".into(),
-        };
-        let frame = crate::encode_frame(&req).unwrap();
-        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
-    fn credential_bind_responses_survive_round_trips() {
-        for resp in [
-            Response::CredentialBindComplete {
-                decision: CredentialBindDecision::Stored,
-            },
-            Response::CredentialBindComplete {
-                decision: CredentialBindDecision::HostDetect,
-            },
-            Response::CredentialBindComplete {
-                decision: CredentialBindDecision::Denied,
-            },
-            Response::CredentialBindFailed {
-                reason: "the value decision timed out".into(),
-            },
-        ] {
-            let frame = crate::encode_frame(&resp).unwrap();
-            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
-            assert_eq!(decoded, resp);
-        }
-    }
-
-    #[test]
     fn primary_session_detach_request_survives_a_round_trip() {
         let req = Request::SessionDetach {
             target: SessionTarget::Primary {
@@ -1653,28 +1571,6 @@ mod tests {
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
         assert_eq!(decoded, resp);
-    }
-
-    #[test]
-    fn oauth_sign_in_responses_survive_round_trips() {
-        for resp in [
-            Response::OauthVerification {
-                verification_uri: "https://example.com/login/device".into(),
-                user_code: "WDJB-MJHT".into(),
-                expires_in_secs: 900,
-            },
-            Response::OauthBrowserOpened {
-                authorization_url: "https://example.com/auth?code_challenge=abc".into(),
-            },
-            Response::OauthSignInComplete,
-            Response::OauthSignInFailed {
-                reason: "access_denied".into(),
-            },
-        ] {
-            let frame = crate::encode_frame(&resp).unwrap();
-            let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
-            assert_eq!(decoded, resp);
-        }
     }
 
     #[test]
@@ -1875,17 +1771,7 @@ mod tests {
                 guest_path: "/root/.agent/skills".into(),
                 owner: SandboxFilesetOwner::Workload,
             }],
-            connectors: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
-            credentials: vec![lns_spec::Credential {
-                env_var: "SOME_TOKEN".into(),
-                placeholder: "some_LNSPLACEHOLDER0000".into(),
-                injections: vec![lns_spec::InjectionDef {
-                    kind: lns_spec::InjectionKind::BearerHeader,
-                    domain: "api.some-provider.example".into(),
-                    header: None,
-                }],
-            }],
             tools: vec!["node@22.11.0".into()],
             scripts: vec![SandboxScript {
                 when: "pre-start".into(),

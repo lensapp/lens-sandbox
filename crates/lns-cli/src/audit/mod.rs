@@ -10,8 +10,6 @@ pub struct AuditArgs {
         help = "Sandbox to scope to: a run id or a unique run-id prefix. Omit for every sandbox."
     )]
     pub sandbox: Option<String>,
-    #[arg(long, help = "Only show events for this connector.")]
-    pub connector: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
     #[arg(
@@ -45,8 +43,6 @@ pub enum KindArg {
     Volume,
     Bind,
     Approval,
-    Connection,
-    Credential,
     Tool,
 }
 
@@ -59,8 +55,6 @@ impl KindArg {
             KindArg::Volume => "volume",
             KindArg::Bind => "bind",
             KindArg::Approval => "approval",
-            KindArg::Connection => "connection",
-            KindArg::Credential => "credential",
             KindArg::Tool => "tool",
         }
     }
@@ -129,7 +123,6 @@ mod tests {
             &octx(run_id, "2026-06-29T13:00:00Z"),
             "ghcr.io/team/hermes:1.4.0",
             "sha256:abc",
-            &[],
             "policyhash",
         )
         .to_string();
@@ -163,12 +156,11 @@ mod tests {
     }
 
     fn write_ledger(home: &std::path::Path) {
-        let event = lns_ocsf::connection(
+        let event = lns_ocsf::approval(
             &octx("5e6f7a8b0000000000000000000000bb", "2026-06-29T14:02:11Z"),
-            "some-oauth",
-            "oauth",
-            Some("@hchen"),
-            &["repo".to_string()],
+            "network",
+            "api.some-vendor.example:443",
+            "allow_always",
             None,
         )
         .to_string();
@@ -215,8 +207,6 @@ mod tests {
         assert_eq!(KindArg::Volume.label(), "volume");
         assert_eq!(KindArg::Bind.label(), "bind");
         assert_eq!(KindArg::Approval.label(), "approval");
-        assert_eq!(KindArg::Connection.label(), "connection");
-        assert_eq!(KindArg::Credential.label(), "credential");
     }
 
     #[tokio::test]
@@ -234,7 +224,7 @@ mod tests {
         assert!(text.contains("data → /data"), "{text}");
         assert!(text.contains("injected: FOO"), "{text}");
         assert!(
-            text.contains("connect some-oauth (oauth) @hchen [repo]"),
+            text.contains("network allow-always api.some-vendor.example:443"),
             "{text}"
         );
     }
@@ -256,8 +246,8 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .expect("a json line");
         let v: serde_json::Value = serde_json::from_str(line).expect("each line is a json object");
-        assert_eq!(v["unmapped"]["lns_kind"], "connection", "got: {text}");
-        assert_eq!(v["class_uid"], 3002, "emitted as OCSF: {text}");
+        assert_eq!(v["unmapped"]["lns_kind"], "approval", "got: {text}");
+        assert_eq!(v["class_uid"], 2004, "emitted as OCSF: {text}");
     }
 
     #[tokio::test]

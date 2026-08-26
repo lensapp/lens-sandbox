@@ -1,7 +1,7 @@
 Feature: lns start — restart a stopped run
   A run that ends becomes a stopped run: restartable until removed.
   Start replays the launch config verbatim from the run record, re-resolves
-  network policy and credentials live, and fails closed on any conflict —
+  network policy live, and fails closed on any conflict —
   config frozen, policy live, conflicts fail closed.
 
   Scenario: starting an already-running run is an idempotent success

@@ -224,20 +224,6 @@ impl crate::artifact::fileset::HostFileProbe for RealSnapshotDir {
     }
 }
 
-/// Refuse a launch whose definition declares a `spec.connectors` id this machine's catalog cannot arm; fail-fast at boot instead of an opaque mid-run credential miss. A declared credential names no connector, so it can never be unknown here.
-pub(crate) fn refuse_unknown_connectors(policy: Option<&lns_policy::Policy>) -> Result<()> {
-    let declared: Vec<String> = policy.map(|p| p.connectors.clone()).unwrap_or_default();
-    if declared.is_empty() {
-        return Ok(());
-    }
-    let catalog = effective_machine_catalog();
-    let unknown = crate::credential_flow::connectors::unknown_connector_ids(&declared, &catalog);
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(crate::credential_flow::connectors::unknown_connectors_refusal(&unknown))
-}
-
 /// The directory's own decisions as a merge source, read off this machine; a run that named no decisions file resolves without one.
 fn local_source(
     decisions: Option<&std::path::Path>,
@@ -282,21 +268,6 @@ impl crate::artifact::mixin::MixinSource for RegistryMixins {
             }
         }
     }
-}
-
-fn effective_machine_catalog() -> Vec<lns_policy::connectors::Connector> {
-    let user = lns_ipc::connectors_path()
-        .map_err(|e| e.to_string())
-        .and_then(|path| {
-            lns_policy::connectors::Catalog::load_or_default(&path).map_err(|e| e.to_string())
-        })
-        .unwrap_or_else(|e| {
-            crate::log::warn!(
-                "unreadable user connector catalog ({e}); using the bundled catalog only"
-            );
-            lns_policy::connectors::Catalog::default()
-        });
-    lns_policy::connectors::effective_connectors(&user)
 }
 
 /// Pull each packed fileset's layer out of the artifact that carries it and expand it into guest-write specs, so the files a sandbox or mixin shipped land in the microVM at their guest paths.
@@ -371,7 +342,7 @@ async fn pull_packed_layer_with<R: Registry>(
     Ok(installed.path)
 }
 
-/// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the effective connectors and shipped-policy hash; a recording failure is logged, never fatal to the launch.
+/// Append a sandbox-run event to the audit chain, pinning the resolved digest (not just the mutable tag) plus the shipped-policy hash; a recording failure is logged, never fatal to the launch.
 fn record_sandbox_run(
     run_id: &str,
     microvm: &str,
@@ -379,11 +350,6 @@ fn record_sandbox_run(
     digest: &str,
     resolved: &ResolvedSandbox,
 ) {
-    let connectors = resolved
-        .policy
-        .as_ref()
-        .map(|p| p.connectors.clone())
-        .unwrap_or_default();
     let policy_hash = resolved
         .policy
         .as_ref()
@@ -394,15 +360,14 @@ fn record_sandbox_run(
         microvm,
         image_ref,
         digest,
-        &connectors,
         &policy_hash,
-        &crate::oauth::RealClock,
+        &crate::clock::RealClock,
     ) {
         crate::log::warn!("failed to record sandbox-run audit event: {e:#}");
     }
 }
 
-/// Disclose the sandbox's shipped network policy and declared connectors at boot: name the policy as the source your own decisions layer over (warning if it is over-broad), and disclose that declared connectors seed placeholders but are offered on first use, never armed automatically.
+/// Disclose the sandbox's shipped network policy at boot: name it as the source your own decisions layer over, warning if it is over-broad.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
@@ -417,13 +382,6 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
         if !summary.is_empty() {
             crate::log::warn!("{summary}");
         }
-    }
-    if !policy.connectors.is_empty() {
-        crate::log::info!(
-            "policy",
-            "this sandbox requests connectors ({}); each seeds a placeholder env var and is offered on first use — accept its connect card to arm it — never armed automatically",
-            policy.connectors.join(", ")
-        );
     }
 }
 

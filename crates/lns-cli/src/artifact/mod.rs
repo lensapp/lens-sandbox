@@ -677,19 +677,6 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
             render_filesets(out, &view.filesets, attributed)?;
-            render_connectors(out, &view.connectors)?;
-            for credential in &view.credentials {
-                writeln!(
-                    out,
-                    "credential: {}{}",
-                    credential_disclosure(credential),
-                    crate::run::summary::contribution_attribution(
-                        attributed,
-                        lns_ipc::ContributionBlock::Credential,
-                        &credential.env_var
-                    )
-                )?;
-            }
             for tool in &view.tools {
                 writeln!(
                     out,
@@ -721,9 +708,6 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
             render_filesets(out, &view.filesets, &[])?;
-            for credential in &view.credentials {
-                writeln!(out, "credential: {}", credential_disclosure(credential))?;
-            }
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
@@ -797,26 +781,6 @@ fn declared_ports_line(ports: &[lns_ipc::SandboxPort]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// What a declared credential discloses: the variable the workload reads, and every destination its value may travel to — the two things a reader has to weigh before running it.
-pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String {
-    if credential.injections.is_empty() {
-        return format!("{} (travels nowhere)", credential.env_var);
-    }
-    let domains: Vec<&str> = credential
-        .injections
-        .iter()
-        .map(|injection| injection.domain.as_str())
-        .collect();
-    format!("{} -> {}", credential.env_var, domains.join(", "))
-}
-
-fn render_connectors<W: std::io::Write>(out: &mut W, connectors: &[String]) -> Result<()> {
-    for id in connectors {
-        writeln!(out, "connector: {id}")?;
-    }
-    Ok(())
 }
 
 /// Inspect is where a script's body is printed whole; the launch summary elides it so a long one cannot bury the rest of the approval.
@@ -1286,7 +1250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_renders_a_cached_sandboxs_connectors_tools_and_scripts() {
+    async fn inspect_renders_a_cached_sandboxs_tools_and_scripts() {
         let svc = CannedService::with_inspect_image(
             Response::Error {
                 message: "no such run: hermes:1.4.0".into(),
@@ -1304,9 +1268,7 @@ mod tests {
                     mounts: Vec::new(),
                     ports: Vec::new(),
                     filesets: Vec::new(),
-                    connectors: vec!["some-provider".into()],
                     env: Vec::new(),
-                    credentials: Vec::new(),
                     tools: vec!["node@22.11.0".into()],
                     scripts: vec![
                         lns_ipc::SandboxScript {
@@ -1340,7 +1302,6 @@ mod tests {
             text.contains("image: docker.io/library/alpine"),
             "got: {text}"
         );
-        assert!(text.contains("connector: some-provider"), "got: {text}");
         assert!(text.contains("tool: node@22.11.0"), "got: {text}");
         assert!(
             text.contains("script: pre-start (runs as root)")

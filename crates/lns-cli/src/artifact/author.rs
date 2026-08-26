@@ -14,7 +14,6 @@ spec:
   egress:
     http: []
     tcp: []
-  credentials: []
   filesets: []
   tools: []
 ";
@@ -33,8 +32,6 @@ spec:
   egress:
     http: []
     tcp: []
-  connectors: []
-  credentials: []
   volumes:
     - type: bind
       source: .
@@ -144,7 +141,7 @@ pub fn init<F: Fs, E: Write>(
         ),
         DocumentKind::Mixin => (
             MIXIN_SCAFFOLD,
-            "  1. name the capability it layers on — tools, filesets, egress, credentials\n  2. try it with `lns run --mixin .`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-mixin:1.0.0`",
+            "  1. name the capability it layers on — tools, filesets, egress\n  2. try it with `lns run --mixin .`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-mixin:1.0.0`",
         ),
     };
     fs.write(&path, scaffold)
@@ -388,17 +385,6 @@ fn render_effective<W: Write>(
         spec.egress.http.len(),
         raw_rule_note(spec.egress.tcp.len())
     )?;
-    if !spec.connectors.is_empty() {
-        writeln!(out, "  connectors: {}", spec.connectors.join(", "))?;
-    }
-    for credential in &spec.credentials {
-        writeln!(
-            out,
-            "  credential: {}{}",
-            super::credential_disclosure(credential),
-            composed.attribution(lns_artifact::merge::Block::Credential, &credential.env_var)
-        )?;
-    }
     for tool in &spec.tools {
         writeln!(
             out,
@@ -436,7 +422,7 @@ mod tests {
     }
 
     fn valid_yaml() -> &'static str {
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  connectors: [some-provider]\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools: [node@22]\n"
     }
 
     fn inspect_cmd(target: Option<&str>) -> ArtifactCommand {
@@ -680,7 +666,7 @@ mod tests {
             text.contains("egress:") && text.contains("route(s)"),
             "got: {text}"
         );
-        assert!(text.contains("connectors: some-provider"), "got: {text}");
+        assert!(text.contains("tool: node@22"), "got: {text}");
     }
 
     #[test]
@@ -916,7 +902,7 @@ mod tests {
 
     #[test]
     fn inspect_local_renders_path_and_inline_filesets() {
-        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n";
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n";
         let fs = fake("/work/lns.yaml", yaml);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), Some("."), None, &[], &mut out).unwrap();
@@ -927,10 +913,6 @@ mod tests {
         );
         assert!(
             text.contains("fileset:      inline -> /root/.agent/settings"),
-            "got: {text}"
-        );
-        assert!(
-            text.contains("credential: SOME_TOKEN -> api.some-provider.example"),
             "got: {text}"
         );
     }

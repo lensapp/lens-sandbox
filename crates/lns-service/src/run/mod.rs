@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lns_ipc::{Response, WireFrame};
-use lns_policy::grants::WorkloadIdentity;
 use tokio::sync::mpsc::Sender;
 
 mod orchestrator;
@@ -118,10 +117,9 @@ pub(super) fn build_workload_argv(
     vec!["/bin/sh".to_string(), "-c".to_string(), joined]
 }
 
-/// The run-scoped environment sources composed around the image's own env: the user's `-e` vars, the managed credential names they may not clobber, the resolved workdir, and the declared tools' bin dirs.
+/// The run-scoped environment sources composed around the image's own env: the user's `-e` vars, the resolved workdir, and the declared tools' bin dirs.
 pub(super) struct EnvInputs<'a> {
     pub user_env: &'a [String],
-    pub extra_managed: &'a [String],
     pub workdir: Option<&'a str>,
     pub tools: &'a crate::workload_env::ToolRuntime,
 }
@@ -147,7 +145,6 @@ pub(super) fn exec_env_strings(
         inputs.user_env,
         agent_command.as_deref(),
         inputs.workdir,
-        inputs.extra_managed,
         inputs.tools,
     )
 }
@@ -252,46 +249,6 @@ pub(super) fn vm_ended_before_connector(
 
 pub(super) fn connector_never_arrived() -> anyhow::Error {
     anyhow::anyhow!("VM backend never produced a VsockConnector")
-}
-
-/// A published reference reduced to its bare `registry/repository`, so `:tag` and `@digest` of one repo share a workload identity; an unparseable reference is keyed verbatim.
-fn normalize_repo(reference: &str) -> String {
-    match reference.parse::<oci_client::Reference>() {
-        Ok(r) => format!("{}/{}", r.registry(), r.repository()),
-        Err(_) => reference.to_string(),
-    }
-}
-
-/// Canonicalizes a definition directory for identity purposes, falling back to the raw string when canonicalization can't resolve it (e.g. it no longer exists) — mirrors `lns_policy::grants::project_key`, so a project reached through a symlink or a differently-cased path keys identically either way.
-fn canonical_dir_key(dir: &str) -> String {
-    std::path::Path::new(dir)
-        .canonicalize()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| dir.to_string())
-}
-
-/// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers). A run resolving neither refuses — plain-image runs are retired, and a shared fallback bucket would let one run's grant arm another's without a card.
-pub(super) fn workload_identity(
-    args: &lns_ipc::RunImageArgs,
-    resolved_ref: Option<&str>,
-    digest: Option<&str>,
-) -> Result<WorkloadIdentity> {
-    // A grant keys on what the run is composed of, never on `mixins`, which is only what the boot still has to merge — a local run sends that empty because its document already carries them.
-    crate::artifact::mixin::require_pinned_extras(&args.composed_mixins)
-        .context("keying this run's connector grants")?;
-    let composed = args.composed_mixins.clone();
-    if let Some(dir) = args.definition_dir.as_deref() {
-        Ok(WorkloadIdentity::definition(canonical_dir_key(dir)).composed_with(composed))
-    } else if let (Some(reference), Some(digest)) = (resolved_ref, digest) {
-        Ok(
-            WorkloadIdentity::reference(normalize_repo(reference), digest.to_string())
-                .composed_with(composed),
-        )
-    } else {
-        anyhow::bail!(
-            "this run resolved neither a definition directory nor a published digest, so it cannot hold connector grants; run a sandbox definition or a published sandbox reference, and if `lns` was upgraded while this service kept running, restart it (`lns service stop` then `lns service start`) so the two match"
-        )
-    }
 }
 
 #[cfg(test)]
@@ -439,9 +396,21 @@ mod tests {
         );
     }
 
+    fn run_args() -> lns_ipc::RunImageArgs {
+        serde_json::from_value(serde_json::json!({
+            "image": "x:1",
+            "cpus": 2,
+            "mem": 2048,
+            "policy_path": null,
+            "cmd": [],
+            "debug": false,
+        }))
+        .expect("the fixture names every field the wire requires")
+    }
+
     #[test]
     fn requested_size_reads_the_three_layers_the_wire_carries() {
-        let mut args = run_args(None, &[]);
+        let mut args = run_args();
         args.cpus = 8;
         args.cpus_explicit = true;
         args.mem = 8192;
@@ -460,145 +429,6 @@ mod tests {
             ),
             (8, true, 8192, false, Some(4), Some(4096))
         );
-    }
-
-    /// A run request carrying only what the identity reads, so a test can vary the definition dir and the composition without spelling forty launch settings.
-    fn run_args(definition_dir: Option<&str>, composed: &[String]) -> lns_ipc::RunImageArgs {
-        serde_json::from_value(serde_json::json!({
-            "image": "x:1",
-            "cpus": 2,
-            "mem": 2048,
-            "policy_path": null,
-            "cmd": [],
-            "debug": false,
-            "definition_dir": definition_dir,
-            "composed_mixins": composed,
-        }))
-        .expect("the fixture names every field the wire requires")
-    }
-
-    #[test]
-    fn workload_identity_keys_a_local_definition_by_its_directory() {
-        let id = workload_identity(
-            &run_args(Some("/Users/me/app"), &[]),
-            Some("ghcr.io/team/base:1"),
-            None,
-        )
-        .expect("a definition dir identifies the run");
-        assert_eq!(
-            id,
-            WorkloadIdentity::definition("/Users/me/app"),
-            "a local definition keys by its dir even though it carries a base image"
-        );
-    }
-
-    #[test]
-    fn workload_identity_carries_the_mixins_the_run_was_composed_with() {
-        let composed = [format!("ghcr.io/acme/obs@sha256:{}", "d".repeat(64))];
-        let id = workload_identity(&run_args(Some("/Users/me/app"), &composed), None, None)
-            .expect("a definition dir identifies the run");
-        assert_ne!(
-            id,
-            workload_identity(&run_args(Some("/Users/me/app"), &[]), None, None)
-                .expect("a definition dir identifies the run"),
-            "a run the user layered a mixin onto must not spend the grant the bare run earned"
-        );
-    }
-
-    #[test]
-    fn workload_identity_refuses_a_composition_named_by_a_moving_reference() {
-        let err = workload_identity(
-            &run_args(Some("/Users/me/app"), &["ghcr.io/acme/obs:2".to_string()]),
-            None,
-            None,
-        )
-        .expect_err(
-            "a tag resolves to different bytes tomorrow, so a grant keyed on it means nothing",
-        );
-        assert!(
-            format!("{err:#}").contains("keying this run's connector grants"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn workload_identity_canonicalizes_a_symlinked_definition_directory_to_the_same_key() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let real = dir.path().join("real");
-        std::fs::create_dir(&real).expect("create real dir");
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
-
-        let via_link = workload_identity(&run_args(Some(link.to_str().unwrap()), &[]), None, None)
-            .expect("a definition dir identifies the run");
-        let via_real = workload_identity(&run_args(Some(real.to_str().unwrap()), &[]), None, None)
-            .expect("a definition dir identifies the run");
-        assert_eq!(
-            via_link, via_real,
-            "the same project reached through a symlink must key identically, or a grant made through one path silently misses through the other"
-        );
-    }
-
-    #[test]
-    fn workload_identity_falls_back_to_the_raw_dir_when_it_cannot_be_canonicalized() {
-        assert_eq!(
-            workload_identity(&run_args(Some("/no/such/project/dir"), &[]), None, None)
-                .expect("a definition dir identifies the run"),
-            WorkloadIdentity::definition("/no/such/project/dir")
-        );
-    }
-
-    #[test]
-    fn workload_identity_keys_a_published_reference_by_repo_and_digest() {
-        let id = workload_identity(
-            &run_args(None, &[]),
-            Some("ghcr.io/acme/agent:1.4.0"),
-            Some("sha256:abc"),
-        )
-        .expect("a resolved digest identifies the run");
-        assert_eq!(
-            id,
-            WorkloadIdentity::reference("ghcr.io/acme/agent", "sha256:abc")
-        );
-    }
-
-    #[test]
-    fn workload_identity_refuses_a_run_without_a_definition_or_a_resolved_digest() {
-        for (definition_dir, resolved_ref) in [(None, None), (None, Some("ghcr.io/acme/agent:1"))] {
-            let err = workload_identity(&run_args(definition_dir, &[]), resolved_ref, None)
-                .expect_err("an unidentifiable run must refuse, never share a grant bucket");
-            assert!(
-                format!("{err:#}").contains("cannot hold connector grants"),
-                "got: {err:#}"
-            );
-        }
-    }
-
-    #[test]
-    fn workload_identity_refusal_names_the_service_restart_a_stale_service_needs() {
-        let err = workload_identity(&run_args(None, &[]), None, None)
-            .expect_err("an unidentifiable run refuses");
-        assert!(
-            format!("{err:#}").contains("lns service stop"),
-            "a matching CLI always resolves an identity, so the developer who sees this is most likely running an upgraded `lns` against a service left running from before; got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn normalize_repo_strips_a_tag_and_a_digest_to_the_bare_repo() {
-        assert_eq!(
-            normalize_repo("ghcr.io/acme/agent:1.4.0"),
-            "ghcr.io/acme/agent"
-        );
-        assert_eq!(
-            normalize_repo(&format!("ghcr.io/acme/agent@sha256:{}", "a".repeat(64))),
-            "ghcr.io/acme/agent"
-        );
-    }
-
-    #[test]
-    fn normalize_repo_keeps_an_unparseable_reference_verbatim() {
-        assert_eq!(normalize_repo("not a valid ref"), "not a valid ref");
     }
 
     #[test]
@@ -735,7 +565,6 @@ mod tests {
             true,
             EnvInputs {
                 user_env: &[],
-                extra_managed: &[],
                 workdir: None,
                 tools: &Default::default(),
             },
@@ -759,7 +588,6 @@ mod tests {
             true,
             EnvInputs {
                 user_env: &[],
-                extra_managed: &[],
                 workdir: None,
                 tools: &Default::default(),
             },
@@ -784,7 +612,6 @@ mod tests {
             false,
             EnvInputs {
                 user_env: &["FOO=bar".into()],
-                extra_managed: &[],
                 workdir: None,
                 tools: &Default::default(),
             },
@@ -833,7 +660,6 @@ mod tests {
             true,
             EnvInputs {
                 user_env: &[],
-                extra_managed: &[],
                 workdir: None,
                 tools: &Default::default(),
             },
@@ -859,7 +685,6 @@ mod tests {
             true,
             EnvInputs {
                 user_env: &["PORT=4000".into()],
-                extra_managed: &[],
                 workdir: None,
                 tools: &Default::default(),
             },

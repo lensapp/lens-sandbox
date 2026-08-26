@@ -15,8 +15,6 @@ Feature: authoring a document
     And the file "lns.yaml" contains "env:"
     And the file "lns.yaml" contains "resources:"
     And the file "lns.yaml" contains "egress:"
-    And the file "lns.yaml" contains "connectors:"
-    And the file "lns.yaml" contains "credentials:"
     And the file "lns.yaml" contains "filesets:"
     And the file "lns.yaml" contains "ports:"
     And the file "lns.yaml" contains "tools: []"
@@ -165,21 +163,6 @@ Feature: authoring a document
     Then the exit code is 0
     And the output contains "user:         root"
     And the service received no request
-
-  Scenario: inspect discloses every declared credential and where its value may travel
-    Given an lns.yaml declaring the "SOME_TOKEN" credential for "api.some-provider.example"
-    When the user runs artifact command "inspect"
-    Then the exit code is 0
-    And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
-    And the service received no request
-
-  Scenario: inspect says so when a declared credential's value travels nowhere
-    Given an lns.yaml declaring the "SOME_TOKEN" credential with no destination
-    When the user runs artifact command "inspect"
-    Then the exit code is 0
-    And the output contains "credential: SOME_TOKEN (travels nowhere)"
-    And the service received no request
-
   Scenario: inspect of a path-shaped target renders the definition offline
     Given a valid lns.yaml in the current directory
     When the user runs artifact command "inspect ."

@@ -11,14 +11,9 @@ use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::PendingPrompt;
-use crate::approval_flow::window::{
-    self, CredentialCardPrompt, SignInCard, Snapshot, StackItem, WindowState,
-};
-use crate::credential_flow::session::{CredentialDecisionRequest, DenyScope};
-use crate::credential_flow::store::CredentialEntry;
+use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
-use lns_policy::connectors::TokenFallback;
 
 pub const WINDOW_WIDTH: f32 = 380.0;
 const WINDOW_HEIGHT: f32 = 300.0;
@@ -28,9 +23,7 @@ const SCREEN_RIGHT_MARGIN: f32 = 0.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 140.0;
 const FALLBACK_MAX_HEIGHT: f32 = 720.0;
 const INFORM_ITEM_HEIGHT: f32 = 88.0;
-const CONNECTING_ITEM_HEIGHT: f32 = 112.0;
 const CARD_ITEM_HEIGHT: f32 = 282.0;
-const TOKEN_REVEAL_EXTRA: f32 = 150.0;
 
 const FOLD_SECONDS: f32 = 0.34;
 const SLIDE_SECONDS: f32 = 0.22;
@@ -211,8 +204,6 @@ struct TrayApp {
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
-    credential_inputs: HashMap<String, String>,
-    token_drafts: HashMap<String, TokenDraft>,
     remember: HashMap<String, bool>,
     audit: Arc<Mutex<AuditWindow>>,
     audit_open: Arc<AtomicBool>,
@@ -223,19 +214,6 @@ struct AuditWindow {
     state: crate::dashboard::DashboardState,
     last_gen: u64,
     focused: bool,
-}
-
-/// The transient UI state of one card's token fallback: whether the field is revealed and what's been typed.
-#[derive(Default)]
-pub struct TokenDraft {
-    revealed: bool,
-    value: String,
-}
-
-impl TokenDraft {
-    pub fn is_revealed(&self) -> bool {
-        self.revealed
-    }
 }
 
 impl TrayApp {
@@ -264,8 +242,6 @@ impl TrayApp {
             #[cfg(target_os = "macos")]
             _tray,
             placement: ViewportPlacement::new(),
-            credential_inputs: HashMap::new(),
-            token_drafts: HashMap::new(),
             remember: HashMap::new(),
             audit: Arc::new(Mutex::new(AuditWindow::default())),
             audit_open: Arc::new(AtomicBool::new(false)),
@@ -352,7 +328,7 @@ impl ViewportPlacement {
         Self::default()
     }
 
-    pub fn sync_visibility(&mut self, ctx: &egui::Context, order: &[StackItem], revealed: usize) {
+    pub fn sync_visibility(&mut self, ctx: &egui::Context, order: &[StackItem]) {
         let should_show = !order.is_empty();
         if should_show {
             self.pending_hide = false;
@@ -367,7 +343,7 @@ impl ViewportPlacement {
                 };
                 // A seed height keeps the reveal frame (which skips ui()) close to size; ui() then snaps the window to its measured content so no estimate slop shows as bottom padding.
                 let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
-                let seed = target_height(order, revealed, monitor_height);
+                let seed = target_height(order, monitor_height);
                 join_all_spaces();
                 set_window_shadows(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
@@ -422,31 +398,17 @@ impl eframe::App for TrayApp {
             return;
         }
         let order = self.window_state.snapshot().order;
-        let revealed = self
-            .token_drafts
-            .values()
-            .filter(|d| d.is_revealed())
-            .count();
-        self.placement.sync_visibility(ctx, &order, revealed);
+        self.placement.sync_visibility(ctx, &order);
         self.render_audit_dashboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let snapshot = self.window_state.snapshot();
-        prune_credential_inputs(&mut self.credential_inputs, &snapshot);
-        prune_token_drafts(&mut self.token_drafts, &snapshot);
         prune_remember(&mut self.remember, &snapshot);
 
         let monitor_height = ui.ctx().input(|i| i.viewport().monitor_size).map(|m| m.y);
         let cap = content_cap(monitor_height);
-        let (action, content_height) = render_stack(
-            ui,
-            &snapshot,
-            &mut self.credential_inputs,
-            &mut self.token_drafts,
-            &mut self.remember,
-            cap,
-        );
+        let (action, content_height) = render_stack(ui, &snapshot, &mut self.remember, cap);
         let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
         self.placement.fit_height(ui.ctx(), target);
 
@@ -459,11 +421,6 @@ impl eframe::App for TrayApp {
                 self.window_state.decide(&id, decision);
                 ui.ctx().request_repaint();
             }
-            Some(CardAction::DecideCredential { id, request }) => {
-                self.credential_inputs.remove(&id);
-                self.window_state.decide_credential(&id, request);
-                ui.ctx().request_repaint();
-            }
             Some(CardAction::DismissInform { index }) => {
                 apply_dismissal(&self.window_state, &Dismissal::Inform { index });
                 ui.ctx().request_repaint();
@@ -472,36 +429,8 @@ impl eframe::App for TrayApp {
                 crate::browser::open(&url);
                 ui.ctx().request_repaint();
             }
-            Some(CardAction::CancelSignIn { credential_id }) => {
-                apply_dismissal(&self.window_state, &Dismissal::SignIn { credential_id });
-                ui.ctx().request_repaint();
-            }
             Some(CardAction::DismissNetwork { id }) => {
                 apply_dismissal(&self.window_state, &Dismissal::Network { id });
-                ui.ctx().request_repaint();
-            }
-            Some(CardAction::DismissCredential { id }) => {
-                self.credential_inputs.remove(&id);
-                apply_dismissal(&self.window_state, &Dismissal::Credential { id });
-                ui.ctx().request_repaint();
-            }
-            Some(CardAction::ConnectOffer { id }) => {
-                self.window_state.connect_offer(&id);
-                ui.ctx().request_repaint();
-            }
-            Some(CardAction::DeclineOffer { id }) => {
-                self.window_state.decline_offer(&id);
-                ui.ctx().request_repaint();
-            }
-            Some(CardAction::UseOfferToken { id, value }) => {
-                self.window_state.use_offer_token(&id, value);
-                ui.ctx().request_repaint();
-            }
-            Some(CardAction::UseTokenSignIn {
-                credential_id,
-                value,
-            }) => {
-                self.window_state.pivot_sign_in(&credential_id, value);
                 ui.ctx().request_repaint();
             }
             None => {}
@@ -521,15 +450,8 @@ pub enum CardAction {
         id: String,
         decision: Decision,
     },
-    DecideCredential {
-        id: String,
-        request: CredentialDecisionRequest,
-    },
     /// Closing a card carries no verdict, so a dismissal names only the card — there is nowhere to put a decision the developer did not make.
     DismissNetwork {
-        id: String,
-    },
-    DismissCredential {
         id: String,
     },
     DismissInform {
@@ -538,39 +460,12 @@ pub enum CardAction {
     OpenBrowser {
         url: String,
     },
-    CancelSignIn {
-        credential_id: String,
-    },
-    ConnectOffer {
-        id: String,
-    },
-    DeclineOffer {
-        id: String,
-    },
-    UseOfferToken {
-        id: String,
-        value: String,
-    },
-    UseTokenSignIn {
-        credential_id: String,
-        value: String,
-    },
-}
-
-/// The refusal a card's "Deny" is entitled to ask for, so durability follows the card that asked rather than the flow that happens to answer.
-fn deny_request(scope: DenyScope) -> CredentialDecisionRequest {
-    match scope {
-        DenyScope::Workload => CredentialDecisionRequest::Deny,
-        DenyScope::Machine => CredentialDecisionRequest::DenyAlways,
-    }
 }
 
 /// Every way a card can leave the stack without a verdict; closed as a type so adding a card kind fails to compile in [`apply_dismissal`] rather than silently hanging its held request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Dismissal {
     Network { id: String },
-    Credential { id: String },
-    SignIn { credential_id: String },
     Inform { index: usize },
 }
 
@@ -578,23 +473,14 @@ impl From<Dismissal> for CardAction {
     fn from(dismissal: Dismissal) -> Self {
         match dismissal {
             Dismissal::Network { id } => Self::DismissNetwork { id },
-            Dismissal::Credential { id } => Self::DismissCredential { id },
-            Dismissal::SignIn { credential_id } => Self::CancelSignIn { credential_id },
             Dismissal::Inform { index } => Self::DismissInform { index },
         }
     }
 }
 
-/// What the user did in the token-fallback affordance shared by every connect card.
-enum TokenFallbackEvent {
-    Save(String),
-    OpenHelp(String),
-}
-
 fn item_height(item: &StackItem) -> f32 {
     match item {
         StackItem::Inform(_) => INFORM_ITEM_HEIGHT,
-        StackItem::Connecting(_) => CONNECTING_ITEM_HEIGHT,
         _ => CARD_ITEM_HEIGHT,
     }
 }
@@ -607,13 +493,12 @@ pub fn content_cap(monitor_height: Option<f32>) -> f32 {
 }
 
 /// A pre-measurement height seed for the reveal frame alone (which skips ui()), after which ui() snaps the window to its measured content.
-fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f32>) -> f32 {
+fn target_height(items: &[StackItem], monitor_height: Option<f32>) -> f32 {
     if items.is_empty() {
         return MIN_WINDOW_HEIGHT;
     }
     let content = items.iter().map(item_height).sum::<f32>()
         + theme::CARD_GAP * (items.len() - 1) as f32
-        + revealed as f32 * TOKEN_REVEAL_EXTRA
         + 2.0 * theme::STACK_MARGIN as f32;
     content.clamp(MIN_WINDOW_HEIGHT, content_cap(monitor_height))
 }
@@ -622,8 +507,6 @@ fn target_height(items: &[StackItem], revealed: usize, monitor_height: Option<f3
 pub fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    credential_inputs: &mut HashMap<String, String>,
-    token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
@@ -633,30 +516,14 @@ pub fn render_stack(
     if snapshot.order.len() == 1 {
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), false));
-        return render_single(
-            ui,
-            snapshot,
-            credential_inputs,
-            token_drafts,
-            remember,
-            scroll_max,
-        );
+        return render_single(ui, snapshot, remember, scroll_max);
     }
-    render_pile(
-        ui,
-        snapshot,
-        credential_inputs,
-        token_drafts,
-        remember,
-        scroll_max,
-    )
+    render_pile(ui, snapshot, remember, scroll_max)
 }
 
 fn render_single(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    credential_inputs: &mut HashMap<String, String>,
-    token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
@@ -678,15 +545,8 @@ fn render_single(
                         if idx > 0 {
                             ui.add_space(theme::CARD_GAP);
                         }
-                        let (item_action, response) = render_item(
-                            ui,
-                            item,
-                            snapshot,
-                            credential_inputs,
-                            token_drafts,
-                            remember,
-                            card_width,
-                        );
+                        let (item_action, response) =
+                            render_item(ui, item, snapshot, remember, card_width);
                         let mut fired = item_action;
                         let close_rect = egui::Rect::from_center_size(
                             response.rect.left_top() + egui::vec2(3.0, 3.0),
@@ -789,11 +649,6 @@ struct PileMemory {
 fn card_key(item: &StackItem, snapshot: &Snapshot) -> egui::Id {
     match *item {
         StackItem::Network(i) => egui::Id::new(("pile-net", &snapshot.pending[i].id)),
-        StackItem::Credential(i) => {
-            egui::Id::new(("pile-cred", &snapshot.pending_credentials[i].id))
-        }
-        StackItem::SignIn(i) => egui::Id::new(("pile-signin", &snapshot.sign_ins[i].credential_id)),
-        StackItem::Connecting(i) => egui::Id::new(("pile-conn", &snapshot.connecting[i])),
         StackItem::Inform(i) => egui::Id::new(("pile-inform", i)),
     }
 }
@@ -870,12 +725,6 @@ fn apply_dismissal(state: &WindowState, dismissal: &Dismissal) {
         Dismissal::Network { id } => {
             state.dismiss(id);
         }
-        Dismissal::Credential { id } => {
-            state.decide_credential(id, CredentialDecisionRequest::Dismiss);
-        }
-        Dismissal::SignIn { credential_id } => {
-            state.cancel_sign_in(credential_id);
-        }
         Dismissal::Inform { index } => {
             state.dismiss_inform(*index);
         }
@@ -918,8 +767,6 @@ fn render_pile_cards(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     snapshot: &Snapshot,
-    credential_inputs: &mut HashMap<String, String>,
-    token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
     geom: &PileGeom,
     layout: &PileLayout,
@@ -963,15 +810,7 @@ fn render_pile_cards(
                 ui.set_clip_rect(clip);
                 ui.set_opacity(alpha);
                 ui.set_width(w);
-                render_item(
-                    ui,
-                    &order[i],
-                    snapshot,
-                    credential_inputs,
-                    token_drafts,
-                    remember,
-                    w,
-                )
+                render_item(ui, &order[i], snapshot, remember, w)
             },
         );
         let (item_action, card_resp) = res.inner;
@@ -1148,8 +987,6 @@ fn pile_expand_hit(
 fn render_pile(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    credential_inputs: &mut HashMap<String, String>,
-    token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
@@ -1181,8 +1018,6 @@ fn render_pile(
         ui,
         &ctx,
         snapshot,
-        credential_inputs,
-        token_drafts,
         remember,
         &geom,
         &layout,
@@ -1238,8 +1073,6 @@ fn render_item(
     ui: &mut egui::Ui,
     item: &StackItem,
     snapshot: &Snapshot,
-    credential_inputs: &mut HashMap<String, String>,
-    token_drafts: &mut HashMap<String, TokenDraft>,
     remember: &mut HashMap<String, bool>,
     width: f32,
 ) -> (Option<CardAction>, egui::Response) {
@@ -1252,49 +1085,10 @@ fn render_item(
         }
         StackItem::Network(i) => {
             let prompt = &snapshot.pending[i];
-            if let Some(display_name) = &prompt.offer {
-                let draft = token_drafts.entry(prompt.id.clone()).or_default();
-                render_offer_card(ui, prompt, display_name, draft, width)
-            } else {
-                let flag = remember.entry(prompt.id.clone()).or_default();
-                render_network_card(ui, prompt, flag, width)
-            }
-        }
-        StackItem::SignIn(i) => {
-            let card = &snapshot.sign_ins[i];
-            let draft = token_drafts.entry(card.credential_id.clone()).or_default();
-            render_sign_in_card(ui, card, draft, width)
-        }
-        StackItem::Credential(i) => {
-            let prompt = &snapshot.pending_credentials[i];
-            let input = credential_inputs.entry(prompt.id.clone()).or_default();
-            let draft = token_drafts.entry(prompt.id.clone()).or_default();
-            render_credential_card(ui, prompt, input, draft, width)
-        }
-        StackItem::Connecting(i) => {
-            let r = crate::ui::card(ui, width, |ui| {
-                render_connecting_card(ui, &snapshot.connecting[i])
-            });
-            (None, r.response)
+            let flag = remember.entry(prompt.id.clone()).or_default();
+            render_network_card(ui, prompt, flag, width)
         }
     }
-}
-
-fn render_connecting_card(ui: &mut egui::Ui, display_name: &str) {
-    use egui::RichText;
-
-    crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
-
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add(egui::Spinner::new().size(18.0).color(window::ACCENT_GREEN));
-        ui.label(
-            RichText::new(format!("Connecting to {display_name}…"))
-                .size(16.0)
-                .strong()
-                .color(window::TEXT_ACCENT),
-        );
-    });
 }
 
 fn render_inform_content(ui: &mut egui::Ui, msg: &str) {
@@ -1312,13 +1106,6 @@ fn close_action(item: &StackItem, snapshot: &Snapshot) -> Option<Dismissal> {
         StackItem::Network(i) => Some(Dismissal::Network {
             id: snapshot.pending[i].id.clone(),
         }),
-        StackItem::SignIn(i) => Some(Dismissal::SignIn {
-            credential_id: snapshot.sign_ins[i].credential_id.clone(),
-        }),
-        StackItem::Credential(i) => Some(Dismissal::Credential {
-            id: snapshot.pending_credentials[i].id.clone(),
-        }),
-        StackItem::Connecting(_) => None,
     }
 }
 
@@ -1486,438 +1273,6 @@ fn remember_toggle(ui: &mut egui::Ui, remember: &mut bool) {
     }
 }
 
-fn render_offer_card(
-    ui: &mut egui::Ui,
-    prompt: &PendingPrompt,
-    display_name: &str,
-    draft: &mut TokenDraft,
-    width: f32,
-) -> (Option<CardAction>, egui::Response) {
-    use egui::RichText;
-
-    let id = prompt.id.clone();
-    let out = crate::ui::card_sectioned(
-        ui,
-        width,
-        |ui| {
-            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
-            run_identity_line(ui, prompt.run.as_ref());
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!("Connect to {display_name}?"))
-                    .size(theme::FONT_TITLE)
-                    .strong()
-                    .color(window::TEXT_ACCENT),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(format!("A workload wants to reach {}.", prompt.host))
-                    .size(theme::FONT_BODY)
-                    .color(window::TEXT_MUTED),
-            );
-        },
-        |ui| {
-            let mut action: Option<CardAction> = None;
-            ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], "Connect").clicked() {
-                    action = Some(CardAction::ConnectOffer { id: id.clone() });
-                }
-                if secondary_button(&mut cols[1], "Not now").clicked() {
-                    action = Some(CardAction::DeclineOffer { id: id.clone() });
-                }
-            });
-            if action.is_none()
-                && let Some(fallback) = &prompt.token_fallback
-            {
-                action = match render_token_fallback(ui, fallback, draft) {
-                    Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseOfferToken {
-                        id: id.clone(),
-                        value,
-                    }),
-                    Some(TokenFallbackEvent::OpenHelp(url)) => {
-                        Some(CardAction::OpenBrowser { url })
-                    }
-                    None => None,
-                };
-            }
-            action
-        },
-    );
-    (out.inner, out.response)
-}
-
-fn render_credential_card(
-    ui: &mut egui::Ui,
-    prompt: &CredentialCardPrompt,
-    input: &mut String,
-    draft: &mut TokenDraft,
-    width: f32,
-) -> (Option<CardAction>, egui::Response) {
-    use egui::RichText;
-
-    if let Some(display_name) = &prompt.oauth_display_name {
-        return render_oauth_consent_card(ui, prompt, display_name, draft, width);
-    }
-
-    let id = prompt.id.clone();
-    let out = crate::ui::card_sectioned(
-        ui,
-        width,
-        |ui| {
-            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_KEY, "CREDENTIAL");
-            run_identity_line(ui, prompt.run.as_ref());
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(&prompt.credential_id)
-                    .size(theme::FONT_TITLE)
-                    .strong()
-                    .color(window::TEXT_ACCENT),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(&prompt.action)
-                    .size(theme::FONT_CAPTION)
-                    .monospace()
-                    .color(window::TEXT_MUTED),
-            );
-            if let Some(env) = &prompt.env_var {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("Reads host env: ${env}"))
-                        .size(theme::FONT_CAPTION)
-                        .color(window::TEXT_MUTED),
-                );
-            }
-            if !prompt.injection_domains.is_empty() {
-                ui.add_space(2.0);
-                let domains = prompt.injection_domains.join(", ");
-                ui.label(
-                    RichText::new(format!("Sends to: {domains}"))
-                        .size(theme::FONT_CAPTION)
-                        .color(window::TEXT_MUTED),
-                );
-            }
-            if prompt.is_project_defined {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Project-defined provider (not built-in)")
-                        .size(theme::FONT_CAPTION)
-                        .strong()
-                        .color(window::TEXT_WARN),
-                );
-            }
-            if !prompt.host_value_available && !prompt.bound_value_available {
-                ui.add_space(8.0);
-                ui.colored_label(
-                    window::TEXT_MUTED,
-                    RichText::new("No token found on this host.")
-                        .size(theme::FONT_CAPTION)
-                        .italics(),
-                );
-                if let Some(command) = prompt
-                    .token_fallback
-                    .as_ref()
-                    .and_then(|f| f.command.as_deref())
-                {
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Create one on your host, then paste it:")
-                            .size(theme::FONT_CAPTION)
-                            .color(window::TEXT_MUTED),
-                    );
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(format!("$ {command}"))
-                            .size(theme::FONT_CAPTION)
-                            .monospace()
-                            .color(window::TEXT_ACCENT),
-                    );
-                }
-            }
-        },
-        |ui| {
-            let mut chosen: Option<CredentialDecisionRequest> = None;
-            if prompt.bound_value_available {
-                if primary_button(ui, "Use connected value").clicked() {
-                    chosen = Some(CredentialDecisionRequest::AllowBound);
-                }
-                ui.add_space(BTN_GAP);
-            }
-            if prompt.host_value_available {
-                if primary_button(ui, "Use detected value").clicked() {
-                    chosen = Some(CredentialDecisionRequest::Allow(
-                        CredentialEntry::HostDetect,
-                    ));
-                }
-                ui.add_space(BTN_GAP);
-            }
-            secret_input(ui, input, "Enter a value");
-            ui.add_space(BTN_GAP);
-            let submit_enabled = !input.trim().is_empty();
-            ui.columns(2, |cols| {
-                if enabled_primary_button(&mut cols[0], "Submit", submit_enabled).clicked()
-                    && submit_enabled
-                {
-                    chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                        value: input.trim().to_string(),
-                    }));
-                }
-                if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(deny_request(prompt.deny_scope));
-                }
-            });
-            chosen.map(|request| CardAction::DecideCredential {
-                id: id.clone(),
-                request,
-            })
-        },
-    );
-    (out.inner, out.response)
-}
-
-fn render_oauth_consent_card(
-    ui: &mut egui::Ui,
-    prompt: &CredentialCardPrompt,
-    display_name: &str,
-    draft: &mut TokenDraft,
-    width: f32,
-) -> (Option<CardAction>, egui::Response) {
-    use egui::RichText;
-
-    let id = prompt.id.clone();
-    let out = crate::ui::card_sectioned(
-        ui,
-        width,
-        |ui| {
-            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
-            run_identity_line(ui, prompt.run.as_ref());
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!("Connect to {display_name}?"))
-                    .size(theme::FONT_TITLE)
-                    .strong()
-                    .color(window::TEXT_ACCENT),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(format!(
-                    "A workload wants to use your {display_name} access."
-                ))
-                .size(theme::FONT_BODY)
-                .color(window::TEXT_MUTED),
-            );
-            if prompt.bound_value_available {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("You are already signed in to {display_name}."))
-                        .size(theme::FONT_CAPTION)
-                        .color(window::TEXT_MUTED),
-                );
-            }
-        },
-        |ui| {
-            let mut chosen: Option<CredentialDecisionRequest> = None;
-            // Granting the existing sign-in is offered alongside a fresh one, never instead of it: the bound connection can be the wrong account or one the service has since revoked, and denying is a standing no for this workload rather than a way to re-authenticate.
-            if prompt.bound_value_available {
-                if primary_button(ui, "Use connection").clicked() {
-                    chosen = Some(CredentialDecisionRequest::AllowBound);
-                }
-                ui.add_space(BTN_GAP);
-            }
-            let connect_label = if prompt.bound_value_available {
-                "Reconnect"
-            } else {
-                "Connect"
-            };
-            ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], connect_label).clicked() {
-                    chosen = Some(CredentialDecisionRequest::Allow(
-                        CredentialEntry::HostDetect,
-                    ));
-                }
-                if deny_button(&mut cols[1], "Deny").clicked() {
-                    chosen = Some(deny_request(prompt.deny_scope));
-                }
-            });
-            if chosen.is_none()
-                && let Some(fallback) = &prompt.token_fallback
-            {
-                match render_token_fallback(ui, fallback, draft) {
-                    Some(TokenFallbackEvent::Save(value)) => {
-                        chosen = Some(CredentialDecisionRequest::Allow(CredentialEntry::Stored {
-                            value,
-                        }));
-                    }
-                    Some(TokenFallbackEvent::OpenHelp(url)) => {
-                        return Some(CardAction::OpenBrowser { url });
-                    }
-                    None => {}
-                }
-            }
-            chosen.map(|request| CardAction::DecideCredential {
-                id: id.clone(),
-                request,
-            })
-        },
-    );
-    (out.inner, out.response)
-}
-
-fn render_sign_in_card(
-    ui: &mut egui::Ui,
-    card: &SignInCard,
-    draft: &mut TokenDraft,
-    width: f32,
-) -> (Option<CardAction>, egui::Response) {
-    use egui::RichText;
-
-    let out = crate::ui::card_sectioned(
-        ui,
-        width,
-        |ui| {
-            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
-            run_identity_line(ui, card.run.as_ref());
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!("Connect to {}", card.display_name))
-                    .size(theme::FONT_TITLE)
-                    .strong()
-                    .color(window::TEXT_ACCENT),
-            );
-            ui.add_space(8.0);
-            match &card.user_code {
-                Some(user_code) => {
-                    ui.label(
-                        RichText::new("Enter this code on the page that opens:")
-                            .size(theme::FONT_BODY)
-                            .color(window::TEXT_MUTED),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(user_code)
-                            .size(28.0)
-                            .strong()
-                            .monospace()
-                            .color(window::TEXT_ACCENT),
-                    );
-                }
-                None => {
-                    ui.label(
-                        RichText::new("Your browser is opening to finish signing in…")
-                            .size(theme::FONT_BODY)
-                            .color(window::TEXT_MUTED),
-                    );
-                }
-            }
-        },
-        |ui| {
-            let mut action: Option<CardAction> = None;
-            ui.columns(2, |cols| {
-                if primary_button(&mut cols[0], "Open").clicked() {
-                    action = Some(CardAction::OpenBrowser {
-                        url: card.verification_uri.clone(),
-                    });
-                }
-                if secondary_button(&mut cols[1], "Cancel").clicked() {
-                    action = Some(CardAction::CancelSignIn {
-                        credential_id: card.credential_id.clone(),
-                    });
-                }
-            });
-            if action.is_none()
-                && let Some(fallback) = &card.token_fallback
-            {
-                action = match render_token_fallback(ui, fallback, draft) {
-                    Some(TokenFallbackEvent::Save(value)) => Some(CardAction::UseTokenSignIn {
-                        credential_id: card.credential_id.clone(),
-                        value,
-                    }),
-                    Some(TokenFallbackEvent::OpenHelp(url)) => {
-                        Some(CardAction::OpenBrowser { url })
-                    }
-                    None => None,
-                };
-            }
-            action
-        },
-    );
-    (out.inner, out.response)
-}
-
-/// Progressive disclosure shared by every connect card: a muted "Use a token instead" that, once clicked, reveals a password field + "Save" and (when declared) a help link. Returns the user's action without performing it.
-fn render_token_fallback(
-    ui: &mut egui::Ui,
-    fallback: &TokenFallback,
-    draft: &mut TokenDraft,
-) -> Option<TokenFallbackEvent> {
-    use egui::{RichText, Sense};
-
-    ui.add_space(BTN_GAP);
-    if !draft.revealed {
-        let link = ui.add(
-            egui::Label::new(
-                RichText::new("Use a token instead")
-                    .size(11.5)
-                    .underline()
-                    .color(window::TEXT_MUTED),
-            )
-            .sense(Sense::click()),
-        );
-        if link.clicked() {
-            draft.revealed = true;
-        }
-        return None;
-    }
-
-    ui.add_space(6.0);
-    secret_input(ui, &mut draft.value, "Paste a token");
-
-    let mut event = None;
-    if let Some(help) = &fallback.help {
-        ui.add_space(6.0);
-        if help_link(ui, "How do I create a token?").clicked() {
-            event = Some(TokenFallbackEvent::OpenHelp(help.clone()));
-        }
-    }
-
-    ui.add_space(BTN_GAP);
-    let enabled = !draft.value.trim().is_empty();
-    if enabled_primary_button(ui, "Save", enabled).clicked() && enabled {
-        event = Some(TokenFallbackEvent::Save(draft.value.trim().to_string()));
-    }
-    event
-}
-
-fn help_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    use egui::{RichText, Sense};
-    ui.add(
-        egui::Label::new(
-            RichText::new(text)
-                .size(10.5)
-                .underline()
-                .color(window::TEXT_MUTED),
-        )
-        .sense(Sense::click()),
-    )
-}
-
-fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
-    ui.scope(|ui| {
-        ui.style_mut().visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0_f32, window::BORDER);
-        ui.style_mut().visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(96));
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .password(true)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(10, 9))
-                .desired_width(f32::INFINITY),
-        )
-    })
-    .inner
-}
-
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     enabled_primary_button(ui, label, true)
 }
@@ -1929,40 +1284,16 @@ fn enabled_primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui
         .show(ui)
 }
 
-fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    Button::new(label, ButtonKind::Secondary)
-        .min_size(egui::vec2(ui.available_width(), 0.0))
-        .show(ui)
-}
-
 fn deny_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     Button::new(label, ButtonKind::Danger)
         .min_size(egui::vec2(ui.available_width(), 0.0))
         .show(ui)
 }
 
-fn prune_credential_inputs(inputs: &mut HashMap<String, String>, snapshot: &Snapshot) {
-    let still_pending: std::collections::HashSet<&str> = snapshot
-        .pending_credentials
-        .iter()
-        .map(|p| p.id.as_str())
-        .collect();
-    inputs.retain(|id, _| still_pending.contains(id.as_str()));
-}
-
 fn prune_remember(remember: &mut HashMap<String, bool>, snapshot: &Snapshot) {
     let still_pending: std::collections::HashSet<&str> =
         snapshot.pending.iter().map(|p| p.id.as_str()).collect();
     remember.retain(|id, _| still_pending.contains(id.as_str()));
-}
-
-/// Token drafts are keyed by the shown card's id — a network request id, a credential prompt id, or a sign-in credential id — so a draft survives only while its card is still on screen.
-fn prune_token_drafts(drafts: &mut HashMap<String, TokenDraft>, snapshot: &Snapshot) {
-    let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    live.extend(snapshot.pending.iter().map(|p| p.id.as_str()));
-    live.extend(snapshot.pending_credentials.iter().map(|p| p.id.as_str()));
-    live.extend(snapshot.sign_ins.iter().map(|c| c.credential_id.as_str()));
-    drafts.retain(|key, _| live.contains(key.as_str()));
 }
 
 pub fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
@@ -2104,7 +1435,7 @@ mod tests {
             .or_default()
             .monitor_size = Some(egui::vec2(1920.0, 1080.0));
         let output = ctx.run_ui(input, |ctx| {
-            placement.sync_visibility(ctx, &[StackItem::Network(0)], 0);
+            placement.sync_visibility(ctx, &[StackItem::Network(0)]);
         });
         output.viewport_output[&egui::ViewportId::ROOT]
             .commands
@@ -2221,8 +1552,6 @@ mod tests {
 
         let fired: Arc<Mutex<Option<CardAction>>> = Arc::new(Mutex::new(None));
         let sink = fired.clone();
-        let mut credential_inputs = HashMap::new();
-        let mut token_drafts = HashMap::new();
         let mut remember = HashMap::new();
 
         // egui applies added fonts at the next pass, so the icon font goes in on a pass that draws nothing — otherwise a card's eyebrow icon panics on an unbound family.
@@ -2238,14 +1567,7 @@ mod tests {
                     prepared = true;
                     return;
                 }
-                let (action, _) = render_stack(
-                    ui,
-                    &snapshot,
-                    &mut credential_inputs,
-                    &mut token_drafts,
-                    &mut remember,
-                    1000.0,
-                );
+                let (action, _) = render_stack(ui, &snapshot, &mut remember, 1000.0);
                 if let Some(action) = action {
                     *sink.lock().expect("action sink poisoned") = Some(action);
                 }
@@ -2263,33 +1585,12 @@ mod tests {
         fired.lock().expect("action sink poisoned").take()
     }
 
-    /// A pile with no connecting placeholder, whose spinner would repaint forever and stall the harness.
-    fn two_credential_cards() -> Snapshot {
-        Snapshot {
-            pending: Vec::new(),
-            pending_credentials: vec![credential_prompt("c0"), credential_prompt("c1")],
-            sign_ins: Vec::new(),
-            informs: Vec::new(),
-            connecting: Vec::new(),
-            order: vec![StackItem::Credential(0), StackItem::Credential(1)],
-        }
-    }
-
     #[test]
     fn the_close_all_pill_fires_a_close_all_rather_than_a_per_card_decision() {
         assert_eq!(
-            click_labelled_control(two_credential_cards(), CLOSE_ALL_LABEL, true),
+            click_labelled_control(pile_seed(), CLOSE_ALL_LABEL, true),
             Some(CardAction::CloseAll),
             "the pile header's ✕ must route through close_all, not decide each card where no test can see it"
-        );
-    }
-
-    #[test]
-    fn the_hover_close_button_dismisses_a_credential_card_without_deciding() {
-        assert_eq!(
-            click_labelled_control(one_credential_card(), CLOSE_LABEL, false),
-            Some(CardAction::DismissCredential { id: "c1".into() }),
-            "the ✕ the developer actually clicks carries no verdict, so it cannot persist a rule"
         );
     }
 
@@ -2300,15 +1601,10 @@ mod tests {
                 id: "r1".into(),
                 host: "api.example.test".into(),
                 action: "CONNECT api.example.test:443".into(),
-                offer: None,
-                token_fallback: None,
                 treatment: Treatment::Inspected,
                 run: Some("some-run".into()),
             }],
-            pending_credentials: Vec::new(),
-            sign_ins: Vec::new(),
             informs: Vec::new(),
-            connecting: Vec::new(),
             order: vec![StackItem::Network(0)],
         };
 
@@ -2319,83 +1615,20 @@ mod tests {
         );
     }
 
-    fn credential_pending_prompt(
-        id: &str,
-    ) -> crate::credential_flow::session::CredentialPendingPrompt {
-        crate::credential_flow::session::CredentialPendingPrompt {
-            id: id.to_string(),
-            credential_id: "some-provider".to_string(),
-            action: "read".to_string(),
-            oauth_display_name: None,
-            token_fallback: None,
-            env_var: None,
-            injection_domains: vec![],
-            is_project_defined: false,
-            bound_value_available: false,
-            deny_scope: crate::credential_flow::session::DenyScope::Workload,
-            run: Some("some-run".into()),
-        }
-    }
-
-    fn one_credential_card() -> Snapshot {
-        Snapshot {
-            pending: Vec::new(),
-            pending_credentials: vec![credential_prompt("c1")],
-            sign_ins: Vec::new(),
-            informs: Vec::new(),
-            connecting: Vec::new(),
-            order: vec![StackItem::Credential(0)],
-        }
-    }
-
-    fn card_with_deny_scope(scope: DenyScope) -> Snapshot {
-        Snapshot {
-            pending_credentials: vec![CredentialCardPrompt {
-                deny_scope: scope,
-                ..credential_prompt("c1")
-            }],
-            ..one_credential_card()
-        }
-    }
-
-    #[test]
-    fn a_run_card_denies_only_for_this_workload() {
-        assert_eq!(
-            click_labelled_control(card_with_deny_scope(DenyScope::Workload), "Deny", false),
-            Some(CardAction::DecideCredential {
-                id: "c1".into(),
-                request: CredentialDecisionRequest::Deny
-            }),
-            "a card raised by a run speaks for that workload, so its Deny must not reach the machine-wide store"
-        );
-    }
-
-    #[test]
-    fn the_bind_card_denies_for_the_whole_machine() {
-        assert_eq!(
-            click_labelled_control(card_with_deny_scope(DenyScope::Machine), "Deny", false),
-            Some(CardAction::DecideCredential {
-                id: "c1".into(),
-                request: CredentialDecisionRequest::DenyAlways
-            }),
-            "the bind card is the only one entitled to a standing refusal, and swapping this mapping would make `lns connector connect` + Deny record nothing"
-        );
-    }
-
-    #[test]
-    fn closing_a_credential_card_decides_nothing() {
-        assert_eq!(
-            close_action(&StackItem::Credential(0), &one_credential_card()),
-            Some(Dismissal::Credential { id: "c1".into() }),
-            "a dismissed card is not a decision, so its action has nowhere to carry one"
-        );
-    }
-
     #[test]
     fn closing_every_card_at_once_decides_nothing() {
         let state = WindowState::new();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(state.try_insert_credential_pending(credential_pending_prompt("c1"), false, tx));
+        state.insert_pending(
+            PendingPrompt {
+                id: "r1".into(),
+                host: "api.example.test".into(),
+                action: "CONNECT api.example.test:443".into(),
+                treatment: Treatment::Inspected,
+                run: Some("some-run".into()),
+            },
+            tx,
+        );
 
         close_all(&state, &state.snapshot());
 
@@ -2403,94 +1636,9 @@ mod tests {
             .try_recv()
             .expect("close-all must resolve every held request");
         assert_eq!(
-            delivery.request,
-            CredentialDecisionRequest::Dismiss,
-            "one click on close-all must not permanently deny every credential in the stack"
-        );
-    }
-
-    #[test]
-    fn close_all_takes_down_every_kind_of_card_in_the_stack() {
-        let state = WindowState::new();
-        let (net_tx, _net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (cred_tx, _cred_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
-        state.insert_pending(
-            crate::approval_flow::session::PendingPrompt {
-                id: "r1".into(),
-                host: "api.example.test".into(),
-                action: "CONNECT api.example.test:443".into(),
-                offer: None,
-                token_fallback: None,
-                treatment: Treatment::Inspected,
-                run: Some("some-run".into()),
-            },
-            net_tx,
-        );
-        state.insert_credential_pending(credential_pending_prompt("c1"), false, cred_tx);
-        state.insert_sign_in(
-            crate::approval_flow::window::SignInCard {
-                credential_id: "some-oauth".into(),
-                display_name: "Some OAuth".into(),
-                user_code: None,
-                verification_uri: "https://api.some-oauth.example/device".into(),
-                token_fallback: None,
-                env_var: None,
-                injection_domains: vec![],
-                is_project_defined: false,
-                run: Some("some-run".into()),
-            },
-            cancel_tx,
-        );
-        state.push_inform("something went wrong".into());
-
-        close_all(&state, &state.snapshot());
-
-        let left = state.snapshot();
-        assert!(
-            left.order.is_empty(),
-            "every card kind the stack can hold must come down on close-all, or its held request hangs to the approval timeout: {:?}",
-            left.order
-        );
-    }
-
-    fn credential_prompt(id: &str) -> CredentialCardPrompt {
-        CredentialCardPrompt {
-            id: id.to_string(),
-            credential_id: "cred".to_string(),
-            action: "read".to_string(),
-            host_value_available: false,
-            bound_value_available: false,
-            oauth_display_name: None,
-            token_fallback: None,
-            env_var: None,
-            injection_domains: vec![],
-            is_project_defined: false,
-            deny_scope: DenyScope::Workload,
-            run: Some("some-run".into()),
-        }
-    }
-
-    #[test]
-    fn prune_credential_inputs_drops_buffers_for_no_longer_pending_prompts() {
-        let snapshot = Snapshot {
-            pending: Vec::new(),
-            pending_credentials: vec![credential_prompt("keep")],
-            sign_ins: Vec::new(),
-            informs: Vec::new(),
-            connecting: Vec::new(),
-            order: vec![StackItem::Credential(0)],
-        };
-        let mut inputs = HashMap::new();
-        inputs.insert("keep".to_string(), "typed so far".to_string());
-        inputs.insert("stale".to_string(), "abandoned".to_string());
-
-        prune_credential_inputs(&mut inputs, &snapshot);
-
-        assert_eq!(inputs.get("keep").map(String::as_str), Some("typed so far"));
-        assert!(
-            !inputs.contains_key("stale"),
-            "stale buffer must be dropped"
+            delivery.action,
+            crate::approval_flow::window::RequestAction::Dismiss,
+            "one click on close-all must not permanently deny every held request in the stack"
         );
     }
 
@@ -2504,27 +1652,19 @@ mod tests {
     }
 
     fn pile_seed() -> Snapshot {
-        let net = |id: &str, host: &str, offer: Option<&str>| PendingPrompt {
+        let net = |id: &str, host: &str| PendingPrompt {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
-            offer: offer.map(str::to_string),
-            token_fallback: None,
             treatment: Treatment::Inspected,
             run: Some("some-run".into()),
         };
         Snapshot {
-            pending: vec![net("n0", "a.test", None), net("n1", "b.test", Some("Svc"))],
-            pending_credentials: vec![credential_prompt("c0"), credential_prompt("c1")],
-            sign_ins: Vec::new(),
+            pending: vec![net("n0", "a.test"), net("n1", "b.test")],
             informs: vec!["warn".into()],
-            connecting: vec!["Svc".into()],
             order: vec![
                 StackItem::Network(0),
                 StackItem::Network(1),
-                StackItem::Credential(0),
-                StackItem::Credential(1),
-                StackItem::Connecting(0),
                 StackItem::Inform(0),
             ],
         }
@@ -2570,7 +1710,7 @@ mod tests {
         window::install_icon_font(&ctx);
         let snapshot = pile_seed();
         let error = ctx.global_style().visuals.error_fg_color;
-        let (mut ci, mut td, mut rem) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let mut rem: HashMap<String, bool> = HashMap::new();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), true));
 
         let mut clash = false;
@@ -2591,7 +1731,7 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
-                render_stack(ui, &snapshot, &mut ci, &mut td, &mut rem, 6000.0);
+                render_stack(ui, &snapshot, &mut rem, 6000.0);
             });
             let reds = [error, egui::Color32::RED, egui::Color32::ORANGE];
             if output
@@ -2610,7 +1750,7 @@ mod tests {
 
     #[test]
     fn target_height_is_the_floor_when_the_stack_is_empty() {
-        assert_eq!(target_height(&[], 0, Some(1080.0)), MIN_WINDOW_HEIGHT);
+        assert_eq!(target_height(&[], Some(1080.0)), MIN_WINDOW_HEIGHT);
     }
 
     #[test]
@@ -2626,10 +1766,9 @@ mod tests {
 
     #[test]
     fn target_height_grows_with_each_additional_card() {
-        let one = target_height(&[StackItem::Network(0)], 0, Some(2000.0));
+        let one = target_height(&[StackItem::Network(0)], Some(2000.0));
         let two = target_height(
-            &[StackItem::Network(0), StackItem::Credential(0)],
-            0,
+            &[StackItem::Network(0), StackItem::Network(1)],
             Some(2000.0),
         );
         assert!(
@@ -2639,26 +1778,10 @@ mod tests {
     }
 
     #[test]
-    fn a_connecting_placeholder_takes_less_room_than_a_full_card() {
-        assert!(item_height(&StackItem::Connecting(0)) < item_height(&StackItem::Network(0)));
-        assert_eq!(
-            item_height(&StackItem::Connecting(0)),
-            CONNECTING_ITEM_HEIGHT
-        );
-    }
-
-    #[test]
-    fn target_height_adds_room_for_a_revealed_token_field() {
-        let collapsed = target_height(&[StackItem::Network(0)], 0, Some(2000.0));
-        let revealed = target_height(&[StackItem::Network(0)], 1, Some(2000.0));
-        assert!(revealed > collapsed);
-    }
-
-    #[test]
     fn target_height_caps_a_long_stack_at_the_usable_monitor_height() {
         let many: Vec<StackItem> = (0..40).map(StackItem::Network).collect();
         assert_eq!(
-            target_height(&many, 0, Some(900.0)),
+            target_height(&many, Some(900.0)),
             900.0 - 2.0 * SCREEN_EDGE_MARGIN,
             "a long stack scrolls inside a screen-bounded window instead of running off-screen"
         );
@@ -2667,7 +1790,7 @@ mod tests {
     #[test]
     fn target_height_falls_back_to_a_fixed_cap_without_a_known_monitor() {
         let many: Vec<StackItem> = (0..40).map(StackItem::Network).collect();
-        assert_eq!(target_height(&many, 0, None), FALLBACK_MAX_HEIGHT);
+        assert_eq!(target_height(&many, None), FALLBACK_MAX_HEIGHT);
     }
 
     #[test]

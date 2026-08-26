@@ -57,7 +57,7 @@ When the workload opens a connection no rule covers, the background service rais
 
 ## Documentation
 
-Start with [`docs/getting-started.md`](docs/getting-started.md), or browse the [documentation index](docs/README.md): [running workloads](docs/running-workloads.md), [policy & approvals](docs/policy.md), [credentials](docs/credentials.md), [audit](docs/audit.md), [the background service](docs/service.md), and the [CLI reference](docs/cli-reference.md).
+Start with [`docs/getting-started.md`](docs/getting-started.md), or browse the [documentation index](docs/README.md): [running workloads](docs/running-workloads.md), [policy & approvals](docs/policy.md), [audit](docs/audit.md), [the background service](docs/service.md), and the [CLI reference](docs/cli-reference.md).
 
 ## Repository
 

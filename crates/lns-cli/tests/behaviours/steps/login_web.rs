@@ -2,7 +2,7 @@ use crate::runner::CliRun;
 use crate::world::BehaviourWorld;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
-use lns_cli::connector::LocalBoxFuture;
+use lns_cli::local_future::LocalBoxFuture;
 use lns_cli::login::{
     self, ListLoginsOutcome, LoginArgs, LoginOutcome, LogoutOutcome, RegistryAuthClient,
     WebLoginFlow, WebLoginOutcome,

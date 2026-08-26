@@ -285,12 +285,6 @@ fn write_disclosed_blocks(s: &mut String, args: &RunArgs) {
         &listed(lns_ipc::ContributionBlock::Egress),
         composed,
     );
-    write_block(
-        s,
-        "Credentials",
-        &listed(lns_ipc::ContributionBlock::Credential),
-        composed,
-    );
 }
 
 fn write_block(
@@ -942,9 +936,7 @@ mod tests {
                 owner: lns_ipc::SandboxFilesetOwner::Root,
                 optional: false,
             }],
-            connectors: Vec::new(),
             env: Vec::new(),
-            credentials: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
             policy_flags: Vec::new(),
@@ -1162,7 +1154,7 @@ mod tests {
     #[test]
     fn a_contribution_of_another_block_never_supplies_a_decider() {
         let contributions = vec![contributed(
-            lns_ipc::ContributionBlock::Credential,
+            lns_ipc::ContributionBlock::Tool,
             "/home/agent/.gitconfig",
             &pinned_mixin(),
             &[],
@@ -1170,7 +1162,7 @@ mod tests {
         assert_eq!(
             fileset_declared_by(&contributions, "/home/agent/.gitconfig"),
             None,
-            "a credential keyed alike must not decide a fileset"
+            "a tool keyed alike must not decide a fileset"
         );
     }
 
@@ -1210,45 +1202,6 @@ mod tests {
         assert!(
             s.contains("node@22  [from ghcr.io/acme/obs@sha256:cccccccccccc…, replaced node@20 from the sandbox]"),
             "a developer reading `node@22` has to be able to see that a mixin put it there over the version their own document asked for; got: {s}"
-        );
-    }
-
-    #[test]
-    fn a_composed_run_lists_the_rules_and_credentials_the_merge_produced() {
-        let mut args = run_args(Some("prism"));
-        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
-        composed(
-            &mut args,
-            vec![
-                contributed(
-                    lns_ipc::ContributionBlock::Egress,
-                    "api.vendor.example",
-                    &obs,
-                    &[],
-                ),
-                contributed(
-                    lns_ipc::ContributionBlock::Credential,
-                    "SOME_TOKEN",
-                    &obs,
-                    &[],
-                ),
-            ],
-        );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(
-            s.contains(
-                "Rules:     api.vendor.example  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"
-            ),
-            "a destination a mixin opened is the whole reason the merged table is disclosed before boot; got: {s}"
-        );
-        assert!(
-            s.contains("Credentials: SOME_TOKEN  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
-            "a credential the sandbox never asked for has to be traceable to the source that asked; got: {s}"
         );
     }
 
@@ -1406,48 +1359,6 @@ mod tests {
         assert!(
             s.contains("[from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
             "a mixin opening a host socket is a thing the developer is approving, so it has to name who asked; got: {s}"
-        );
-    }
-
-    #[test]
-    fn a_second_credential_lines_up_under_the_first() {
-        let mut args = run_args(Some("prism"));
-        let obs = format!("ghcr.io/acme/obs@sha256:{}", "c".repeat(64));
-        composed(
-            &mut args,
-            vec![
-                contributed(
-                    lns_ipc::ContributionBlock::Credential,
-                    "SOME_TOKEN",
-                    &obs,
-                    &[],
-                ),
-                contributed(
-                    lns_ipc::ContributionBlock::Credential,
-                    "SOME_OTHER_TOKEN",
-                    &obs,
-                    &[],
-                ),
-            ],
-        );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        let first = s
-            .lines()
-            .find(|l| l.contains("SOME_TOKEN"))
-            .expect("the first credential renders");
-        let second = s
-            .lines()
-            .find(|l| l.contains("SOME_OTHER_TOKEN"))
-            .expect("the second credential renders");
-        assert_eq!(
-            first.find("SOME_TOKEN"),
-            second.find("SOME_OTHER_TOKEN"),
-            "a label wider than the column still has to line its own entries up, or the block stops reading as one list"
         );
     }
 

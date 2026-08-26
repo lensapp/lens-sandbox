@@ -16,19 +16,17 @@ use tracing::Instrument;
 
 use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::session::ApprovalSession;
-use crate::credential_flow::session::CredentialSession;
 use crate::log;
 
 use super::{
-    AuditBudget, MAX_AUDIT_MESSAGE_BYTES, buffer_frame, current_credentials, handle_inbound,
-    is_expected_close, seed_frames, supersede_connection, validate_authorization_header,
+    AuditBudget, MAX_AUDIT_MESSAGE_BYTES, buffer_frame, handle_inbound, is_expected_close,
+    seed_frames, supersede_connection, validate_authorization_header,
 };
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_loop(
     mut fd_rx: mpsc::UnboundedReceiver<RawFd>,
     session: Arc<ApprovalSession>,
-    credential_session: Arc<CredentialSession>,
     mut frame_rx: mpsc::UnboundedReceiver<HostFrame>,
     token: String,
     audit: PathBuf,
@@ -52,18 +50,13 @@ pub(super) async fn accept_loop(
                 let Some(fd) = accepted else { break };
                 supersede_connection(conn_shutdown.take(), conn_task.take()).await;
                 let (tx, rx) = mpsc::unbounded_channel::<HostFrame>();
-                let seeded = seed_frames(
-                    std::mem::take(&mut pending),
-                    &session.current_policy(),
-                    current_credentials(&credential_session),
-                );
+                let seeded = seed_frames(std::mem::take(&mut pending), &session.current_policy());
                 for frame in seeded {
                     let _ = tx.send(frame);
                 }
                 conn_tx = Some(tx);
                 let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
                 let session_c = session.clone();
-                let credential_session_c = credential_session.clone();
                 let token_c = token.clone();
                 let audit_c = audit.clone();
                 let user_env_c = user_env.clone();
@@ -75,7 +68,6 @@ pub(super) async fn accept_loop(
                         if let Err(e) = handle_connection(
                             fd,
                             session_c,
-                            credential_session_c,
                             rx,
                             token_c,
                             audit_c,
@@ -111,7 +103,6 @@ pub(super) async fn accept_loop(
         }
     }
     session.withdraw_run();
-    credential_session.withdraw_run();
 }
 
 #[allow(clippy::result_large_err)]
@@ -119,7 +110,6 @@ pub(super) async fn accept_loop(
 async fn handle_connection(
     fd: RawFd,
     session: Arc<ApprovalSession>,
-    credential_session: Arc<CredentialSession>,
     mut frame_rx: mpsc::UnboundedReceiver<HostFrame>,
     expected_token: String,
     audit_path: PathBuf,
@@ -178,14 +168,6 @@ async fn handle_connection(
     let mut chain = lns_ipc::AuditChain::resuming_from_anchor(resume_anchor.as_ref());
     let mut anchor_sink = crate::audit::FileAnchorSink::new(anchor_path);
     let mut audit_file = crate::audit::LazyAuditLog::new(audit_path);
-    let extra_managed: Vec<String> = {
-        use crate::credential_flow::providers::Provider;
-        credential_session
-            .custom_providers()
-            .iter()
-            .map(|p| p.env_var().to_string())
-            .collect()
-    };
     let mut writer = super::AuditWriter {
         chain: &mut chain,
         log: &mut audit_file,
@@ -193,19 +175,12 @@ async fn handle_connection(
         run: &identity.run,
         microvm: &identity.microvm,
     };
-    super::write_run_env_event(
-        &user_env,
-        &extra_managed,
-        &mut writer,
-        &crate::oauth::RealClock,
-    )
-    .await?;
+    super::write_run_env_event(&user_env, &mut writer, &crate::clock::RealClock).await?;
 
     let result = serve(
         &mut write,
         &mut read,
         &session,
-        &credential_session,
         &mut frame_rx,
         &mut writer,
         shutdown,
@@ -229,7 +204,6 @@ async fn serve(
     write: &mut SplitSink<WebSocketStream<UnixStream>, Message>,
     read: &mut futures_util::stream::SplitStream<WebSocketStream<UnixStream>>,
     session: &Arc<ApprovalSession>,
-    credential_session: &Arc<CredentialSession>,
     frame_rx: &mut mpsc::UnboundedReceiver<HostFrame>,
     writer: &mut super::AuditWriter<'_, crate::audit::LazyAuditLog, crate::audit::FileAnchorSink>,
     mut shutdown: oneshot::Receiver<()>,
@@ -258,10 +232,9 @@ async fn serve(
                 if handle_inbound(
                     msg,
                     session,
-                    credential_session,
                     writer,
                     budget,
-                    &crate::oauth::RealClock,
+                    &crate::clock::RealClock,
                 )
                 .await?
                 {

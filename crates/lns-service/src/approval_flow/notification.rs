@@ -62,16 +62,6 @@ impl Notifier for WindowNotifier {
         self.state.clear_informs();
         self.wake();
     }
-
-    fn connect_finished(&self, display_name: &str) {
-        self.state.clear_connecting(display_name);
-        self.wake();
-    }
-
-    fn clear_all_connecting(&self) {
-        self.state.clear_all_connecting();
-        self.wake();
-    }
 }
 
 #[cfg(test)]
@@ -84,8 +74,6 @@ pub(crate) mod tests {
             id: id.into(),
             host: host.into(),
             action: format!("CONNECT {host}:443"),
-            offer: None,
-            token_fallback: None,
             treatment: Treatment::Inspected,
             run: None,
         }
@@ -182,40 +170,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connect_finished_clears_the_connecting_placeholder() {
-        let (n, state, _rx) = fixture(false);
-        let mut offer = prompt("r1", "api.some-oauth.example");
-        offer.offer = Some("GitHub".into());
-        n.present(&offer);
-        state.connect_offer("r1");
-        assert_eq!(state.snapshot().connecting, vec!["GitHub".to_string()]);
-        n.connect_finished("GitHub");
-        assert!(
-            state.snapshot().connecting.is_empty(),
-            "the resolved connect takes the placeholder down"
-        );
-    }
-
-    #[test]
-    fn clear_all_connecting_drops_every_placeholder() {
-        let (n, state, _rx) = fixture(false);
-        let mut offer = prompt("r1", "api.some-oauth.example");
-        offer.offer = Some("GitHub".into());
-        n.present(&offer);
-        state.connect_offer("r1");
-        assert_eq!(state.snapshot().connecting, vec!["GitHub".to_string()]);
-        n.clear_all_connecting();
-        assert!(state.snapshot().connecting.is_empty());
-    }
-
-    #[test]
     fn noop_notifier_methods_are_safe_to_call() {
         let n = NoopNotifier;
         n.present(&prompt("r1", "a.test"));
         n.dismiss("r1");
         n.inform("anything");
         n.clear_informs();
-        n.connect_finished("GitHub");
-        n.clear_all_connecting();
     }
 }

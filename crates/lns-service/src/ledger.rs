@@ -5,7 +5,7 @@ use anyhow::Result;
 use lns_ipc::{LedgerEvent, LedgerRecord};
 use tokio::sync::mpsc;
 
-use crate::oauth::Clock;
+use crate::clock::Clock;
 
 pub fn now_rfc3339(clock: &dyn Clock) -> String {
     crate::time_fmt::rfc3339_from_unix(clock.now_unix())
@@ -156,7 +156,7 @@ fn warn_on_record_failure(result: Result<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_ipc::{ApprovalKind, AuthKind, Decision, LedgerEvent};
+    use lns_ipc::{ApprovalKind, Decision, LedgerEvent};
 
     struct FakeClock(u64);
     impl Clock for FakeClock {
@@ -186,7 +186,6 @@ mod tests {
             target: "api.foo.com:443".into(),
             decision: Decision::AllowAlways,
             reason: None,
-            connector: None,
         }
     }
 
@@ -195,13 +194,7 @@ mod tests {
             ts: "2026-06-29T14:02:11Z".into(),
             run: run.to_string(),
             microvm: "calm-finch".into(),
-            event: LedgerEvent::Connection {
-                connector: "some-oauth".into(),
-                auth: AuthKind::Oauth,
-                account: Some("@hchen".into()),
-                scopes: vec!["repo".into()],
-                expires: None,
-            },
+            event: network_approval(),
         }
     }
 
@@ -219,7 +212,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains("\"class_uid\":3002"),
+            content.contains("\"class_uid\":2004"),
             "the ledger is now written as OCSF: {content}"
         );
         assert!(
@@ -234,11 +227,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         let row = lns_audit::read(&events[0]).unwrap();
         assert_eq!(row.run, "aa49");
-        assert_eq!(row.kind, "connection");
-        assert_eq!(row.connector.as_deref(), Some("some-oauth"));
+        assert_eq!(row.kind, "approval");
         assert_eq!(
-            row.detail, "connect some-oauth (oauth) @hchen [repo]",
-            "the OCSF line reads back to the same connection the record described"
+            row.detail, "network allow-always api.foo.com:443",
+            "the OCSF line reads back to the same approval the record described"
         );
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 1);
@@ -359,7 +351,6 @@ mod tests {
             target: "x".into(),
             decision: Decision::DenyOnce,
             reason: Some("policy-ambiguous".into()),
-            connector: None,
         });
         drop(recorder);
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
@@ -400,9 +391,8 @@ mod tests {
                 if !self.seen_first.swap(true, Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                if let LedgerEvent::Approval { target, .. } = &record.event {
-                    self.targets.lock().unwrap().push(target.clone());
-                }
+                let LedgerEvent::Approval { target, .. } = &record.event;
+                self.targets.lock().unwrap().push(target.clone());
                 Ok(())
             }
         }
@@ -420,7 +410,6 @@ mod tests {
                 target: target.into(),
                 decision: Decision::AllowOnce,
                 reason: None,
-                connector: None,
             });
         }
         drop(recorder);

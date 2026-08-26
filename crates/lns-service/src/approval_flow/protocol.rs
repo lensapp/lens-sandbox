@@ -7,14 +7,12 @@ use lns_policy::{Egress, NetworkPolicy, Transport};
 pub enum HostFrame {
     Policy(PolicyMessage),
     RequestDecision(RequestDecision),
-    CredentialDecision(CredentialDecision),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestFrame {
     RequestPending(RequestPending),
-    CredentialPending(CredentialPending),
     #[serde(other)]
     Other,
 }
@@ -52,14 +50,12 @@ pub enum WireDefaultVerdict {
     Deny,
 }
 
-/// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network` and (when armed) `credentials`.
+/// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<WireNetwork>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<Vec<Credential>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +69,7 @@ pub struct RequestPending {
     pub treatment: Treatment,
 }
 
-/// What approving a held request actually permits: `action` renders identically either way, but a raw splice is opaque to the proxy — no HTTP rules, no credential injection, no per-request audit.
+/// What approving a held request actually permits: `action` renders identically either way, but a raw splice is opaque to the proxy — no HTTP rules and no per-request audit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Treatment {
@@ -100,71 +96,6 @@ pub enum Decision {
     Timeout,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Credential {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_var: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
-    #[serde(default)]
-    pub injections: Vec<CredentialInjection>,
-}
-
-/// `UriPlaceholder` substitutes the parent `Credential.placeholder` inside matching outbound URLs, so unlike `Header` it carries no placeholder of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "injectionType",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum CredentialInjection {
-    Header {
-        domain: String,
-        header: String,
-        value: String,
-    },
-    UriPlaceholder {
-        domain: String,
-        value: String,
-    },
-}
-
-impl CredentialInjection {
-    pub(crate) fn domain(&self) -> &str {
-        match self {
-            Self::Header { domain, .. } => domain,
-            Self::UriPlaceholder { domain, .. } => domain,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialPending {
-    pub id: String,
-    pub credential_id: String,
-    pub action: String,
-    pub reason: String,
-}
-
-/// Outbound `credential_decision`; the real credential value, if any, follows in a later `policy` frame rather than here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CredentialDecision {
-    pub id: String,
-    pub decision: CredentialDecisionKind,
-}
-
-/// Unlike [`Decision`] there is no once/always — every credential decision is sticky, and `Timeout` is lns-service-initiated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialDecisionKind {
-    Allow,
-    Deny,
-    Timeout,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +106,6 @@ mod tests {
     fn policy_frame_serializes_with_type_discriminator() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(NetworkPolicy::default())),
-            credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(v["type"], "policy");
@@ -209,7 +139,6 @@ mod tests {
     fn the_policy_frame_publishes_one_egress_table_and_not_the_deprecated_list() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(NetworkPolicy::default())),
-            credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         let network = v["network"].as_object().expect("network is an object");
@@ -237,7 +166,6 @@ mod tests {
             ));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
-            credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         let rule = v["network"]["egress"]["tcp"][0]
@@ -256,7 +184,6 @@ mod tests {
         net.egress.http.push(RouteRule::allow_host("10.0.0.0/8"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
-            credentials: None,
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(
@@ -273,7 +200,6 @@ mod tests {
             .push(RouteRule::allow_host("api.linear.app"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
-            credentials: None,
         });
 
         let s = serde_json::to_string(&frame).unwrap();
@@ -420,140 +346,9 @@ mod tests {
         });
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
-            credentials: None,
         });
         let s = serde_json::to_string(&frame).unwrap();
         assert!(s.contains(r#""match":"api.linear.app""#), "got: {s}");
         assert!(!s.contains("matchPattern"), "rust ident leaked: {s}");
-    }
-
-    fn some_credential(armed: bool) -> Credential {
-        Credential {
-            id: "some-provider".into(),
-            env_var: Some("SOME_TOKEN".into()),
-            placeholder: Some("some-placeholder-0000000000000000000000".into()),
-            injections: if armed {
-                vec![CredentialInjection::Header {
-                    domain: "api.some-provider.example".into(),
-                    header: "Authorization".into(),
-                    value: "Bearer some-secret".into(),
-                }]
-            } else {
-                Vec::new()
-            },
-        }
-    }
-
-    #[test]
-    fn credential_in_policy_frame_serializes_with_camel_case_field_names() {
-        let frame = HostFrame::Policy(PolicyMessage {
-            network: None,
-            credentials: Some(vec![some_credential(false)]),
-        });
-        let s = serde_json::to_string(&frame).unwrap();
-        assert!(s.contains(r#""envVar":"SOME_TOKEN""#), "got: {s}");
-        assert!(!s.contains("env_var"), "rust ident leaked into JSON: {s}");
-        assert!(s.contains(r#""placeholder":"some-placeholder"#), "got: {s}");
-        assert!(s.contains(r#""injections":[]"#), "got: {s}");
-    }
-
-    #[test]
-    fn header_injection_serializes_with_injection_type_discriminator() {
-        let frame = HostFrame::Policy(PolicyMessage {
-            network: None,
-            credentials: Some(vec![some_credential(true)]),
-        });
-        let s = serde_json::to_string(&frame).unwrap();
-        assert!(
-            s.contains(r#""injectionType":"header""#),
-            "discriminator tag missing or wrong: {s}"
-        );
-        assert!(
-            s.contains(r#""domain":"api.some-provider.example""#),
-            "got: {s}"
-        );
-        assert!(s.contains(r#""header":"Authorization""#), "got: {s}");
-    }
-
-    #[test]
-    fn policy_frame_with_credentials_round_trips() {
-        let frame = HostFrame::Policy(PolicyMessage {
-            network: Some(WireNetwork::seeded(NetworkPolicy::default())),
-            credentials: Some(vec![some_credential(true)]),
-        });
-        let s = serde_json::to_string(&frame).unwrap();
-        let parsed: HostFrame = serde_json::from_str(&s).unwrap();
-        assert_eq!(frame, parsed);
-    }
-
-    #[test]
-    fn credential_pending_parses_from_proxy_emitted_json() {
-        let raw = r#"{
-            "type": "credential_pending",
-            "id": "cred-42",
-            "credentialId": "some-provider",
-            "action": "POST https://api.some-provider.example/issues",
-            "reason": "placeholder-unauthorized"
-        }"#;
-        let parsed: GuestFrame = serde_json::from_str(raw).unwrap();
-        assert!(
-            matches!(&parsed, GuestFrame::CredentialPending(cp)
-                if cp.id == "cred-42"
-                    && cp.credential_id == "some-provider"
-                    && cp.action == "POST https://api.some-provider.example/issues"
-                    && cp.reason == "placeholder-unauthorized"),
-            "got {parsed:?}"
-        );
-    }
-
-    #[test]
-    fn credential_decision_serializes_with_envelope_type_and_snake_case_kind() {
-        let frame = HostFrame::CredentialDecision(CredentialDecision {
-            id: "cred-1".into(),
-            decision: CredentialDecisionKind::Allow,
-        });
-        let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
-        assert_eq!(v["type"], "credential_decision");
-        assert_eq!(v["id"], "cred-1");
-        assert_eq!(v["decision"], "allow");
-    }
-
-    #[test]
-    fn every_credential_decision_kind_serializes_to_snake_case_token() {
-        for (variant, expected) in [
-            (CredentialDecisionKind::Allow, "allow"),
-            (CredentialDecisionKind::Deny, "deny"),
-            (CredentialDecisionKind::Timeout, "timeout"),
-        ] {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s.trim_matches('"'), expected);
-        }
-    }
-
-    #[test]
-    fn host_frame_credential_decision_round_trips_through_json() {
-        let frame = HostFrame::CredentialDecision(CredentialDecision {
-            id: "cred-1".into(),
-            decision: CredentialDecisionKind::Deny,
-        });
-        let s = serde_json::to_string(&frame).unwrap();
-        let parsed: HostFrame = serde_json::from_str(&s).unwrap();
-        assert_eq!(frame, parsed);
-    }
-
-    #[test]
-    fn domain_accessor_returns_domain_for_both_injection_variants() {
-        let header = CredentialInjection::Header {
-            domain: "api.some-provider.example".into(),
-            header: "Authorization".into(),
-            value: "Bearer some-secret".into(),
-        };
-        assert_eq!(header.domain(), "api.some-provider.example");
-
-        let uri = CredentialInjection::UriPlaceholder {
-            domain: "api.some-provider.example".into(),
-            value: "some-secret".into(),
-        };
-        assert_eq!(uri.domain(), "api.some-provider.example");
     }
 }

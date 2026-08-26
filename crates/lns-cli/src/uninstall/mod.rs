@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use lns_ipc::{Request, Response, RunStatus, short_run_id};
 
 use crate::command::{CommandSpec, subcommand};
-use crate::connector::LocalBoxFuture;
+use crate::local_future::LocalBoxFuture;
 use crate::service::{DisableOutcome, ServiceClient};
 
 mod real;
@@ -19,7 +19,7 @@ pub struct UninstallArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Also delete everything under ~/.lns: cached artifacts and layers, named volumes, the audit trail, config, connectors, and stored credentials. Without this, only the program is removed and the directory is kept."
+        help = "Also delete everything under ~/.lns: cached artifacts and layers, named volumes, the audit trail, and config. Without this, only the program is removed and the directory is kept."
     )]
     pub purge: bool,
 
@@ -140,7 +140,7 @@ fn question(purge: bool, purge_dirs: &[PathBuf]) -> String {
         format!("deletes all local data under {targets}")
     };
     format!(
-        "This stops all running sandboxes, removes the lns binaries and background service, and {data_clause} (cached images, named volumes, the audit trail, and stored credentials). Continue? [y/N] "
+        "This stops all running sandboxes, removes the lns binaries and background service, and {data_clause} (cached images, named volumes, and the audit trail). Continue? [y/N] "
     )
 }
 

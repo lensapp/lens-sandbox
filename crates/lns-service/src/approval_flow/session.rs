@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -6,58 +6,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
-    Credential, Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
-    WireNetwork,
+    Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment, WireNetwork,
 };
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
-use lns_policy::connectors::TokenFallback;
-use lns_policy::matching::{domain_matches, split_destination, unbracketed};
+use lns_policy::matching::{split_destination, unbracketed};
 use lns_policy::{Approval, Policy, PolicyStore, RouteRule, TcpEgressRule};
 
 pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
-
-/// Supplies the registry credentials packed into every emitted `Policy` frame so a network decision is never read upstream as "drop all credentials".
-pub type CredentialsProvider = Box<dyn Fn() -> Vec<Credential> + Send + Sync>;
-
-/// Maps a reloaded policy's `connectors:` ids to their catalog routes, so a load that records only the ids gets those routes back live — the boot path and the file watcher derive them the same way.
-pub type ConnectorRouteDeriver = Box<dyn Fn(&[String]) -> Vec<RouteRule> + Send + Sync>;
-
-/// Invoked on a policy reload with the reloaded connected-connector ids so the credential subsystem can revoke a disconnected connector's arming.
-pub type ArmedReconciler = Box<dyn Fn(&[String]) + Send + Sync>;
-
-/// Records that this project connected a connector. Connecting is a per-machine risk acceptance, so it lands in the sidecar beside the per-workload grants rather than in a file that travels.
-pub type ConnectionRecorder = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
-
-/// A connectable connector whose routes aren't allowed yet, so a held request to one of its `patterns` offers to connect it before the plain allow/deny.
-pub struct OfferableConnector {
-    pub id: String,
-    pub display_name: String,
-    pub patterns: Vec<String>,
-    pub token_fallback: Option<TokenFallback>,
-}
-
-/// Connects a connector interactively and reports whether it is now connected; injected so the approval flow can offer a connect without owning the credential machinery. `connect_with_token` arms a pasted token instead of running the interactive sign-in.
-pub trait ConnectPort: Send + Sync {
-    fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool>;
-    fn connect_with_token<'a>(
-        &'a self,
-        id: &'a str,
-        value: String,
-    ) -> futures_util::future::BoxFuture<'a, bool>;
-}
 
 pub trait Notifier: Send + Sync {
     fn present(&self, pending: &PendingPrompt);
     fn dismiss(&self, id: &str);
     fn inform(&self, message: &str);
     fn clear_informs(&self);
-    /// Signals that an accepted offer's connect has resolved (either way), so any surface holding the card's slot can release it; default no-op for notifiers without one.
-    fn connect_finished(&self, display_name: &str) {
-        let _ = display_name;
-    }
-    /// Drops every in-flight connect placeholder on run teardown so a connect that never resolves can't keep the window pinned; default no-op.
-    fn clear_all_connecting(&self) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,10 +27,6 @@ pub struct PendingPrompt {
     pub id: String,
     pub host: String,
     pub action: String,
-    /// Some(display name) when `host` matches a connectable connector, so the card offers to connect it before the plain allow/deny.
-    pub offer: Option<String>,
-    /// Some when the offered connector declares a token fallback, so the offer card can also reveal "use a token instead".
-    pub token_fallback: Option<TokenFallback>,
     /// `Raw` when approving splices the connection through unread, which the card has to say out loud.
     pub treatment: Treatment,
     /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
@@ -103,7 +61,7 @@ impl PendingPrompt {
     }
 }
 
-const RAW_SPLICE_CAPTION: &str = "lns cannot inspect this traffic or inject credentials.";
+const RAW_SPLICE_CAPTION: &str = "lns cannot inspect this traffic.";
 
 #[derive(Debug)]
 struct PendingEntry {
@@ -112,7 +70,6 @@ struct PendingEntry {
     action: String,
     treatment: Treatment,
     deadline: Instant,
-    offer: Option<OfferRef>,
     reason: String,
 }
 
@@ -130,28 +87,15 @@ impl PendingEntry {
     }
 }
 
-#[derive(Debug, Clone)]
-struct OfferRef {
-    connector_id: String,
-    display_name: String,
-}
-
 pub struct ApprovalSession {
     policy: Mutex<Policy>,
-    /// What the developer's own file holds — never the artifact baseline or a connector's derived routes the running `policy` also carries.
+    /// What the developer's own file holds — never the artifact baseline the running `policy` also carries.
     persisted: Mutex<Policy>,
     pending: Mutex<HashMap<String, PendingEntry>>,
     notifier: Arc<dyn Notifier>,
     store: Arc<dyn PolicyStore>,
     sink: FrameSink,
     timeout: Duration,
-    credentials_provider: OnceLock<CredentialsProvider>,
-    connector_routes: OnceLock<ConnectorRouteDeriver>,
-    armed_reconciler: OnceLock<ArmedReconciler>,
-    connection_recorder: OnceLock<ConnectionRecorder>,
-    offerable: Vec<OfferableConnector>,
-    connector: OnceLock<Arc<dyn ConnectPort>>,
-    connecting: Mutex<HashSet<String>>,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
     shipped: OnceLock<Policy>,
     run: Option<String>,
@@ -180,23 +124,10 @@ impl ApprovalSession {
             store,
             sink,
             timeout,
-            credentials_provider: OnceLock::new(),
-            connector_routes: OnceLock::new(),
-            armed_reconciler: OnceLock::new(),
-            connection_recorder: OnceLock::new(),
-            offerable: Vec::new(),
-            connector: OnceLock::new(),
-            connecting: Mutex::new(HashSet::new()),
             ledger: OnceLock::new(),
             shipped: OnceLock::new(),
             run: None,
         }
-    }
-
-    /// Captures the run's connectable connectors so a held request to one of their domains offers to connect before the plain allow/deny.
-    pub fn with_offers(mut self, offerable: Vec<OfferableConnector>) -> Self {
-        self.offerable = offerable;
-        self
     }
 
     /// Names the run every card this session raises speaks for; the service attributes it from the channel the request arrived on, never from the workload.
@@ -205,74 +136,13 @@ impl ApprovalSession {
         self
     }
 
-    /// Installs the credentials closure once at boot; idempotent, the first provider wins.
-    pub fn set_credentials_provider(&self, provider: CredentialsProvider) {
-        let _ = self.credentials_provider.set(provider);
-    }
-
-    /// Installs the armed-reconciler once at boot so a watcher reload revokes a disconnected connector's arming; idempotent, the first wins.
-    pub fn set_armed_reconciler(&self, reconciler: ArmedReconciler) {
-        let _ = self.armed_reconciler.set(reconciler);
-    }
-
-    /// Installs the port a live connect records through; idempotent, the first wins.
-    pub fn set_connection_recorder(&self, recorder: ConnectionRecorder) {
-        let _ = self.connection_recorder.set(recorder);
-    }
-
-    /// Installs the connector-route deriver once at boot so a watcher reload re-applies a connected connector's routes instead of dropping them; idempotent, the first wins.
-    pub fn set_connector_route_deriver(&self, deriver: ConnectorRouteDeriver) {
-        let _ = self.connector_routes.set(deriver);
-    }
-
     /// Installs the baseline every reload folds the decisions file over — what every source *but* this directory's own decided, since a copy of that file frozen here would outlive a rule the developer deletes; idempotent, the first wins.
     pub fn set_shipped_policy(&self, shipped: Policy) {
         let _ = self.shipped.set(shipped);
     }
 
-    /// Installs the connect port once the credential subsystem exists; idempotent, the first wins.
-    pub fn set_connector(&self, connector: Arc<dyn ConnectPort>) {
-        let _ = self.connector.set(connector);
-    }
-
     pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
         let _ = self.ledger.set(recorder);
-    }
-
-    fn offer_for_host(&self, host: &str) -> Option<&OfferableConnector> {
-        self.offerable
-            .iter()
-            .find(|i| i.patterns.iter().any(|p| domain_matches(p, host)))
-    }
-
-    /// The (id, display name, token fallback) to offer for `host`, or `None` when nothing matches or the connector is already connected this run.
-    fn offer_id_and_name_for(&self, host: &str) -> Option<(String, String, Option<TokenFallback>)> {
-        let integ = self.offer_for_host(host)?;
-        let already_connected = self
-            .policy
-            .lock()
-            .expect("policy mutex poisoned")
-            .connectors
-            .iter()
-            .any(|i| i == &integ.id);
-        (!already_connected).then(|| {
-            (
-                integ.id.clone(),
-                integ.display_name.clone(),
-                integ.token_fallback.clone(),
-            )
-        })
-    }
-
-    fn is_connecting(&self, id: &str) -> bool {
-        self.connecting
-            .lock()
-            .expect("connecting mutex poisoned")
-            .contains(id)
-    }
-
-    fn current_credentials(&self) -> Option<Vec<Credential>> {
-        self.credentials_provider.get().map(|p| p())
     }
 
     pub fn current_policy(&self) -> Policy {
@@ -280,18 +150,6 @@ impl ApprovalSession {
     }
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
-        // Connecting a connector arms credential injection, which an opaque splice can never carry — and the offer card has no room for the RAW disclosure.
-        let matched = (req.treatment == Treatment::Inspected)
-            .then(|| self.offer_id_and_name_for(&req.host))
-            .flatten();
-        let offer_ref = matched.as_ref().map(|(id, name, _)| OfferRef {
-            connector_id: id.clone(),
-            display_name: name.clone(),
-        });
-        // While a connect for this connector is in flight, hold the request silently and let that connect's batch release it — a fresh offer card would only cover the sign-in card.
-        let coalesced = offer_ref
-            .as_ref()
-            .is_some_and(|o| self.is_connecting(&o.connector_id));
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         if pending.contains_key(&req.id) {
             return;
@@ -303,24 +161,14 @@ impl ApprovalSession {
                 action: req.action.clone(),
                 treatment: req.treatment,
                 deadline: now + self.timeout,
-                offer: offer_ref,
                 reason: req.reason.clone(),
             },
         );
         drop(pending);
-        if coalesced {
-            return;
-        }
-        let (offer, token_fallback) = match matched {
-            Some((_, name, fallback)) => (Some(name), fallback),
-            None => (None, None),
-        };
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
             action: req.action,
-            offer,
-            token_fallback,
             treatment: req.treatment,
             run: self.run.clone(),
         });
@@ -382,24 +230,6 @@ impl ApprovalSession {
             target: entry.audit_target().to_string(),
             decision,
             reason: (!entry.reason.is_empty()).then(|| entry.reason.clone()),
-            connector: entry.offer.as_ref().map(|o| o.connector_id.clone()),
-        });
-    }
-
-    fn record_offer_decision(&self, connector_id: &str, connected: bool) {
-        let Some(recorder) = self.ledger.get() else {
-            return;
-        };
-        recorder.record(LedgerEvent::Approval {
-            kind: ApprovalKind::Connector,
-            target: connector_id.to_string(),
-            decision: if connected {
-                LedgerDecision::AllowOnce
-            } else {
-                LedgerDecision::DenyOnce
-            },
-            reason: None,
-            connector: Some(connector_id.to_string()),
         });
     }
 
@@ -420,122 +250,12 @@ impl ApprovalSession {
             .remove(id)
     }
 
-    /// Accepts a held request's connector offer via the interactive connect (oauth sign-in or a straight credential connect). See [`Self::connect_offer_with`].
-    pub async fn connect_offer(&self, id: &str) -> DecisionOutcome {
-        self.connect_offer_with(id, None).await
-    }
-
-    /// Accepts a held request's connector offer by arming a pasted token instead of the interactive connect. See [`Self::connect_offer_with`].
-    pub async fn connect_offer_with_token(&self, id: &str, value: String) -> DecisionOutcome {
-        self.connect_offer_with(id, Some(value)).await
-    }
-
-    /// Drives one connect for the offered connector and releases **every** held request for it — allow-once on success, deny-once closed on failure or a missing connector. A second card for the same connector coalesces onto the in-flight connect instead of starting another. `token` selects the pasted-token connect over the interactive one.
-    async fn connect_offer_with(&self, id: &str, token: Option<String>) -> DecisionOutcome {
-        let Some(offer) = self.offer_of(id) else {
-            return DecisionOutcome::UnknownId;
-        };
-        if !self.begin_connecting(&offer.connector_id) {
-            // Another card already started this connect; its batch will release this request too.
-            self.notifier.dismiss(id);
-            return DecisionOutcome::Resolved;
-        }
-        // Hide every offer card for this connector so the sign-in card isn't covered; the requests stay held for the batch release.
-        for request_id in self.offer_request_ids(&offer.connector_id) {
-            self.notifier.dismiss(&request_id);
-        }
-        let connected = match self.connector.get() {
-            Some(connector) => match token {
-                Some(value) => {
-                    connector
-                        .connect_with_token(&offer.connector_id, value)
-                        .await
-                }
-                None => connector.connect(&offer.connector_id).await,
-            },
-            None => false,
-        };
-        self.finish_connecting(&offer.connector_id);
-        self.notifier.connect_finished(&offer.display_name);
-        let decision = if connected {
-            Decision::AllowOnce
-        } else {
-            Decision::DenyOnce
-        };
-        self.record_offer_decision(&offer.connector_id, connected);
-        for request_id in self.drain_offer_requests(&offer.connector_id) {
-            self.send_decision_frame(&request_id, decision);
-        }
-        DecisionOutcome::Resolved
-    }
-
-    /// The offer a held entry carries, if any; does not remove the entry.
-    fn offer_of(&self, id: &str) -> Option<OfferRef> {
-        self.pending
-            .lock()
-            .expect("pending mutex poisoned")
-            .get(id)?
-            .offer
-            .clone()
-    }
-
-    /// Marks `id` as connecting; returns false when a connect was already in flight.
-    fn begin_connecting(&self, id: &str) -> bool {
-        self.connecting
-            .lock()
-            .expect("connecting mutex poisoned")
-            .insert(id.to_string())
-    }
-
-    fn finish_connecting(&self, id: &str) {
-        self.connecting
-            .lock()
-            .expect("connecting mutex poisoned")
-            .remove(id);
-    }
-
-    fn offer_request_ids(&self, connector_id: &str) -> Vec<String> {
-        self.pending
-            .lock()
-            .expect("pending mutex poisoned")
-            .iter()
-            .filter(|(_, e)| offers_connector(e, connector_id))
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    /// Removes and returns every held request offering `connector_id`.
-    fn drain_offer_requests(&self, connector_id: &str) -> Vec<String> {
-        let mut pending = self.pending.lock().expect("pending mutex poisoned");
-        let ids: Vec<String> = pending
-            .iter()
-            .filter(|(_, e)| offers_connector(e, connector_id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &ids {
-            pending.remove(id);
-        }
-        ids
-    }
-
     pub fn tick_timeouts(&self, now: Instant) -> usize {
-        let connecting = self
-            .connecting
-            .lock()
-            .expect("connecting mutex poisoned")
-            .clone();
         let expired: Vec<String> = {
             let pending = self.pending.lock().expect("pending mutex poisoned");
             pending
                 .iter()
                 .filter(|(_, entry)| entry.deadline <= now)
-                // A request offering a connector that's mid sign-in must not be swept; its connect releases it.
-                .filter(|(_, entry)| {
-                    entry
-                        .offer
-                        .as_ref()
-                        .is_none_or(|o| !connecting.contains(&o.connector_id))
-                })
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -543,14 +263,10 @@ impl ApprovalSession {
     }
 
     fn timeout_one(&self, id: &str) -> bool {
-        let Some(entry) = self.remove_pending(id) else {
+        if self.remove_pending(id).is_none() {
             return false;
-        };
-        self.notifier.dismiss(id);
-        // A request clicked into a connect right as it expired leaves a placeholder no later connect will resolve; take it down with the request.
-        if let Some(offer) = &entry.offer {
-            self.notifier.connect_finished(&offer.display_name);
         }
+        self.notifier.dismiss(id);
         self.send_decision_frame(id, Decision::Timeout);
         true
     }
@@ -560,21 +276,9 @@ impl ApprovalSession {
         if let Some(shipped) = self.shipped.get() {
             new_policy = crate::artifact::policy::merge_effective(Some(shipped), &new_policy);
         }
-        if let Some(derive) = self.connector_routes.get() {
-            let routes = derive(&new_policy.connectors);
-            crate::artifact::policy::splice_connector_routes(
-                &mut new_policy.network.egress.http,
-                routes,
-            );
-        }
-        if let Some(reconcile) = self.armed_reconciler.get() {
-            reconcile(&new_policy.connectors);
-        }
         *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
-        let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(new_policy.network)),
-            credentials,
         }));
     }
 
@@ -587,7 +291,6 @@ impl ApprovalSession {
             self.notifier.dismiss(id);
         }
         self.notifier.clear_informs();
-        self.notifier.clear_all_connecting();
     }
 
     fn send_decision_frame(&self, id: &str, decision: Decision) {
@@ -671,10 +374,8 @@ impl ApprovalSession {
 
     /// Hands the updated policy to the running guest first and to disk second, so a file that cannot be written still leaves the decision live for the rest of the run.
     fn publish_and_persist(&self, effective: Policy) {
-        let credentials = self.current_credentials();
         let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(effective.network)),
-            credentials,
         }));
         let to_persist = self
             .persisted
@@ -687,42 +388,6 @@ impl ApprovalSession {
             ));
         }
     }
-
-    /// Connects a connector live: records the connection where this machine keeps them, while the routes are applied to the in-memory policy and emitted so a held request sees them — boot re-derives the routes from the catalog, so persisting them would leave a residual allow that `disconnect` can't revoke.
-    pub fn connect_connector(&self, id: &str, routes: Vec<RouteRule>) {
-        let live_network = {
-            let mut policy = self.policy.lock().expect("policy mutex poisoned");
-            policy.connect(id.to_string());
-            crate::artifact::policy::splice_connector_routes(
-                &mut policy.network.egress.http,
-                routes,
-            );
-            policy.network.clone()
-        };
-        let credentials = self.current_credentials();
-        let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(WireNetwork::seeded(live_network)),
-            credentials,
-        }));
-        // The routes are live above, so requests held on this connector's offer proceed no matter which surface the consent came from.
-        for request_id in self.drain_offer_requests(id) {
-            self.notifier.dismiss(&request_id);
-            self.send_decision_frame(&request_id, Decision::AllowOnce);
-        }
-        // Recorded last: the sidecar takes a lock, and a held request must not wait on disk to be released.
-        if let Some(Err(e)) = self.connection_recorder.get().map(|record| record(id)) {
-            self.notifier.inform(&format!(
-                "connector connected in-memory but not persisted: {e}"
-            ));
-        }
-    }
-}
-
-fn offers_connector(entry: &PendingEntry, connector_id: &str) -> bool {
-    entry
-        .offer
-        .as_ref()
-        .is_some_and(|o| o.connector_id == connector_id)
 }
 
 fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
@@ -776,8 +441,6 @@ pub(crate) mod tests {
         pub(crate) dismissed: StdMutex<Vec<String>>,
         pub(crate) informed: StdMutex<Vec<String>>,
         pub(crate) informs_cleared: StdMutex<usize>,
-        pub(crate) connects_finished: StdMutex<Vec<String>>,
-        pub(crate) all_connecting_cleared: StdMutex<usize>,
     }
 
     impl Notifier for RecordingNotifier {
@@ -792,15 +455,6 @@ pub(crate) mod tests {
         }
         fn clear_informs(&self) {
             *self.informs_cleared.lock().unwrap() += 1;
-        }
-        fn connect_finished(&self, display_name: &str) {
-            self.connects_finished
-                .lock()
-                .unwrap()
-                .push(display_name.to_string());
-        }
-        fn clear_all_connecting(&self) {
-            *self.all_connecting_cleared.lock().unwrap() += 1;
         }
     }
 
@@ -942,7 +596,6 @@ pub(crate) mod tests {
                 target: "api.foo.com".into(),
                 decision: LedgerDecision::AllowAlways,
                 reason: Some("policy-ambiguous".into()),
-                connector: None,
             }
         );
     }
@@ -964,7 +617,6 @@ pub(crate) mod tests {
                 target: "api.foo.com".into(),
                 decision: LedgerDecision::DenyOnce,
                 reason: None,
-                connector: None,
             }
         );
     }
@@ -984,7 +636,6 @@ pub(crate) mod tests {
                 target: "db.internal:5432".into(),
                 decision: LedgerDecision::AllowAlways,
                 reason: Some("policy-ambiguous".into()),
-                connector: None,
             },
             "a raw grant is per port; recording the bare host would overstate what was audited"
         );
@@ -1016,10 +667,7 @@ pub(crate) mod tests {
         let presented = notifier.presented.lock().unwrap();
         let prompt = presented.last().expect("a card");
         assert_eq!(prompt.badges(), vec!["RAW", "TCP", "5432"]);
-        assert_eq!(
-            prompt.caption(),
-            Some("lns cannot inspect this traffic or inject credentials.")
-        );
+        assert_eq!(prompt.caption(), Some("lns cannot inspect this traffic."));
     }
 
     #[test]
@@ -1054,16 +702,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// A run whose effective policy is the developer's file plus an artifact baseline and a connected connector's routes — the shape `supervisor::adapter::start` builds.
+    /// A run whose effective policy is the developer's file plus an artifact baseline — the shape `supervisor::adapter::start` builds.
     fn fixture_over_a_merged_run() -> Fixture {
         let mut own = Policy::default();
         own.add_rule(RouteRule::allow_host("mine.example.test"));
         let mut effective = own.clone();
         effective.add_rule(RouteRule::allow_host("from-the-artifact.example.test"));
-        crate::artifact::policy::splice_connector_routes(
-            &mut effective.network.egress.http,
-            vec![RouteRule::allow_host("from-a-connector.example.test")],
-        );
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1124,7 +768,6 @@ pub(crate) mod tests {
             "just-approved.example.test",
             "mine.example.test",
             "from-the-artifact.example.test",
-            "from-a-connector.example.test",
         ] {
             assert!(
                 published.iter().any(|p| p == expected),
@@ -1709,38 +1352,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn withdraw_run_clears_connecting_placeholders_so_window_does_not_stay_pinned() {
-        let (s, n, _store, _rx) = fixture();
-        s.submit_pending(pending("r1", "a"), Instant::now());
-
-        s.withdraw_run();
-
-        assert_eq!(
-            *n.all_connecting_cleared.lock().unwrap(),
-            1,
-            "an in-flight connect placeholder must not survive the run that started it"
-        );
-    }
-
-    #[test]
-    fn timeout_clears_a_connecting_placeholder_for_an_expired_offer() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        let t0 = Instant::now();
-        s.submit_pending(pending("r1", "api.some-oauth.example"), t0);
-
-        s.tick_timeouts(t0 + TEST_TIMEOUT + Duration::from_secs(1));
-
-        assert_eq!(
-            n.connects_finished.lock().unwrap().as_slice(),
-            &["GitHub".to_string()],
-            "timing out a clicked offer must release the placeholder no later connect will resolve"
-        );
-    }
-
-    #[test]
     fn apply_external_policy_replaces_in_memory_and_emits_policy_frame() {
         let (s, _n, _store, mut rx) = fixture();
         let mut updated = Policy::default();
@@ -1811,198 +1422,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_live_connect_records_the_connection_where_the_machine_keeps_them() {
-        let (s, _n, _store, mut rx) = fixture();
-        let recorded: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let seen = recorded.clone();
-        s.set_connection_recorder(Box::new(move |id| {
-            seen.lock().unwrap().push(id.to_string());
-            Ok(())
-        }));
-
-        s.connect_connector(
-            "some-oauth",
-            vec![RouteRule::allow_host("api.some-oauth.example")],
-        );
-
-        assert_eq!(
-            recorded.lock().unwrap().as_slice(),
-            &["some-oauth".to_string()],
-            "the decisions file no longer carries connections, so a connect the developer accepted mid-run would be lost on the next reload unless it is recorded per machine"
-        );
-        let _ = policy_frame(&mut rx);
-    }
-
-    #[test]
-    fn apply_external_policy_reconciles_armed_ids_with_the_reloaded_connectors() {
-        let (s, _n, _store, _rx) = fixture();
-        let seen: Arc<StdMutex<Vec<Vec<String>>>> = Arc::new(StdMutex::new(Vec::new()));
-        let seen_clone = seen.clone();
-        s.set_armed_reconciler(Box::new(move |connectors| {
-            seen_clone.lock().unwrap().push(connectors.to_vec());
-        }));
-        let mut reloaded = Policy::default();
-        reloaded.connect("gitlab");
-        s.apply_external_policy(reloaded);
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[vec!["gitlab".to_string()]],
-            "a policy reload must reconcile the credential subsystem's armed set, or a disconnected connector keeps spending its value"
-        );
-    }
-
-    #[test]
     fn apply_external_policy_emits_no_decision_frames() {
         let (s, _n, _store, mut rx) = fixture();
         s.apply_external_policy(Policy::default());
         let frame = rx.try_recv().expect("expected a policy frame");
         assert!(matches!(frame, HostFrame::Policy(_)));
         assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn a_reload_of_a_closed_policy_still_reaches_the_connector_route() {
-        // A closed policy is a trailing catch-all deny now, and the gate stops at the
-        // first match. Re-deriving the route but appending it behind that rule would
-        // leave the connector dead — and a closed policy raises no card, so nothing
-        // would say why.
-        let (s, _n, _store, mut rx) = fixture();
-        s.set_connector_route_deriver(Box::new(|ids| {
-            ids.iter()
-                .filter(|id| id.as_str() == "some-oauth")
-                .map(|_| RouteRule::allow_host("api.some-oauth.example"))
-                .collect()
-        }));
-        let mut closed = Policy::default();
-        closed.connect("some-oauth");
-        closed.add_rule(RouteRule::deny_host("*"));
-
-        s.apply_external_policy(closed);
-
-        let patterns: Vec<String> = s
-            .current_policy()
-            .network
-            .egress
-            .http
-            .iter()
-            .map(|r| r.match_pattern.clone())
-            .collect();
-        assert_eq!(
-            patterns,
-            vec!["api.some-oauth.example".to_string(), "*".to_string()],
-            "the connector route must sit ahead of the catch-all the gate stops at"
-        );
-        let _ = policy_frame(&mut rx);
-    }
-
-    #[test]
-    fn apply_external_policy_re_derives_a_connected_connectors_routes() {
-        let (s, _n, _store, mut rx) = fixture();
-        s.set_connector_route_deriver(Box::new(|ids| {
-            ids.iter()
-                .filter(|id| id.as_str() == "some-oauth")
-                .map(|_| RouteRule::allow_host("api.some-oauth.example"))
-                .collect()
-        }));
-        let mut reloaded = Policy::default();
-        reloaded.connect("some-oauth");
-
-        s.apply_external_policy(reloaded);
-
-        let routes = s.current_policy().network.egress.http;
-        assert_eq!(
-            routes.len(),
-            1,
-            "a reloaded id-only policy gets its connector route back live, not dropped"
-        );
-        assert_eq!(routes[0].match_pattern, "api.some-oauth.example");
-        assert_eq!(
-            policy_frame(&mut rx).network.unwrap().egress.http[0].match_pattern,
-            "api.some-oauth.example",
-            "the hot-swap frame carries the re-derived route so the guest sees it"
-        );
-    }
-
-    #[test]
-    fn allow_always_policy_frame_packs_registry_credentials_when_provider_set() {
-        let (s, _n, _store, mut rx) = fixture();
-        s.set_credentials_provider(Box::new(|| {
-            vec![Credential {
-                id: "some-provider".into(),
-                env_var: Some("SOME_TOKEN".into()),
-                placeholder: Some("some-placeholder-0000000000000000000000".into()),
-                injections: Vec::new(),
-            }]
-        }));
-
-        s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
-        s.record_decision("r1", Decision::AllowAlways);
-
-        let _ = decision_frame(&mut rx);
-        let pushed = policy_frame(&mut rx);
-        let creds = pushed
-            .credentials
-            .expect("Policy frame must carry credentials when provider is set");
-        assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].id, "some-provider");
-    }
-
-    #[test]
-    fn apply_external_policy_packs_registry_credentials_when_provider_set() {
-        let (s, _n, _store, mut rx) = fixture();
-        s.set_credentials_provider(Box::new(|| {
-            vec![Credential {
-                id: "openai".into(),
-                env_var: Some("OPENAI_API_KEY".into()),
-                placeholder: Some("sk-LNSPLACEHOLDER0000000000000000000000000000000000".into()),
-                injections: Vec::new(),
-            }]
-        }));
-
-        let mut updated = Policy::default();
-        updated.add_rule(RouteRule::allow_host("api.linear.app"));
-        s.apply_external_policy(updated);
-
-        let pushed = policy_frame(&mut rx);
-        let creds = pushed
-            .credentials
-            .expect("hot-swap Policy must carry credentials when provider is set");
-        assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].id, "openai");
-    }
-
-    #[test]
-    fn policy_frames_omit_credentials_when_no_provider_installed() {
-        let (s, _n, _store, mut rx) = fixture();
-        s.apply_external_policy(Policy::default());
-        let pushed = policy_frame(&mut rx);
-        assert!(pushed.credentials.is_none(), "creds must be absent");
-    }
-
-    fn single_credential_provider(id: &'static str) -> CredentialsProvider {
-        Box::new(move || {
-            vec![Credential {
-                id: id.into(),
-                env_var: None,
-                placeholder: None,
-                injections: Vec::new(),
-            }]
-        })
-    }
-
-    #[test]
-    fn set_credentials_provider_is_idempotent() {
-        let (s, _n, _store, mut rx) = fixture();
-        s.set_credentials_provider(single_credential_provider("first"));
-        s.set_credentials_provider(single_credential_provider("second"));
-        s.apply_external_policy(Policy::default());
-        let pushed = policy_frame(&mut rx);
-        let creds = pushed.credentials.expect("credentials present");
-        assert_eq!(creds.len(), 1);
-        assert_eq!(
-            creds[0].id, "first",
-            "OnceLock keeps the first provider; second set call is a no-op"
-        );
     }
 
     #[test]
@@ -2017,611 +1442,5 @@ pub(crate) mod tests {
 
         let deny = rule_for_always_decision("h", Decision::DenyAlways).unwrap();
         assert_eq!(deny.verdict, Verdict::Deny);
-    }
-
-    #[test]
-    fn connect_connector_leaves_the_developers_file_alone_and_emits_the_route_live() {
-        let (s, _n, store, mut rx) = fixture();
-        s.connect_connector(
-            "some-provider",
-            vec![RouteRule::allow_host("api.some-provider.example")],
-        );
-        assert!(
-            store.saves.lock().unwrap().is_empty(),
-            "the connection lives in the machine's sidecar and the route is re-derived at boot, so a connect has nothing left to write into a file the developer commits"
-        );
-        let v = serde_json::to_value(rx.try_recv().expect("policy frame")).unwrap();
-        assert_eq!(v["type"], "policy");
-        assert_eq!(
-            v["network"]["egress"]["http"][0]["match"], "api.some-provider.example",
-            "the live frame still carries the route so a held request can proceed"
-        );
-    }
-
-    #[test]
-    fn connect_connector_informs_when_the_connection_cannot_be_recorded() {
-        let (s, n, _store, _rx) = fixture();
-        s.set_connection_recorder(Box::new(|_| Err("disk full".to_string())));
-        s.connect_connector(
-            "some-provider",
-            vec![RouteRule::allow_host("api.some-provider.example")],
-        );
-        let informed = n.informed.lock().unwrap();
-        assert_eq!(informed.len(), 1);
-        assert!(informed[0].contains("not persisted"), "got: {:?}", informed);
-    }
-
-    struct FakeConnector {
-        result: bool,
-        connected: StdMutex<Vec<String>>,
-        connected_with_token: StdMutex<Vec<(String, String)>>,
-    }
-
-    impl FakeConnector {
-        fn new(result: bool) -> Self {
-            Self {
-                result,
-                connected: StdMutex::new(Vec::new()),
-                connected_with_token: StdMutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl ConnectPort for FakeConnector {
-        fn connect<'a>(&'a self, id: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
-            Box::pin(async move {
-                self.connected.lock().unwrap().push(id.to_string());
-                self.result
-            })
-        }
-        fn connect_with_token<'a>(
-            &'a self,
-            id: &'a str,
-            value: String,
-        ) -> futures_util::future::BoxFuture<'a, bool> {
-            Box::pin(async move {
-                self.connected_with_token
-                    .lock()
-                    .unwrap()
-                    .push((id.to_string(), value));
-                self.result
-            })
-        }
-    }
-
-    fn offerable(id: &str, name: &str, pattern: &str) -> OfferableConnector {
-        OfferableConnector {
-            id: id.into(),
-            display_name: name.into(),
-            patterns: vec![pattern.into()],
-            token_fallback: None,
-        }
-    }
-
-    fn offerable_with_fallback(id: &str, name: &str, pattern: &str) -> OfferableConnector {
-        OfferableConnector {
-            token_fallback: Some(TokenFallback {
-                help: Some("https://example.com/pat".into()),
-                command: None,
-            }),
-            ..offerable(id, name, pattern)
-        }
-    }
-
-    fn offer_session(
-        offers: Vec<OfferableConnector>,
-        connector: Option<Arc<FakeConnector>>,
-    ) -> (
-        ApprovalSession,
-        Arc<RecordingNotifier>,
-        mpsc::UnboundedReceiver<HostFrame>,
-    ) {
-        let notifier = Arc::new(RecordingNotifier::default());
-        let store = Arc::new(CapturingStore::default());
-        let (tx, rx) = mpsc::unbounded_channel();
-        let session = ApprovalSession::new(
-            Policy::default(),
-            Policy::default(),
-            notifier.clone(),
-            store,
-            tx,
-            TEST_TIMEOUT,
-        )
-        .with_offers(offers);
-        if let Some(c) = connector {
-            session.set_connector(c);
-        }
-        (session, notifier, rx)
-    }
-
-    #[test]
-    fn submit_pending_with_a_matching_offer_presents_the_connector_display_name() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        assert_eq!(
-            n.presented.lock().unwrap()[0].offer.as_deref(),
-            Some("GitHub"),
-            "a held request to a connector domain offers to connect it"
-        );
-    }
-
-    #[test]
-    fn a_raw_splice_to_a_connector_domain_is_never_offered_as_a_connect() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(
-            raw_pending("r1", "api.some-oauth.example:5432"),
-            Instant::now(),
-        );
-        let presented = n.presented.lock().unwrap();
-        let prompt = &presented[0];
-        assert_eq!(
-            prompt.offer, None,
-            "connecting arms credential injection, which an opaque splice can never carry; the offer card would also hide the RAW disclosure"
-        );
-        assert_eq!(prompt.badges(), vec!["RAW", "TCP", "5432"]);
-        assert_eq!(prompt.caption(), Some(RAW_SPLICE_CAPTION));
-    }
-
-    #[test]
-    fn connecting_a_connector_releases_its_held_offer_requests() {
-        let (s, n, mut rx) = offer_session(
-            vec![offerable(
-                "some-provider",
-                "SomeProvider",
-                "api.some-provider.example",
-            )],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
-        assert_eq!(n.presented.lock().unwrap().len(), 1);
-        s.connect_connector(
-            "some-provider",
-            vec![RouteRule::allow_host("api.some-provider.example")],
-        );
-        let _live_routes = policy_frame(&mut rx);
-        let d = decision_frame(&mut rx);
-        assert_eq!(d.id, "r1");
-        assert_eq!(
-            d.decision,
-            Decision::AllowOnce,
-            "consent from the credential card connected the connector, so its held offer request must release instead of waiting out the timeout"
-        );
-        assert_eq!(
-            n.dismissed.lock().unwrap().as_slice(),
-            &["r1".to_string()],
-            "the offer card asks a question the connect already answered"
-        );
-    }
-
-    #[test]
-    fn submit_pending_without_a_matching_offer_presents_no_offer() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(pending("r1", "example.com"), Instant::now());
-        assert_eq!(n.presented.lock().unwrap()[0].offer, None);
-    }
-
-    #[test]
-    fn submit_pending_surfaces_the_offered_connectors_token_fallback() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable_with_fallback(
-                "some-oauth",
-                "GitHub",
-                "api.some-oauth.example",
-            )],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        let presented = n.presented.lock().unwrap();
-        assert_eq!(presented[0].offer.as_deref(), Some("GitHub"));
-        assert_eq!(
-            presented[0].token_fallback,
-            Some(TokenFallback {
-                help: Some("https://example.com/pat".into()),
-                command: None,
-            }),
-            "an offer for a connector that declares a token fallback carries it to the card"
-        );
-    }
-
-    #[test]
-    fn submit_pending_carries_no_token_fallback_for_an_offer_that_declares_none() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        assert_eq!(n.presented.lock().unwrap()[0].token_fallback, None);
-    }
-
-    #[tokio::test]
-    async fn connect_offer_with_token_arms_via_the_token_and_releases_the_held_request_allow_once()
-    {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, mut rx) = offer_session(
-            vec![offerable_with_fallback(
-                "some-oauth",
-                "GitHub",
-                "api.some-oauth.example",
-            )],
-            Some(connector.clone()),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        let outcome = s
-            .connect_offer_with_token("r1", "some-pasted-token".into())
-            .await;
-
-        assert_eq!(outcome, DecisionOutcome::Resolved);
-        assert_eq!(
-            connector.connected_with_token.lock().unwrap().as_slice(),
-            &[("some-oauth".to_string(), "some-pasted-token".to_string())],
-            "the pasted token drives the token connect, not the interactive one"
-        );
-        assert!(
-            connector.connected.lock().unwrap().is_empty(),
-            "the interactive connect must not run when a token is pasted"
-        );
-        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
-        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn connect_offer_with_token_for_a_non_offer_id_is_unknownid() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, _n, _rx) = offer_session(vec![], Some(connector.clone()));
-        s.submit_pending(pending("r1", "example.com"), Instant::now());
-        assert_eq!(
-            s.connect_offer_with_token("r1", "some-pasted-token".into())
-                .await,
-            DecisionOutcome::UnknownId
-        );
-        assert!(connector.connected_with_token.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn connect_offer_success_releases_the_held_request_with_allow_once() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector.clone()),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        let outcome = s.connect_offer("r1").await;
-
-        assert_eq!(outcome, DecisionOutcome::Resolved);
-        assert_eq!(
-            connector.connected.lock().unwrap().as_slice(),
-            &["some-oauth".to_string()],
-            "accepting the offer drives a connect of the matched connector"
-        );
-        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
-        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn connect_offer_failure_releases_the_held_request_deny_once_closed() {
-        let connector = Arc::new(FakeConnector::new(false));
-        let (s, _n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(
-            decision_frame(&mut rx).decision,
-            Decision::DenyOnce,
-            "a failed sign-in fails the held request closed"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_without_a_connector_fails_closed() {
-        let (s, _n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyOnce);
-    }
-
-    #[tokio::test]
-    async fn an_accepted_connector_offer_records_an_connector_allow() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, _n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector),
-        );
-        let recorder = Arc::new(CapturingRecorder::default());
-        s.set_ledger_recorder(recorder.clone());
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        let events = recorder.events.lock().unwrap();
-        assert_eq!(
-            *only_approval(&events),
-            LedgerEvent::Approval {
-                kind: ApprovalKind::Connector,
-                target: "some-oauth".into(),
-                decision: LedgerDecision::AllowOnce,
-                reason: None,
-                connector: Some("some-oauth".into()),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_connector_connect_records_an_connector_deny() {
-        let connector = Arc::new(FakeConnector::new(false));
-        let (s, _n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector),
-        );
-        let recorder = Arc::new(CapturingRecorder::default());
-        s.set_ledger_recorder(recorder.clone());
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        let events = recorder.events.lock().unwrap();
-        assert_eq!(
-            *only_approval(&events),
-            LedgerEvent::Approval {
-                kind: ApprovalKind::Connector,
-                target: "some-oauth".into(),
-                decision: LedgerDecision::DenyOnce,
-                reason: None,
-                connector: Some("some-oauth".into()),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_for_an_id_that_carries_no_offer_is_unknownid() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, _n, mut rx) = offer_session(vec![], Some(connector.clone()));
-        s.submit_pending(pending("r1", "example.com"), Instant::now());
-
-        assert_eq!(s.connect_offer("r1").await, DecisionOutcome::UnknownId);
-        assert!(
-            connector.connected.lock().unwrap().is_empty(),
-            "a plain network request must not be treated as an offer"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "no decision frame for a non-offer id"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_for_an_unknown_id_is_unknownid() {
-        let (s, _n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        assert_eq!(s.connect_offer("never").await, DecisionOutcome::UnknownId);
-    }
-
-    #[tokio::test]
-    async fn connect_offer_releases_every_held_request_for_the_connector() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector.clone()),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(
-            connector.connected.lock().unwrap().as_slice(),
-            &["some-oauth".to_string()],
-            "one sign-in serves every held request for the connector"
-        );
-        let a = decision_frame(&mut rx);
-        let b = decision_frame(&mut rx);
-        assert_eq!(a.decision, Decision::AllowOnce);
-        assert_eq!(b.decision, Decision::AllowOnce);
-        let mut released = vec![a.id, b.id];
-        released.sort();
-        assert_eq!(released, vec!["r1".to_string(), "r2".to_string()]);
-        assert!(rx.try_recv().is_err(), "no third frame");
-        let dismissed = n.dismissed.lock().unwrap();
-        assert!(
-            dismissed.contains(&"r1".to_string()) && dismissed.contains(&"r2".to_string()),
-            "both cards are dismissed so no second offer is ever shown"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_signals_connect_finished_with_the_offers_display_name() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(
-            n.connects_finished.lock().unwrap().as_slice(),
-            &["GitHub".to_string()],
-            "the resolved connect releases the slot its placeholder holds in the window"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_failure_still_signals_connect_finished() {
-        let connector = Arc::new(FakeConnector::new(false));
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(
-            n.connects_finished.lock().unwrap().as_slice(),
-            &["GitHub".to_string()],
-            "a failed connect must not leave a connecting placeholder behind"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_without_a_connector_signals_connect_finished() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer("r1").await;
-
-        assert_eq!(
-            n.connects_finished.lock().unwrap().as_slice(),
-            &["GitHub".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_with_token_signals_connect_finished() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, _rx) = offer_session(
-            vec![offerable_with_fallback(
-                "some-oauth",
-                "GitHub",
-                "api.some-oauth.example",
-            )],
-            Some(connector),
-        );
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-
-        s.connect_offer_with_token("r1", "some-pasted-token".into())
-            .await;
-
-        assert_eq!(
-            n.connects_finished.lock().unwrap().as_slice(),
-            &["GitHub".to_string()]
-        );
-    }
-
-    #[test]
-    fn submit_pending_coalesces_a_request_while_its_connector_is_connecting() {
-        let (s, n, _rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        s.begin_connecting("some-oauth");
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        assert!(
-            n.presented.lock().unwrap().is_empty(),
-            "a request arriving mid sign-in raises no new card"
-        );
-        assert_eq!(
-            s.offer_request_ids("some-oauth"),
-            vec!["r1".to_string()],
-            "but it is still held, to be released by the in-flight connect"
-        );
-    }
-
-    #[tokio::test]
-    async fn connect_offer_for_a_sibling_while_connecting_does_not_start_a_second_connect() {
-        let connector = Arc::new(FakeConnector::new(true));
-        let (s, n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            Some(connector.clone()),
-        );
-        s.begin_connecting("some-oauth");
-        s.submit_pending(pending("r2", "api.some-oauth.example"), Instant::now());
-
-        let outcome = s.connect_offer("r2").await;
-
-        assert_eq!(outcome, DecisionOutcome::Resolved);
-        assert!(
-            connector.connected.lock().unwrap().is_empty(),
-            "a second sign-in must not run while one is in flight"
-        );
-        assert!(
-            n.connects_finished.lock().unwrap().is_empty(),
-            "the duplicate click must not release the in-flight connect's placeholder"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "the in-flight connect releases r2, not this duplicate click"
-        );
-        assert_eq!(
-            s.offer_request_ids("some-oauth"),
-            vec!["r2".to_string()],
-            "r2 stays held for the in-flight connect's batch"
-        );
-    }
-
-    #[test]
-    fn submit_pending_does_not_offer_an_already_connected_connector() {
-        let mut policy = Policy::default();
-        policy.connect("some-oauth");
-        let notifier = Arc::new(RecordingNotifier::default());
-        let store = Arc::new(CapturingStore::default());
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let s = ApprovalSession::new(
-            policy.clone(),
-            policy,
-            notifier.clone(),
-            store,
-            tx,
-            TEST_TIMEOUT,
-        )
-        .with_offers(vec![offerable(
-            "some-oauth",
-            "GitHub",
-            "api.some-oauth.example",
-        )]);
-        s.submit_pending(pending("r1", "api.some-oauth.example"), Instant::now());
-        assert_eq!(
-            notifier.presented.lock().unwrap()[0].offer,
-            None,
-            "a connected connector is not re-offered"
-        );
-    }
-
-    #[test]
-    fn an_offer_held_during_a_connect_is_not_swept_by_the_timeout_ticker() {
-        let (s, _n, mut rx) = offer_session(
-            vec![offerable("some-oauth", "GitHub", "api.some-oauth.example")],
-            None,
-        );
-        let t0 = Instant::now();
-        s.submit_pending(pending("r1", "api.some-oauth.example"), t0);
-        s.begin_connecting("some-oauth");
-        assert_eq!(
-            s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
-            0,
-            "a connecting offer must not time out under the sign-in"
-        );
-        s.finish_connecting("some-oauth");
-        assert_eq!(
-            s.tick_timeouts(t0 + TEST_TIMEOUT * 2),
-            1,
-            "once the connect ends the request can time out"
-        );
-        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
     }
 }

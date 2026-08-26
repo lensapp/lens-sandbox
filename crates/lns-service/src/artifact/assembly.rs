@@ -36,7 +36,6 @@ pub struct ResolvedSandbox {
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
-    pub credentials: Vec<lns_spec::Credential>,
     pub tools: Vec<String>,
     pub scripts: Vec<lns_artifact::sandbox::ScriptStep>,
 }
@@ -57,7 +56,6 @@ pub struct AssembledWorkload {
     pub env: BTreeMap<String, String>,
     pub resources: Option<crate::artifact::spec::Resources>,
     pub policy: Option<lns_policy::Policy>,
-    pub credentials: Vec<lns_spec::Credential>,
     pub tools: Vec<String>,
     pub scripts: Vec<lns_artifact::sandbox::ScriptStep>,
 }
@@ -70,7 +68,6 @@ pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
         env: sandbox.env.clone(),
         resources: sandbox.resources.clone(),
         policy: sandbox.policy.clone(),
-        credentials: sandbox.credentials.clone(),
         tools: sandbox.tools.clone(),
         scripts: sandbox.scripts.clone(),
     }

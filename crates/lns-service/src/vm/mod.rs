@@ -769,9 +769,6 @@ mod tests {
                 fd_tx,
             },
             watcher: None,
-            credential_watcher: None,
-            managed_env_vars: Vec::new(),
-            placeholder_env: Vec::new(),
         }
     }
 

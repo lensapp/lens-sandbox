@@ -49,9 +49,6 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | Path | Holds |
 | ---- | ----- |
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
-| `~/.lns/connectors.yaml` | The connectors declared on this machine. |
-| `~/.lns/credentials.json` | The per-machine credential values you bound. |
-| `~/.lns/workload-grants.json` | Which workload was granted which connector, per project. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/audit/` | Each sandbox's own audit chain, which outlives the sandbox that wrote it. |
 | `~/.lns/runs/` | A live or stopped sandbox's writable layer and scratch, removed with the sandbox. |
@@ -69,8 +66,8 @@ The list and status verbs take `--format <table|json>`, so a script doesn't have
 parse the human table:
 
 `lns ps`, `lns sandbox ls`, `lns sandbox inspect <RUN>`, `lns artifact ls`,
-`lns volume ls`, `lns volume inspect`, `lns connector list`, `lns connector grants`,
-`lns login --list`, `lns config list`, `lns config get`, `lns service status`.
+`lns volume ls`, `lns volume inspect`, `lns login --list`, `lns config list`,
+`lns config get`, `lns service status`.
 
 `table` is the default everywhere, including the two `inspect` verbs — the table is
 a summary a reader scans, the JSON is the record. `lns artifact inspect` renders a
@@ -180,7 +177,7 @@ the `./lns.yaml` definition with its command overridden.
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
 | `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Takes a reference or a directory. A bare reference is qualified by `--registry`, else `run.registry`, else the Lens hub; a directory is a local document and stays a path. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`, and a directory shows its absolute path. |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
-| `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). Secrets belong in the credential flow. |
+| `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
 | `-v`, `--volume`, `--mount <SPEC>` |            | Mount into the workload (repeatable): a named volume `name:/path[:ro]` (persists across runs) or a host bind `/host/path:/path[:ro]` (live host files; prompts to keep/drop secret-shaped files). Also accepts keyed syntax: `type=bind\|volume,source=...,target=...[,readonly]`. |
 | `-p`, `--publish <SPEC>`     |                  | Publish a guest port as `[host_ip:]hostport:containerport[/proto]` (repeatable). Host bind defaults to `127.0.0.1`. On a container-port conflict with declared `spec.ports`, `-p` wins. |
@@ -231,13 +228,13 @@ bare reference is qualified by `run.registry`, else the Lens hub (`hub.lns.run`)
 | `pull`     | `lns pull`   | Inspect and fetch a published artifact and its base image into the local cache. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — the whole graph is recorded in the local store, so `lns artifact ls` lists it and `rm`/`prune` can reclaim it. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
 | `tag`      | `lns tag`    | Re-reference a cached artifact under a new tag. A bare `<TARGET>` follows the qualified `<SOURCE>`'s registry, so a same-repo retag never becomes a cross-registry pair. |
 | `ls`       | —            | List what the local store holds — reference, kind, digest, size, and the sandbox holding each. `--kind` filters to `sandbox` (a pulled or built artifact) or `mixin` (a pulled mixin document). The base OCI images a sandbox runs on are cache-internal: they never list, and `prune` reclaims them silently once nothing needs them. Alias: `list`. |
-| `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), connectors, declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. Against a local document the flag takes a local path (`./obs`, `./obs/lns.yaml`, `../x/lns.yaml`): the mixin is read from this machine and merged after the document, in flag order, so the render stays offline. A published reference there is refused, because an offline render has nothing to resolve it against. The document's own `spec.mixins` merge the same way: a local path is read and merged (rooted at the document that declares it, before any flag); a published reference is listed as `mixin: <ref> (published; not merged, because this render is offline)` and the render continues. Every merged mixin is named by the absolute path of the document it resolved to. |
+| `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. Against a local document the flag takes a local path (`./obs`, `./obs/lns.yaml`, `../x/lns.yaml`): the mixin is read from this machine and merged after the document, in flag order, so the render stays offline. A published reference there is refused, because an offline render has nothing to resolve it against. The document's own `spec.mixins` merge the same way: a local path is read and merged (rooted at the document that declares it, before any flag); a published reference is listed as `mixin: <ref> (published; not merged, because this render is offline)` and the render continues. Every merged mixin is named by the absolute path of the document it resolved to. |
 | `rm`       | `lns rm`     | Remove one cached artifact and free its now-unreferenced layers. |
 | `prune`    | —            | Remove every cached artifact nothing holds and, when no sandbox is live, reclaim the provisioned tool cache. Lists what it would remove and asks first, unless `-f`/`--force`. |
 
 The `./lns.yaml` document (`apiVersion: lns.run/v1`, `kind: sandbox`) carries a
 `spec` with `image` (**required** base OCI image), and the optional `command`,
-`workdir`, `volumes`, `env`, `egress`, and `connectors`. Declarative mounts
+`workdir`, `volumes`, `env`, and `egress`. Declarative mounts
 accept `type: bind` or `type: volume`, `source`, an absolute `target`, and optional
 `readOnly`; explicit run mounts replace declarations with the same target. See
 [Running workloads — defining a sandbox](running-workloads.md#defining-a-sandbox).
@@ -272,7 +269,7 @@ workload does.
 | `exec`     | `lns exec`   | Run another command inside a running sandbox. Stdin and PTY allocation are explicit: `-i` forwards stdin, `-t` allocates a PTY, and `-it` does both. `--detach-keys` closes only that exec session; `-q` suppresses status lines. The command needs no `--` separator. |
 | `kill`     | `lns kill`   | Send one signal (`--signal`, default `TERM`; bare or `SIG`-prefixed, case-insensitive: `TERM`, `INT`, `QUIT`, `HUP`, `WINCH`, `KILL`) and return. |
 | `stop`     | `lns stop`   | Stop a sandbox gracefully: SIGTERM first, SIGKILL once the timeout passes (`-t`, default 10s). Reports whether it had to escalate. The sandbox stays listed as **stopped**, restartable with `lns start` until you `lns sandbox rm` it. |
-| `start`    | `lns start`  | Run a stopped sandbox again on its preserved writable layer. The launch replays exactly as recorded — image (digest-pinned), command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot. Detached by default: prints the handle and returns. `-a` attaches output and adopts the workload's exit code; `-i` (with `-a`) forwards stdin. A conflict — a taken host port, a volume another sandbox holds, a missing bind source — aborts the start and leaves the sandbox stopped, untouched. |
+| `start`    | `lns start`  | Run a stopped sandbox again on its preserved writable layer. The launch replays exactly as recorded — image (digest-pinned), command, env, mounts, ports, resources, run-as — while the network rules re-resolve as they would for a fresh boot. Detached by default: prints the handle and returns. `-a` attaches output and adopts the workload's exit code; `-i` (with `-a`) forwards stdin. A conflict — a taken host port, a volume another sandbox holds, a missing bind source — aborts the start and leaves the sandbox stopped, untouched. |
 | `logs`     | `lns logs`   | Print the sandbox's captured stdout/stderr; `-f` keeps streaming until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
 | `attach`   | `lns attach` | Re-join a sandbox's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves it running and returns you to your shell (no signal is sent). Stdin reaches the workload only if the sandbox was started with stdin open. |
 | `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
@@ -343,22 +340,19 @@ Show one chronological timeline of every audit event across all sandboxes — or
 ```bash
 lns audit                                   # every event, every sandbox, newest first
 lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
-lns audit [--connector <id>] [--kind <kind>] [--format <table|jsonl>]
+lns audit [--kind <kind>] [--format <table|jsonl>]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
-logs (launch, egress, injected env, volume/bind mounts) and the durable connection
-ledger (`approval`, `connection`, and `credential` events recorded across runs).
+logs (launch, egress, injected env, volume/bind mounts) and the durable approval
+ledger (`approval` events recorded across runs).
 `<sandbox>` narrows it to one run — resolved as a run id or a unique id prefix; an
 unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 
 Filters compose:
 
-- `--connector <id>` — only events for one connector. Discover the ids with
-  `lns connector list`; they also appear in the `DETAIL` column. Per-run egress/mount
-  events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
-  `connection`, `credential`, `tool`.
+  `tool`.
 - `--format jsonl` — one raw JSON event per line instead of the table.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
@@ -397,43 +391,6 @@ lns update [--force] [--dry-run]
 | `--force`   | `false` | Reinstall even if the running version matches (e.g. corrupt or unsigned binary).|
 | `--dry-run` | `false` | Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network. |
 
-## `lns connector`
-
-Manage the credential-connector catalog — the services whose credentials reach a
-workload. The catalog is machine-global (`~/.lns/connectors.yaml`). A connector
-declared in a sandbox definition's `spec.connectors` seeds its placeholder env
-var but is only offered — the workload is prompted on first use, never armed
-automatically. Connecting one records the connection for that project on this
-machine and binds its value; the workload
-still meets a first-use card, and answering it is what grants that workload the
-value.
-
-```bash
-lns connector add <ID> --env-var <VAR> --inject <KIND:DOMAIN>... [--route <HOST>]... [--placeholder <P>]
-lns connector list
-lns connector remove <ID>
-lns connector connect <ID> [--policy <PATH>]
-lns connector disconnect <ID> [--policy <PATH>]
-lns connector grants [--policy <PATH>] [--all]
-lns connector revoke <ID> [--policy <PATH>]
-```
-
-| Subcommand   | Meaning                                                                       |
-| ------------ | ----------------------------------------------------------------------------- |
-| `add`        | Declare a credential connector in your machine-global catalog.              |
-| `list`       | List the bundled and user-declared connectors and their auth kind.          |
-| `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
-| `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares. |
-| `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
-| `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
-| `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
-
-`--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,
-`token_header`, `basic_x_access_token`, or `api_key_header` (which takes the header
-name as a third segment: `api_key_header:DOMAIN:HEADER`). Value decisions for a
-connected connector are made interactively in the approval window; grants are
-recorded per project and workload in `~/.lns/workload-grants.json`. See
-[Credentials](credentials.md) and [Connectors](connectors.md).
 
 ## `lns config`
 

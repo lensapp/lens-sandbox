@@ -1,5 +1,5 @@
 use lns_policy::matching::split_destination;
-use lns_policy::{NetworkPolicy, Policy, RouteRule, Verdict};
+use lns_policy::{NetworkPolicy, Policy, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardrailFlag {
@@ -100,24 +100,12 @@ fn merge_rule_table<R: Clone + PartialEq>(layers: &[&Policy], table: TableOf<R>)
     merged
 }
 
-/// Adds a connector's derived rules ahead of any catch-all, since appended behind one they would never fire and a closed policy raises no card to say why.
-pub fn splice_connector_routes(
-    table: &mut Vec<RouteRule>,
-    routes: impl IntoIterator<Item = RouteRule>,
-) {
-    let at = table
-        .iter()
-        .position(RouteRule::is_catch_all)
-        .unwrap_or(table.len());
-    table.splice(at..at, routes);
-}
-
 /// Whether the first catch-all the gate reaches in `egress.http` is a deny, read from that table alone because a raw rule must name a port and so can never be a catch-all.
 pub fn is_closed(policy: &Policy) -> bool {
     policy.network.is_closed()
 }
 
-/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: the overlay is the later source, so its entries decide every destination both name, and only its connectors are applied — an artifact-declared connector the user has not connected in this directory is never force-armed, so it stays connectable and is offered as a live connect on first use.
+/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: the overlay is the later source, so its entries decide every destination both name.
 pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
     let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
     Policy {
@@ -127,7 +115,6 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
                 tcp: merge_rule_table(&layers, |policy| &policy.network.egress.tcp),
             },
         },
-        connectors: overlay.connectors.clone(),
         ..Policy::default()
     }
 }
@@ -135,7 +122,7 @@ pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lns_policy::TcpEgressRule;
+    use lns_policy::{RouteRule, TcpEgressRule};
 
     /// The merged table as the guest's first-match gate reads it, which is the only thing the merge means.
     fn table(policy: &Policy) -> Vec<(&str, Verdict)> {
@@ -346,40 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn connector_routes_land_ahead_of_a_catch_all_so_the_gate_still_reaches_them() {
-        // A closed policy says so with a rule now, and the gate stops at the first
-        // match — appended behind it a connector's route never fires, and a closed
-        // policy raises no card either, so the failure would be silent.
-        let mut table = vec![
-            RouteRule::allow_host("api.example.test"),
-            RouteRule::deny_host("*"),
-        ];
-        splice_connector_routes(
-            &mut table,
-            [RouteRule::allow_host("api.some-oauth.example")],
-        );
-        let patterns: Vec<&str> = table.iter().map(|r| r.match_pattern.as_str()).collect();
-        assert_eq!(
-            patterns,
-            vec!["api.example.test", "api.some-oauth.example", "*"],
-            "the route must sit ahead of the catch-all"
-        );
-    }
-
-    #[test]
-    fn connector_routes_append_when_nothing_closes_the_table() {
-        let mut table = vec![RouteRule::allow_host("api.example.test")];
-        splice_connector_routes(
-            &mut table,
-            [RouteRule::allow_host("api.some-oauth.example")],
-        );
-        assert_eq!(
-            table.last().unwrap().match_pattern,
-            "api.some-oauth.example"
-        );
-    }
-
-    #[test]
     fn a_later_sources_entries_precede_an_earlier_sources() {
         let baseline = allow("api.example.test");
         let overlay = deny("api.example.test");
@@ -559,33 +512,6 @@ mod tests {
                 .iter()
                 .all(|rule| rule.match_pattern != "db.internal:5432"),
             "the tables fold independently, so an http entry never becomes a raw one"
-        );
-    }
-
-    #[test]
-    fn merge_honors_a_deny_default_and_applies_only_overlay_connectors() {
-        let mut overlay = Policy::default();
-        overlay.add_rule(RouteRule::deny_host("*"));
-        overlay.connect("some-overlay-connector");
-        let mut baseline = Policy::default();
-        baseline.connect("some-artifact-connector");
-        let merged = merge_effective(Some(&baseline), &overlay);
-        assert!(
-            is_closed(&merged),
-            "a closed layer must leave the merged policy closed: {:?}",
-            merged.network.egress.http
-        );
-        assert!(
-            merged
-                .connectors
-                .contains(&"some-overlay-connector".to_string()),
-            "a connector the user connected in this directory is applied"
-        );
-        assert!(
-            !merged
-                .connectors
-                .contains(&"some-artifact-connector".to_string()),
-            "an artifact-declared connector is never force-armed by the merge; it stays connectable and is offered on first use"
         );
     }
 

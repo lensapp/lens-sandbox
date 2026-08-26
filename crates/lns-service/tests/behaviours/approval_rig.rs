@@ -7,8 +7,20 @@ use lns_service::approval_flow::{
     protocol::HostFrame,
     session::{ApprovalSession, Notifier, PendingPrompt},
 };
+use lns_service::ledger::LedgerRecorder;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
+
+#[derive(Default)]
+pub struct RigRecorder {
+    pub events: Mutex<Vec<lns_ipc::LedgerEvent>>,
+}
+
+impl LedgerRecorder for RigRecorder {
+    fn record(&self, event: lns_ipc::LedgerEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
 
 #[derive(Default)]
 pub struct TestNotifier {
@@ -70,7 +82,7 @@ pub struct ApprovalRig {
     pub frames: mpsc::UnboundedReceiver<HostFrame>,
     pub policy_path: PathBuf,
     pub timeout: Duration,
-    pub ledger: Arc<crate::credential_rig::RigRecorder>,
+    pub ledger: Arc<RigRecorder>,
     _tempdir: TempDir,
 }
 
@@ -90,7 +102,7 @@ impl ApprovalRig {
             tx,
             timeout,
         ));
-        let ledger = Arc::new(crate::credential_rig::RigRecorder::default());
+        let ledger = Arc::new(RigRecorder::default());
         session.set_ledger_recorder(ledger.clone());
         Self {
             session,

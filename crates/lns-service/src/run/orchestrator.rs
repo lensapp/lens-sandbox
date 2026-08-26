@@ -20,7 +20,6 @@ use super::{
 pub struct PreparedRun {
     forwards: crate::forward::ForwardGuard,
     document: PreparedDocument,
-    workload: super::WorkloadIdentity,
 }
 
 /// What a run will boot from: the definition its request carried, what its published reference resolved to, or neither.
@@ -59,17 +58,7 @@ pub async fn prepare(run_id: &str, args: &RunImageArgs) -> Result<PreparedRun> {
         }
         (None, None) => PreparedDocument::Imageless,
     };
-    let digest = match &document {
-        PreparedDocument::Published(resolved) => Some(resolved.digest.as_str()),
-        _ => None,
-    };
-    // Refuse an unidentifiable run before its sign-in gate can drag the user through a device flow.
-    let workload = super::workload_identity(args, resolved_image, digest)?;
-    Ok(PreparedRun {
-        forwards,
-        document,
-        workload,
-    })
+    Ok(PreparedRun { forwards, document })
 }
 
 pub async fn handle(
@@ -100,7 +89,7 @@ pub async fn handle(
         &finished_run_id,
         &microvm_label,
         code,
-        &crate::oauth::RealClock,
+        &crate::clock::RealClock,
     ) {
         log::warn!("run exit not audited: {e:#}");
     }
@@ -118,7 +107,7 @@ pub async fn handle(
                 },
                 |id| {
                     if let Err(e) =
-                        crate::audit::record_run_removed(id, false, true, &crate::oauth::RealClock)
+                        crate::audit::record_run_removed(id, false, true, &crate::clock::RealClock)
                     {
                         log::warn!("run removal not audited: {e:#}");
                     }
@@ -156,11 +145,7 @@ async fn orchestrate(
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
-    let PreparedRun {
-        forwards,
-        document,
-        workload,
-    } = prepared;
+    let PreparedRun { forwards, document } = prepared;
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
@@ -200,18 +185,6 @@ async fn orchestrate(
         ),
         PreparedDocument::Imageless => None,
     };
-    let mut signed_in = Vec::new();
-    let mut revocations_at_gate = std::collections::HashMap::new();
-    if let Some(plan) = &sandbox_plan {
-        crate::artifact::real::refuse_unknown_connectors(plan.workload.policy.as_ref())?;
-        // Read before the gate opens: a device flow can hold it for minutes, and a disconnect landing inside that window must win over the grant the sign-in earns.
-        revocations_at_gate = policy
-            .as_deref()
-            .map(supervisor::revocations_before_gate)
-            .transpose()?
-            .unwrap_or_default();
-        signed_in = gate_declared_sign_ins(&plan.workload.credentials, &frame_tx).await?;
-    }
     let tool_requests = match &sandbox_plan {
         Some(plan) if !plan.workload.tools.is_empty() => {
             let requests = lns_artifact::tools::parse_all(&plan.workload.tools)?;
@@ -248,15 +221,6 @@ async fn orchestrate(
                 sandbox_plan
                     .as_ref()
                     .and_then(|p| p.workload.policy.as_ref()),
-                supervisor::RunConsent {
-                    credentials: sandbox_plan
-                        .as_ref()
-                        .map(|p| p.workload.credentials.as_slice())
-                        .unwrap_or_default(),
-                    workload: workload.clone(),
-                    signed_in: signed_in.clone(),
-                    revocations_at_gate: revocations_at_gate.clone(),
-                },
                 guest_tools.root.clone(),
                 env.clone(),
             ),
@@ -336,13 +300,13 @@ async fn orchestrate(
             &run_id,
             &microvm,
             args.image.as_deref().unwrap_or("<imageless>"),
-            &crate::oauth::RealClock,
+            &crate::clock::RealClock,
         )?,
         super::LaunchMode::Restart { .. } => crate::audit::record_run_restarted(
             &run_id,
             &microvm,
             args.image.as_deref().unwrap_or("<imageless>"),
-            &crate::oauth::RealClock,
+            &crate::clock::RealClock,
         )?,
     }
     for vol in &args.volumes {
@@ -351,7 +315,7 @@ async fn orchestrate(
             &microvm,
             &vol.name,
             &vol.target,
-            &crate::oauth::RealClock,
+            &crate::clock::RealClock,
         )?;
     }
 
@@ -373,7 +337,7 @@ async fn orchestrate(
             &bind.target,
             &bind.kept_paths,
             &bind.dropped_paths,
-            &crate::oauth::RealClock,
+            &crate::clock::RealClock,
         )?;
     }
 
@@ -400,7 +364,7 @@ async fn orchestrate(
                     &run_id,
                     &microvm,
                     outcome,
-                    &crate::oauth::RealClock,
+                    &crate::clock::RealClock,
                 ) {
                     log::warn!("could not record the provisioned tool in the run's chain: {e:#}");
                 }
@@ -564,24 +528,13 @@ async fn orchestrate(
         SUPERVISED,
         super::EnvInputs {
             user_env: &env,
-            extra_managed: session.managed_env_vars.as_slice(),
             workdir: workdir.as_deref(),
             tools: &tool_runtime,
         },
     );
-    for refused in &composed.refused {
-        let _ = frame_tx
-            .send(WireFrame::Json(lns_ipc::Response::RunLog {
-                level: lns_ipc::LogLevel::Warn,
-                verb: None,
-                message: crate::workload_env::refusal_warning(refused),
-            }))
-            .await;
-    }
     let exec_environment = crate::run_registry::ExecEnvironment {
         session_env: composed.env.clone(),
         tools: tool_runtime,
-        placeholders: session.placeholder_env.clone(),
         workdir: workdir.clone(),
         declared_identity_keys: crate::workload_env::declared_identity_keys(&env),
     };
@@ -689,85 +642,4 @@ async fn orchestrate(
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
-}
-
-/// Block the boot on any declared credential whose supplying connector signs in with oauth and holds no armed machine grant: drive that sign-in host-side (streaming the verification frames to the client), and abort the launch if it does not complete. Returns the ids whose sign-in the user completed this launch — that consent becomes the workload's grant, so the credential arms now and the next run skips the sign-in. A bare `spec.connectors` id never gates here — it is offered reactively on first use.
-async fn gate_declared_sign_ins(
-    credentials: &[lns_spec::Credential],
-    frame_tx: &Sender<WireFrame>,
-) -> Result<Vec<String>> {
-    use crate::artifact::credential_boot::{
-        BootGate, SlotPlan, boot_gate, plan_declared_connectors, sign_in_gate_ids,
-    };
-    use crate::credential_flow::store::{CredentialStore, JsonFileCredentialStore};
-    use lns_ipc::Response;
-
-    let mut signed_in = Vec::new();
-    if credentials.is_empty() {
-        return Ok(signed_in);
-    }
-    let user = lns_policy::connectors::Catalog::load_or_default(&lns_ipc::connectors_path()?)
-        .unwrap_or_default();
-    let catalog = lns_policy::connectors::effective_connectors(&user);
-    let declared = sign_in_gate_ids(credentials, &catalog);
-    if declared.is_empty() {
-        return Ok(signed_in);
-    }
-    let state = JsonFileCredentialStore::new(lns_ipc::credentials_path()?)
-        .load()
-        .unwrap_or_default();
-    let plans = plan_declared_connectors(&declared, &catalog, &state);
-    if boot_gate(&plans) == BootGate::StartWorkload {
-        return Ok(signed_in);
-    }
-    for plan in plans {
-        let SlotPlan::Connect(prompt) = plan else {
-            continue;
-        };
-        let id = prompt.connector.clone();
-        let _ = frame_tx
-            .send(WireFrame::Json(Response::RunLog {
-                level: lns_ipc::LogLevel::Info,
-                verb: None,
-                message: format!("connector {id} needs a sign-in before the workload starts"),
-            }))
-            .await;
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
-        let sign_in = crate::ipc::adapter::run_connector_sign_in(&id, progress_tx);
-        tokio::pin!(sign_in);
-        let terminal = loop {
-            tokio::select! {
-                biased;
-                Some(resp) = progress_rx.recv() => {
-                    let _ = frame_tx.send(WireFrame::Json(resp)).await;
-                }
-                res = &mut sign_in => break res,
-            }
-        };
-        while let Ok(resp) = progress_rx.try_recv() {
-            let _ = frame_tx.send(WireFrame::Json(resp)).await;
-        }
-        match terminal {
-            Response::OauthSignInComplete => {
-                signed_in.push(id.clone());
-                let _ = frame_tx
-                    .send(WireFrame::Json(Response::RunLog {
-                        level: lns_ipc::LogLevel::Info,
-                        verb: None,
-                        message: format!("signed in to {id}"),
-                    }))
-                    .await;
-            }
-            Response::OauthSignInFailed { reason } => {
-                // Every declared credential is a requirement, so a sign-in the user abandons refuses the run rather than starting a workload that cannot reach its service.
-                anyhow::bail!(
-                    "sign-in for connector {id} did not complete ({reason}); launch aborted"
-                );
-            }
-            other => {
-                anyhow::bail!("unexpected sign-in response for connector {id}: {other:?}");
-            }
-        }
-    }
-    Ok(signed_in)
 }

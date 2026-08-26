@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use lns_policy::Egress;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -105,7 +105,7 @@ impl Volume {
     }
 }
 
-/// The whole sandbox in one document: the base image plus its config, env, embedded network policy, mounts, and the connector ids it needs.
+/// The whole sandbox in one document: the base image plus its config, env, embedded network policy, and mounts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpec {
@@ -124,10 +124,6 @@ pub struct SandboxSpec {
     pub resources: Option<Resources>,
     #[serde(default)]
     pub egress: Egress,
-    #[serde(default)]
-    pub connectors: Vec<String>,
-    #[serde(default)]
-    pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub mixins: Vec<String>,
     #[serde(default)]
@@ -288,7 +284,7 @@ fn validate_mixin_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// The blocks a mixin may not carry: the five that describe one launch, which the sandbox owns, plus the connector list — how a credential is obtained is decided per machine, never by a document that travels with a workload.
+/// The blocks a mixin may not carry: the five that describe one launch, which the sandbox owns.
 fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
     let launch_blocks = [
         (!spec.image.trim().is_empty(), "image"),
@@ -299,11 +295,6 @@ fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
     ];
     if let Some((_, block)) = launch_blocks.iter().find(|(declared, _)| *declared) {
         bail!("a mixin must not declare {block}: it describes one launch, and the sandbox owns it");
-    }
-    if !spec.connectors.is_empty() {
-        bail!(
-            "a mixin must not name a connector: which method supplies a credential is decided per machine"
-        );
     }
     Ok(())
 }
@@ -372,13 +363,6 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             bail!("duplicate volume target {}", volume.target);
         }
     }
-    for connector in &doc.spec.connectors {
-        if !spec::is_valid_name(connector) {
-            bail!("invalid connector id {connector:?}");
-        }
-    }
-    lns_spec::credential::validate_all(&doc.spec.credentials)
-        .map_err(|problem| anyhow!(problem))?;
     for reference in &doc.spec.mixins {
         validate_mixin_reference(reference)?;
     }
@@ -864,7 +848,7 @@ mod tests {
     #[test]
     fn a_mixin_reads_every_block_it_shares_with_a_sandbox() {
         let def = parse_mixin(&mixin_json(
-            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder-some-token"}],"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"guestPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
+            r#"{"env":{"MODE":"research"},"tools":["postgresql@17"],"egress":{"tcp":[{"match":"db.example.com:5432","verdict":"allow"}]},"filesets":[{"inline":{"USING-POSTGRES.md":"Connect with $DATABASE_URL."},"guestPath":"/home/agent/notes"}],"ports":[{"container":8080}],"volumes":[{"type":"volume","name":"cache","target":"/home/agent/.cache"}]}"#,
         ))
         .expect("a mixin's shared blocks follow the same rules as a sandbox's");
         assert_eq!(def.name, "postgres-tools");
@@ -876,7 +860,6 @@ mod tests {
         assert_eq!(def.spec.ports[0].container, 8080);
         assert_eq!(def.spec.volumes[0].target, "/home/agent/.cache");
         assert_eq!(def.spec.egress.tcp.len(), 1);
-        assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
         assert_eq!(def.spec.filesets[0].guest_path, "/home/agent/notes");
     }
 
@@ -895,15 +878,6 @@ mod tests {
                 "a block the sandbox owns must be refused by name rather than silently ignored; got: {err:#}"
             );
         }
-    }
-
-    #[test]
-    fn a_mixin_may_not_name_a_connector() {
-        let err = parse_mixin(&mixin_json(r#"{"connectors":["some-provider"]}"#)).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("a mixin must not name a connector"),
-            "how a credential is obtained is the user's decision on their own machine, and the retired field stays a sandbox-only divergence rather than spreading to a new kind; got: {err:#}"
-        );
     }
 
     #[test]
@@ -1303,7 +1277,7 @@ mod tests {
     #[test]
     fn parse_reads_the_whole_flat_definition() {
         let json = def_json(
-            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]},"connectors":["some-provider"],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000"}],"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
+            r#"{"image":"ghcr.io/team/base:1","command":"agent --serve","workdir":"/workspace","env":{"MODE":"research"},"resources":{"cpu":2,"memory":"1Gi"},"egress":{"http":[{"match":"api.example.test","verdict":"allow"},{"match":"*","verdict":"deny"}]},"volumes":[{"type":"bind","source":".","target":"/workspace"},{"type":"volume","source":"home","target":"/root/.home","readOnly":true}],"ports":[{"container":8080}]}"#,
         );
         let def = parse(&json).unwrap();
         assert_eq!(def.name, "hermes");
@@ -1320,8 +1294,6 @@ mod tests {
             "a closed baseline carries its lockdown as a catch-all deny"
         );
         assert_eq!(def.spec.egress.http.len(), 2);
-        assert_eq!(def.spec.connectors, vec!["some-provider".to_string()]);
-        assert_eq!(def.spec.credentials[0].env_var, "SOME_TOKEN");
         assert_eq!(def.spec.volumes[0].source(), ".");
         assert!(def.spec.volumes[0].is_bind());
         assert_eq!(def.spec.volumes[1].source(), "home");
@@ -1334,7 +1306,6 @@ mod tests {
         let def = parse(&def_json(r#"{"image":"ghcr.io/team/base:1"}"#)).unwrap();
         assert!(def.spec.egress.http.is_empty());
         assert!(def.spec.egress.tcp.is_empty());
-        assert!(def.spec.connectors.is_empty());
     }
 
     #[test]
@@ -2454,123 +2425,6 @@ mod tests {
         assert!(
             format!("{err:#}").contains("duplicate container port 3003"),
             "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_an_invalid_connector_id() {
-        let err = parse(&def_json(r#"{"image":"x:1","connectors":["Bad_Id"]}"#)).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("invalid connector id"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_reads_a_credential_as_the_injection_contract_it_declares() {
-        let def = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"},{"kind":"api_key_header","domain":"api.some-oauth.example","header":"x-api-key"}]}]}"#,
-        ))
-        .unwrap();
-        let credential = &def.spec.credentials[0];
-        assert_eq!(credential.env_var, "SOME_TOKEN");
-        assert_eq!(credential.placeholder, "some_LNSPLACEHOLDER0000");
-        assert_eq!(
-            credential.injections[0].kind,
-            lns_spec::InjectionKind::BearerHeader
-        );
-        assert_eq!(credential.injections[0].domain, "api.some-provider.example");
-        assert_eq!(
-            credential.injections[1].header.as_deref(),
-            Some("x-api-key")
-        );
-    }
-
-    #[test]
-    fn parse_reads_a_credential_that_declares_no_injection() {
-        let def = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000"}]}"#,
-        ))
-        .unwrap();
-        assert!(
-            def.spec.credentials[0].injections.is_empty(),
-            "injections are optional: a credential the workload only reads travels nowhere"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_two_credentials_sharing_an_env_var() {
-        let err = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000"},{"envVar":"SOME_TOKEN","placeholder":"other_LNSPLACEHOLDER0000"}]}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("duplicate credential env var \"SOME_TOKEN\""),
-            "nothing inside one document disambiguates two entries claiming one variable, so the second silently decides which secret the workload reads; got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_a_credential_env_var_that_would_produce_a_malformed_entry() {
-        for spec in [
-            r#"{"image":"x:1","credentials":[{"envVar":" ","placeholder":"some_LNSPLACEHOLDER0000"}]}"#,
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN=x","placeholder":"some_LNSPLACEHOLDER0000"}]}"#,
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN\nLD_PRELOAD","placeholder":"some_LNSPLACEHOLDER0000"}]}"#,
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME TOKEN","placeholder":"some_LNSPLACEHOLDER0000"}]}"#,
-        ] {
-            let err = parse(&def_json(spec)).unwrap_err();
-            assert!(
-                format!("{err:#}").contains("invalid credential env var"),
-                "spec {spec}: got: {err:#}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_rejects_a_placeholder_a_real_token_could_pass_for() {
-        let err = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"sk-live-0123456789"}]}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must self-identify as fake"),
-            "a document that publishes to a registry carries its placeholder with it, so one that reads like a token is a secret one edit from being committed; got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_an_injection_that_names_no_domain() {
-        let err = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000","injections":[{"kind":"bearer_header","domain":"  "}]}]}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must name the domain"),
-            "injection is domain-keyed, so an entry with no domain sends the secret nowhere and says nothing about where it may go; got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_a_header_on_a_kind_that_cannot_carry_one() {
-        let err = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example","header":"x-api-key"}]}]}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("only an api_key_header injection carries a header name"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn parse_rejects_an_api_key_header_injection_with_no_header_name() {
-        let err = parse(&def_json(
-            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000","injections":[{"kind":"api_key_header","domain":"api.some-provider.example"}]}]}"#,
-        ))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("api_key_header injection must name the header"),
-            "the proxy has no header to set, so the injection would silently do nothing; got: {err:#}"
         );
     }
 
