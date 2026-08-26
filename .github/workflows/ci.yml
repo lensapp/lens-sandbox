@@ -1,10 +1,11 @@
 name: CI
 
 on:
+  # Label-only events must never re-report `CI / check` (they'd supersede a
+  # failing run with all-skipped green); the label gate lives in pr-labels.yml.
+  # No base-branch filter: stacked PRs target another PR's branch and need the
+  # same suite; every base-dependent job reads github.event.pull_request.base.
   pull_request:
-    # Label-only events must never re-report `CI / check` (they'd supersede a
-    # failing run with all-skipped green); the label gate lives in pr-labels.yml.
-    branches: [main]
   push:
     branches: [main]
 
