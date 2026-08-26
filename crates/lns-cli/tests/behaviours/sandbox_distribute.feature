@@ -111,6 +111,27 @@ Feature: distributing a sandbox
     And the output contains "README.md exceeds"
     And nothing is pushed
 
+  Scenario: an oversized README is caught before any mixin uploads
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the project file "README.md" is larger than the README limit
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the command fails with an exit code other than 0
+    And the output contains "README.md exceeds"
+    And nothing is pushed
+
+  Scenario: an oversized README beside a local mixin is caught before any upload
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the project file "mixins/pg/README.md" is larger than the README limit
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the command fails with an exit code other than 0
+    And the output contains "README.md exceeds"
+    And the output contains "./mixins/pg/"
+    And nothing is pushed
+
   Scenario: a published mixin ships the README beside its own document
     Given an lns.yaml layering on the local mixin "./mixins/pg/"
     And the local mixin at "./mixins/pg/" is named "postgres-tools"

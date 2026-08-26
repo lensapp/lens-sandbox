@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use lns_artifact::build::BuiltArtifact;
 
 use super::author::Fs;
@@ -113,16 +113,40 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
         .collect()
 }
 
-/// The `README.md` beside the document, read whole so an over-limit file reaches `build_artifact`'s refusal rather than publishing truncated.
+/// The `README.md` beside the document, refused when it is a symlink or over-limit — it publishes automatically, so it gets the same boundary a packed fileset draws, and it is checked before any upload.
 fn read_readme<F: Fs + ?Sized>(fs: &F, cwd: &Path) -> Result<Option<Vec<u8>>> {
     let path = cwd.join("README.md");
+    if fs.is_symlink(&path) {
+        bail!(
+            "README.md is a symlink — a README publishes automatically, so it must be a regular file in the project"
+        );
+    }
     if !fs.exists(&path) {
         return Ok(None);
     }
     let bytes = fs
         .read_limited(&path, lns_artifact::build::MAX_README_BYTES)
         .with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() as u64 > lns_artifact::build::MAX_README_BYTES {
+        bail!(
+            "README.md exceeds the {}-byte limit",
+            lns_artifact::build::MAX_README_BYTES
+        );
+    }
     Ok(Some(bytes))
+}
+
+/// Validate every README a push would publish — the document's and each planned mixin's — so a refusal fires before the first upload and leaves nothing published.
+fn preflight_readmes<F: Fs + ?Sized>(
+    fs: &F,
+    cwd: &Path,
+    plan: &super::mixin_plan::MixinPlan,
+) -> Result<()> {
+    read_readme(fs, cwd)?;
+    for node in &plan.nodes {
+        read_readme(fs, &node.root).with_context(|| format!("mixin {}", node.declared))?;
+    }
+    Ok(())
 }
 
 /// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, and the README beside it.
@@ -302,6 +326,7 @@ where
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
+    preflight_readmes(fs, cwd, &plan)?;
     super::mixin_plan::confirm_mixin_publication(
         &plan,
         reference,
@@ -358,6 +383,7 @@ where
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
+    preflight_readmes(fs, cwd, &plan)?;
     let published = preview_planned_mixins(fs, &plan, out)?;
     let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (built, packed) = build(fs, cwd, &pinned)?;
@@ -1119,6 +1145,32 @@ mod tests {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","tools":[42]}}"#;
         let err = pin_declared_tools(&unconsultable(), doc).await.unwrap_err();
         assert!(format!("{err:#}").contains("not a string"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_readme_refuses_the_push_before_anything_uploads() {
+        // A README publishes automatically, so a checkout with README.md → ~/.aws/credentials must not exfiltrate the target — the same boundary fileset packing draws.
+        let mut fs = fs_with_skills();
+        fs.symlinks
+            .insert(std::path::PathBuf::from("/work/README.md"));
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        let err = push_no_prompt(
+            &fs,
+            cwd(),
+            &producer,
+            &unconsultable(),
+            VALID,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
+        assert!(
+            producer.uploaded.borrow().is_empty(),
+            "the symlink target must never reach the registry"
+        );
     }
 
     #[test]
