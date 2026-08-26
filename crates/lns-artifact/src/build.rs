@@ -9,6 +9,12 @@ const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 /// The media type of a packed `filesets[].path` layer; a sandbox or mixin artifact carries one per entry it declares (`docs/sandbox-spec.md` §7).
 pub const FILESET_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 
+/// The media type of the packed `README.md` layer a registry UI renders (`docs/sandbox-spec.md` §7.2).
+pub const README_LAYER_MEDIA_TYPE: &str = "text/markdown";
+
+/// Maximum size of a packed `README.md` layer.
+pub const MAX_README_BYTES: u64 = 1024 * 1024;
+
 /// Maximum aggregate size of one packed fileset layer.
 pub const MAX_FILESET_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -48,14 +54,25 @@ impl BuiltArtifact {
             .iter()
             .filter(|blob| blob.media_type == FILESET_LAYER_MEDIA_TYPE)
     }
+
+    /// The packed `README.md` layer, when the document ships one.
+    pub fn readme_layer(&self) -> Option<&Blob> {
+        self.blobs
+            .iter()
+            .find(|blob| blob.media_type == README_LAYER_MEDIA_TYPE)
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-/// Assemble one OCI artifact from a validated document and the directories its `path` filesets pack, in declaration order: one layer per entry (`docs/sandbox-spec.md` §6), so the files and the declaration that mounts them share one digest. A document declaring none is config-only.
-pub fn build_artifact(doc: &[u8], filesets: &[Vec<FileEntry>]) -> Result<BuiltArtifact> {
+/// Assemble one OCI artifact from a validated document, the directories its `path` filesets pack in declaration order — one layer per entry (`docs/sandbox-spec.md` §6), so the files and the declaration that mounts them share one digest — and the `README.md` beside the document, if any (§7.2).
+pub fn build_artifact(
+    doc: &[u8],
+    filesets: &[Vec<FileEntry>],
+    readme: Option<&[u8]>,
+) -> Result<BuiltArtifact> {
     if let Err(problems) = crate::validate::validate(doc) {
         bail!(
             "refusing to build an invalid manifest:\n  - {}",
@@ -90,6 +107,23 @@ pub fn build_artifact(doc: &[u8], filesets: &[Vec<FileEntry>]) -> Result<BuiltAr
             "size": blob.data.len(),
         }));
         blobs.push(blob);
+    }
+    if let Some(readme) = readme {
+        if readme.len() as u64 > MAX_README_BYTES {
+            bail!("README.md exceeds the {MAX_README_BYTES}-byte limit");
+        }
+        let digest = sha256_digest(readme);
+        layers.push(json!({
+            "mediaType": README_LAYER_MEDIA_TYPE,
+            "digest": digest,
+            "size": readme.len(),
+            "annotations": { "org.opencontainers.image.title": "README.md" },
+        }));
+        blobs.push(Blob {
+            digest,
+            media_type: README_LAYER_MEDIA_TYPE.to_string(),
+            data: readme.to_vec(),
+        });
     }
     if layers.is_empty() {
         let empty_blob = b"{}".to_vec();
@@ -210,7 +244,100 @@ mod tests {
 
     /// Every artifact in this module is built from a document plus the directories its `path` filesets pack; most fixtures declare none.
     fn build(doc: &[u8]) -> Result<BuiltArtifact> {
-        build_artifact(doc, &[])
+        build_artifact(doc, &[], None)
+    }
+
+    #[test]
+    fn a_readme_beside_the_document_becomes_a_text_markdown_layer() {
+        let built = build_artifact(&sandbox(), &[], Some(b"# hermes")).unwrap();
+        let layer = built
+            .readme_layer()
+            .expect("the README travels with the artifact");
+        assert_eq!(layer.data, b"# hermes");
+
+        let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
+        let descriptor = manifest["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["mediaType"] == README_LAYER_MEDIA_TYPE)
+            .expect("the manifest addresses the README layer");
+        assert_eq!(descriptor["digest"], layer.digest);
+        assert_eq!(
+            descriptor["size"].as_u64().unwrap() as usize,
+            layer.data.len()
+        );
+        assert_eq!(
+            descriptor["annotations"]["org.opencontainers.image.title"], "README.md",
+            "the title annotation is how generic OCI tooling and the hub name the blob"
+        );
+    }
+
+    #[test]
+    fn a_readme_change_changes_the_artifact_digest() {
+        let with = |readme: &[u8]| {
+            build_artifact(&sandbox(), &[], Some(readme))
+                .unwrap()
+                .manifest_digest
+        };
+        assert_ne!(
+            with(b"# v1"),
+            with(b"# v2"),
+            "every digest carries exactly the README that shipped with it"
+        );
+        assert_ne!(
+            with(b"# v1"),
+            build(&sandbox()).unwrap().manifest_digest,
+            "adding a README is a new artifact, not an out-of-band edit"
+        );
+    }
+
+    #[test]
+    fn a_readme_layer_is_not_a_fileset_layer() {
+        let built = build_artifact(
+            &with_path_filesets(&["/opt/skills"]),
+            &[vec![entry("a.md", "x")]],
+            Some(b"# docs"),
+        )
+        .unwrap();
+        assert_eq!(
+            built.fileset_layers().count(),
+            1,
+            "the i-th path entry owns the i-th fileset layer, so the README must not shift the correlation"
+        );
+        let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
+        let media_types: Vec<&str> = manifest["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["mediaType"].as_str())
+            .collect();
+        assert_eq!(
+            media_types,
+            [FILESET_LAYER_MEDIA_TYPE, README_LAYER_MEDIA_TYPE]
+        );
+    }
+
+    #[test]
+    fn a_readme_alone_needs_no_empty_layer() {
+        let built = build_artifact(&sandbox(), &[], Some(b"# hermes")).unwrap();
+        assert!(
+            !built
+                .blobs
+                .iter()
+                .any(|blob| blob.media_type == EMPTY_MEDIA_TYPE),
+            "the empty descriptor exists only to keep a config-only manifest valid"
+        );
+    }
+
+    #[test]
+    fn an_oversized_readme_refuses_the_build() {
+        let oversized = vec![b'x'; MAX_README_BYTES as usize + 1];
+        let err = build_artifact(&sandbox(), &[], Some(&oversized)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("README.md exceeds"),
+            "a registry-rendered document has no business being megabytes; got: {err:#}"
+        );
     }
 
     #[test]
@@ -386,6 +513,7 @@ mod tests {
                 entry("deep.md", "research"),
                 entry("nested/tools.md", "tools"),
             ]],
+            None,
         )
         .expect("a declared path fileset packs into this artifact");
         assert_eq!(built.artifact_type, "application/vnd.lens.sandbox.v1+json");
@@ -416,6 +544,7 @@ mod tests {
         let built = build_artifact(
             &with_path_filesets(&["/first", "/second"]),
             &[vec![entry("a.md", "first")], vec![entry("b.md", "second")]],
+            None,
         )
         .unwrap();
         let layers: Vec<Vec<String>> = built
@@ -437,6 +566,7 @@ mod tests {
                 entry_mode("run.sh", "#!/bin/sh\n", 0o755),
                 entry("notes.md", "x"),
             ]],
+            None,
         )
         .unwrap();
         let modes = unpacked(built.fileset_layers().next().expect("a packed layer"));
@@ -451,7 +581,7 @@ mod tests {
     fn one_directory_packs_to_one_layer_digest_however_it_is_ordered_or_republished() {
         let doc = with_path_filesets(&["/x"]);
         let digest = |entries: Vec<FileEntry>| {
-            build_artifact(&doc, &[entries])
+            build_artifact(&doc, &[entries], None)
                 .unwrap()
                 .fileset_layers()
                 .next()
@@ -473,8 +603,12 @@ mod tests {
 
     #[test]
     fn a_document_and_its_packed_directories_have_to_agree_in_number() {
-        let err = build_artifact(&with_path_filesets(&["/x", "/y"]), &[vec![entry("a", "1")]])
-            .unwrap_err();
+        let err = build_artifact(
+            &with_path_filesets(&["/x", "/y"]),
+            &[vec![entry("a", "1")]],
+            None,
+        )
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("declares 2 path fileset(s) but 1 were packed"),
             "a layer per entry is what makes the i-th entry addressable, so a mismatch has to refuse the build rather than publish an artifact no consumer can correlate; got: {err:#}"
@@ -489,7 +623,7 @@ mod tests {
     #[test]
     fn a_mixin_carries_its_own_packed_filesets() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"skills","spec":{"filesets":[{"path":"./skills","guestPath":"/skills"}]}}"#;
-        let built = build_artifact(doc, &[vec![entry("a.md", "shared")]])
+        let built = build_artifact(doc, &[vec![entry("a.md", "shared")]], None)
             .expect("sharing one directory across sandboxes is publishing a mixin that carries it");
         assert_eq!(built.fileset_layers().count(), 1);
     }

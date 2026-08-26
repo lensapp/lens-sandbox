@@ -1046,6 +1046,14 @@ definition, packs each `path` fileset into a layer, builds the artifact — and
 prints the digests that would publish, layers included
 (`npm publish --dry-run`-style), so you can preview a release offline.
 
+A `README.md` next to your `lns.yaml` publishes with the artifact, as a
+`text/markdown` layer — it's what the Lens hub renders on the repository page.
+Every digest carries exactly the README that shipped with it, so updating the
+page is just editing the file and pushing again; there is no separate
+description to maintain on the hub. No `README.md`, no layer. The file is
+capped at 1 MiB, it never enters the sandbox, and since nothing hosts the files
+around it, links inside it should be absolute URLs.
+
 `lns push` also resolves each fuzzy `spec.tools` version (`node@22`,
 `node@latest`) against the tool's public version index and embeds the exact pin
 in the published definition — the same publish-time pinning filesets get, so

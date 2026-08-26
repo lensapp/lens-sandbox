@@ -677,6 +677,17 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         .last()
         .map(|(_, built)| built.fileset_layers().map(|l| l.digest.clone()).collect())
         .unwrap_or_default();
+    w.pushed_readmes = uploaded
+        .iter()
+        .map(|(reference, built)| {
+            (
+                reference.clone(),
+                built
+                    .readme_layer()
+                    .map(|layer| (layer.media_type.clone(), layer.data.clone())),
+            )
+        })
+        .collect();
     w.pushed_doc = uploaded.last().and_then(|(_, built)| {
         built
             .blobs

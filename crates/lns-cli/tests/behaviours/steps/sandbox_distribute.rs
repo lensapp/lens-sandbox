@@ -119,6 +119,67 @@ fn published_config_keeps_the_fileset_path(w: &mut BehaviourWorld) -> Result<(),
     }
 }
 
+#[given(regex = r#"^the project file "([^"]+)" contains "([^"]+)"$"#)]
+fn project_file_contains(w: &mut BehaviourWorld, path: String, content: String) {
+    w.author_files
+        .insert(std::path::PathBuf::from(format!("/work/{path}")), content);
+}
+
+#[given(regex = r#"^the project file "([^"]+)" is larger than the README limit$"#)]
+fn project_file_over_readme_limit(w: &mut BehaviourWorld, path: String) {
+    w.author_files.insert(
+        std::path::PathBuf::from(format!("/work/{path}")),
+        "x".repeat(lns_artifact::build::MAX_README_BYTES as usize + 1),
+    );
+}
+
+#[then("the pushed artifact carries the README as a text/markdown layer")]
+fn pushed_artifact_carries_readme(w: &mut BehaviourWorld) -> Result<(), String> {
+    let (_, readme) = w.pushed_readmes.last().ok_or("nothing was pushed")?;
+    match readme {
+        Some((media_type, content))
+            if media_type == lns_artifact::build::README_LAYER_MEDIA_TYPE
+                && content == b"# hermes" =>
+        {
+            Ok(())
+        }
+        other => Err(format!(
+            "the hub renders the README from a text/markdown layer of the artifact (docs/sandbox-spec.md §7.2); saw {other:?}"
+        )),
+    }
+}
+
+#[then("the pushed artifact carries no README layer")]
+fn pushed_artifact_carries_no_readme(w: &mut BehaviourWorld) -> Result<(), String> {
+    match w.pushed_readmes.last() {
+        Some((_, None)) => Ok(()),
+        Some((reference, Some(_))) => Err(format!(
+            "no README.md beside the document means no layer, but {reference} carries one"
+        )),
+        None => Err("nothing was pushed".into()),
+    }
+}
+
+#[then(regex = r#"^the artifact pushed to "([^"]+)" carries a README layer$"#)]
+fn artifact_pushed_to_carries_readme(
+    w: &mut BehaviourWorld,
+    repository: String,
+) -> Result<(), String> {
+    let (_, readme) = w
+        .pushed_readmes
+        .iter()
+        .find(|(reference, _)| reference.starts_with(&format!("{repository}:")))
+        .ok_or_else(|| format!("nothing published to {repository}; saw {:?}", w.pushed_refs))?;
+    if readme.is_some() {
+        Ok(())
+    } else {
+        Err(
+            "each artifact ships the README beside its own document, so the mixin's README travels with the mixin, not the sandbox"
+                .into(),
+        )
+    }
+}
+
 #[then("nothing is pushed")]
 fn nothing_pushed(w: &mut BehaviourWorld) -> Result<(), String> {
     if w.pushed_layers.is_empty() && w.pushed_doc.is_none() {

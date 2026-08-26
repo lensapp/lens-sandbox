@@ -1057,12 +1057,13 @@ mod tests {
             layers: vec![
                 descriptor("application/vnd.oci.empty.v1+json", "sha256:e", 2),
                 descriptor("application/vnd.oci.image.layer.v1.tar", "sha256:t", 9),
+                descriptor(lns_artifact::build::README_LAYER_MEDIA_TYPE, "sha256:r", 5),
             ],
             ..Default::default()
         };
         assert!(
             packed_layers(&manifest).is_empty(),
-            "a document declaring no path fileset still carries the OCI empty descriptor, and counting either of these as content would misalign every index after it"
+            "a document declaring no path fileset still carries the OCI empty descriptor, and its README never enters the guest — counting any of these as content would misalign every index after it"
         );
     }
 

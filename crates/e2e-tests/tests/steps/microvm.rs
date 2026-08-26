@@ -1201,7 +1201,7 @@ async fn published_sandbox_wrapping(world: &mut E2eWorld, image: &str) -> String
         r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"e2e-run-sandbox","spec":{{"image":"{image}"}}}}"#
     );
     let built =
-        lns_artifact::build::build_artifact(doc.as_bytes(), &[]).expect("build run sandbox");
+        lns_artifact::build::build_artifact(doc.as_bytes(), &[], None).expect("build run sandbox");
     let client = oci_client::Client::new(oci_client::client::ClientConfig {
         protocol: oci_client::client::ClientProtocol::Http,
         ..Default::default()
