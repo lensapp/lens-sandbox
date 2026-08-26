@@ -199,6 +199,22 @@ Feature: authoring a document
     Then the command fails with an exit code other than 0
     And the output contains "unknown field `ref`"
 
+  Scenario: validate accepts a connector path fileset whose secret-shaped file carries a declared placeholder
+    Given an lns.yaml holding a connector declaring fileset "./some-provider" mounted at "/home/agent/.some-provider"
+    And the project directory "./some-provider" contains "credentials.json" holding `{"token":"some_LNSPLACEHOLDER0000000000"}`
+    When the user runs artifact command "validate"
+    Then the exit code is 0
+    And the service received no request
+
+  Scenario: validate refuses a connector path fileset whose secret-shaped file declares no placeholder
+    Given an lns.yaml holding a connector declaring fileset "./some-provider" mounted at "/home/agent/.some-provider"
+    And the project directory "./some-provider" contains "credentials.json" holding `{"token":"sk-live-real"}`
+    When the user runs artifact command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "credentials.json"
+    And the output contains "carries no placeholder"
+    And the service received no request
+
   Scenario: validate refuses a relative fileset guestPath
     Given an lns.yaml declaring fileset "./skills" mounted at "skills"
     When the user runs artifact command "validate"

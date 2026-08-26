@@ -125,6 +125,8 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub egress: Egress,
     #[serde(default)]
+    pub credentials: Vec<lns_spec::Credential>,
+    #[serde(default)]
     pub mixins: Vec<String>,
     #[serde(default)]
     pub tools: Vec<String>,
@@ -212,19 +214,6 @@ pub enum FilesetOwner {
     Root,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Doc {
-    #[serde(rename = "apiVersion", default)]
-    api_version: String,
-    #[serde(default)]
-    kind: String,
-    name: String,
-    /// Read only after the group and kind decide, so another group's field names cannot answer as unknown fields of this one.
-    #[serde(default)]
-    spec: serde_json::Value,
-}
-
 /// Parse and cross-field-validate a `lns.run/v1` sandbox definition as its author wrote it, offline.
 pub fn parse(config_json: &[u8]) -> Result<Definition> {
     let doc = parse_resolved(config_json)?;
@@ -284,8 +273,8 @@ fn validate_mixin_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// The blocks a mixin may not carry: the five that describe one launch, which the sandbox owns.
-fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
+/// The five blocks the sandbox owns, refused in a mixin (§3.3), naming the kind that carried them.
+fn refuse_the_blocks_that_describe_one_launch(spec: &SandboxSpec, kind: spec::Kind) -> Result<()> {
     let launch_blocks = [
         (!spec.image.trim().is_empty(), "image"),
         (spec.command.is_some(), "command"),
@@ -294,36 +283,28 @@ fn refuse_blocks_a_mixin_cannot_carry(spec: &SandboxSpec) -> Result<()> {
         (spec.resources.is_some(), "resources"),
     ];
     if let Some((_, block)) = launch_blocks.iter().find(|(declared, _)| *declared) {
-        bail!("a mixin must not declare {block}: it describes one launch, and the sandbox owns it");
+        bail!(
+            "a {} must not declare {block}: it describes one launch, and the sandbox owns it",
+            kind.as_str()
+        );
     }
     Ok(())
 }
 
 fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
-    let doc: Doc = serde_json::from_slice(config_json).context("parsing sandbox definition")?;
-    if doc.api_version != API_VERSION {
-        bail!(
-            "unexpected apiVersion {:?}; expected {API_VERSION}",
-            doc.api_version
-        );
-    }
-    if doc.kind != kind.as_str() {
-        bail!(
-            "expected kind {} but definition declares {:?}",
-            kind.as_str(),
-            doc.kind
-        );
-    }
-    if !spec::is_valid_name(&doc.name) {
-        bail!("invalid name {:?}", doc.name);
-    }
+    let doc = spec::parse_envelope(config_json, kind)?;
     let doc = Definition {
         name: doc.name,
         spec: serde_json::from_value(doc.spec).context("parsing sandbox spec")?,
     };
-    if kind == spec::Kind::Mixin {
-        refuse_blocks_a_mixin_cannot_carry(&doc.spec)?;
+    if kind != spec::Kind::Sandbox {
+        refuse_the_blocks_that_describe_one_launch(&doc.spec, kind)?;
     }
+    lns_spec::credential::validate_all(
+        &doc.spec.credentials,
+        lns_spec::credential::Source::Document,
+    )
+    .map_err(anyhow::Error::msg)?;
     for key in doc.spec.env.keys() {
         if !lns_spec::is_legal_env_var_name(key) {
             bail!(
@@ -369,6 +350,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
+        refuse_a_secret_shaped_inline_name(fileset)?;
         if !targets.insert(claimed_path(&fileset.guest_path)) {
             bail!("duplicate guest path {}", fileset.guest_path);
         }
@@ -442,7 +424,7 @@ fn validate_scripts(scripts: &[ScriptStep]) -> Result<()> {
     Ok(())
 }
 
-fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
+pub(crate) fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
     let source_count = usize::from(fileset.path.is_some())
         + usize::from(fileset.inline.is_some())
         + usize::from(fileset.host_path.is_some());
@@ -533,13 +515,18 @@ fn validate_inline_path(path: &str) -> Result<()> {
             "inline file path {path:?} must be a safe relative path beneath its fileset guestPath"
         );
     }
-    if segments
-        .iter()
-        .any(|segment| looks_like_secret_name(segment))
-    {
-        bail!(
-            "inline fileset contains a secret-shaped file: {path} — real secrets stay outside the workload"
-        );
+    Ok(())
+}
+
+/// Real secrets stay outside the workload, so a sandbox or mixin may not ship a file whose name names one; a connector earns its exception in `crate::connector` instead.
+fn refuse_a_secret_shaped_inline_name(fileset: &FilesetEntry) -> Result<()> {
+    let names = fileset.inline.iter().flat_map(BTreeMap::keys);
+    for path in names {
+        if path.split('/').any(looks_like_secret_name) {
+            bail!(
+                "inline fileset contains a secret-shaped file: {path} — real secrets stay outside the workload"
+            );
+        }
     }
     Ok(())
 }
@@ -805,12 +792,46 @@ fn validate_volume_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse whichever `lns.run/v1` document this is, so every verb answers for the kind the file declares rather than the one it expected.
-pub fn parse_document(config_json: &[u8]) -> Result<Definition> {
-    if spec::read_kind(config_json).ok() == Some(spec::Kind::Mixin) {
-        return parse_mixin(config_json);
+/// Whichever `lns.run/v1` document this is. A connector carries its own spec shape (§3.2), so one type cannot answer for all three.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Document {
+    Sandbox(Definition),
+    Mixin(Definition),
+    Connector(crate::connector::ConnectorDefinition),
+}
+
+impl Document {
+    /// Every `path` fileset this document packs, in the order an artifact layers them.
+    pub fn path_filesets(&self) -> Vec<&str> {
+        match self {
+            Document::Connector(def) => crate::connector::path_filesets(&def.spec)
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect(),
+            Document::Sandbox(def) | Document::Mixin(def) => crate::merge::path_filesets(&def.spec)
+                .map(|(_, _, path)| path)
+                .collect(),
+        }
     }
-    parse(config_json)
+
+    /// The mixins this document names; a connector may declare none (§3.2.3).
+    pub fn mixins(&self) -> &[String] {
+        match self {
+            Document::Sandbox(def) | Document::Mixin(def) => &def.spec.mixins,
+            Document::Connector(_) => &[],
+        }
+    }
+}
+
+/// Parse whichever `lns.run/v1` document this is, so every verb answers for the kind the file declares rather than the one it expected.
+pub fn parse_document(config_json: &[u8]) -> Result<Document> {
+    match spec::read_kind(config_json).ok() {
+        Some(spec::Kind::Mixin) => parse_mixin(config_json).map(Document::Mixin),
+        Some(spec::Kind::Connector) => {
+            crate::connector::parse(config_json).map(Document::Connector)
+        }
+        _ => parse(config_json).map(Document::Sandbox),
+    }
 }
 
 /// Schema + cross-field guards for whichever `lns.run/v1` document this is.
@@ -2459,5 +2480,36 @@ mod tests {
         let top_level = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1"},"unexpected":true}"#;
         let err = parse(top_level).unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_sandbox_still_refuses_a_secret_shaped_inline_name() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","filesets":[{"guestPath":"/home/agent/.some-provider","inline":{"credentials.json":"lns-placeholder0"}}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("secret-shaped"),
+            "only a connector earns the §3.2.3 exception; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn two_credentials_claiming_one_variable_are_refused_in_every_kind() {
+        let duplicate = r#"[{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder0"},{"envVar":"SOME_TOKEN","placeholder":"lns-placeholder1"}]"#;
+        let err = parse(&def_json(&format!(
+            r#"{{"image":"x:1","credentials":{duplicate}}}"#
+        )))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate credential env var"),
+            "nothing inside one document disambiguates two entries claiming one variable; got: {err:#}"
+        );
+        let err =
+            parse_mixin(&mixin_json(&format!(r#"{{"credentials":{duplicate}}}"#))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate credential env var"),
+            "got: {err:#}"
+        );
     }
 }

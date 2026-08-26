@@ -46,7 +46,16 @@ pub fn resolve<F: Fs>(
     }
     let json = load_definition_json_at(fs, &file)?;
     let def = lns_artifact::sandbox::parse(&json)?;
-    let problems = crate::artifact::fileset::path_fileset_problems(fs, &project_dir, &def);
+    let paths: Vec<&str> = lns_artifact::merge::path_filesets(&def.spec)
+        .map(|(_, _, path)| path)
+        .collect();
+    let problems = crate::artifact::fileset::path_fileset_problems(
+        fs,
+        &project_dir,
+        &paths,
+        &[],
+        lns_artifact::spec::Kind::Sandbox,
+    );
     if !problems.is_empty() {
         bail!("{}", problems.join("\n"));
     }
@@ -188,6 +197,23 @@ mod tests {
 
     fn local_yaml() -> &'static str {
         "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  command: agent --serve\n  env:\n    MODE: research\n"
+    }
+
+    #[test]
+    fn running_a_sandbox_refuses_a_secret_shaped_file_in_its_fileset() {
+        // Pass the wrong kind here and a sandbox ships the secret it names, because only a connector is exempt from the name refusal.
+        let fs = MapFs::with(&[
+            (
+                "/work/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  filesets:\n    - path: ./skills\n      guestPath: /home/agent/.agent\n",
+            ),
+            ("/work/skills/.env", "TOKEN=real"),
+        ]);
+        let err = resolve(None, None, &fs, cwd()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("secret-shaped file"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

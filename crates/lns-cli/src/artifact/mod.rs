@@ -1375,17 +1375,7 @@ mod tests {
                         owner: lns_ipc::SandboxFilesetOwner::Workload,
                         optional: false,
                     }],
-                    connectors: Vec::new(),
                     env: Vec::new(),
-                    credentials: vec![lns_spec::Credential {
-                        env_var: "SOME_TOKEN".into(),
-                        placeholder: "lns-placeholder-some-token".into(),
-                        injections: vec![lns_spec::InjectionDef {
-                            kind: lns_spec::InjectionKind::BearerHeader,
-                            domain: "api.some-provider.example".into(),
-                            header: None,
-                        }],
-                    }],
                     tools: vec!["node@22".into()],
                     scripts: Vec::new(),
                     policy_flags: Vec::new(),
@@ -1402,7 +1392,6 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         for line in [
             "tool: node@22  [from ghcr.io/acme/obs:2, replaced node@20 from the sandbox]",
-            "credential: SOME_TOKEN -> api.some-provider.example  [from ghcr.io/acme/obs:2]",
             "mount: volume obs-cache -> /cache  [from ghcr.io/acme/obs:2]",
             "fileset: inline -> /root/.agent/settings (owner: workload)  [from ghcr.io/acme/obs:2]",
         ] {

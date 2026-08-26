@@ -70,7 +70,7 @@ pub fn plan_local_mixins<F: Fs + ?Sized>(
         children: std::collections::BTreeMap::new(),
         roots: Vec::new(),
     };
-    walk.descend(&def.spec.mixins, project_dir, None)?;
+    walk.descend(def.mixins(), project_dir, None)?;
     refuse_what_sits_too_deep(&walk.roots, &walk.children)?;
     Ok(MixinPlan { nodes: walk.nodes })
 }

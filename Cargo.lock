@@ -3566,6 +3566,10 @@ dependencies = [
 [[package]]
 name = "lns-spec"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+]
 
 [[package]]
 name = "lns-supervisor"

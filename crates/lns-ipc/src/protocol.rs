@@ -372,6 +372,7 @@ pub enum ContributionBlock {
     Port,
     Egress,
     Script,
+    Credential,
 }
 
 /// One `pre-start` script of a resolved sandbox, carried whole because a consumer approving a script has to be able to read it (`docs/sandbox-spec.md` §1.5).
@@ -958,6 +959,11 @@ mod tests {
             serde_json::to_string(&ContributionBlock::Script).expect("a block encodes"),
             "\"script\"",
             "a renderer picks the line to attribute by this name, so it is part of the contract rather than an internal spelling"
+        );
+        assert_eq!(
+            serde_json::to_string(&ContributionBlock::Credential).expect("a block encodes"),
+            "\"credential\"",
+            "§1.5 attributes every credential of a resolved sandbox, so the block a renderer matches on is part of the contract too"
         );
     }
 
