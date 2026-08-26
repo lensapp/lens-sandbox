@@ -1339,6 +1339,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_answers_the_typed_miss_as_no_such_run() {
+        let svc = CannedService::new(Response::RunUnknown {
+            run: "ghost".into(),
+        });
+        let mut out = Vec::new();
+        let err = inspect(&svc, "ghost", crate::output::Format::Table, &mut out)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no such run: ghost"));
+    }
+
+    #[tokio::test]
     async fn inspect_surfaces_a_daemon_error() {
         let svc = CannedService::new(Response::Error {
             message: "no active run with id 1".into(),
