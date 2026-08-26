@@ -118,10 +118,40 @@ Feature: distributing a sandbox
     And the service received a request to pull "ghcr.io/team/hermes:1.4.0"
 
   Scenario: tag re-refs a cached sandbox
-    Given the sandbox "hermes:1.4.0" is cached
-    When the user runs artifact command "tag hermes:1.4.0 hermes:latest"
+    Given the sandbox "ghcr.io/team/hermes:1.4.0" is cached
+    When the user runs artifact command "tag ghcr.io/team/hermes:1.4.0 ghcr.io/team/hermes:latest"
     Then the exit code is 0
-    And the sandbox "hermes:latest" resolves to the same cached artifact
+    And the sandbox "ghcr.io/team/hermes:latest" resolves to the same cached artifact
+
+  Scenario: a bare tag pair re-references in the Lens hub
+    Given the sandbox "hub.lns.run/team/hermes:1.4.0" is cached
+    When the user runs artifact command "tag team/hermes:1.4.0 team/hermes:latest"
+    Then the exit code is 0
+    And the service was asked to tag "hub.lns.run/team/hermes:1.4.0" as "hub.lns.run/team/hermes:latest"
+
+  Scenario: a bare tag target follows its qualified source's registry
+    Given the sandbox "registry.example.test/team/hermes:1.4.0" is cached
+    When the user runs artifact command "tag registry.example.test/team/hermes:1.4.0 team/hermes:latest"
+    Then the exit code is 0
+    And the service was asked to tag "registry.example.test/team/hermes:1.4.0" as "registry.example.test/team/hermes:latest"
+
+  Scenario: a bare rm reference removes the Lens hub record a pull wrote
+    Given the sandbox "hub.lns.run/team/hermes:1.4.0" is cached and no other sandbox shares its base-image layers
+    When the user runs artifact command "rm team/hermes:1.4.0"
+    Then the exit code is 0
+    And the service was asked to remove the cached artifact "hub.lns.run/team/hermes:1.4.0"
+
+  Scenario: a bare inspect reference asks the service about its Lens hub form
+    Given the reference "hub.lns.run/team/hermes:1.4.0" resolves to a cached sandbox
+    When the user runs artifact command "inspect team/hermes:1.4.0"
+    Then the exit code is 0
+    And the service was asked to inspect "hub.lns.run/team/hermes:1.4.0"
+
+  Scenario: the rm shortcut settles a bare reference on the cache and removes its hub record
+    Given the sandbox "hub.lns.run/team/hermes:1.4.0" is cached and no other sandbox shares its base-image layers
+    When the user runs "lns rm team/hermes:1.4.0"
+    Then the exit code is 0
+    And the service was asked to remove the cached artifact "hub.lns.run/team/hermes:1.4.0"
 
   Scenario: push carries a hostPath fileset verbatim and packs nothing for it
     Given a valid lns.yaml in the current directory declaring a hostPath fileset "~/.gitconfig" mounted at "/home/agent/.gitconfig"

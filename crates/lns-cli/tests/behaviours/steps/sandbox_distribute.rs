@@ -155,6 +155,51 @@ fn service_received_pull(w: &mut BehaviourWorld, reference: String) -> Result<()
     }
 }
 
+#[then(regex = r#"^the service was asked to tag "([^"]+)" as "([^"]+)"$"#)]
+fn service_asked_to_tag(w: &mut BehaviourWorld, from: String, to: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::TagImage { from: f, to: t } if *f == from && *t == to))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a TagImage from {from:?} to {to:?} among {requests:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the service was asked to remove the cached artifact "([^"]+)"$"#)]
+fn service_asked_to_remove_artifact(w: &mut BehaviourWorld, image: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::RemoveImage { image: asked } if *asked == image))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a RemoveImage for {image:?} among {requests:?}"
+        ))
+    }
+}
+
+#[then(regex = r#"^the service was asked to inspect "([^"]+)"$"#)]
+fn service_asked_to_inspect(w: &mut BehaviourWorld, image: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests
+        .iter()
+        .any(|r| matches!(r, Request::InspectImage { image: asked, .. } if *asked == image))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected an InspectImage for {image:?} among {requests:?}"
+        ))
+    }
+}
+
 #[then(regex = r#"^the sandbox "([^"]+)" resolves to the same cached artifact$"#)]
 fn sandbox_resolves_to_same_artifact(w: &mut BehaviourWorld, to: String) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();

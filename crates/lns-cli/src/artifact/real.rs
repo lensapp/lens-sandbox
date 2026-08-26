@@ -83,7 +83,9 @@ pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
 pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::TagArgs::from_arg_matches(matches)?;
-        run_after_gate(ArtifactCommand::Tag(args), ctx.input).await
+        let mut command = ArtifactCommand::Tag(args);
+        super::apply_registry_default(&mut command, configured_registry()?.as_deref());
+        run_after_gate(command, ctx.input).await
     })
 }
 
@@ -95,8 +97,10 @@ pub fn run_inspect_offline(args: super::InspectArgs, ctx: RunCtx<'_>) -> Result<
 pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::RmArgs::from_arg_matches(matches)?;
+        let mut command = ArtifactCommand::Rm(args);
+        super::apply_registry_default(&mut command, configured_registry()?.as_deref());
         crate::service::require_running().await?;
-        dispatch(ArtifactCommand::Rm(args), ctx.input).await
+        dispatch(command, ctx.input).await
     })
 }
 
