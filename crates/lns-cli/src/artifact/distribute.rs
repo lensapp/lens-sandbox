@@ -113,7 +113,19 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
         .collect()
 }
 
-/// Build the artifact a push uploads: the document, plus one layer per `path` fileset it declares.
+/// The `README.md` beside the document, read whole so an over-limit file reaches `build_artifact`'s refusal rather than publishing truncated.
+fn read_readme<F: Fs + ?Sized>(fs: &F, cwd: &Path) -> Result<Option<Vec<u8>>> {
+    let path = cwd.join("README.md");
+    if !fs.exists(&path) {
+        return Ok(None);
+    }
+    let bytes = fs
+        .read_limited(&path, lns_artifact::build::MAX_README_BYTES)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(bytes))
+}
+
+/// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, and the README beside it.
 fn build<F: Fs + ?Sized>(
     fs: &F,
     cwd: &Path,
@@ -122,7 +134,8 @@ fn build<F: Fs + ?Sized>(
     let packed = pack_path_filesets(fs, cwd, doc)?;
     let layers: Vec<Vec<lns_artifact::build::FileEntry>> =
         packed.iter().map(|dir| dir.files.clone()).collect();
-    let built = lns_artifact::build::build_artifact(doc, &layers)?;
+    let readme = read_readme(fs, cwd)?;
+    let built = lns_artifact::build::build_artifact(doc, &layers, readme.as_deref())?;
     Ok((built, packed))
 }
 
@@ -138,6 +151,14 @@ fn report_packed<W: Write>(
             out,
             "{verb} fileset {} -> {} ({} bytes)",
             dir.path,
+            layer.digest,
+            layer.data.len()
+        )?;
+    }
+    if let Some(layer) = built.readme_layer() {
+        writeln!(
+            out,
+            "{verb} README.md -> {} ({} bytes)",
             layer.digest,
             layer.data.len()
         )?;

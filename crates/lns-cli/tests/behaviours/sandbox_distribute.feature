@@ -78,6 +78,49 @@ Feature: distributing a sandbox
     And the sandbox artifact carries the packed directory as a layer of its own
     And the published sandbox config keeps the fileset path it was authored with
 
+  Scenario: push packs a README.md beside the document into a layer of the same artifact
+    Given a valid lns.yaml in the current directory
+    And the project file "README.md" contains "# hermes"
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "packed README.md -> sha256:"
+    And the pushed artifact carries the README as a text/markdown layer
+
+  Scenario: a push without a README.md publishes no README layer
+    Given a valid lns.yaml in the current directory
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the pushed artifact carries no README layer
+
+  Scenario: push --dry-run previews the README layer digest
+    Given a valid lns.yaml in the current directory
+    And the project file "README.md" contains "# hermes"
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "would pack README.md -> sha256:"
+    And nothing is pushed
+
+  Scenario: a README.md over the size limit refuses the push
+    Given a valid lns.yaml in the current directory
+    And the project file "README.md" is larger than the README limit
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the command fails with an exit code other than 0
+    And the output contains "README.md exceeds"
+    And nothing is pushed
+
+  Scenario: a published mixin ships the README beside its own document
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the project file "mixins/pg/README.md" contains "# postgres tools"
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"
+    Then the exit code is 0
+    And the artifact pushed to "ghcr.io/team/postgres-tools" carries a README layer
+    And the pushed artifact carries no README layer
+
   Scenario: a secret-shaped file in a path fileset refuses the push
     Given a valid lns.yaml in the current directory declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"

@@ -12,6 +12,9 @@ use lns_ipc::UpdateStatus;
 use tempfile::TempDir;
 use tokio::io::DuplexStream;
 
+/// A pushed README layer as (media type, content).
+pub type ReadmeLayer = (String, Vec<u8>);
+
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
     pub result: Option<CliRun>,
@@ -49,6 +52,8 @@ pub struct BehaviourWorld {
     pub pushed_refs: Vec<String>,
     /// The digest of each packed fileset layer the push uploaded, in declaration order.
     pub pushed_layers: Vec<String>,
+    /// Each uploaded artifact's README layer, keyed by the reference it published to.
+    pub pushed_readmes: Vec<(String, Option<ReadmeLayer>)>,
     /// The definition JSON a prepared local run would send to the service.
     pub wire_definition: Option<String>,
     /// The preflight view a pulled-run scenario stages.
