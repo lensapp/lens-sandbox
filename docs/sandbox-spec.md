@@ -1482,6 +1482,7 @@ runs exactly what the author tested:
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
+| `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
 
 Each transform pins something that means one thing on the author's machine and
 another on the consumer's: a directory that exists only beside the author's file,
@@ -1561,8 +1562,12 @@ blob, and the media type names the kind:
 | `mixin` | `application/vnd.lens.mixin.v1+json` | `application/vnd.lens.mixin.config.v1+json` |
 
 A `sandbox` or `mixin` artifact carries one layer per `filesets[].path` entry it
-declares ([§3.1.11](#3111-filesets)); a `connector` is config-only. Nothing else is
-addressable on its own, so one reference names one complete, digest-pinned thing.
+declares ([§3.1.11](#3111-filesets)), plus at most one README layer
+([§7.2](#72-the-readme-layer)); a `connector` is config-only apart from that same
+README layer. Nothing else is addressable on its own, so one reference names one
+complete, digest-pinned thing. A consumer correlates fileset layers by their media
+type, in manifest order, and MUST leave out any layer whose media type it does not
+consume rather than guess at it.
 
 A release is a reference, not a field: `lns push ghcr.io/acme/reviewer:1.4.0`
 makes that tag the release, and push records it as the artifact's
@@ -1601,6 +1606,35 @@ Two rules follow from a connector arriving over the network:
 
 See [Distributing a sandbox](running-workloads.md#distributing-a-sandbox) for
 the `lns push` / `lns pull` / `lns tag` workflow.
+
+### 7.2 The README layer
+
+A `README.md` beside the document publishes as a layer of the same artifact:
+
+```json
+{
+  "mediaType": "text/markdown",
+  "digest": "sha256:…",
+  "size": 4096,
+  "annotations": { "org.opencontainers.image.title": "README.md" }
+}
+```
+
+The layer is how a registry UI renders documentation for the artifact, and being
+a layer is the point: every digest carries exactly the README that shipped with
+it, so a pinned reference never shows documentation from a different version, and
+updating the README is a push like any other — there is no out-of-band edit that
+can drift from the artifact it describes.
+
+The file is found by its exact name, `README.md`, in the directory of the
+document being published — each artifact of one push looks beside its own
+document, so a local mixin ships its own README or none. The file is capped at
+1 MiB; a larger one refuses the push. No file means no layer, never an empty one.
+
+The README never enters the guest. It is not a fileset, it is not mounted, and a
+consumer that materializes filesets leaves it out like any other layer whose
+media type it does not consume ([§7](#7-distribution)). Relative links inside it
+resolve against nothing; a README SHOULD use absolute URLs.
 
 ---
 
