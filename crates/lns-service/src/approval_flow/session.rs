@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
-    Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment, WireNetwork,
+    Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
 };
 use crate::ledger::LedgerRecorder;
 use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
@@ -174,13 +174,17 @@ impl ApprovalSession {
         });
     }
 
+    /// Publishes the rule before the decision that wakes the held connection, and writes the file only once both frames have left, so a slow disk cannot hold the request.
     pub fn record_decision(&self, id: &str, decision: Decision) -> DecisionOutcome {
         let Some(entry) = self.remove_pending(id) else {
             return DecisionOutcome::UnknownId;
         };
         self.notifier.dismiss(id);
+        let rule_stands = self.apply_always_decision(&entry, decision);
         self.send_decision_frame(id, decision);
-        self.persist_always_decision(&entry, decision);
+        if rule_stands {
+            self.save_persisted();
+        }
         self.record_approval(&entry, decision);
         DecisionOutcome::Resolved
     }
@@ -195,25 +199,27 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
-    /// Writes the rule an "always" decision earns into the table its treatment belongs to; a once-decision earns none.
-    fn persist_always_decision(&self, entry: &PendingEntry, decision: Decision) {
+    /// Writes the rule an "always" decision earns into the table its treatment belongs to and answers whether it stands; a once-decision earns none.
+    fn apply_always_decision(&self, entry: &PendingEntry, decision: Decision) -> bool {
         match entry.treatment {
-            Treatment::Inspected => {
-                if let Some(rule) = rule_for_always_decision(&entry.host, decision) {
-                    self.apply_persistent_rule(rule);
-                }
-            }
+            Treatment::Inspected => match rule_for_always_decision(&entry.host, decision) {
+                Some(rule) => self.apply_persistent_rule(rule),
+                None => false,
+            },
             Treatment::Raw => match entry.raw_destination() {
-                Some(destination) => {
-                    if let Some(rule) = tcp_rule_for_always_decision(destination, decision) {
-                        self.apply_persistent_tcp_rule(rule);
+                Some(destination) => match tcp_rule_for_always_decision(destination, decision) {
+                    Some(rule) => self.apply_persistent_tcp_rule(rule),
+                    None => false,
+                },
+                None => {
+                    if earns_a_rule(decision) {
+                        self.report_no_rule_written(&format!(
+                            "the gate named the destination {:?}, which this lns cannot read as a rule for {:?}",
+                            entry.action, entry.host
+                        ));
                     }
+                    false
                 }
-                None if earns_a_rule(decision) => self.report_no_rule_written(&format!(
-                    "the gate named the destination {:?}, which this lns cannot read as a rule for {:?}",
-                    entry.action, entry.host
-                )),
-                None => {}
             },
         }
     }
@@ -276,10 +282,8 @@ impl ApprovalSession {
         if let Some(shipped) = self.shipped.get() {
             new_policy = crate::artifact::policy::merge_effective(Some(shipped), &new_policy);
         }
-        *self.policy.lock().expect("policy mutex poisoned") = new_policy.clone();
-        let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(WireNetwork::seeded(new_policy.network)),
-        }));
+        *self.policy.lock().expect("policy mutex poisoned") = new_policy;
+        self.send_policy_frame();
     }
 
     pub fn withdraw_run(&self) {
@@ -300,18 +304,25 @@ impl ApprovalSession {
         }));
     }
 
-    fn apply_persistent_rule(&self, rule: RouteRule) {
-        let (approval, effective) = {
-            let mut policy = self.policy.lock().expect("policy mutex poisoned");
-            (policy.add_approved_rule(rule.clone()), policy.clone())
-        };
+    fn send_policy_frame(&self) {
+        let _ = self.sink.send(HostFrame::Policy(PolicyMessage::seeded(
+            self.current_policy(),
+        )));
+    }
+
+    fn apply_persistent_rule(&self, rule: RouteRule) -> bool {
+        let approval = self
+            .policy
+            .lock()
+            .expect("policy mutex poisoned")
+            .add_approved_rule(rule.clone());
         if approval == Approval::Stands {
             self.persisted
                 .lock()
                 .expect("persisted mutex poisoned")
                 .add_approved_rule(rule);
         }
-        self.publish_if_it_stands(approval, effective);
+        self.publish_if_it_stands(approval)
     }
 
     /// Says the decision stands for this request but outlived nothing.
@@ -321,20 +332,16 @@ impl ApprovalSession {
         ));
     }
 
-    fn apply_persistent_tcp_rule(&self, rule: TcpEgressRule) {
+    fn apply_persistent_tcp_rule(&self, rule: TcpEgressRule) -> bool {
         // One rule lens-sandbox-core cannot parse force-denies the whole policy in the guest, so a destination we cannot express is not written at all.
         if let Err(e) = rule.validate() {
             self.report_no_rule_written(&e);
-            return;
+            return false;
         }
-        let (approval, pre_empted, effective) = {
+        let (approval, pre_empted) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             let pre_empted = pre_empted_http_patterns(&policy, &rule);
-            (
-                policy.add_approved_tcp_rule(rule.clone()),
-                pre_empted,
-                policy.clone(),
-            )
+            (policy.add_approved_tcp_rule(rule.clone()), pre_empted)
         };
         if approval == Approval::Stands {
             self.persisted
@@ -342,8 +349,8 @@ impl ApprovalSession {
                 .expect("persisted mutex poisoned")
                 .add_approved_tcp_rule(rule);
         }
-        if !self.publish_if_it_stands(approval, effective) {
-            return;
+        if !self.publish_if_it_stands(approval) {
+            return false;
         }
         // The http rules this raw rule displaces would otherwise go quiet without a word.
         if !pre_empted.is_empty() {
@@ -352,13 +359,14 @@ impl ApprovalSession {
                 pre_empted.join(", ")
             ));
         }
+        true
     }
 
     /// Answers whether the decision stands, telling the developer when it applied to one request only — silence there would read as "remembered".
-    fn publish_if_it_stands(&self, approval: Approval, effective: Policy) -> bool {
+    fn publish_if_it_stands(&self, approval: Approval) -> bool {
         let why = match approval {
             Approval::Stands => {
-                self.publish_and_persist(effective);
+                self.send_policy_frame();
                 return true;
             }
             Approval::Shadowed(pattern) => format!(
@@ -372,11 +380,8 @@ impl ApprovalSession {
         false
     }
 
-    /// Hands the updated policy to the running guest first and to disk second, so a file that cannot be written still leaves the decision live for the rest of the run.
-    fn publish_and_persist(&self, effective: Policy) {
-        let _ = self.sink.send(HostFrame::Policy(PolicyMessage {
-            network: Some(WireNetwork::seeded(effective.network)),
-        }));
+    /// Runs after both frames have left, and a file that cannot be written still leaves the decision live for the rest of the run.
+    fn save_persisted(&self) {
         let to_persist = self
             .persisted
             .lock()
@@ -431,7 +436,8 @@ fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use lns_policy::{RouteRule, Verdict};
+    use crate::approval_flow::protocol::WireDefaultVerdict;
+    use lns_policy::{RouteRule, Transport, Verdict};
     use std::io;
     use std::sync::Mutex as StdMutex;
 
@@ -1104,6 +1110,136 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    fn drain(rx: &mut mpsc::UnboundedReceiver<HostFrame>) -> Vec<HostFrame> {
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn frame_kinds(frames: &[HostFrame]) -> Vec<&'static str> {
+        frames
+            .iter()
+            .map(|frame| match frame {
+                HostFrame::Policy(_) => "policy",
+                HostFrame::RequestDecision(_) => "decision",
+            })
+            .collect()
+    }
+
+    struct StoreWatchingFrames {
+        frames_before_save: StdMutex<Vec<HostFrame>>,
+        frames: StdMutex<mpsc::UnboundedReceiver<HostFrame>>,
+    }
+
+    impl PolicyStore for StoreWatchingFrames {
+        fn save(&self, _policy: &Policy) -> io::Result<()> {
+            let mut frames = self.frames.lock().unwrap();
+            self.frames_before_save
+                .lock()
+                .unwrap()
+                .extend(drain(&mut frames));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_policy_an_always_decision_writes_reaches_the_guest_before_the_decision() {
+        let (s, _n, _store, mut rx) = fixture();
+        s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+
+        s.record_decision("r1", Decision::AllowAlways);
+
+        assert_eq!(
+            frame_kinds(&drain(&mut rx)),
+            vec!["policy", "decision"],
+            "the decision wakes the held connection, so a policy behind it can be read too late"
+        );
+    }
+
+    #[test]
+    fn the_decisions_file_is_written_only_once_both_frames_have_left() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let store = Arc::new(StoreWatchingFrames {
+            frames_before_save: StdMutex::new(Vec::new()),
+            frames: StdMutex::new(rx),
+        });
+        let session = ApprovalSession::new(
+            Policy::default(),
+            Policy::default(),
+            Arc::new(RecordingNotifier::default()),
+            store.clone(),
+            tx,
+            TEST_TIMEOUT,
+        );
+        session.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+
+        session.record_decision("r1", Decision::AllowAlways);
+
+        assert_eq!(
+            frame_kinds(&store.frames_before_save.lock().unwrap()),
+            vec!["policy", "decision"],
+            "a slow or failing disk write must not delay releasing the held request"
+        );
+    }
+
+    #[test]
+    fn a_decision_publishes_the_standing_tables_and_not_just_the_rule_it_wrote() {
+        let mut standing = Policy::default();
+        standing
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.internal:5432"));
+        let (s, _n, _store, mut rx) = fixture_holding(standing);
+        s.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+
+        s.record_decision("r1", Decision::AllowAlways);
+
+        let network = policy_frame(&mut rx)
+            .network
+            .expect("a frame without a network section retracts every rule the guest holds");
+        assert_eq!(
+            network.egress.tcp,
+            vec![TcpEgressRule::allow_destination("db.internal:5432")],
+            "the guest replaces every map on each apply, so a table left out of this frame is a table withdrawn"
+        );
+        assert_eq!(
+            network
+                .egress
+                .http
+                .iter()
+                .map(|route| route.match_pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["api.linear.app"]
+        );
+    }
+
+    #[test]
+    fn a_published_policy_carries_the_defaults_the_guest_cannot_derive_from_the_tables() {
+        let (s, _n, _store, mut rx) = fixture();
+        s.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+
+        s.record_decision("r1", Decision::AllowAlways);
+
+        let network = policy_frame(&mut rx).network.expect("a network section");
+        assert_eq!(
+            network.egress.tcp,
+            vec![TcpEgressRule::allow_destination("db.internal:5432").approved()]
+        );
+        assert_eq!(
+            network.default_verdict,
+            WireDefaultVerdict::Ask,
+            "a policy that decides nothing else must keep asking rather than fail every destination closed"
+        );
+        assert_eq!(
+            network.default_transport,
+            Transport::Direct,
+            "core fail-closes a non-deny verdict when the transport default is anything else"
+        );
+    }
+
     #[test]
     fn allow_always_adds_allow_rule_persists_and_emits_policy_frame() {
         let (s, _n, store, mut rx) = fixture();
@@ -1116,12 +1252,12 @@ pub(crate) mod tests {
         assert_eq!(routes[0].match_pattern, "api.linear.app");
         assert_eq!(routes[0].verdict, Verdict::Allow);
 
-        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowAlways);
         let pushed = policy_frame(&mut rx);
         assert_eq!(
             pushed.network.unwrap().egress.http[0].match_pattern,
             "api.linear.app"
         );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowAlways);
 
         let saves = store.saves.lock().unwrap();
         assert_eq!(saves.len(), 1);
@@ -1142,12 +1278,12 @@ pub(crate) mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].verdict, Verdict::Deny);
 
-        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyAlways);
         let pushed = policy_frame(&mut rx);
         assert_eq!(
             pushed.network.unwrap().egress.http[0].verdict,
             Verdict::Deny
         );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::DenyAlways);
 
         assert_eq!(store.saves.lock().unwrap().len(), 1);
     }
@@ -1164,8 +1300,8 @@ pub(crate) mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].verdict, Verdict::Allow);
 
-        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowAlways);
         assert!(policy_frame(&mut rx).network.is_some());
+        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowAlways);
 
         assert!(store.saves.lock().unwrap().is_empty());
         let informed = n.informed.lock().unwrap();

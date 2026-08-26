@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lns_policy::{Egress, NetworkPolicy, Transport};
+use lns_policy::{Egress, NetworkPolicy, Policy, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -56,6 +56,15 @@ pub enum WireDefaultVerdict {
 pub struct PolicyMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<WireNetwork>,
+}
+
+impl PolicyMessage {
+    /// The one place a published policy is shaped, because the guest replaces every map it carries on each apply — a section left out here retracts it.
+    pub fn seeded(policy: Policy) -> Self {
+        Self {
+            network: Some(WireNetwork::seeded(policy.network)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
