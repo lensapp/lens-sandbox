@@ -916,8 +916,10 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
                 .root_mixins(w.cwd.as_ref().expect("cwd").path())
                 .expect("root mixins");
         }
+        let mut command = lns_cli::artifact::ArtifactCommand::Inspect(inspect_args);
+        lns_cli::artifact::apply_registry_default(&mut command, None);
         lns_cli::artifact::run_with_writers(
-            &lns_cli::artifact::ArtifactCommand::Inspect(inspect_args),
+            &command,
             &svc,
             TermInfo::default(),
             &mut std::io::Cursor::new(""),
@@ -976,10 +978,12 @@ async fn run_lns_rm(w: &mut BehaviourWorld, force: String, operand: String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let result = if owner == lns_cli::shortcut::Owner::Artifact {
+        let mut command = lns_cli::artifact::ArtifactCommand::Rm(lns_cli::artifact::RmArgs {
+            reference: operand,
+        });
+        lns_cli::artifact::apply_registry_default(&mut command, None);
         lns_cli::artifact::run_with_writers(
-            &lns_cli::artifact::ArtifactCommand::Rm(lns_cli::artifact::RmArgs {
-                reference: operand,
-            }),
+            &command,
             &svc,
             TermInfo::default(),
             &mut std::io::Cursor::new(""),

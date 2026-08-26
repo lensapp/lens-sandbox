@@ -405,8 +405,22 @@ pub fn resolve_default_registry(image: &str, default_registry: Option<&str>) -> 
 
 fn image_has_registry(image: &str) -> bool {
     match image.split_once('/') {
-        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+        Some((first, _)) => is_registry_host(first),
         None => false,
+    }
+}
+
+fn is_registry_host(first: &str) -> bool {
+    first.contains('.') || first.contains(':') || first == "localhost"
+}
+
+/// A bare tag target follows its qualified source's registry, so a same-repo retag off a non-default registry never turns into a refused cross-registry pair.
+pub fn follow_source_registry(target: &str, source: &str) -> String {
+    match source.split_once('/') {
+        Some((registry, _)) if is_registry_host(registry) && !image_has_registry(target) => {
+            format!("{registry}/{target}")
+        }
+        _ => target.to_string(),
     }
 }
 
@@ -897,6 +911,37 @@ mod tests {
             }
             .registry_or_default(),
             "ghcr.io"
+        );
+    }
+
+    #[test]
+    fn a_bare_tag_target_follows_its_source_registry() {
+        assert_eq!(
+            follow_source_registry("team/hermes:latest", "registry.example.test/team/hermes:1"),
+            "registry.example.test/team/hermes:latest",
+            "a same-repo retag off a non-default registry must not become a cross-registry pair"
+        );
+    }
+
+    #[test]
+    fn a_qualified_tag_target_is_used_as_written() {
+        assert_eq!(
+            follow_source_registry(
+                "other.example.test/team/hermes:2",
+                "registry.example.test/team/hermes:1"
+            ),
+            "other.example.test/team/hermes:2"
+        );
+    }
+
+    #[test]
+    fn a_bare_source_leaves_the_target_alone() {
+        // Both stay bare so the service resolves the pair with one default, never a mixed one.
+        assert_eq!(follow_source_registry("hermes:2", "hermes:1"), "hermes:2");
+        assert_eq!(
+            follow_source_registry("hermes:2", "team/hermes:1"),
+            "hermes:2",
+            "a repository namespace is not a registry host"
         );
     }
 

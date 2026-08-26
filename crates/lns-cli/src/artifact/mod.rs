@@ -88,14 +88,31 @@ shortcut_spec!(
     "Re-reference a cached artifact (shortcut for `lns artifact tag`)."
 );
 
-/// Qualifies the registry coordinate a distribution verb addresses with `registry`, or the built-in default when nothing is configured; the local-cache verbs take a reference the service resolves, so they are left alone.
+/// Qualifies every REF a verb addresses with `registry`, or the built-in default when nothing is configured — §2.3: a bare REF is qualified, never guessed. A path-shaped inspect target is a local document and stays as written, and a bare tag target follows its qualified source's registry.
 pub fn apply_registry_default(command: &mut ArtifactCommand, registry: Option<&str>) {
-    let reference = match command {
-        ArtifactCommand::Push(args) => &mut args.reference,
-        ArtifactCommand::Pull(args) => &mut args.reference,
-        _ => return,
+    let qualify = |reference: &mut String| {
+        *reference = crate::config::resolve_default_registry(reference, registry)
     };
-    *reference = crate::config::resolve_default_registry(reference, registry);
+    match command {
+        ArtifactCommand::Push(args) => qualify(&mut args.reference),
+        ArtifactCommand::Pull(args) => qualify(&mut args.reference),
+        ArtifactCommand::Rm(args) => qualify(&mut args.reference),
+        ArtifactCommand::Inspect(args) => {
+            if let Some(reference) = &mut args.reference
+                && !crate::run::target::is_definition_path(reference)
+            {
+                qualify(reference);
+            }
+        }
+        ArtifactCommand::Tag(args) => {
+            qualify(&mut args.from);
+            args.to = crate::config::follow_source_registry(&args.to, &args.from);
+        }
+        ArtifactCommand::Init(_)
+        | ArtifactCommand::Validate(_)
+        | ArtifactCommand::Ls(_)
+        | ArtifactCommand::Prune(_) => {}
+    }
 }
 
 #[derive(clap::Args)]

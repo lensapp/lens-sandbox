@@ -17,13 +17,11 @@ pub(super) fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunF
         )?;
         match owner {
             Owner::Artifact => {
-                crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Rm(crate::artifact::RmArgs {
-                        reference: args.reference,
-                    }),
-                    ctx.input,
-                )
-                .await
+                let mut command = crate::artifact::ArtifactCommand::Rm(crate::artifact::RmArgs {
+                    reference: args.reference,
+                });
+                crate::artifact::apply_registry_default(&mut command, default_registry.as_deref());
+                crate::artifact::real::dispatch(command, ctx.input).await
             }
             _ => {
                 crate::sandbox::real::dispatch(
@@ -72,11 +70,9 @@ pub(super) fn run_inspect<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) ->
                 if !inspect.mixins.is_empty() {
                     inspect.root_mixins(&ctx.cwd()?)?;
                 }
-                crate::artifact::real::dispatch(
-                    crate::artifact::ArtifactCommand::Inspect(inspect),
-                    ctx.input,
-                )
-                .await
+                let mut command = crate::artifact::ArtifactCommand::Inspect(inspect);
+                crate::artifact::apply_registry_default(&mut command, default_registry.as_deref());
+                crate::artifact::real::dispatch(command, ctx.input).await
             }
             _ => {
                 if let Some(message) = refuse(super::InspectTarget::Sandbox) {
