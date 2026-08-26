@@ -12,6 +12,7 @@ pub(crate) struct MapFs {
     pub unreadable: bool,
     pub fail_write: bool,
     pub executables: HashSet<String>,
+    pub symlinks: HashSet<PathBuf>,
 }
 
 impl MapFs {
@@ -53,7 +54,10 @@ impl Fs for MapFs {
         Ok(())
     }
     fn exists(&self, path: &Path) -> bool {
-        self.files.borrow().contains_key(path)
+        self.files.borrow().contains_key(path) || self.symlinks.contains(path)
+    }
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.symlinks.contains(path)
     }
     fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
         if self.unreadable {

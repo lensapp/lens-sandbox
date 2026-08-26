@@ -288,6 +288,11 @@ impl super::author::Fs for RealFs {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }
+    fn is_symlink(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+    }
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         std::fs::File::open(path)?

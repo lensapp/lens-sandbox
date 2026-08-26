@@ -369,6 +369,9 @@ impl author::Fs for StepFs {
     fn exists(&self, path: &Path) -> bool {
         self.files.borrow().contains_key(path)
     }
+    fn is_symlink(&self, _path: &Path) -> bool {
+        false
+    }
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
         let mut bytes = self.read_to_string(path)?.into_bytes();
         bytes.truncate(max_bytes.saturating_add(1) as usize);
