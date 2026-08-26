@@ -60,6 +60,10 @@ debug = "line-tables-only"
 [profile.test]
 debug = "line-tables-only"
 
+# Deps carry no debug info: Linux embeds dep DWARF into every artifact, and a full --all-targets build links them many times over.
+[profile.dev.package."*"]
+debug = false
+
 # `release-init` profile — for lns-init's static-musl PID-1 binary.
 # Inherits release (lto, strip) and adds size-killing options that
 # require a workspace-wide unification rule (`panic = "abort"` drops
