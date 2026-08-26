@@ -33,8 +33,8 @@ has a kind:
 | Kind | What it is |
 |---|---|
 | `sandbox` | A complete sandbox: its base image, the egress it needs, the credentials it needs, and the files, tools, and mounts it brings. |
-| `connector` | How a credential for a service is obtained and injected. |
 | `mixin` | A capability layered onto a sandbox: tools, filesets, egress, credentials. |
+| `connector` | A mixin you install on this machine, offered when a run reaches the service it covers. |
 
 A **sandbox** is what a sandbox artifact becomes when it runs: a live guest with
 an id, a name, and a state. It outlives its workload — when the workload exits,
@@ -52,8 +52,8 @@ Each has its own namespace:
 artifact and produces a sandbox.
 
 The rest of the surface manages neither a document nor a guest:
-[`lns connector`](#33-lns-connector) decides what this machine and this project
-may use; [`lns volume`](#34-lns-volume) holds data;
+[`lns connector`](#33-lns-connector) decides what this machine offers;
+[`lns volume`](#34-lns-volume) holds data;
 [`lns config`](#35-lns-config) holds your defaults; and
 [`lns audit`](#36-lns-audit), [`lns service`](#37-lns-service),
 [`lns login`](#38-lns-login--lns-logout), and
@@ -292,8 +292,8 @@ does not: it returns your terminal, exits `0`, and leaves the workload running.
 
 Every project directory has one mixin nobody publishes: `lns-local-mixin.yaml`,
 beside the document. It holds what you decided here — the destinations you
-approved or refused, and which connectors this project uses — and every run in
-that directory resolves it last, so nothing you pulled can overrule it.
+approved or refused — and every run in that directory resolves it last, so
+neither what you pulled nor what you accepted can overrule it.
 
 - **The run writes it.** A destination no rule decides is asked about at first
   use, and your answer is appended as an `egress` entry. There is no command to
@@ -314,40 +314,36 @@ try a rule set without writing it here.
 
 ### 3.3 `lns connector`
 
-> **Work in progress.** This namespace is not settled. The verbs and their split
-> across machine and project are still being worked out, and this section will
-> change.
-
 A connector is an artifact, so it is authored, published, and fetched with
-[`lns artifact`](#31-lns-artifact). This namespace covers the two things that are
-not the document: whether it is available on **this machine**, and whether it is
-allowed in **this project**.
+[`lns artifact`](#31-lns-artifact). This namespace covers the one thing that is
+not the document: whether it is available on **this machine**.
 
 ```bash
 lns connector install <REF|PATH>
 lns connector uninstall <ID>
 lns connector list [--format <table|json>]
-lns connector connect <ID> [--project <PATH>]
-lns connector disconnect <ID> [--project <PATH>]
-lns connector grants [--all] [--project <PATH>] [--format <table|json>]
-lns connector revoke <ID> [--project <PATH>]
+lns connector connect <ID>
+lns connector forget <ID> [--project <PATH>]
 ```
 
 | Verb | What it does |
 |---|---|
-| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: a newly installed connector holds no sign-in, seeds nothing, and arms nothing. |
-| `uninstall` | Removes it from this machine. |
-| `list` | Lists what is installed, its sign-in methods, and whether it is connected here. |
-| `connect` | Binds its value for this machine — a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in — and records the connection in this project. |
-| `disconnect` | Withdraws it from this project and forgets the grants remembered here. |
-| `grants` | Lists the per-workload grants for this project as `workload  connector  verdict`. `--all` adds a project column and covers every project on this machine. |
-| `revoke` | Forgets one connector's grants in this project, so its next use asks again. Exits `1` when there was nothing to forget. |
+| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: it seeds the connector's variables into later runs and opens no destination. Refused when the document declares a block a connector may not carry, when its egress overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
+| `uninstall` | Removes it from this machine, with its stored value. A project that already accepted it keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
+| `list` | Lists what is installed: its destinations, the variables it seeds, and whether this machine holds a value. |
+| `connect` | Binds its value for this machine — the approval window prompts to use a host value, store one, or deny. Separate from accepting, and never asked inside a held request. |
+| `forget` | Clears this project's decision about one connector, accepted or declined, so the next run asks again. `--project <PATH>` acts on another directory. Exits `1` when there was nothing to forget. |
 
-`--project <PATH>` acts on another project directory instead of the current one.
+There is no `accept` verb, and that is the point: a connector is accepted in the
+approval window, at the moment a run reaches the service it covers. Installing
+makes a connector offerable, `connect` binds its value, and accepting is a
+decision you make in front of the request that provoked it.
 
-Three steps stay separate, and no flag collapses them: installing makes a
-connector available, connecting decides this project uses it, and the workload
-still meets a first-use card the first time it reaches for the value.
+Accepting and binding a value are independent, and neither waits for the other.
+You can accept a connector this machine holds no value for: the egress opens and
+the files are written, and the next request carrying its placeholder is held
+again until you run `connect`. That is why `connect` is a command and not a field
+on the card — a held request cannot wait for you to go and find a token.
 
 ### 3.4 `lns volume`
 
@@ -404,7 +400,9 @@ lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 
 `SANDBOX` is a `RUN`. `--kind` takes one of `launch`, `exit`, `restart`,
 `sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
-`approval`, `connection`, `credential`, or `tool`. Filters compose.
+`approval`, `connection`, `credential`, `connector`, or `tool`. Filters compose.
+`credential` covers binding and injecting a value, with or without a connector;
+`connector` covers accepting, declining, and forgetting one.
 
 A sandbox's own life is in the timeline as much as what it reached for: `launch`
 is the workload starting, `exit` is it ending, `restart` is a stopped sandbox
@@ -414,7 +412,7 @@ swept with every other stopped one.
 
 It is not `lns sandbox audit`, because half of what it reads is not a sandbox's:
 the timeline merges each sandbox's own chain with the durable ledger of
-approvals, connections, and credential decisions, which spans sandboxes and
+approvals, credential uses, and connector decisions, which spans sandboxes and
 outlives every one of them. A sandbox's chain also outlives the sandbox —
 removing one does not remove what it did.
 
@@ -577,11 +575,12 @@ never half-written. Warnings never change the exit code.
 | Run this sandbox's declared tool installers? | `pull`, `run` |
 | Let these host files in, including the secret-shaped ones? | `run` with a host bind |
 | Delete this data? | `prune`, `uninstall` |
-| Use this credential for this workload? | The approval window, on first use |
+| Bind a value for this credential? | The approval window, when a run needs one |
+| Use this connector here? | The approval window, when a run reaches its service |
 
-The first three are asked at your terminal. The fourth is not: a credential
-decision is made in the approval window the background service owns, because it
-has to be answerable while a sandbox is already running.
+The first three are asked at your terminal. The last two are not: a credential or
+connector decision is made in the approval window the background service owns,
+because it has to be answerable while a sandbox is already running.
 
 ### 7.2 Answering
 
@@ -592,8 +591,8 @@ has to be answerable while a sandbox is already running.
 - A verb that names its target does not ask: you already named it. `rm` removes
   what you pointed at, and `-f` on `lns sandbox rm` means "stop it first", not
   "delete without asking".
-- A flag answers only the question it names. No flag answers the credential card:
-  that value is bound per machine and granted per workload.
+- A flag answers only the question it names. No flag answers the connector card:
+  the value is bound per machine, and accepting is decided per project.
 - With no terminal to ask at, a command that would have asked **refuses** and
   names the flag that would have answered it. It never assumes.
 
@@ -650,8 +649,9 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | Path | Holds |
 |---|---|
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
-| `~/.lns/connectors.yaml` | The connectors installed on this machine. |
-| `~/.lns/workload-grants.json` | Which workload was granted which connector, per project. |
+| `~/.lns/connectors/` | The connectors installed on this machine, each stored verbatim at the digest it came from. |
+| `~/.lns/connector-grants.json` | Which connectors a project accepted, and which it declined. |
+| `~/.lns/connector-values.json` | Bound connector values, mode `0600`. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
 
@@ -662,7 +662,7 @@ The project keeps two files, both in the directory you work in:
 | Path | Holds |
 |---|---|
 | `./lns.yaml` | The sandbox document. |
-| `./lns-local-mixin.yaml` | What you decided here: the egress rules you approved, and which connectors this project uses. Committable. |
+| `./lns-local-mixin.yaml` | What you decided here: the egress rules you approved. Committable — which is why a connector acceptance is not in it. |
 
 Secrets are never written to the project. A credential value is bound per machine,
 and what a project records is the decision, not the value.
@@ -691,7 +691,5 @@ The product is pre-1.0 and carries no compatibility shims. A rename is a rename.
   and `stop`.
 - [Policy and approvals](policy.md) — the destination grammar, and how the
   project's own mixin records what you approve.
-- [Connectors](connectors.md) and [Credentials](credentials.md) — the model behind
-  `lns connector`.
 - [Audit](audit.md) — the chain `lns audit` reads.
 - [The background service](service.md) — what `lns` is a client of.
