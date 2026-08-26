@@ -1,36 +1,42 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use lns_artifact::build::FileEntry;
+use lns_artifact::spec::Kind;
 
 use super::author::Fs;
 
-/// Snapshot a fileset directory into pack-ready entries, refusing secret-shaped files anywhere in the tree — a fileset is baked into the artifact, so there is no keep/drop prompt to catch one later.
-pub fn walk<F: Fs + ?Sized>(fs: &F, root: &Path) -> Result<Vec<FileEntry>> {
-    walk_with_limits(
+/// Snapshot a fileset directory into pack-ready entries, refusing secret-shaped files anywhere in the tree — a fileset is baked into the artifact, so there is no keep/drop prompt to catch one later. A connector is §3.2.3's one exception: it may name such a file, and the caller checks the content for a declared placeholder instead.
+pub fn walk<F: Fs + ?Sized>(fs: &F, root: &Path, kind: Kind) -> Result<Vec<FileEntry>> {
+    walk_under(
         fs,
         root,
-        lns_artifact::build::MAX_FILESET_BYTES,
-        lns_artifact::build::MAX_FILESET_ENTRIES,
+        &WalkRules {
+            kind,
+            max_bytes: lns_artifact::build::MAX_FILESET_BYTES,
+            max_entries: lns_artifact::build::MAX_FILESET_ENTRIES,
+        },
     )
 }
 
-fn walk_with_limits<F: Fs + ?Sized>(
-    fs: &F,
-    root: &Path,
+/// What one walk enforces on the tree it reads: which kind is walking, and the two limits a packed layer may not exceed.
+struct WalkRules {
+    kind: Kind,
     max_bytes: u64,
     max_entries: usize,
-) -> Result<Vec<FileEntry>> {
+}
+
+fn walk_under<F: Fs + ?Sized>(fs: &F, root: &Path, rules: &WalkRules) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     let mut total_bytes = 0;
     walk_into(
         fs,
         root,
         Path::new(""),
+        rules,
         &mut entries,
         &mut total_bytes,
-        max_bytes,
-        max_entries,
     )?;
     Ok(entries)
 }
@@ -39,17 +45,16 @@ fn walk_into<F: Fs + ?Sized>(
     fs: &F,
     dir: &Path,
     rel: &Path,
+    rules: &WalkRules,
     out: &mut Vec<FileEntry>,
     total_bytes: &mut u64,
-    max_bytes: u64,
-    max_entries: usize,
 ) -> Result<()> {
     let listed = fs
         .dir_entries(dir)
         .with_context(|| format!("reading fileset directory {}", dir.display()))?;
     for entry in listed {
         let entry_rel = rel.join(&entry.name);
-        if crate::run::host_bind::looks_like_secret(&entry.name) {
+        if rules.kind != Kind::Connector && crate::run::host_bind::looks_like_secret(&entry.name) {
             bail!(
                 "fileset contains a secret-shaped file: {} — real secrets stay outside the workload",
                 entry_rel.display()
@@ -57,25 +62,17 @@ fn walk_into<F: Fs + ?Sized>(
         }
         let entry_abs = dir.join(&entry.name);
         if entry.dir {
-            walk_into(
-                fs,
-                &entry_abs,
-                &entry_rel,
-                out,
-                total_bytes,
-                max_bytes,
-                max_entries,
-            )?;
+            walk_into(fs, &entry_abs, &entry_rel, rules, out, total_bytes)?;
         } else {
-            if out.len() >= max_entries {
-                bail!("fileset contains more than {max_entries} files");
+            if out.len() >= rules.max_entries {
+                bail!("fileset contains more than {} files", rules.max_entries);
             }
-            let remaining = max_bytes.saturating_sub(*total_bytes);
+            let remaining = rules.max_bytes.saturating_sub(*total_bytes);
             let data = fs
                 .read_limited(&entry_abs, remaining)
                 .with_context(|| format!("reading fileset file {}", entry_abs.display()))?;
             if data.len() as u64 > remaining {
-                bail!("fileset content exceeds the {max_bytes}-byte limit");
+                bail!("fileset content exceeds the {}-byte limit", rules.max_bytes);
             }
             *total_bytes += data.len() as u64;
             out.push(FileEntry {
@@ -91,23 +88,39 @@ fn walk_into<F: Fs + ?Sized>(
     Ok(())
 }
 
-/// The offline validate/run guard: every path fileset must name a readable, secret-free directory in the project.
+/// The offline validate/run guard: every path fileset must name a readable directory in the project that its kind is allowed to ship. Reading the directory is what lets a connector be held to §3.2.3 here rather than only at push.
 pub fn path_fileset_problems<F: Fs + ?Sized>(
     fs: &F,
     project_dir: &Path,
-    definition: &lns_artifact::sandbox::Definition,
+    paths: &[&str],
+    methods: &[lns_artifact::connector::Method],
+    kind: Kind,
 ) -> Vec<String> {
-    definition
-        .spec
-        .filesets
-        .iter()
-        .filter_map(|fileset| {
-            let path = fileset.path.as_deref()?;
-            walk(fs, &project_dir.join(path))
-                .err()
-                .map(|e| format!("fileset {path}: {e:#}"))
-        })
-        .collect()
+    let mut problems = Vec::new();
+    let mut read: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for path in paths {
+        match walk(fs, &project_dir.join(path), kind) {
+            Ok(entries) => {
+                read.insert(
+                    (*path).to_string(),
+                    lns_artifact::build::text_by_name(&entries),
+                );
+            }
+            Err(e) => problems.push(format!("fileset {path}: {e:#}")),
+        }
+    }
+    if problems.is_empty() {
+        for method in methods {
+            if let Err(e) =
+                lns_artifact::connector::refuse_a_secret_shaped_file_carrying_no_declared_placeholder(
+                    method, &read,
+                )
+            {
+                problems.push(format!("{e:#}"));
+            }
+        }
+    }
+    problems
 }
 
 /// The document a local mixin reference names: a directory is read as the `lns.yaml` inside it, and a path naming the document is that document.
@@ -128,11 +141,9 @@ pub fn local_mixin_document<F: Fs + ?Sized>(
 pub fn directory_mixin_problems<F: Fs + ?Sized>(
     fs: &F,
     project_dir: &Path,
-    definition: &lns_artifact::sandbox::Definition,
+    mixins: &[String],
 ) -> Vec<String> {
-    definition
-        .spec
-        .mixins
+    mixins
         .iter()
         .filter(|reference| lns_artifact::sandbox::names_a_local_path(reference))
         .filter_map(|reference| {
@@ -165,7 +176,7 @@ mod tests {
         let problems = directory_mixin_problems(
             &fs,
             Path::new("/work"),
-            &definition(r#"["./mixins/pg/lns.yaml"]"#),
+            &definition(r#"["./mixins/pg/lns.yaml"]"#).spec.mixins,
         );
         assert!(
             problems.is_empty(),
@@ -179,7 +190,9 @@ mod tests {
         let problems = directory_mixin_problems(
             &fs,
             Path::new("/work"),
-            &definition(r#"["./mixins/present","./mixins/absent"]"#),
+            &definition(r#"["./mixins/present","./mixins/absent"]"#)
+                .spec
+                .mixins,
         );
         assert_eq!(
             problems.len(),
@@ -200,7 +213,9 @@ mod tests {
             &definition(&format!(
                 r#"["ghcr.io/acme/obs@sha256:{}"]"#,
                 "c".repeat(64)
-            )),
+            ))
+            .spec
+            .mixins,
         );
         assert!(
             problems.is_empty(),
@@ -214,7 +229,7 @@ mod tests {
             ("/work/skills/prompts.md", "p"),
             ("/work/skills/deep/notes.md", "n"),
         ]);
-        let entries = walk(&fs, Path::new("/work/skills")).unwrap();
+        let entries = walk(&fs, Path::new("/work/skills"), Kind::Sandbox).unwrap();
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["deep/notes.md", "prompts.md"]);
         assert_eq!(entries[1].data, b"p");
@@ -229,7 +244,7 @@ mod tests {
                 ("/work/skills/notes.md", "n"),
             ])
         };
-        let entries = walk(&fs, Path::new("/work/skills")).unwrap();
+        let entries = walk(&fs, Path::new("/work/skills"), Kind::Sandbox).unwrap();
         let modes: std::collections::BTreeMap<&str, u32> =
             entries.iter().map(|e| (e.path.as_str(), e.mode)).collect();
         assert_eq!(
@@ -245,7 +260,7 @@ mod tests {
             ("/work/skills/prompts.md", "p"),
             ("/work/skills/deep/.env", "TOKEN=x"),
         ]);
-        let err = walk(&fs, Path::new("/work/skills")).unwrap_err();
+        let err = walk(&fs, Path::new("/work/skills"), Kind::Sandbox).unwrap_err();
         assert!(
             format!("{err:#}").contains("secret-shaped file: deep/.env"),
             "got: {err:#}"
@@ -255,7 +270,7 @@ mod tests {
     #[test]
     fn walk_surfaces_a_missing_directory_with_its_path() {
         let fs = MapFs::default();
-        let err = walk(&fs, Path::new("/work/skills")).unwrap_err();
+        let err = walk(&fs, Path::new("/work/skills"), Kind::Sandbox).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading fileset directory /work/skills"),
             "got: {err:#}"
@@ -268,7 +283,7 @@ mod tests {
             unreadable: true,
             ..MapFs::with(&[("/work/skills/prompts.md", "p")])
         };
-        let err = walk(&fs, Path::new("/work/skills")).unwrap_err();
+        let err = walk(&fs, Path::new("/work/skills"), Kind::Sandbox).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading fileset file /work/skills/prompts.md"),
             "got: {err:#}"
@@ -282,22 +297,81 @@ mod tests {
             br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/a"},{"path":"./missing","guestPath":"/b"},{"inline":{"a.md":"x"},"guestPath":"/c"}]}}"#,
         )
         .unwrap();
-        let problems = path_fileset_problems(&fs, Path::new("/work"), &def);
+        let paths: Vec<&str> = lns_artifact::merge::path_filesets(&def.spec)
+            .map(|(_, _, path)| path)
+            .collect();
+        let problems = path_fileset_problems(&fs, Path::new("/work"), &paths, &[], Kind::Sandbox);
         assert_eq!(problems.len(), 1, "got: {problems:?}");
         assert!(problems[0].contains("./missing"), "got: {problems:?}");
+    }
+
+    fn connector_with_a_path_fileset() -> lns_artifact::connector::ConnectorDefinition {
+        lns_artifact::connector::parse(
+                br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]}]}}"#,
+            )
+        .expect("the fixture is a valid connector")
+    }
+
+    #[test]
+    fn validate_accepts_a_connector_path_file_that_carries_the_declared_placeholder() {
+        let fs = MapFs::with(&[(
+            "/work/some-provider/credentials.json",
+            r#"{"token":"some_LNSPLACEHOLDER0000000000"}"#,
+        )]);
+        let def = connector_with_a_path_fileset();
+        let problems = path_fileset_problems(
+            &fs,
+            Path::new("/work"),
+            &["./some-provider"],
+            &def.spec.methods,
+            Kind::Connector,
+        );
+        assert!(
+            problems.is_empty(),
+            "§3.2.3 makes a connector the one kind whose fileset exists to write this exact file, so refusing it by name leaves the placeholder rule with nothing to check; got {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_connector_path_file_that_declares_no_placeholder() {
+        let fs = MapFs::with(&[(
+            "/work/some-provider/credentials.json",
+            r#"{"token":"sk-live-real"}"#,
+        )]);
+        let def = connector_with_a_path_fileset();
+        let problems = path_fileset_problems(
+            &fs,
+            Path::new("/work"),
+            &["./some-provider"],
+            &def.spec.methods,
+            Kind::Connector,
+        );
+        assert_eq!(problems.len(), 1, "got {problems:?}");
+        assert!(
+            problems[0].contains("carries no placeholder"),
+            "§5 runs the §3.2.3 read over a `path` directory beside the document, so validate must refuse this for the same reason push does rather than by the name alone; got {problems:?}"
+        );
+    }
+
+    fn limits(max_bytes: u64, max_entries: usize) -> WalkRules {
+        WalkRules {
+            kind: Kind::Sandbox,
+            max_bytes,
+            max_entries,
+        }
     }
 
     #[test]
     fn walk_refuses_content_beyond_the_aggregate_limit() {
         let fs = MapFs::with(&[("/work/skills/a", "123"), ("/work/skills/b", "456")]);
-        let err = walk_with_limits(&fs, Path::new("/work/skills"), 5, 10).unwrap_err();
+        let err = walk_under(&fs, Path::new("/work/skills"), &limits(5, 10)).unwrap_err();
         assert!(format!("{err:#}").contains("5-byte limit"));
     }
 
     #[test]
     fn walk_refuses_more_than_the_entry_limit() {
         let fs = MapFs::with(&[("/work/skills/a", "1"), ("/work/skills/b", "2")]);
-        let err = walk_with_limits(&fs, Path::new("/work/skills"), 10, 1).unwrap_err();
+        let err = walk_under(&fs, Path::new("/work/skills"), &limits(10, 1)).unwrap_err();
         assert!(format!("{err:#}").contains("more than 1 files"));
     }
 }

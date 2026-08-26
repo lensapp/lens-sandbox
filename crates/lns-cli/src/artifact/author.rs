@@ -191,12 +191,25 @@ pub fn validate<F: Fs, W: Write>(
     problems.extend(wrong_kind_problem(&json, kind));
     if problems.is_empty()
         && let Ok(def) = lns_artifact::sandbox::parse_document(&json)
+        && let kind =
+            lns_artifact::spec::read_kind(&json).unwrap_or(lns_artifact::spec::Kind::Sandbox)
     {
-        problems.extend(super::fileset::path_fileset_problems(fs, project_dir, &def));
+        let paths = def.path_filesets();
+        let methods: &[lns_artifact::connector::Method] = match &def {
+            lns_artifact::sandbox::Document::Connector(connector) => &connector.spec.methods,
+            _ => &[],
+        };
+        problems.extend(super::fileset::path_fileset_problems(
+            fs,
+            project_dir,
+            &paths,
+            methods,
+            kind,
+        ));
         problems.extend(super::fileset::directory_mixin_problems(
             fs,
             project_dir,
-            &def,
+            def.mixins(),
         ));
     }
     if problems.is_empty() {
@@ -242,8 +255,18 @@ pub fn inspect_local<F: Fs, W: Write>(
     let def = lns_artifact::sandbox::parse_document(&json).map_err(|e| {
         anyhow::anyhow!("{} is not a valid {}: {e:#}", path.display(), kind.as_str())
     })?;
+    let mixin = matches!(def, lns_artifact::sandbox::Document::Mixin(_));
+    let def = match def {
+        // A connector declares no mixins, so there is nothing to compose and nothing to attribute.
+        lns_artifact::sandbox::Document::Connector(def) => {
+            render_connector(&def, out)?;
+            return Ok(0);
+        }
+        lns_artifact::sandbox::Document::Sandbox(def)
+        | lns_artifact::sandbox::Document::Mixin(def) => def,
+    };
     let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
-    render_effective(kind, &def.name, &composed, out)?;
+    render_effective(mixin, &def.name, &composed, out)?;
     Ok(0)
 }
 
@@ -324,19 +347,19 @@ fn mixin_lines(
         .collect()
 }
 
+/// A connector never reaches here — it renders on its own path — so the kind this takes is the one bit that is left.
 fn render_effective<W: Write>(
-    kind: lns_artifact::spec::Kind,
+    mixin: bool,
     name: &str,
     composed: &Composition,
     out: &mut W,
 ) -> Result<()> {
     let spec = &composed.spec;
-    match kind {
-        lns_artifact::spec::Kind::Sandbox => {
-            writeln!(out, "Sandbox: {name}")?;
-            writeln!(out, "  image:        {}", spec.image)?;
-        }
-        lns_artifact::spec::Kind::Mixin => writeln!(out, "Mixin: {name}")?,
+    if mixin {
+        writeln!(out, "Mixin: {name}")?;
+    } else {
+        writeln!(out, "Sandbox: {name}")?;
+        writeln!(out, "  image:        {}", spec.image)?;
     }
     for mixin in &composed.mixins {
         writeln!(out, "  mixin: {mixin}")?;
@@ -394,6 +417,49 @@ fn render_effective<W: Write>(
                 lns_artifact::merge::tool_name(tool)
             )
         )?;
+    }
+    Ok(())
+}
+
+/// A connector renders by what it serves and the ways it can be connected, because its payload lives in a method rather than beside one (§3.2).
+fn render_connector<W: Write>(
+    def: &lns_artifact::connector::ConnectorDefinition,
+    out: &mut W,
+) -> Result<()> {
+    writeln!(out, "Connector: {}", def.name)?;
+    for pattern in &def.spec.serves {
+        writeln!(out, "  serves:       {pattern}")?;
+    }
+    for method in &def.spec.methods {
+        let auth = match &method.auth {
+            Some(auth) => auth.kind.as_str(),
+            None => "none",
+        };
+        writeln!(
+            out,
+            "  method:       {} (auth: {auth}){}",
+            method.name,
+            if method.is_offerable() {
+                ""
+            } else {
+                " — needs a newer lns"
+            }
+        )?;
+        writeln!(
+            out,
+            "    egress:     {} route(s){}",
+            method.egress.http.len(),
+            raw_rule_note(method.egress.tcp.len())
+        )?;
+        for credential in &method.credentials {
+            writeln!(out, "    credential: {}", credential.owner())?;
+        }
+        for fileset in &method.filesets {
+            writeln!(out, "    file:       {}", fileset.guest_path)?;
+        }
+        for (key, value) in &method.env {
+            writeln!(out, "    env:        {key}={value}")?;
+        }
     }
     Ok(())
 }
@@ -500,6 +566,23 @@ mod tests {
         let code = validate(&fs, cwd(), None, None, &mut out).unwrap();
         assert_eq!(code, 0);
         assert!(String::from_utf8(out).unwrap().contains("is valid"));
+    }
+
+    #[test]
+    fn validate_refuses_a_secret_shaped_file_in_a_sandbox_fileset() {
+        // Validate has to reach push's verdict, and the kind it hands down is what decides it.
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: x:1\n  filesets:\n    - path: ./skills\n      guestPath: /root/.agent/skills\n";
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", yaml),
+            ("/work/skills/.env", "TOKEN=real"),
+        ]);
+        let mut out = Vec::new();
+
+        let code = validate(&fs, cwd(), None, None, &mut out).unwrap();
+
+        assert_eq!(code, 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("secret-shaped file"), "got: {text}");
     }
 
     #[test]
@@ -623,6 +706,51 @@ mod tests {
         assert!(
             format!("{err:#}").contains("reachable from itself"),
             "a cycle has no composition to render; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn inspect_local_renders_a_connector_by_what_it_serves_and_how_it_connects() {
+        let yaml = concat!(
+            "apiVersion: lns.run/v1\nkind: connector\nname: stripe\nspec:\n",
+            "  serves:\n    - api.stripe.com\n",
+            "  methods:\n",
+            "    - name: token\n      auth:\n        kind: token\n",
+            "      egress:\n        http:\n          - match: api.stripe.com\n            verdict: allow\n",
+            "        tcp:\n          - match: api.stripe.com:5432\n            verdict: allow\n",
+            "      credentials:\n        - envVar: STRIPE_KEY\n          placeholder: stripe_LNSPLACEHOLDER00000\n",
+            "      filesets:\n        - guestPath: /home/agent/.stripe\n          inline:\n            config.json: '{}'\n",
+            "      env:\n        STRIPE_REGION: eu\n",
+            "    - name: sso\n      auth:\n        kind: oauth_device\n",
+            "    - name: open\n      egress:\n        http:\n          - match: api.stripe.com\n            verdict: allow\n",
+        );
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        let code = inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        for expected in [
+            "Connector: stripe",
+            "serves:       api.stripe.com",
+            "method:       token (auth: token)",
+            "1 route(s), 1 raw TCP rule(s)",
+            "credential: STRIPE_KEY",
+            "file:       /home/agent/.stripe",
+            "env:        STRIPE_REGION=eu",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in: {text}");
+        }
+        assert!(
+            text.contains("method:       sso (auth: oauth_device) — needs a newer lns"),
+            "a mechanism this version cannot run is listed and marked, because the document is valid and its other methods still work: {text}"
+        );
+        assert!(
+            text.contains("method:       open (auth: none)"),
+            "a method with nothing to sign in to is granted rather than connected, and the card still has to show it: {text}"
+        );
+        assert!(
+            !text.contains("image:"),
+            "a connector carries no image, so rendering it as a sandbox would print a field it cannot have: {text}"
         );
     }
 
@@ -759,14 +887,13 @@ mod tests {
     #[test]
     fn each_merged_entry_names_the_source_that_decided_it() {
         let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  tools:\n    - node@20\n";
-        let mixin = "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n  filesets:\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  volumes:\n    - type: volume\n      source: obs-cache\n      target: /cache\n";
+        let mixin = "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n  filesets:\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  volumes:\n    - type: volume\n      source: obs-cache\n      target: /cache\n";
         let fs = MapFs::with(&[("/work/lns.yaml", yaml), ("/work/obs/lns.yaml", mixin)]);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         for line in [
             "tool: node@22  [from /work/obs/lns.yaml, replaced node@20 from the sandbox]",
-            "credential: SOME_TOKEN -> api.some-provider.example  [from /work/obs/lns.yaml]",
             "fileset:      inline -> /root/.agent/settings (owner: workload)  [from /work/obs/lns.yaml]",
             "mount:        volume obs-cache -> /cache (read-write)  [from /work/obs/lns.yaml]",
         ] {

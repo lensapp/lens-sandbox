@@ -309,6 +309,9 @@ pub(crate) async fn pull_artifact_with<R: Registry>(
             }));
         }
         Some(lns_artifact::spec::Kind::Sandbox) => {}
+        Some(lns_artifact::spec::Kind::Connector) => anyhow::bail!(
+            "{image} is a connector; a connector is installed on this machine rather than pulled into a project"
+        ),
         None => anyhow::bail!(
             "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` takes a published sandbox or mixin"
         ),
@@ -1316,6 +1319,37 @@ mod tests {
             registry.calls.lock().unwrap().as_slice(),
             ["manifest"],
             "a mixin is config-only, so no layer blob is fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_a_connector_because_a_project_never_holds_one() {
+        ensure_global_trace_subscriber();
+        let document =
+            r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{}}"#
+                .to_string();
+        let registry = FakeImage {
+            manifest: OciImageManifest {
+                artifact_type: Some("application/vnd.lens.connector.v1+json".into()),
+                config: OciDescriptor {
+                    media_type: "application/vnd.lens.connector.config.v1+json".into(),
+                    digest: sha256_hex(document.as_bytes()),
+                    size: document.len() as i64,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            config_json: document,
+            manifest_digest: format!("sha256:{}", "d".repeat(64)),
+            blobs: vec![],
+        }
+        .into_registry();
+        let err = pull_artifact_with(&registry, "registry.example.test/some-provider:1")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is a connector"),
+            "a connector is installed on this machine rather than pulled into a project, so pulling one into a project has no answer; got: {err:#}"
         );
     }
 

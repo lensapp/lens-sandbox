@@ -5,15 +5,17 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Sandbox,
     Mixin,
+    Connector,
 }
 
-const ALL_KINDS: [Kind; 2] = [Kind::Sandbox, Kind::Mixin];
+const ALL_KINDS: [Kind; 3] = [Kind::Sandbox, Kind::Mixin, Kind::Connector];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Sandbox => "sandbox",
             Kind::Mixin => "mixin",
+            Kind::Connector => "connector",
         }
     }
 
@@ -40,6 +42,43 @@ impl Kind {
     pub fn from_kind_str(kind: &str) -> Option<Kind> {
         ALL_KINDS.into_iter().find(|k| k.as_str() == kind)
     }
+}
+
+/// The identity every document carries, read before the kind's own `spec` is decoded so another group's field names cannot answer as unknown fields of this one (§2).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Envelope {
+    #[serde(rename = "apiVersion", default)]
+    api_version: String,
+    #[serde(default)]
+    kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub spec: serde_json::Value,
+}
+
+/// Check the envelope of a document that must be one kind, and hand back its identity and undecoded `spec`.
+pub fn parse_envelope(config_json: &[u8], kind: Kind) -> Result<Envelope> {
+    let doc: Envelope = serde_json::from_slice(config_json)
+        .with_context(|| format!("parsing {} definition", kind.as_str()))?;
+    if doc.api_version != crate::sandbox::API_VERSION {
+        bail!(
+            "unexpected apiVersion {:?}; expected {}",
+            doc.api_version,
+            crate::sandbox::API_VERSION
+        );
+    }
+    if doc.kind != kind.as_str() {
+        bail!(
+            "expected kind {} but definition declares {:?}",
+            kind.as_str(),
+            doc.kind
+        );
+    }
+    if !is_valid_name(&doc.name) {
+        bail!("invalid name {:?}", doc.name);
+    }
+    Ok(doc)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +173,11 @@ mod tests {
 
     #[test]
     fn a_kind_is_spelled_the_way_the_specification_writes_it() {
-        for (kind, spelling) in [(Kind::Sandbox, "sandbox"), (Kind::Mixin, "mixin")] {
+        for (kind, spelling) in [
+            (Kind::Sandbox, "sandbox"),
+            (Kind::Mixin, "mixin"),
+            (Kind::Connector, "connector"),
+        ] {
             assert_eq!(
                 kind.as_str(),
                 spelling,
@@ -162,6 +205,12 @@ mod tests {
                 "mixin",
                 "application/vnd.lens.mixin.v1+json",
                 "application/vnd.lens.mixin.config.v1+json",
+            ),
+            (
+                Kind::Connector,
+                "connector",
+                "application/vnd.lens.connector.v1+json",
+                "application/vnd.lens.connector.config.v1+json",
             ),
         ] {
             assert_eq!(kind.as_str(), name);

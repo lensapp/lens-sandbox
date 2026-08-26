@@ -102,6 +102,9 @@ pub(crate) fn project_inspection(
             reference: image_ref.to_string(),
             digest,
         })),
+        Some(lns_artifact::spec::Kind::Connector) => anyhow::bail!(
+            "{image_ref} is a connector; a connector is installed on this machine rather than inspected as a project's artifact"
+        ),
         Some(lns_artifact::spec::Kind::Mixin) => {
             let mixin = lns_artifact::sandbox::parse_mixin(&resolution.document)
                 .with_context(|| format!("inspecting mixin {image_ref}"))?;
@@ -459,6 +462,26 @@ mod tests {
         assert!(
             format!("{err:#}").contains("a mixin must not declare image"),
             "the artifact type says mixin, so the document has to hold to a mixin's rules before a reader trusts it; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_connector_artifact_is_not_a_projects_artifact_to_inspect() {
+        let err = project_inspection(
+            "ghcr.io/acme/some-provider:1",
+            digest(),
+            Some(&lns_artifact::spec::Kind::Connector.artifact_type()),
+            &lns_artifact::spec::Kind::Connector.config_media_type(),
+            &resolution(
+                r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{}}"#,
+                &[],
+            ),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is a connector"),
+            "a connector is installed on this machine rather than resolved into a project, so inspecting one as a project's artifact has no answer; got: {err:#}"
         );
     }
 

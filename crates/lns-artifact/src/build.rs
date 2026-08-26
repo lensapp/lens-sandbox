@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::spec;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -80,13 +82,17 @@ pub fn build_artifact(
         );
     }
     let kind = spec::read_kind(doc)?;
-    let declared = crate::sandbox::parse_document(doc)?;
-    let declared = crate::merge::path_filesets(&declared.spec).count();
-    if declared != filesets.len() {
+    let document = crate::sandbox::parse_document(doc)?;
+    let packing = document.path_filesets();
+    if packing.len() != filesets.len() {
         bail!(
-            "this document declares {declared} path fileset(s) but {} were packed; an artifact carries one layer per entry",
+            "this document declares {} path fileset(s) but {} were packed; an artifact carries one layer per entry",
+            packing.len(),
             filesets.len()
         );
+    }
+    if kind == spec::Kind::Connector {
+        crate::connector::parse_with_path_files(doc, &files_by_path(&packing, filesets))?;
     }
 
     let config_value: Value = serde_json::from_slice(doc).context("parsing manifest")?;
@@ -162,6 +168,30 @@ pub fn build_artifact(
         manifest_digest,
         blobs,
     })
+}
+
+fn files_by_path(
+    packing: &[&str],
+    filesets: &[Vec<FileEntry>],
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    packing
+        .iter()
+        .zip(filesets)
+        .map(|(path, entries)| ((*path).to_string(), text_by_name(entries)))
+        .collect()
+}
+
+/// One directory's entries as text keyed by name, the shape the §3.2.3 read of a `path` fileset takes wherever the bytes are in hand.
+pub fn text_by_name(entries: &[FileEntry]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                String::from_utf8_lossy(&entry.data).into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Pack one fileset directory into a gzipped tar layer. Deterministic — entries sorted, uid/gid/mtime zeroed, each file's mode preserved, no gzip timestamp — so identical directories dedupe at the blob level however many artifacts carry them.
@@ -487,6 +517,40 @@ mod tests {
             entries.join(",")
         )
         .into_bytes()
+    }
+
+    fn connector_packing_one_directory() -> Vec<u8> {
+        br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]}]}}"#.to_vec()
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_packed_connector_secret_carrying_no_declared_placeholder() {
+        let err = build_artifact(
+            &connector_packing_one_directory(),
+            &[vec![entry(
+                "credentials.json",
+                r#"{"token":"sk-live-real"}"#,
+            )]],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("credentials.json"),
+            "push is the last gate before the registry, so a §3.2.3 breach in a packed layer has to be refused here even when validate already read the same directory; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_artifact_packs_a_connector_secret_that_carries_the_placeholder() {
+        build_artifact(
+            &connector_packing_one_directory(),
+            &[vec![entry(
+                "credentials.json",
+                r#"{"token":"some_LNSPLACEHOLDER0000000000"}"#,
+            )]],
+            None,
+        )
+        .expect("a connector's fileset exists to write exactly this file");
     }
 
     fn unpacked(layer: &Blob) -> std::collections::BTreeMap<String, (u32, Vec<u8>)> {

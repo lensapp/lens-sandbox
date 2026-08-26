@@ -96,14 +96,14 @@ pub fn pack_path_filesets<F: Fs + ?Sized>(
     cwd: &Path,
     doc: &[u8],
 ) -> Result<Vec<PackedDirectory>> {
+    let kind = lns_artifact::spec::read_kind(doc)
+        .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
     let def = lns_artifact::sandbox::parse_document(doc)
         .map_err(|e| anyhow::anyhow!("refusing to push an invalid document: {e:#}"))?;
-    def.spec
-        .filesets
-        .iter()
-        .filter_map(|fileset| fileset.path.as_deref())
+    def.path_filesets()
+        .into_iter()
         .map(|path| {
-            let files = super::fileset::walk(fs, &cwd.join(path))
+            let files = super::fileset::walk(fs, &cwd.join(path), kind)
                 .with_context(|| format!("fileset {path}"))?;
             Ok(PackedDirectory {
                 path: path.to_string(),
@@ -774,6 +774,64 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["./skills", "./hooks"],
             "the i-th path entry owns the i-th layer, so an inline entry in between must not consume a layer"
+        );
+    }
+
+    const CONNECTOR_WITH_A_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]}]}}"#;
+
+    #[test]
+    fn packing_reads_a_connectors_secret_shaped_file_so_push_can_check_its_content() {
+        let fs = MapFs::with(&[(
+            "/work/some-provider/credentials.json",
+            r#"{"token":"some_LNSPLACEHOLDER0000000000"}"#,
+        )]);
+        let packed = pack_path_filesets(&fs, cwd(), CONNECTOR_WITH_A_PATH_FILESET).expect(
+            "§3.2.3 exempts a connector from the refusal this name draws in every other kind",
+        );
+        assert_eq!(
+            packed[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["credentials.json"],
+            "the bytes have to reach the packer, or the placeholder check push runs over them has nothing to read"
+        );
+    }
+
+    #[test]
+    fn packing_still_refuses_a_secret_shaped_file_in_a_sandbox_fileset() {
+        let fs = MapFs::with(&[("/work/skills/credentials.json", "{}")]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"x:1","filesets":[{"path":"./skills","guestPath":"/opt/skills"}]}}"#;
+        let err = pack_path_filesets(&fs, cwd(), doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("secret-shaped file"),
+            "only a connector earns the §3.2.3 exception; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_refuses_a_connector_whose_packed_secret_shaped_file_declares_no_placeholder() {
+        let producer = FakeProducer::ok();
+        let fs = MapFs::with(&[(
+            "/work/some-provider/credentials.json",
+            r#"{"token":"sk-live-real"}"#,
+        )]);
+        let mut out = Vec::new();
+        let err = push_no_prompt(
+            &fs,
+            cwd(),
+            &producer,
+            &unconsultable(),
+            CONNECTOR_WITH_A_PATH_FILESET,
+            "ghcr.io/team/some-provider:1.0.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("carries no placeholder"),
+            "with the name refusal lifted for a connector, the placeholder rule is what keeps a real token out of the registry; got: {err:#}"
         );
     }
 

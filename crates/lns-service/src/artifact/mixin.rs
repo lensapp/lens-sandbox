@@ -387,6 +387,7 @@ pub fn on_the_wire(
                 lns_artifact::merge::Block::Port => lns_ipc::ContributionBlock::Port,
                 lns_artifact::merge::Block::Egress => lns_ipc::ContributionBlock::Egress,
                 lns_artifact::merge::Block::Script => lns_ipc::ContributionBlock::Script,
+                lns_artifact::merge::Block::Credential => lns_ipc::ContributionBlock::Credential,
             },
             key: c.key.clone(),
             source: c.source.clone(),
@@ -687,7 +688,7 @@ mod tests {
             r#"{"image":"x:1","mixins":["obs"]}"#,
             &[(
                 "obs",
-                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow","description":"approved during a run"}]}}"#,
+                r#"{"tools":["node@22"],"volumes":[{"type":"volume","name":"cache","target":"/cache"}],"ports":[{"container":8080}],"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow","description":"approved during a run"}]}}"#,
             )],
         );
         let refs: Vec<(&str, &str)> = documents
@@ -704,6 +705,7 @@ mod tests {
             (lns_ipc::ContributionBlock::Tool, "node"),
             (lns_ipc::ContributionBlock::Mount, "/cache"),
             (lns_ipc::ContributionBlock::Port, "8080"),
+            (lns_ipc::ContributionBlock::Credential, "SOME_TOKEN"),
             (
                 lns_ipc::ContributionBlock::Egress,
                 "allow api.some-provider.example",

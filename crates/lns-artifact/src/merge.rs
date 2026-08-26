@@ -25,6 +25,7 @@ pub enum Block {
     Port,
     Egress,
     Script,
+    Credential,
 }
 
 /// What one source decided, and what deciding it replaced, so a reader sees where every line of a resolved sandbox came from.
@@ -217,6 +218,17 @@ pub fn merge(sources: &[Source]) -> Result<Merged> {
     }
     spec.ports = ports.into_iter().map(|won| won.item).collect();
 
+    // A credential is replaced whole rather than field by field, because a placeholder armed against another source's injections is a marker no document declared.
+    // Keyed by `envVar`, or by `placeholder` for an entry that declares none — a connector method may supply a credential a fileset carries and no variable holds (§3.3.2).
+    spec.credentials = fold(
+        sources,
+        |s| &s.credentials,
+        |c| c.owner().to_string(),
+        |c| c.owner().to_string(),
+        Block::Credential,
+        &mut contributions,
+    );
+
     spec.egress = egress_of(sources);
     for source in sources.iter().rev() {
         // Egress is a union rather than a keyed replacement, so every entry is attributed and none displaces another.
@@ -292,7 +304,7 @@ fn script_contributions(spec: &SandboxSpec, source: &str) -> Vec<Contribution> {
 /// Where a document's own `path` filesets came from when nothing merges into it, so a run that layered on nothing still addresses each one's layer by its source.
 pub fn own_fileset_origins(spec: &SandboxSpec) -> Vec<FilesetOrigin> {
     path_filesets(spec)
-        .map(|(layer_index, fileset)| FilesetOrigin {
+        .map(|(layer_index, fileset, _)| FilesetOrigin {
             guest_path: fileset.guest_path.clone(),
             source: ROOT_LABEL.to_string(),
             layer_index,
@@ -300,12 +312,13 @@ pub fn own_fileset_origins(spec: &SandboxSpec) -> Vec<FilesetOrigin> {
         .collect()
 }
 
-/// Every `path` fileset a document declares, numbered in declaration order — the numbering publish packs layers in (§6).
-pub fn path_filesets(spec: &SandboxSpec) -> impl Iterator<Item = (usize, &FilesetEntry)> {
+/// Every `path` fileset a document declares with the path it names, numbered in declaration order — the numbering publish packs layers in (§6).
+pub fn path_filesets(spec: &SandboxSpec) -> impl Iterator<Item = (usize, &FilesetEntry, &str)> {
     spec.filesets
         .iter()
-        .filter(|fileset| fileset.path.is_some())
+        .filter_map(|fileset| fileset.path.as_deref().map(|path| (fileset, path)))
         .enumerate()
+        .map(|(layer_index, (fileset, path))| (layer_index, fileset, path))
 }
 
 /// What a document's own egress contributes when nothing merges into it, so a run that layered on nothing still discloses every rule it will enforce (§1.5).
@@ -1487,6 +1500,119 @@ mod tests {
             serde_json::from_str::<SandboxSpec>(&json).expect("and decodes again"),
             merged,
             "the resolved document has to survive the trip to a disclosure and to the service, or the merge silently drops what it re-encoded badly"
+        );
+    }
+
+    #[test]
+    fn credentials_union_by_the_variable_they_claim() {
+        let merged = merged(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}"#,
+            ),
+            (
+                "obs",
+                r#"{"credentials":[{"envVar":"OTHER_TOKEN","placeholder":"other_LNSPLACEHOLDER0000000000"}]}"#,
+            ),
+        ]));
+        assert_eq!(
+            merged
+                .credentials
+                .iter()
+                .map(|c| c.owner())
+                .collect::<Vec<_>>(),
+            ["SOME_TOKEN", "OTHER_TOKEN"],
+            "§3.3.2 unions credentials by envVar, so a mixin's credential joins the sandbox's rather than replacing the block"
+        );
+    }
+
+    #[test]
+    fn a_later_source_redefining_a_credential_replaces_it_whole() {
+        let merged = merged(&sources(&[
+            (
+                ROOT_LABEL,
+                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}"#,
+            ),
+            (
+                "obs",
+                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"other_LNSPLACEHOLDER0000000000"}]}"#,
+            ),
+        ]));
+        assert_eq!(merged.credentials.len(), 1);
+        assert_eq!(
+            merged.credentials[0].placeholder,
+            "other_LNSPLACEHOLDER0000000000"
+        );
+        assert!(
+            merged.credentials[0].injections.is_empty(),
+            "a redefinition replaces the placeholder and the injections together: keeping the earlier injections would arm a domain against a marker that document never wrote"
+        );
+    }
+
+    #[test]
+    fn a_credential_survives_the_merged_document_serialization() {
+        let merged = merged(&sources(&[(
+            "base",
+            r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"api_key_header","domain":"api.some-provider.example","header":"x-api-key"}]}]}"#,
+        )]));
+        let json = serde_json::to_string(&merged).expect("a merged spec serializes");
+        let decoded = serde_json::from_str::<SandboxSpec>(&json).expect("and decodes again");
+        assert_eq!(
+            decoded, merged,
+            "a credential the merge dropped on re-encoding would leave the workload holding a placeholder nothing substitutes"
+        );
+        assert_eq!(
+            decoded.credentials[0].env_var.as_deref(),
+            Some("SOME_TOKEN")
+        );
+        assert_eq!(
+            decoded.credentials[0].injections[0].header.as_deref(),
+            Some("x-api-key"),
+            "the header an api_key_header injection sets travels with the credential, or the proxy arms a header the document named and this one does not"
+        );
+    }
+
+    #[test]
+    fn a_credential_is_attributed_to_the_source_that_contributed_it() {
+        let found = contribution(
+            &sources(&[(
+                "obs",
+                r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}"#,
+            )]),
+            Block::Credential,
+            "SOME_TOKEN",
+        );
+        assert_eq!(found.source, "obs");
+        assert!(
+            found.displaced.is_empty(),
+            "§1.5 attributes every credential of the resolved sandbox, and this one replaced nothing"
+        );
+    }
+
+    #[test]
+    fn a_credential_a_later_source_redefines_names_the_source_and_what_it_replaced() {
+        let found = contribution(
+            &sources(&[
+                (
+                    ROOT_LABEL,
+                    r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}"#,
+                ),
+                (
+                    "obs",
+                    r#"{"credentials":[{"envVar":"SOME_TOKEN","placeholder":"other_LNSPLACEHOLDER0000000000"}]}"#,
+                ),
+            ]),
+            Block::Credential,
+            "SOME_TOKEN",
+        );
+        assert_eq!(found.source, "obs");
+        assert_eq!(
+            found.displaced,
+            [Displaced {
+                source: ROOT_LABEL.to_string(),
+                summary: "SOME_TOKEN".to_string()
+            }],
+            "§3.3.2 replaces a redefined credential whole, and that is exactly the override §1.5 exists to expose, so the shadowed contribution has to be reported rather than dropped"
         );
     }
 }

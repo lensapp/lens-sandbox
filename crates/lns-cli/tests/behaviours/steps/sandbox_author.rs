@@ -232,6 +232,31 @@ fn lns_yaml_with_duplicate_filesets(w: &mut BehaviourWorld, mount: String) {
     );
 }
 
+#[given(
+    regex = r#"^an lns\.yaml holding a connector declaring fileset "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn lns_yaml_holding_a_connector(w: &mut BehaviourWorld, path: String, mount: String) {
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves:\n    - api.some-provider.example\n  methods:\n    - name: token\n      auth:\n        kind: token\n      credentials:\n        - envVar: SOME_TOKEN\n          placeholder: some_LNSPLACEHOLDER0000000000\n      filesets:\n        - path: {path}\n          guestPath: {mount}\n"
+        ),
+    );
+}
+
+#[given(regex = r#"^the project directory "([^"]+)" contains "([^"]+)" holding `([^`]*)`$"#)]
+fn project_directory_contains_content(
+    w: &mut BehaviourWorld,
+    dir: String,
+    file: String,
+    content: String,
+) {
+    let path = PathBuf::from("/work")
+        .join(dir.trim_start_matches("./"))
+        .join(&file);
+    w.author_files.insert(path, content);
+}
+
 #[given(regex = r#"^the project directory "([^"]+)" contains "([^"]+)"$"#)]
 fn project_directory_contains(w: &mut BehaviourWorld, dir: String, file: String) {
     let path = PathBuf::from("/work")
