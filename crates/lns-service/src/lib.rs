@@ -9,6 +9,7 @@ pub mod ca_bundle;
 pub mod cache;
 pub mod clock;
 pub mod composefs;
+pub mod connector;
 pub mod content_store;
 pub mod cpio;
 pub mod dashboard;

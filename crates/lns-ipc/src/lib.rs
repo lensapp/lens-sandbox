@@ -17,8 +17,9 @@ pub use codec::{
 pub use ledger::{ApprovalKind, Decision, LedgerEvent, LedgerRecord};
 pub use paths::{
     LnsHomeError, audit_anchor_for_run, audit_log_for_run, audit_runs_root, build_cache_root,
-    config_path, connection_ledger, connection_ledger_anchor, host_bind_decisions_path,
-    host_path_decisions_path, lns_home, registry_auth_path, short_run_id,
+    config_path, connection_ledger, connection_ledger_anchor, connector_grants_path,
+    connector_values_path, connectors_root, host_bind_decisions_path, host_path_decisions_path,
+    lns_home, registry_auth_path, short_run_id,
 };
 pub use protocol::{
     ArtifactInspection, BindMount, BindSpec, CachedKind, ContributionBlock, DisplacedEntry,

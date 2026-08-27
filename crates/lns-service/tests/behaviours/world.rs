@@ -41,6 +41,8 @@ pub struct BehaviourWorld {
 
     pub bind: Option<BindRig>,
 
+    pub connector: Option<crate::connector_rig::ConnectorRig>,
+
     pub image: Option<ImageRig>,
 
     pub artifact: Option<ArtifactRig>,
