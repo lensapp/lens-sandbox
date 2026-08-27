@@ -9,5 +9,6 @@ pub mod sandbox;
 pub mod spec;
 pub mod tools;
 pub mod validate;
+pub mod walk;
 
 pub use registry::{client_protocol_for, is_loopback_registry};

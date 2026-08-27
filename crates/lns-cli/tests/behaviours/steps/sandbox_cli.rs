@@ -395,13 +395,16 @@ impl author::Fs for StepFs {
     fn is_symlink(&self, _path: &Path) -> bool {
         false
     }
+}
+
+impl lns_artifact::walk::SnapshotFs for StepFs {
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-        let mut bytes = self.read_to_string(path)?.into_bytes();
+        let mut bytes = author::Fs::read_to_string(self, path)?.into_bytes();
         bytes.truncate(max_bytes.saturating_add(1) as usize);
         Ok(bytes)
     }
-    fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<author::DirEntry>> {
-        author::map_dir_entries(self.files.borrow().keys(), dir)
+    fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
+        lns_artifact::walk::map_dir_entries(self.files.borrow().keys(), dir)
     }
 }
 

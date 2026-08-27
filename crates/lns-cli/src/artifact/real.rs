@@ -295,6 +295,9 @@ impl super::author::Fs for RealFs {
             .map(|meta| meta.file_type().is_symlink())
             .unwrap_or(false)
     }
+}
+
+impl lns_artifact::walk::SnapshotFs for RealFs {
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         std::fs::File::open(path)?
@@ -302,7 +305,7 @@ impl super::author::Fs for RealFs {
             .read_to_end(&mut bytes)?;
         Ok(bytes)
     }
-    fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<super::author::DirEntry>> {
+    fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -320,7 +323,7 @@ impl super::author::Fs for RealFs {
                 ));
             }
             use std::os::unix::fs::PermissionsExt;
-            entries.push(super::author::DirEntry {
+            entries.push(lns_artifact::walk::DirEntry {
                 name,
                 dir: file_type.is_dir(),
                 mode: entry.metadata()?.permissions().mode() & 0o777,
