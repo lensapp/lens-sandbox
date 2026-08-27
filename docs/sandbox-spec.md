@@ -33,7 +33,7 @@ and a `spec`, published as one OCI artifact. Three artifact kinds exist:
 |---|---|
 | **`sandbox`** | A complete sandbox: the base image, the egress it needs, the credentials it needs, and the files, tools, and mounts it brings. |
 | **`mixin`** | A capability layered onto a sandbox: tools, filesets, egress, credentials. |
-| **`connector`** | A mixin the user installs on their machine, offered when a run reaches the service it covers. It carries only what can be applied to a guest that is already running. |
+| **`connector`** | A mixin the user installs on their machine, offered when a run reaches a service it covers. It carries only what can be applied to a guest that is already running, and it applies only after the user connects it. |
 
 [Chapter 3](#3-artifact-kinds) specifies each in full.
 
@@ -58,6 +58,11 @@ field — `guestpath` for `guestPath`, or `egres` for `egress` — and the load 
 on that line instead of ignoring the key and running with a default. `lns sandbox
 validate` runs the whole schema and cross-field check offline — no service, no
 network.
+
+One stated exception exists, and it is one map deep: the body of a connector
+method's `auth` whose `kind` this reader does not know is not decoded, so the
+document loads and the method is simply not offered
+([§3.2.2](#322-methods)).
 
 ### 1.3 Disclosure before boot
 
@@ -84,8 +89,9 @@ them:
   and is never asked about.
 
 A `connector` is the one kind that grants nothing even after it arrives.
-Installing it seeds a placeholder and opens nothing; what grants is accepting the
-offer ([§3.2.2](#322-installing-accepting-and-domain-ownership)).
+Installing it opens nothing, arms nothing, writes nothing, and sets nothing; what
+grants is the user connecting one of its methods
+([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.4 Credentials, and what a connector adds
 
@@ -100,29 +106,40 @@ developer for — a token, pasted once — and knows exactly where the value may
 travel afterwards.
 
 A **connector** ([§3.2](#32-kind-connector)) is a mixin that carries one, plus
-the egress that reaches the service and the files the service's client expects.
-It is worth having for three reasons a bare credential cannot cover:
+the egress that reaches the service and the files the service's client expects —
+each stated inside a **method**, one of the alternative ways the connector can be
+connected ([§3.2.2](#322-methods)). It is worth having for four reasons a bare
+credential cannot cover:
 
 | A connector adds | Why it matters |
 |---|---|
 | One or more credentials, published together | The env var, placeholder, and injection kinds for a service are stated once by whoever knows them, instead of by every author who talks to it. |
-| The egress that service needs | Reaching the destination and authenticating to it are one decision, so accepting arrives with its own egress rather than a second round of approvals. |
+| The egress that service needs | Reaching the destination and authenticating to it are one decision, so connecting arrives with its own egress rather than a second round of approvals. |
 | The files its client reads | A tool that looks for `~/.claude/.credentials.json` rather than an environment variable is served the same way, and by the same document. |
+| The ways to authenticate | A service reached with a pasted token and the same service reached with a browser sign-in need different variables, different files, and sometimes a different transport. A connector states each as a **method**, and the user picks one. |
 
 So a connector is a convenience and a security upgrade over pasting, never a
 different mechanism. What supplies the value is still the user's decision on
 their own machine.
 
-**The connector is a mixin, and its restriction is what makes it one.** A
-connector is offered while the guest is already running, and accepting it applies
-the document then and there. So it may carry only blocks that can be applied to a
-booted guest — egress, credentials, filesets, and env — and no others
-([§3.2](#32-kind-connector)). What it carries merges by the ordinary rules in
-[§3.3.2](#332-merge-rules), so a connector accepted at the gate and one already
-accepted at boot produce the same run. Installing it is not a merge — that seeds its
-`env` and its placeholders and nothing more, and
-[§3.2.2](#322-installing-accepting-and-domain-ownership) says what seeding may
-and may not overwrite.
+**Two things separate a connector from a plain mixin, and neither is the
+format.** A mixin is named by a document and resolved at startup. A connector is
+named by nobody: the user installs it, a run **detects** that it is relevant, and
+the user is **offered** it. Detection reads one block — `serves`, the
+destinations the connector is worth offering for — and detection grants nothing.
+
+**The restriction is what makes it a mixin at all.** A connector is applied while
+the guest is already running, so it may carry only blocks that a booted guest can
+still be given — egress, credentials, filesets, and env — and no others
+([§3.2.3](#323-what-a-method-may-carry)). What it carries merges by the ordinary
+rules in [§3.3.2](#332-merge-rules), so a method connected at the gate and one
+already granted at boot produce the same run.
+
+**Nothing applies until the user connects.** Installing is not a merge and not a
+seed: it makes a connector offerable and does nothing else. Connecting is where
+the user picks a method, satisfies whatever that method's `auth` asks for, and —
+only on success — has its payload applied
+([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.5 One disclosure
 
@@ -190,7 +207,7 @@ common: each is authored, published, versioned, and approved the same way
 |---|---|---|
 | [`sandbox`](#31-kind-sandbox) | The workload's author | `lns run <reference>`, or a local `./lns.yaml`. Exactly one. |
 | [`mixin`](#33-kind-mixin) | Anyone | Referenced by a sandbox, merged at startup. |
-| [`connector`](#32-kind-connector) | The user, on their machine | Installed once, then offered when a run reaches the service it covers. Merged on acceptance. |
+| [`connector`](#32-kind-connector) | The user, on their machine | Installed once, then offered when a run reaches a service it covers. Merged when the user connects it. |
 
 The middle column is the distinction to keep in view. A `sandbox` and a `mixin`
 travel **with the workload** — an author writes them, and a consumer approves what
@@ -514,12 +531,12 @@ Asking before boot is the value of writing the credential down: the alternative 
 a workload that starts, runs, and fails somewhere inside itself with an unset
 variable.
 
-**An installed connector makes that question better, not different.** When a
-connector covers a declared `domain` ([§3.2.2](#322-installing-accepting-and-domain-ownership)),
-the prompt offers the connector instead of asking for a bare token, and accepting
-brings its egress and its files along with the value. With no connector
-installed, the same declaration still works; the developer pastes a token, and
-the injection is identical.
+**A declaration is answered here, not by a connector.** A
+[connector](#32-kind-connector) is offered when a request reaches a destination
+nothing decided ([§3.2.4](#324-installing-connecting-and-applying)), which is
+after boot — so it is not what satisfies a declaration the run resolves before
+boot. The two paths meet at the same mechanism and nowhere else: both end in an
+injection, and the injection is identical.
 
 A declaration never carries the value. Per-machine credential values live outside
 every document ([§7.1](#71-connectors)).
@@ -713,7 +730,7 @@ filesets:
 | `path` | string | Conditional. A directory beside this document, packed at publish. Non-empty. |
 | `inline` | map<string,string> | Conditional. Relative path → file content. MUST NOT be empty. |
 | `hostPath` | string | Conditional. One file on the machine that runs the document, read at launch and never packed at publish ([§6](#6-publish-time-transforms)). See the rules below. |
-| `guestPath` | string | REQUIRED. Where the files land in the guest. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). A `hostPath` entry carries one file, so its `guestPath` MUST NOT end in `/`. |
+| `guestPath` | string | REQUIRED. Where the files land in the guest. Same rules as a volume `target` ([§3.1.10](#3110-volumes)), except that it MAY be home-anchored — see below. A `hostPath` entry carries one file, so its `guestPath` MUST NOT end in `/`. |
 | `owner` | string | optional. `workload` (default) or `root`. |
 | `optional` | bool | optional. Default `false`. `hostPath` only. A file the running machine does not have is skipped instead of refusing the run. |
 
@@ -807,10 +824,34 @@ and the credential directories `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`,
 
 A [connector](#32-kind-connector) is the one exception, and a narrow one. Its
 filesets exist to write exactly these files, and
-[§3.2.3](#323-a-fileset-carries-the-placeholder-not-the-value) requires every one
+[§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value) requires every one
 of them to carry a placeholder rather than a value. So a connector may use a
 secret-shaped name, and a connector fileset that uses one and declares no
 placeholder in it is refused.
+
+**`guestPath` MAY be home-anchored.** A `guestPath` starting `~/` resolves
+against the home directory of the run's [`user`](#313-user), read from the guest.
+It does **not** vary with `owner`: `owner: root` decides who owns the file, never
+where it lands. Another user's home (`~alice/`) is refused, as it is for a
+[`hostPath`](#3111-filesets); the two `~/` are otherwise unrelated, one being the
+guest's home and the other the developer's. The form exists because a client's own
+documentation names the file it wants as `~/.claude/.credentials.json`, and
+`/home/agent` is wrong on any image whose user is named something else.
+
+A [`user`](#313-user) given as `uid:gid` has a home only if the image's passwd
+names one. Where it does not, a `~/`-anchored `guestPath` **refuses the run**,
+naming the fileset and the `user` it could not resolve.
+
+**Home resolution happens at launch, so path uniqueness splits in two.** Offline
+validation compares the paths as written and refuses two that are literally the
+same; it cannot see that `~/.agent` and `/home/agent/.agent` are one location. That
+collision is caught at launch ([§5](#5-validation-summary)), and the run refuses,
+naming both entries and the spelling each used.
+
+[§3.3.2](#332-merge-rules) keys the fileset union on the path **as written**, so a
+local mixin writing `/home/agent/.claude` does not override a connector method's
+`~/.claude` — both survive the merge and the run refuses for the collision above.
+To override an entry, match its spelling.
 
 **A pulled `hostPath` is a per-machine decision.** A `hostPath` makes what a
 document reads depend on the machine running it, so an artifact from a registry
@@ -977,207 +1018,341 @@ status it exited with, under the `launch` kind.
 
 ### 3.2 `kind: connector`
 
-A connector bundles what a service needs into one installable document: the
-[egress](#42-the-egress-definition) that reaches it, the
-[credentials](#41-the-credential-definition) that authenticate to it, and the
-files and variables its client expects to find. It adds no injection mechanism of
-its own — the credential is the mechanism.
+A connector is a [mixin](#33-kind-mixin) the user installs on their own machine.
+No document names it, and it is **offered** rather than resolved.
 
-A connector is a [mixin](#33-kind-mixin) in every respect but two: the user
-installs it rather than a document naming it, and it is **offered** rather than
-resolved.
+Two blocks, with two different jobs:
+
+| Block | Job |
+|---|---|
+| `serves` | When is this connector worth offering. Grants nothing. |
+| `methods` | The alternative ways to connect, each carrying what applies once it succeeds. |
 
 ```yaml
 apiVersion: lns.run/v1
 kind: connector
-name: some-provider              # the connector id
+name: some-provider
 spec:
-  egress:
-    http:
-      - match: api.some-provider.example
-        verdict: allow
-  credentials:
-    - envVar: SOME_TOKEN
-      placeholder: some_LNSPLACEHOLDER0000000000
-      injections:
-        - kind: bearer_header
-          domain: api.some-provider.example
-  env:
-    SOME_PROVIDER_REGION: eu
-  filesets:
-    - guestPath: /home/agent/.some-provider
-      inline:
-        credentials.json: '{"token":"some_LNSPLACEHOLDER0000000000"}'
+  serves:                                    # detection only
+    - api.some-provider.example
+
+  methods:
+    - name: token
+      label: API token
+      auth:
+        kind: token
+        help: Create one at some-provider.example/settings/tokens
+      egress:
+        http:
+          - match: api.some-provider.example
+            verdict: allow
+      credentials:
+        - envVar: SOME_TOKEN
+          placeholder: some_LNSPLACEHOLDER0000000000
+          injections:
+            - kind: bearer_header
+              domain: api.some-provider.example
+      env:
+        SOME_PROVIDER_REGION: eu
 ```
 
-#### 3.2.1 What a connector may carry
+**Installing applies nothing** — no destination opens, no injection is armed, no
+file is written, no variable is set. Two independent acts do that: a **grant**
+applies a method, and a **connect** arms it. A granted method this machine cannot
+authenticate still applies, with its credentials unarmed
+([§3.2.4](#324-installing-connecting-and-applying)).
 
-A connector is applied to a guest that is **already running**, so it may declare
+Four states, each a fact about a different scope:
+
+| State | Means | Scope |
+|---|---|---|
+| **installed** | the document is on this machine, so it can be offered | the machine |
+| **connected** | a method's `auth` has produced live values | the machine |
+| **granted** | this project may use that method | the project directory |
+| **applied** | the method's payload is in force in a running guest | the run |
+
+#### 3.2.1 `serves`
+
+The destinations that make this connector relevant, written in the
+[`match`](#42-the-egress-definition) grammar. At least one entry.
+
+**`serves` grants nothing.** The gate reads it only for a destination the run's
+own [egress](#42-the-egress-definition) does not decide. What opens is the
+granted method's `egress`, which MAY be narrower than `serves` and MAY name
+destinations `serves` never mentions — a sign-in host, for instance. So write
+`serves` broadly: a destination it misses is one the connector is never offered
+for.
+
+**An entry with no port matches any port.** A port narrows it
+(`db.some-provider.example:5432`). This is the opposite default from
+[`egress.tcp`](#42-the-egress-definition), where a port is REQUIRED, because a
+bare host matching only the HTTP ports would leave every raw-stream connector
+installed and never offered.
+
+`serves` is one list, not an `http` and a `tcp` table: a connector serves a host
+however the request arrived, and the transport decision belongs to the method's
+`egress`. So a raw-stream service needs no extra syntax:
+
+```yaml
+spec:
+  serves:
+    - db.some-provider.example                 # any port
+  methods:
+    - name: password
+      auth:
+        kind: token
+      egress:
+        tcp:
+          - match: db.some-provider.example:5432
+            verdict: allow
+      credentials:
+        - envVar: PGPASSWORD
+          placeholder: some_LNSPLACEHOLDER0000000000
+          injections:
+            - kind: uri_placeholder
+              domain: db.some-provider.example:5432
+```
+
+`uri_placeholder` is the injection family that reaches a raw stream
+([§4.1](#41-the-credential-definition)): the workload sends the placeholder as
+its password and the proxy swaps it in transit.
+
+**One connector per destination.** Two installed connectors whose `serves`
+overlap make the offer ambiguous, so the second install is refused
+([§7.1](#71-connectors)). Overlap is computed on the patterns with their ports,
+so two connectors on different ports of one host coexist; two on the same host
+and port do not, whatever transport each method declares.
+
+#### 3.2.2 `methods`
+
+The ways to connect, in the author's order of preference. At least one.
+
+**Methods are alternatives, never a set.** One is chosen, and exactly one
+method's payload applies. A service needing two secrets at once is one method
+producing two values.
+
+| Field | Type | Rules |
+|---|---|---|
+| `name` | string | REQUIRED. A DNS label ([§2](#2-common-top-level-fields)), unique within the document. The stored identity: what a grant records, and what `lns connector connect --method` names. |
+| `label` | string | optional. Display text for the card; defaults to `name`. It MAY be rewritten between versions without signing the machine out, because values are keyed by `name` ([§7.1](#71-connectors)). |
+| `auth` | map | optional. How the user proves they may use this method. Absent means there is nothing to prove. |
+| [`egress`](#42-the-egress-definition) | map | optional. Opened when this method applies. |
+| [`credentials`](#41-the-credential-definition) | list | optional. Armed when this method applies. |
+| [`filesets`](#3111-filesets) | list | optional. Written when this method applies. |
+| [`env`](#314-env) | map | optional. Set for workloads that start after this method connects ([§3.2.4](#324-installing-connecting-and-applying)). |
+
+**The payload lives in the method and nowhere else.** No block a method may carry
+may also appear under `spec`. A connector whose methods share a payload repeats
+it.
+
+A method with no `auth` is not a lesser method — a connector that only opens
+`docs.rs` has nothing to sign in to, and connecting it is consent alone:
+
+```yaml
+spec:
+  serves: [docs.rs]
+  methods:
+    - name: default
+      egress:
+        http:
+          - match: docs.rs
+            verdict: allow
+```
+
+**`auth`.**
+
+| Field | Type | Rules |
+|---|---|---|
+| `kind` | string | REQUIRED. The mechanism. Decides what else `auth` accepts and what values the method produces. |
+| `label` | string | optional. Names this mechanism on the card when a connector offers several. |
+| `help` | string | optional. Plain text the card shows: where to get a value, what to expect. |
+
+| `kind` | Produces | Notes |
+|---|---|---|
+| `token` | `token` | The user supplies one value. |
+
+A method's `credentials` draw from what its `auth` produced
+([§4.1](#41-the-credential-definition) `field`), so a method declaring
+`credentials` and no `auth` is **refused** — the credential would ship
+permanently unarmed.
+
+**An unknown `auth.kind` MUST NOT refuse the document**, and this is a stated
+exception to [§1.2](#12-strict-decoding). A reader that does not know a `kind`
+does not decode that `auth` at all: it marks the method unofferable, offers every
+other method, and the card names the method that needed a newer `lns`.
+
+The exception is bounded to that one map. It tolerates unrecognized keys directly
+under an `auth` whose `kind` the reader does not know, and nothing further — not
+the method's own fields, and not the body of an `auth` whose `kind` the reader
+does know.
+
+#### 3.2.3 What a method may carry
+
+A method is applied to a guest that is **already running**, so it may declare
 only what such a guest can still be given. Every other block is refused wherever
 the document is parsed — at `lns artifact validate`, at push, and at install,
 which is where a user meets the refusal.
 
-| Block | Connector | Why |
+| Block | Method | Why |
 |---|---|---|
-| [`egress`](#42-the-egress-definition) | MAY | The gate reads a fresh table on every policy change. Also what the offer matches on. |
-| [`credentials`](#41-the-credential-definition) | MAY | Injection is domain-keyed and re-read per policy change, so accepting arms a value mid-connection. |
+| [`egress`](#42-the-egress-definition) | MAY | The gate reads a fresh table on every policy change. |
+| [`credentials`](#41-the-credential-definition) | MAY | Injection is domain-keyed and re-read per policy change, so connecting arms a value mid-connection. |
 | [`filesets`](#3111-filesets) | MAY — `inline` or `path` | Written into the running guest at the path the entry names. |
-| [`env`](#314-env) | MAY | Seeded before any workload starts, which is the only moment a variable can be given ([§3.2.2](#322-installing-accepting-and-domain-ownership)). |
+| [`env`](#314-env) | MAY | Applies to workloads that start afterwards, which is the only moment a variable can be given. |
 | `tools` | MUST NOT | Provisioned into the image layer before boot, and contributes to `PATH`. |
-| `scripts` | MUST NOT | Run once, before the workload. Accepting a connector MUST NOT mean running code. |
+| `scripts` | MUST NOT | Run once, before the workload. Connecting a connector MUST NOT mean running code. |
 | `volumes`, `ports` | MUST NOT | Which mounts and which listeners exist is fixed when the guest is created. |
-| `mixins` | MUST NOT | The offer shows one document. A graph would apply egress and credentials from documents the user never saw. |
+| `mixins` | MUST NOT | The card shows one document. A graph would apply egress and credentials from documents the user never saw. |
 | `image`, `command`, `workdir`, `user`, `resources` | MUST NOT | The [mixin](#33-kind-mixin) rule, for the same reasons. |
 
-`env` is the row that needs its exception stated, because a running process's
-environment cannot be changed. A connector may carry `env` **because installing
-it, not accepting it, is what puts the variable there** — see
-[§3.2.2](#322-installing-accepting-and-domain-ownership).
-
-A `filesets[].hostPath` is refused too. A connector is installed once and used in
+A `filesets[].hostPath` is refused too: a connector is installed once and used in
 every project, so reading a path off whichever machine happens to be running it
-is the wrong shape — that is a [sandbox](#3111-filesets) concern.
+is a [sandbox](#3111-filesets) concern.
 
-The refusal names the mechanism rather than the rule, because the mechanism is
-what tells an author where the block belongs instead:
+The refusal names the mechanism rather than the rule, so an author learns where
+the block belongs instead:
 
 ```text
 a connector must not declare tools: a connector is applied to a guest that is
 already running, and tools are installed before the guest boots
 ```
 
-#### 3.2.2 Installing, accepting, and domain ownership
+#### 3.2.4 Installing, connecting, and applying
 
-**Installing seeds. Accepting merges.** These are two different acts on two
-different schedules, and keeping them apart is what makes the rest coherent.
+**Installing makes a connector offerable, and does nothing else.** An installed
+connector appears nowhere in a resolved sandbox ([§1.5](#15-one-disclosure)) and
+nowhere in a running guest.
 
-Installing a connector puts its `env` and each credential's `placeholder` into
-every workload that starts on this machine afterwards. It opens no destination,
-arms no injection, and writes no file. Seeding happens at install because a
-running process's environment cannot be changed: a variable delivered after the
-workload started would never be read, so seeding late is not seeding at all.
+**Connecting has three parts, in this order:**
 
-Accepting an offer merges the document, at the position
-[§3.3.2](#332-merge-rules) gives it. That is what opens the egress, arms the
-injections, and writes the filesets. Only accepting is a merge — seeding is not,
-which is why an installed connector appears nowhere in a resolved sandbox until
-it is accepted.
+1. **Choose a method.** The card offers every offerable method, each labelled
+   with what applying it will do — the destinations it opens, the variables it
+   sets, the files it writes. Consent is given to one concrete payload.
+2. **Satisfy its `auth`**, if it has one. This happens on the host, outside the
+   guest, and produces the values the method's `credentials` draw from.
+3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
+   running guest, and a grant is recorded for this project
+   ([§8.4](#84-where-a-connector-grant-goes)).
 
-**What seeding may and may not overwrite.** A seeded variable never displaces one
-a document declared:
+Authentication that fails or is abandoned grants nothing and leaves the offer
+standing.
 
-- A connector `env` key that the sandbox or one of its mixins also sets is **not**
-  seeded. The author knows their workload; the connector is a machine-wide
-  default underneath.
-- A connector credential whose `envVar` a sandbox also declares is **not** seeded
-  either. [§3.1.7](#317-credentials) already resolves that variable before boot,
-  and two placeholders in one variable would make injection ambiguous. The
-  connector is still offered; accepting it binds the value the declaration was
-  asking for.
-- A connector this project has **declined** is not seeded here at all. A decline
-  is per project, and so is every run that reads it.
+**Two prompts, two triggers:**
 
-The set of seeded variables, and which connector seeded each, is named in the
-run's disclosure ([§1.5](#15-one-disclosure)).
+| Prompt | Asks | Fires on |
+|---|---|---|
+| The **consent** card | choose a method, and use it in this project | a destination `serves` covers that the run's own egress **does not decide** |
+| The **connect** prompt | authenticate a method this project already granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
 
-**When the offer fires.** Three moments, all of them the same question:
+**"Does not decide" is exact**, and it bounds the consent card: a `verdict: deny`
+is a decision, so a connector is never offered over one. The gate asks only about
+a destination nothing decided. A connector is not offered before boot either,
+because nothing yet said the run needs it.
 
-1. **Before boot**, when the sandbox declares a credential a connector covers —
-   the prompt in [§3.1.7](#317-credentials) offers the connector instead of
-   asking for a bare token.
-2. **On a destination the connector's `egress` covers** that no rule decides.
-3. **On a request carrying a `placeholder` that no armed injection covered** —
-   to a domain the connector claims, *even when a rule already allows that
-   domain*. This is what makes seeding safe: a placeholder that reaches the wire
-   is held, never relayed.
+**A granted method can still override a document's `deny`.** A method granted
+while a destination was undecided keeps applying after a pulled update denies it,
+because a connector is source 4 and [§4.2](#42-the-egress-definition) lets a later
+source turn a `deny` into an `allow`. The override MUST be named in the pre-boot
+disclosure ([§1.5](#15-one-disclosure)) and on the consent card that introduces
+it. The [local mixin](#8-the-local-mixin) is unaffected: it is source 5, so a
+`deny` the developer typed still wins.
 
-**Injection runs first, and the hold catches what it missed.** The order matters
-enough to state: on a request to a claimed domain the proxy applies every armed
-injection, and only then looks for a surviving placeholder. So an accepted
-connector with a bound value substitutes and the request proceeds — trigger 3
-does not fire, and the flow in
-[§3.2.3](#323-a-fileset-carries-the-placeholder-not-the-value) is not a hold on
-every request.
+**The held request waits, and applying does not depend on it.** The request that
+triggered the offer stays held while the user chooses a method and satisfies its
+`auth`; when the method applies, the hold is released and the request proceeds.
+The deadline is the workload's, not the run's, and a mechanism that sends the user
+to a browser can outlast it — then that request fails as any refused request does.
+**An expired hold does not cancel the connect:** the user finishes, the method
+applies, and the next request succeeds.
 
-What survives, then, is the case injection did not cover, and it is held rather
-than relayed:
+**`env` reaches the next run.** A method's `env`, and the `placeholder` of each
+credential it declares, are set for workloads that start after the method
+connected; the workload that triggered the offer keeps the environment it was
+launched with. A tool authenticating over the wire works immediately; one reading
+a variable works from the next `lns run`.
 
-- The injection is **unarmed** — accepted, no value bound yet.
-- The placeholder is somewhere the declared kind does not reach. A
-  `bearer_header` injection sets one header; a placeholder in a request body is
-  untouched by it, so it survives and the request is held. Reaching a body takes
-  a `uri_placeholder` injection ([§4.1](#41-the-credential-definition)).
-
-A **declined** connector seeds nothing in this project, so it has no placeholder
-in flight and nothing of its own to hold.
-
-**Accepting does not require a bound value.** The two are independent, and the
-offer is made either way. Accepting with no value bound opens the egress, writes
-the filesets, and ships the injection **unarmed** — so the next request carrying
-the placeholder is held again by trigger 3, and stays held until a value is bound
-or the request times out. Binding a value is its own act, taken outside any held
-request, because hunting for a token is not something a waiting connection can
-wait for.
-
-**A decline is a per-project standing no**, remembered outside every document
+**Declining is a per-project standing no**, remembered outside every document
 ([§8.4](#84-where-a-connector-grant-goes)) and retractable there.
 
-**One connector per domain.** Two connectors claiming the same destination is
-refused at install time, because the offer would be ambiguous. See
-[§7.1](#71-connectors).
+**Switching method is connecting again.** A machine is connected with **at most
+one method per connector**, so connecting a second replaces the first. Where the
+project granted the replaced method, its payload is retracted — egress closes,
+injections disarm, filesets are removed — and the new one's applies. A grant names
+the method, so another project that granted the replaced one keeps its grant,
+meets the state below, and is offered the new method on next reach.
 
-**`envVar`, every `injections[].domain`, and every `egress` `match` are
-approval-relevant.** A pulled update that changes one MUST invalidate the
-acceptance and re-prompt. It MUST NOT silently widen it.
+**A grant is bound to the document's bytes.** A connector republished with any
+change is a different digest, so its grant does not carry over and the user is
+asked again ([§7.1](#71-connectors)) — on the whole digest, because any list of
+fields that can widen a grant is a list that can be missing one. A grant MUST NOT
+be silently widened.
 
-#### 3.2.3 A fileset carries the placeholder, not the value
+**Granted is not connected.** The combination is reachable: `lns connector
+disconnect` drops the values and keeps the grant, and reinstalling a connector
+restores the document without restoring what it held
+([§7.1](#71-connectors)). In that state:
+
+- The granted method **is** the run's source in [§3.3.2](#332-merge-rules), so
+  its `egress`, its `filesets`, and its `env` apply as the project consented.
+  They needed no value.
+- Its `credentials` ship **unarmed** — the placeholder is registered, no value
+  substitutes for it. A request carrying the placeholder is held rather than
+  relayed ([§4.1](#41-the-credential-definition)), and that hold raises the
+  **connect** prompt.
+
+A granted method with an `auth` but no `credentials` raises no prompt and needs
+none — nothing holds, and nothing is missing. `lns connector connect` is the only
+way to connect it.
+
+#### 3.2.5 A fileset carries the placeholder, not the value
 
 Some clients read a credential from a file rather than an environment variable. A
-connector serves them with a fileset, and the content carries the **placeholder**:
+method serves them with a fileset whose content carries the **placeholder**:
 
 ```yaml
-credentials:
-  - envVar: SOME_TOKEN
-    placeholder: some_LNSPLACEHOLDER0000000000
-    injections:
-      - kind: bearer_header
-        domain: api.some-provider.example
-filesets:
-  - guestPath: /home/agent/.some-provider
-    inline:
-      credentials.json: '{"token":"some_LNSPLACEHOLDER0000000000"}'
+methods:
+  - name: token
+    auth:
+      kind: token
+    credentials:
+      - envVar: SOME_TOKEN
+        placeholder: some_LNSPLACEHOLDER0000000000
+        injections:
+          - kind: bearer_header
+            domain: api.some-provider.example
+    filesets:
+      - guestPath: ~/.some-provider
+        inline:
+          credentials.json: '{"token":"some_LNSPLACEHOLDER0000000000"}'
 ```
 
 The client reads the file and sends the placeholder. On a request to
 `api.some-provider.example` the proxy **sets** the `Authorization` header to the
-real value, replacing whatever the client sent — the ordinary header-family
-behaviour in [§4.1](#41-the-credential-definition), reached by a file instead of
-a variable. The real value stays on the host.
+real value, replacing whatever the client sent — the header-family behaviour in
+[§4.1](#41-the-credential-definition), reached by a file instead of a variable.
+The real value stays on the host, which is what makes a fileset at an arbitrary
+guest path safe to allow.
 
-Two rules make this safe. They are not the same kind of rule, and conflating
-them would send an implementer looking for a check that cannot exist:
+Two rules govern it, and only the second is checkable:
 
-- **A connector fileset MUST NOT carry a real secret.** This binds the author,
-  and **no validator can verify it** — nothing distinguishes a real token from
-  arbitrary text. These documents are pushed to registries, so a value here is a
-  credential one push away from being public, which is the same reason
-  [§4.1](#41-the-credential-definition) forces a placeholder to look fake. What
-  compensates for the missing check is exposure, not detection: every fileset a
-  connector writes is named on the card before it is accepted
-  ([§1.5](#15-one-disclosure)), and every write is recorded.
-- **A connector MAY use a secret-shaped file name, and MUST declare a placeholder
-  in every file that has one.** This is the checkable half.
-  [§3.1.11](#3111-filesets) refuses names like `credentials.json` precisely
-  because a real secret must not ship inside a document. A connector is the one
-  kind whose filesets exist to write those exact files, and the rule above is
-  what earns the exception. A connector fileset with a secret-shaped name and no
-  declared placeholder in it is refused.
+- **A method's fileset MUST NOT carry a real secret.** No validator can verify
+  this — nothing distinguishes a real token from arbitrary text. These documents
+  are pushed to registries, so a value here is a credential one push away from
+  being public. What compensates is exposure: every fileset a method writes is
+  named on the card before the user grants it ([§1.5](#15-one-disclosure)), and
+  every write is recorded.
+- **A method MAY use a secret-shaped file name, and MUST declare a placeholder in
+  every file that has one.** [§3.1.11](#3111-filesets) refuses names like
+  `credentials.json`; a connector is the one kind whose filesets exist to write
+  those exact files, and this rule earns the exception. A fileset with a
+  secret-shaped name and no declared placeholder is refused. The placeholder MUST
+  be one the same method declares, because a sibling's injection is not armed
+  when this one applies.
 
-Be clear about what the second rule does **not** buy: it is scoped to
-secret-shaped names, and a file that contains a placeholder can contain a second
-field beside it. A connector that ships a real token under a benign filename
-passes every check. That is the residual risk the first rule addresses, and it is
-addressed by the author and the card, not by validation.
+The second rule is scoped to secret-shaped names, and a file containing a
+placeholder may contain a second field beside it — so a method shipping a real
+token under a benign filename passes every check. That residual risk is the first
+rule's, and it is addressed by the author and the card, not by validation.
 
 A `connector` document carries the placeholder, never a value. Values stay
 per-machine.
@@ -1302,10 +1477,11 @@ it:
    own `mixins`, expanded the same way.
 3. Each `--mixin`, in flag order; after each, that mixin's own `mixins`, expanded
    the same way.
-4. Each accepted [connector](#32-kind-connector), in acceptance order — user
-   consent on this machine, so it beats anything a document shipped.
+4. Each granted [connector](#32-kind-connector) — its **granted method** only,
+   in grant order. User consent on this machine, so it beats anything a document
+   shipped.
 5. The directory's [local mixin](#8-the-local-mixin) — the developer's own
-   decisions, so neither what they pulled nor what they accepted can overrule
+   decisions, so neither what they pulled nor what they connected can overrule
    them.
 
 So `lns run claude --mixin first --mixin second` resolves as:
@@ -1317,10 +1493,16 @@ weakest ────────────────────────
 
 **A connector is the one source no document names**, so it is the one source
 whose position is not a consequence of where it was written down. It sits after
-every document because the user accepted it here and now; it sits before the
+every document because the user connected it here and now; it sits before the
 local mixin because a `deny` the developer typed by hand is still the last word.
 A connector shadowed that way is reported in the approval window, rather than
 silently taking no effect.
+
+**A connector contributes one source, not one per method.** Methods are
+alternatives ([§3.2.2](#322-methods)), so the source is the method the project
+granted, and the others are not in the list at all. A grant is what puts it here;
+whether this machine can currently authenticate it decides only whether its
+credentials are armed ([§3.2.4](#324-installing-connecting-and-applying)).
 
 Two properties fall out of the shape:
 
@@ -1336,7 +1518,7 @@ What "wins" means per block:
 |---|---|
 | `env` | Union by key. The last source to set a key wins. |
 | `egress` | Union of entries, later sources placed ahead of earlier ones, so the latest entry matching a destination is the one that decides ([§4.2](#42-the-egress-definition)). |
-| `credentials` | Union by `envVar`. A later source redefining one replaces it whole — its `placeholder` and `injections` together, never half of each. |
+| `credentials` | Union by `envVar`, or by `placeholder` for an entry that declares no `envVar` ([§4.1](#41-the-credential-definition)). A later source redefining one replaces it whole — its `placeholder` and `injections` together, never half of each. |
 | `tools` | Union by name. The last version declared wins. |
 | `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace, compared on path segments ([§3.1.10](#3110-volumes)). The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
 | `ports` | Union by `container`. The last mapping wins. |
@@ -1417,7 +1599,7 @@ injection contract, and it is identical wherever it appears:
 |---|---|
 | [`sandbox`](#317-credentials) | `spec.credentials[]` — the secrets its workload needs. |
 | [`mixin`](#33-kind-mixin) | `spec.credentials[]` — the same, contributed to whatever sandbox resolves it. |
-| [`connector`](#32-kind-connector) | `spec.credentials[]` — the same, supplied to whatever run accepts it. |
+| [`connector`](#32-kind-connector) | `spec.methods[].credentials[]` — the same, supplied to whatever run connects that method. |
 
 A connector uses this shape rather than defining one of its own, because it is a
 higher-level way to *supply* a credential — the injection mechanism is here.
@@ -1432,12 +1614,33 @@ injections:
 
 | Field | Type | Rules |
 |---|---|---|
-| `envVar` | string | REQUIRED. The variable the workload sees. |
+| `envVar` | string | Conditional. The variable the workload sees. REQUIRED in a `sandbox` and a `mixin`. Optional inside a [method](#322-methods), where a credential may exist only to be injected on the wire — see below. |
 | `placeholder` | string | REQUIRED. The literal value the workload reads. MUST self-identify as fake — it contains `placeholder` or `lns`, case-insensitively — and MUST be at least 16 characters, so a stream is unlikely to carry the marker by accident. |
+| `field` | string | Conditional. Inside a [method](#322-methods), which of the method's `auth` outputs supplies this credential's value. Optional when the `auth.kind` produces exactly one; REQUIRED when it produces more. Refused outside a method, where there is no `auth` to draw from. |
 | `injections` | list | optional. Where the real value replaces the placeholder, host by host. |
 | `injections[].kind` | string | REQUIRED. See the two families below. |
 | `injections[].domain` | string | REQUIRED. The destination this injection applies to, port included for a raw stream. A wildcard may name a family of hosts, but never the catch-all `*`: an injection states where a secret may travel, and a catch-all states nothing while putting the real value on every host the workload reaches. |
 | `injections[].header` | string | Conditional. `api_key_header` only. |
+
+**Why `envVar` is optional in a method and nowhere else.** A `sandbox` or a
+`mixin` declares a credential because its workload needs one, and the workload
+reads it from a variable — so the variable is the declaration. A method's
+credential is a *supply*, and a supply can land somewhere else entirely: a
+[fileset](#325-a-fileset-carries-the-placeholder-not-the-value) carrying the
+placeholder serves a client that never reads the environment. Requiring `envVar`
+there would force an author to invent a variable nothing reads, and an unread
+variable holding a credential marker is worse than no variable.
+
+A credential with no `envVar` still registers its `placeholder`, because
+injection is domain-keyed and needs nothing else. The `placeholder` is then the
+entry's identity: it is what [§3.3.2](#332-merge-rules) merges on, so no two
+credentials **in one source** may share one. A `placeholder` is already required
+to be distinctive, so this costs an author nothing and gives every entry a key.
+
+Inside a connector the source is one [method](#322-methods), not the document.
+Two methods are alternatives and only one ever enters the merge, so they may
+reuse an `envVar` and a `placeholder` freely — and they usually should, since a
+token method and a sign-in method serve the same variable of the same service.
 
 The definition names the shape of a secret without containing one. The real value
 is bound per machine and lives outside every document
@@ -1446,7 +1649,7 @@ holds, and the proxy substitutes the real value on the way out to a declared
 `domain`.
 
 That split is why injection is **domain-keyed**: a credential injected on the wire
-works whether or not the workload ever reads `envVar`. Seeding the variable exists
+works whether or not the workload ever reads `envVar`. Setting the variable exists
 so a tool can detect that it is signed in.
 
 Injection kinds come in two families, and the family decides which
@@ -1457,10 +1660,29 @@ Injection kinds come in two families, and the family decides which
 | **Header** — the proxy sets or rewrites an HTTP header | `bearer_header`, `token_header`, `basic_x_access_token`, `api_key_header` | An `http` destination. The request has to be readable, so the connection is TLS-terminated. |
 | **Placeholder** — the proxy finds the placeholder in the outbound bytes and replaces it | `uri_placeholder` | Either table. A `tcp` destination is served this way: a database password, an SSH key passphrase, or a broker token reaches the wire without the workload ever holding the real value. |
 
-The family also decides what a placeholder the injection did not reach means. A
-placeholder that survives injection on its way to a claimed domain is held rather
-than relayed — the order, and what that holds up, is in
-[§3.2.2](#322-installing-accepting-and-domain-ownership).
+The family also decides what a placeholder the injection did not reach means, and
+the answer is that it is **held rather than relayed**. Injection runs first: on a
+request to a domain some injection claims, the proxy applies every armed
+injection and only then looks for a surviving marker. A credential whose
+injection covered the request proceeds untouched by this rule.
+
+What survives is a real mismatch, and there are two:
+
+- The injection is **unarmed** — declared, with no value behind it. One state
+  produces this: a [connector](#32-kind-connector) method a project granted, on a
+  machine that is no longer connected to it
+  ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
+  own credential cannot reach it, because [§3.1.7](#317-credentials) resolves
+  every declaration before boot — bound, or the run refuses.
+- The placeholder is somewhere the declared kind does not reach. A
+  `bearer_header` injection sets one header; the same placeholder in a request
+  body is untouched by it, so it survives. Reaching a body takes a
+  `uri_placeholder` injection.
+
+Either way the request is held instead of carrying the marker onto the wire,
+because a marker on the wire tells a destination that a secret was meant to be
+here and was not — and the request it belongs to would fail anyway, less
+informatively.
 
 Placeholder substitution is why a `placeholder` MUST be distinctive: it is the
 marker the proxy looks for. A value that could occur naturally in a stream would
@@ -1542,10 +1764,10 @@ only who is speaking:
 | Declared by | Reads as |
 |---|---|
 | [`sandbox`](#316-egress) / [`mixin`](#33-kind-mixin) | What this workload may reach. A destination no entry decides is asked about. |
-| [`connector`](#32-kind-connector) | What this service needs in order to work. Accepting the connector accepts every entry, not only the one that raised the offer. |
+| [`connector`](#32-kind-connector) | What this service needs in order to work, declared inside one [method](#322-methods). Connecting that method grants every entry it declares, not only the one that raised the offer. |
 
 **Combining egress from several sources.** A run's egress is rarely one table: a
-sandbox, the mixins it resolves, and every accepted connector each contribute one.
+sandbox, the mixins it resolves, and each granted connector method contribute one.
 They are unioned, and one rule settles the overlap:
 
 - **Within one document, the first matching entry decides.** An author writes an
@@ -1568,7 +1790,9 @@ Offline validation (`lns artifact validate`, and every load path including
 `lns run` preflight) enforces, in addition to the per-field rules above:
 
 - **Document**: `apiVersion` is `lns.run/v1`; `kind` is one of the three;
-  `name` matches the name pattern; no unrecognized field at any level.
+  `name` matches the name pattern; no unrecognized field at any level, with the
+  one exception [§1.2](#12-strict-decoding) states — the body of a connector
+  method's `auth` whose `kind` this reader does not know.
 - **Sandbox**: `image` present and non-empty; `workdir` absolute with no `..`;
   `user` has at most one `:`, no empty segment, and no `=`, whitespace, control
   character, or quote.
@@ -1582,7 +1806,11 @@ Offline validation (`lns artifact validate`, and every load path including
 - **credentials**: every `envVar` is a legal environment-variable name; every
   `placeholder` self-identifies as fake and is at least 16 characters; every
   `injections[].domain` is set and is not the catch-all `*`, and `header`
-  appears only on `api_key_header`; no two entries share an `envVar`.
+  appears only on `api_key_header`; within one source no two entries share an
+  `envVar` and no two share a `placeholder` — one source being one document, or
+  one [method](#322-methods) inside a connector; `envVar` is present outside a
+  [method](#322-methods) and `field` is absent there; inside a method `field` is
+  present when the method's `auth.kind` produces more than one value.
 - **tools**: every entry parses as portable `name@version`; one entry per name.
 - **volumes**: each `target` is a legal mount path outside `/.lens`; the
   `type`/`source`/`name` combination is one of the three legal shapes; volume
@@ -1593,21 +1821,29 @@ Offline validation (`lns artifact validate`, and every load path including
 - **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
   limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
   literal, and names one file; `optional` appears only on a `hostPath`;
-  `guestPath` unique across volumes and filesets.
+  `guestPath` is absolute or `~/`-anchored and never names another user's home,
+  and is unique **as written** across volumes and filesets — two spellings of one
+  resolved path are caught at launch ([§3.1.11](#3111-filesets)).
 - **ports**: `container` and `host` in range and each unique.
 - **scripts**: every entry sets a `when` this grammar defines and a `run` that is
   non-empty and free of NUL; a `user`, where present, follows the `user` rule; at
   most 32 entries, each `run` at most 128 KiB, and 512 KiB across the block — the
   entry count and the block total bound one document rather than a resolved one,
   while the per-script size holds for both, since merging cannot grow a script.
-- **Connector**: no block [§3.2.1](#321-what-a-connector-may-carry) refuses; no
-  `filesets[].hostPath`; every placeholder self-identifies as fake and is at
-  least 16 characters; and every fileset file with a secret-shaped name declares
-  a placeholder this document also declares
-  ([§3.2.3](#323-a-fileset-carries-the-placeholder-not-the-value)). That last
+- **Connector**: `serves` is present and non-empty; `methods` is present and
+  non-empty; every method `name` matches the name pattern and is unique in the
+  document; no method declares a block
+  [§3.2.3](#323-what-a-method-may-carry) refuses, and no block a method may carry
+  appears under `spec`; no `filesets[].hostPath`; an `auth`, where present, sets
+  a `kind`; a method declaring `credentials` declares an `auth`; every placeholder self-identifies as fake and
+  is at least 16 characters; and every fileset file with a secret-shaped name
+  declares a placeholder **its own method** also declares
+  ([§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value)). That last
   check reads content, so it covers an `inline` value and a file in a `path`
   directory beside the document. A `path` a validator cannot read — a pulled
-  artifact's packed layer — is checked at push, where the layer is built.
+  artifact's packed layer — is checked at push, where the layer is built. An
+  unknown `auth.kind` is **not** a validation failure
+  ([§3.2.2](#322-methods)).
 - **Mixin**: no `image`, `command`, `workdir`, `user`, or `resources`; every
   entry in a document's `mixins` is a local path or a digest-pinned OCI
   reference; and a document **loaded from a registry** names no local path,
@@ -1618,15 +1854,16 @@ Offline validation (`lns artifact validate`, and every load path including
   is not an offline check on one document: it depends on the document that entry
   names ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
 
-Offline validation checks one document in isolation. Five checks cannot run
+Offline validation checks one document in isolation. Six checks cannot run
 there, because they depend on state no document carries — they run at launch:
 
 | Check | Depends on |
 |---|---|
 | Whether a declared credential has a value bound ([§3.1.7](#317-credentials)) | Per-machine credential values. |
-| Which connectors this project has accepted ([§3.2.2](#322-installing-accepting-and-domain-ownership)) | The machine's installed set and its per-project acceptances. |
+| Which connector methods this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, what it is connected to, and the project's own grants. |
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
+| Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
 | The resolved source list in [§3.3.2](#332-merge-rules) | The mixin graph — its depth, its cycles, and which source wins each setting — is only known once each mixin, and each mixin it declares, is pulled. |
 
 The last one is why a merge collision refuses the **run** rather than the
@@ -1748,50 +1985,75 @@ ships inside the `lns` binary. A machine with no connectors installed still runs
 every sandbox; each declared credential is simply asked for directly, as
 [§3.1.7](#317-credentials) describes.
 
-Installing is not accepting. A newly installed connector seeds its variables and
-opens nothing until an offer is accepted
-([§3.2.2](#322-installing-accepting-and-domain-ownership)).
+Installing is neither connecting nor granting. Installing alone applies nothing:
+what applies a method is a project's grant, and what arms its credentials is a
+connect ([§3.2](#32-kind-connector)). So installing into a project that already
+holds a matching grant — a reinstall of bytes it consented to — applies that
+method's `egress`, `filesets`, and `env` on the next run, and asks for a connect
+when a request needs a value.
 
 Four things live per machine, none of them in any document:
 
-| What | Scope |
-|---|---|
-| The installed set — each connector's document, stored verbatim at the digest it was installed from | The machine |
-| Each connector's bound value | The machine |
-| Which connectors a project has accepted | The project directory |
-| Which connectors a project has declined | The project directory |
+| What | Keyed by | Scope |
+|---|---|---|
+| The installed set — each connector's document, stored verbatim at the digest it came from | name | The machine |
+| The connected method, and the values its `auth` produced | name | The machine |
+| Which method a project granted | directory, then name, digest, and method `name` | The project directory |
+| Which connectors a project declined | directory, then name | The project directory |
 
-Storing the document **verbatim, at its digest**, is what binds an acceptance to
-bytes: a connector republished with a changed `egress` is a different digest, so
-the acceptance does not carry over and the offer fires again.
+The second row is keyed by connector name alone, and that is what makes a machine
+connected with **at most one method per connector**
+([§3.2.4](#324-installing-connecting-and-applying)): the row records which method,
+so writing a second one replaces the first.
+
+The third row keys on the method as well, because a grant is consent to the
+payload the card showed — and a different method is a different payload. So a
+project that granted the token method has not granted the SSH one, and is asked
+if the machine switches.
+
+**The two keys differ deliberately.** Values are keyed by name and survive an
+update; a grant is keyed by the digest too and does not. So a connector
+republished with a changed `egress` is offered again — the user is asked to
+consent to the new bytes — while remaining signed in. Re-consenting is cheap;
+signing in again is not, and making an update log the user out would teach them to
+avoid updates.
+
+Storing the document **verbatim, at its digest**, is what makes that possible: it
+is what a grant binds to.
 
 Three rules follow from a connector arriving over the network:
 
-- **An update that changes an approval-relevant field re-prompts.** `envVar`,
-  every `injections[].domain`, and every `egress` `match` are what an acceptance
-  is bound to. A pulled update that changes one MUST invalidate the acceptance,
-  and it MUST NOT silently widen it — a widened domain would ship a token
-  somewhere the developer never approved.
-- **A domain claim conflict refuses the install, not the run.** Installing a
-  connector that claims a destination an installed one already claims fails at
-  install time, where the user can act on it, rather than leaving an ambiguous
-  offer to surface at some later launch
-  ([§3.2.2](#322-installing-accepting-and-domain-ownership)). Overlap is what
-  conflicts, not equality: a connector claiming `*.some-provider.example` and one
-  claiming `api.some-provider.example` cannot both be installed.
+- **Any update offers again.** A grant is bound to the digest, so a connector
+  republished with any change has no grant here and the user is asked. It MUST
+  NOT silently widen one — a widened domain would ship a token somewhere the
+  developer never approved, and enumerating which fields could do that is how a
+  list comes to be missing one ([§3.2.4](#324-installing-connecting-and-applying)).
+- **An overlapping `serves` refuses the install, not the run.** Installing a
+  connector whose `serves` overlaps an installed connector's fails at install
+  time, where the user can act on it, rather than leaving an ambiguous offer to
+  surface at some later launch ([§3.2.1](#321-serves)). Overlap is what
+  conflicts, not equality: a connector serving `*.some-provider.example` and one
+  serving `api.some-provider.example` cannot both be installed.
 - **A variable two connectors both claim refuses the install too**, for the same
   reason and at the same moment. This covers an `envVar` — one variable holds one
   placeholder, and a second claim would make injection ambiguous — and a plain
-  `env` key, where the two would otherwise race to seed the same name
-  ([§3.2.2](#322-installing-accepting-and-domain-ownership)).
+  `env` key. The check is across connectors only: two **methods** of one
+  connector may claim the same variable, because they are alternatives and only
+  one is ever applied ([§3.2.2](#322-methods)).
 
-**Uninstalling stops the offer; it does not retract an acceptance.** A project
-that already accepted a connector keeps that decision, and reinstalling the same
-digest resumes it with no fresh offer — the acceptance was bound to those bytes
-and those bytes came back. This is deliberate: uninstalling is housekeeping on
-the machine, and withdrawing consent is a decision about a project. A project
-retracts its own acceptance, or its decline, through the store that holds it
+**Uninstalling stops the offer; it does not retract a grant.** A project that
+already granted a method keeps that decision, and reinstalling the same digest
+resumes that grant with no fresh consent prompt — the grant was bound to those
+bytes and those bytes came back. This is deliberate: uninstalling is housekeeping
+on the machine, and withdrawing consent is a decision about a project. A project
+retracts its own grant, or its decline, through the store that holds it
 ([§8.4](#84-where-a-connector-grant-goes)).
+
+**Uninstalling does drop the values**, because they are machine state and the
+machine is what is being cleaned. So a reinstall resumes the grant and **not** the
+connection: the project's consent stands, the machine is asked to connect again,
+and the run behaves as [§3.2.4](#324-installing-connecting-and-applying)
+describes for a granted method with no values behind it.
 
 See [Distributing a sandbox](running-workloads.md#distributing-a-sandbox) for
 the `lns push` / `lns pull` / `lns tag` workflow.
@@ -1903,19 +2165,21 @@ Its `name` is the file's own stem, because nobody is present to choose one.
 ### 8.4 Where a connector grant goes
 
 A connector grant does not live here, and this is the one place where "a
-connector is a mixin" stops short of the obvious. Writing the accepted
+connector is a mixin" stops short of the obvious. Writing the granted
 connector's reference into this file's `mixins` would make every later run
 resolve it by the ordinary rules, with no special path anywhere — which is
 exactly why it is tempting, and exactly why it is wrong.
 
-**This file is committable.** An acceptance is consent to let a real value reach
-a real destination ([§7.1](#71-connectors)), given by one person on one machine,
-and consent does not travel in a git clone. A teammate is asked on their own
-machine rather than inheriting an answer.
+**This file is committable.** A grant is consent to let a real value reach a real
+destination ([§7.1](#71-connectors)), given by one person on one machine, and
+consent does not travel in a git clone. A teammate is asked on their own machine
+rather than inheriting an answer. Worse, the answer would not even work there:
+what a grant points at is a method this machine is connected to, and another
+machine holds no values for it.
 
-So an acceptance lives in the per-project store the machine already keeps
-([§7.1](#71-connectors)), keyed by directory alone. The run reads it and merges
-the connector at the position [§3.3.2](#332-merge-rules) gives it — the same
+So a grant lives in the per-project store the machine already keeps
+([§7.1](#71-connectors)), keyed by directory. The run reads it and merges the
+granted method at the position [§3.3.2](#332-merge-rules) gives it — the same
 merge, from a different source.
 
 A decline lives beside it, and both are retractable: a project can forget what it
