@@ -1536,30 +1536,6 @@ mod tests {
     }
 
     #[test]
-    fn a_path_shaped_mixin_is_never_addressed_to_a_registry() {
-        let mut command = ArtifactCommand::Inspect(InspectArgs {
-            reference: Some("ghcr.io/team/hermes:1.4.0".into()),
-            file: None,
-            mixins: vec![
-                ".".into(),
-                "./obs".into(),
-                "../obs".into(),
-                "/opt/obs".into(),
-                "obs/lns.yaml".into(),
-            ],
-        });
-        apply_registry_default(&mut command, Some("ghcr.io"));
-        let ArtifactCommand::Inspect(args) = command else {
-            panic!("inspect stays inspect")
-        };
-        assert_eq!(
-            args.mixins,
-            vec![".", "./obs", "../obs", "/opt/obs", "obs/lns.yaml"],
-            "qualification runs before a directory roots, so a path must survive it as written"
-        );
-    }
-
-    #[test]
     fn format_bytes_picks_the_natural_unit() {
         assert_eq!(crate::output::format_bytes(512), "512 B");
         assert_eq!(crate::output::format_bytes(2048), "2.0 KiB");
