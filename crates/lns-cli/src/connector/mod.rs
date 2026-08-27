@@ -319,7 +319,7 @@ fn list(args: &ConnectorListArgs, catalog_path: &Path, writer: &mut impl Write) 
             .filter(|i| !is_bundled(&i.id))
             .map(|i| ConnectorRow::new(i, "user")),
     );
-    crate::output::emit(args.output.format, &rows, writer)?;
+    crate::output::emit(args.output.format, &rows, "No connectors.", writer)?;
     Ok(0)
 }
 

@@ -389,7 +389,12 @@ async fn ps<W: std::io::Write>(
         };
         rows.push(PsRow::new(run, stats));
     }
-    crate::output::emit(args.output.format, &rows, out)?;
+    let nothing_listed = if args.all {
+        "No sandboxes."
+    } else {
+        "No running sandboxes."
+    };
+    crate::output::emit(args.output.format, &rows, nothing_listed, out)?;
     Ok(0)
 }
 
@@ -1049,7 +1054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ps_renders_only_the_header_when_nothing_is_running() {
+    async fn ps_says_nothing_is_running_rather_than_listing_an_exited_run() {
         let svc = CannedService::new(Response::RunList {
             runs: vec![lns_ipc::RunSummary {
                 status: lns_ipc::RunStatus::Exited { code: 0 },
@@ -1060,11 +1065,7 @@ mod tests {
         let code = ps(&svc, &ps_args(), &mut out).await.unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("CPU"), "got: {text}");
-        assert!(
-            !text.contains("reviewer"),
-            "an exited run must not list: {text}"
-        );
+        assert_eq!(text, "No running sandboxes.\n");
     }
 
     #[tokio::test]

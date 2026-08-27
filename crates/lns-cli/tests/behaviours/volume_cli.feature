@@ -39,6 +39,13 @@ Feature: managing named volumes from the CLI
     Then the exit code is 0
     And the listed row for "prism-data" ends with "-"
 
+  Scenario: with no volumes to list, ls says so instead of printing a bare header
+    Given the service reports no volumes
+    When the user runs volume command "ls"
+    Then the exit code is 0
+    And the output contains "No volumes."
+    And the output does not contain "ON DISK"
+
   Scenario: creating a volume confirms it by name
     When the user runs volume command "create prism-data"
     Then the exit code is 0
