@@ -194,7 +194,7 @@ lns artifact prune [-f]
 | `ls` | | Lists cached artifacts: reference, kind, digest, size, and what holds each. `--kind` filters. |
 | `inspect` | `lns inspect` | Renders one artifact's resolved content, offline for a local path. `--mixin <REF>` resolves that mixin in first (repeatable), so you can preview a composition without running it. With no operand it renders `./lns.yaml`. |
 | `rm` | `lns rm` | Removes one cached artifact and frees its now-unreferenced layers. Refused while a sandbox holds it — running or stopped — and the message names the holder. |
-| `prune` | | Removes every cached artifact nothing holds. Lists them and asks, unless `-f`/`--force`. |
+| `prune` | | Removes every cached artifact nothing holds, and — when no sandbox is live — the provisioned tool cache, which any running sandbox may still be using. Lists them and asks, unless `-f`/`--force`. |
 
 `-f`/`--file` selects a document other than `./lns.yaml`; its directory is the
 project, so it roots the document's relative binds and filesets and holds the
