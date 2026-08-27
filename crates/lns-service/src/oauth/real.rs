@@ -15,6 +15,18 @@ const DEFAULT_INTERVAL: u64 = 5;
 const DEFAULT_EXPIRES_IN: u64 = 3600;
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
+/// One client for every leg of a connector sign-in, so the provider sees the same `lns` identity on the device, token and userinfo calls.
+fn oauth_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(crate::identity::header(lns_ipc::Method::ConnectorOauth))
+            .build()
+            // Same failure reqwest::Client::new panics on: the process has no usable TLS backend, so there is nothing to fall back to.
+            .expect("a TLS-backed HTTP client")
+    })
+}
+
 pub struct RealClock;
 
 impl Clock for RealClock {
@@ -31,10 +43,9 @@ pub struct RealUserInfoFetcher;
 impl UserInfoFetcher for RealUserInfoFetcher {
     fn fetch<'a>(&'a self, url: &'a str, access_token: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(async move {
-            let resp = reqwest::Client::new()
+            let resp = oauth_client()
                 .get(url)
                 .header("accept", "application/json")
-                .header("user-agent", "lns")
                 .bearer_auth(access_token)
                 .timeout(HTTP_TIMEOUT)
                 .send()
@@ -86,7 +97,7 @@ async fn post_form_bytes(
     url: &str,
     form: &[(&str, &str)],
 ) -> Result<(reqwest::StatusCode, Vec<u8>)> {
-    let resp = reqwest::Client::new()
+    let resp = oauth_client()
         .post(url)
         .header("accept", "application/json")
         .form(form)
@@ -249,7 +260,7 @@ async fn post_json_bytes(
     body: &impl Serialize,
 ) -> Result<(reqwest::StatusCode, Vec<u8>)> {
     let json = serde_json::to_vec(body).context("serializing pkce exchange request")?;
-    let resp = reqwest::Client::new()
+    let resp = oauth_client()
         .post(url)
         .header("accept", "application/json")
         .header("content-type", "application/json")

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use lns_ipc::Method;
 use lns_policy::registry_auth::{JsonFileRegistryAuthStore, RegistryAuthStore, credential_for};
 use oci_client::{
     Reference, RegistryOperation,
@@ -20,15 +21,23 @@ pub struct RealRegistry {
 }
 
 impl RealRegistry {
-    pub fn for_registry(registry: &str, auth: RegistryAuth) -> Self {
+    fn identifying_as(registry: &str, auth: RegistryAuth, method: Method) -> Self {
         Self {
-            client: oci_client::Client::new(client_config_for(registry)),
+            client: oci_client::Client::new(client_config_for(registry, method)),
             auth,
         }
     }
 
+    pub fn for_registry(registry: &str, auth: RegistryAuth) -> Self {
+        Self::identifying_as(registry, auth, Method::RegistryPull)
+    }
+
     pub fn for_reference(reference: &Reference, auth: RegistryAuth) -> Self {
         Self::for_registry(reference.registry(), auth)
+    }
+
+    fn for_login_probe(reference: &Reference, auth: RegistryAuth) -> Self {
+        Self::identifying_as(reference.registry(), auth, Method::RegistryLogin)
     }
 }
 
@@ -54,7 +63,7 @@ pub(crate) fn registry_auth_for(image: &str) -> RegistryAuth {
 pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Result<()> {
     let reference = login_probe_reference(registry)?;
     let auth = RegistryAuth::Basic(username.to_string(), secret.to_string());
-    let probe = RealRegistry::for_reference(&reference, auth);
+    let probe = RealRegistry::for_login_probe(&reference, auth);
     probe
         .client
         .auth(&reference, &probe.auth, RegistryOperation::Pull)

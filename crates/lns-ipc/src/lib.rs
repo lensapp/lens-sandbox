@@ -34,6 +34,6 @@ pub use protocol::{
 pub use socket::{SocketPathError, default_socket_path};
 pub use update::{NO_UPDATE_CHECK_ENV, UpdateStatus};
 pub use user_agent::{
-    Method, PlatformInfo, Uname, env_os_to_uname_sysname, shell_basename_from, uname_fields_with,
-    user_agent,
+    Identity, Method, PlatformInfo, Uname, env_os_to_uname_sysname, shell_basename_from,
+    uname_fields_with, user_agent,
 };

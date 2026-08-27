@@ -17,6 +17,7 @@ fn shared_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent(crate::identity::header(lns_ipc::Method::AssetDownload))
             .build()
             // Same failure reqwest::get panics on: the process has no usable TLS backend, so there is nothing to fall back to.
             .expect("a TLS-backed HTTP client")

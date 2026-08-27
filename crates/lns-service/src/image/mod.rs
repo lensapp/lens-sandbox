@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use lns_ipc::Method;
 use oci_client::{
     Reference,
     client::ClientConfig,
@@ -163,11 +164,12 @@ pub(crate) fn linux_platform_resolver(
         .map(|m| m.digest.clone())
 }
 
-/// Every registry client this service builds, so no pull, push or login probe can pick its own transport.
-pub(crate) fn client_config_for(registry: &str) -> ClientConfig {
+/// Every registry client this service builds, so no pull or login probe can pick its own transport or its own identity.
+pub(crate) fn client_config_for(registry: &str, method: Method) -> ClientConfig {
     ClientConfig {
         protocol: lns_artifact::client_protocol_for(registry),
         platform_resolver: Some(Box::new(linux_platform_resolver)),
+        user_agent: crate::identity::header(method),
         ..Default::default()
     }
 }
@@ -609,7 +611,27 @@ mod tests {
     use tempfile::TempDir;
 
     fn speaks_http(registry: &str) -> bool {
-        matches!(client_config_for(registry).protocol, ClientProtocol::Http)
+        matches!(
+            client_config_for(registry, Method::RegistryPull).protocol,
+            ClientProtocol::Http
+        )
+    }
+
+    #[test]
+    fn a_registry_client_identifies_itself_as_lns_and_names_its_verb() {
+        let pull = client_config_for("hub.lns.run", Method::RegistryPull);
+        assert!(pull.user_agent.starts_with("lns/"), "{}", pull.user_agent);
+        assert!(
+            pull.user_agent.ends_with("method=registry-pull)"),
+            "{}",
+            pull.user_agent
+        );
+        let login = client_config_for("hub.lns.run", Method::RegistryLogin);
+        assert!(
+            login.user_agent.ends_with("method=registry-login)"),
+            "{}",
+            login.user_agent
+        );
     }
 
     #[test]
@@ -627,9 +649,13 @@ mod tests {
 
     #[test]
     fn every_registry_client_resolves_the_linux_host_arch_manifest() {
-        let loopback = client_config_for("localhost:5000");
+        let loopback = client_config_for("localhost:5000", Method::RegistryPull);
         assert!(loopback.platform_resolver.is_some());
-        assert!(client_config_for("ghcr.io").platform_resolver.is_some());
+        assert!(
+            client_config_for("ghcr.io", Method::RegistryPull)
+                .platform_resolver
+                .is_some()
+        );
     }
 
     #[test]

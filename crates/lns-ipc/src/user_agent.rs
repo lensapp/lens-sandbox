@@ -15,13 +15,33 @@ pub enum Method {
     CliUpdate,
     CliLogin,
     ServiceUpdateCheck,
+    RegistryPull,
+    RegistryPush,
+    RegistryLogin,
+    ConnectorOauth,
+    ToolIndex,
+    AssetDownload,
 }
 
 impl Method {
+    /// Declaration order, which is also the slot order [`Identity`] indexes by.
+    pub const ALL: [Method; 10] = [
+        Method::InstallScript,
+        Method::CliUpdate,
+        Method::CliLogin,
+        Method::ServiceUpdateCheck,
+        Method::RegistryPull,
+        Method::RegistryPush,
+        Method::RegistryLogin,
+        Method::ConnectorOauth,
+        Method::ToolIndex,
+        Method::AssetDownload,
+    ];
+
     pub fn product(self) -> &'static str {
         match self {
             Method::InstallScript => "lns-install",
-            Method::CliUpdate | Method::CliLogin | Method::ServiceUpdateCheck => "lns",
+            _ => "lns",
         }
     }
 
@@ -31,7 +51,31 @@ impl Method {
             Method::CliUpdate => "cli-update",
             Method::CliLogin => "cli-login",
             Method::ServiceUpdateCheck => "service-update-check",
+            Method::RegistryPull => "registry-pull",
+            Method::RegistryPush => "registry-push",
+            Method::RegistryLogin => "registry-login",
+            Method::ConnectorOauth => "connector-oauth",
+            Method::ToolIndex => "tool-index",
+            Method::AssetDownload => "asset-download",
         }
+    }
+}
+
+/// One process's outbound identity: every header it can send, built once so a caller needing `&'static str` never leaks a fresh one per request.
+pub struct Identity {
+    headers: [String; Method::ALL.len()],
+}
+
+impl Identity {
+    pub fn new(version: &str, platform: &PlatformInfo) -> Self {
+        Self {
+            headers: Method::ALL.map(|method| user_agent(version, platform, method)),
+        }
+    }
+
+    /// Borrowed for `'static` because `oci_client::client::ClientConfig::user_agent` accepts nothing shorter.
+    pub fn header(&'static self, method: Method) -> &'static str {
+        &self.headers[method as usize]
     }
 }
 
@@ -146,6 +190,79 @@ mod tests {
         assert_eq!(
             ua,
             "lns/0.16.0 (os=Darwin; arch=arm64; kernel=Darwin/24.6.0; shell=zsh; method=cli-login)"
+        );
+    }
+
+    #[test]
+    fn every_method_carries_its_own_token_under_one_product() {
+        let p = platform("Darwin", "arm64", "24.6.0", "zsh");
+        let tokens: Vec<&str> = Method::ALL.iter().map(|m| m.as_str()).collect();
+        let mut unique = tokens.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            tokens.len(),
+            "duplicate method token: {tokens:?}"
+        );
+        for method in Method::ALL {
+            let ua = user_agent("1.2.3", &p, method);
+            assert!(
+                ua.ends_with(&format!("method={})", method.as_str())),
+                "{ua}"
+            );
+            assert!(
+                ua.starts_with(&format!("{}/1.2.3 (", method.product())),
+                "{ua}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_install_script_speaks_under_its_own_product() {
+        for method in Method::ALL {
+            let expected = if method == Method::InstallScript {
+                "lns-install"
+            } else {
+                "lns"
+            };
+            assert_eq!(method.product(), expected, "{:?}", method.as_str());
+        }
+    }
+
+    #[test]
+    fn registry_traffic_names_the_verb_it_is_performing() {
+        assert_eq!(Method::RegistryPull.as_str(), "registry-pull");
+        assert_eq!(Method::RegistryPush.as_str(), "registry-push");
+        assert_eq!(Method::RegistryLogin.as_str(), "registry-login");
+    }
+
+    #[test]
+    fn the_remaining_outbound_callers_name_themselves_too() {
+        assert_eq!(Method::ConnectorOauth.as_str(), "connector-oauth");
+        assert_eq!(Method::ToolIndex.as_str(), "tool-index");
+        assert_eq!(Method::AssetDownload.as_str(), "asset-download");
+    }
+
+    #[test]
+    fn all_lists_every_method_at_the_slot_identity_indexes_it_by() {
+        for (slot, method) in Method::ALL.iter().enumerate() {
+            assert_eq!(*method as usize, slot, "{}", method.as_str());
+        }
+    }
+
+    #[test]
+    fn an_identity_hands_out_one_header_per_method() {
+        static ID: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
+        let id = ID
+            .get_or_init(|| Identity::new("0.16.0", &platform("Linux", "x86_64", "6.6.0", "bash")));
+        assert_eq!(
+            id.header(Method::RegistryPull),
+            "lns/0.16.0 (os=Linux; arch=x86_64; kernel=Linux/6.6.0; shell=bash; method=registry-pull)"
+        );
+        assert_eq!(
+            id.header(Method::InstallScript),
+            "lns-install/0.16.0 (os=Linux; arch=x86_64; kernel=Linux/6.6.0; shell=bash; method=install-script)"
         );
     }
 
