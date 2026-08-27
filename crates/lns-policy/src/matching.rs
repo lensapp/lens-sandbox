@@ -71,6 +71,11 @@ fn patterns_overlap(one: &str, other: &str) -> bool {
     domain_matches(one, other) || domain_matches(other, one)
 }
 
+/// Whether two `match` patterns name any destination in common, ports included; it misses two mid-segment wildcards for the reason [`patterns_overlap`] gives, so a caller that must not miss an overlap keeps its ambiguous case reachable.
+pub fn destinations_overlap(one: &str, other: &str) -> bool {
+    destination_covers(one, other) || destination_covers(other, one)
+}
+
 fn shadows(existing: &RouteRule, new: &RouteRule) -> bool {
     scheme_covers(existing.scheme, new.scheme)
         && destination_covers(&existing.match_pattern, &new.match_pattern)
@@ -778,6 +783,39 @@ mod tests {
             None,
             "the excluded caller scans on and the second scoped rule decides it"
         );
+    }
+
+    #[test]
+    fn overlap_is_symmetric_where_one_pattern_covers_the_other() {
+        // `destination_covers` is directional, and a caller asking "can these two collide" has no direction.
+        assert!(destinations_overlap("*.example.test", "api.example.test"));
+        assert!(destinations_overlap("api.example.test", "*.example.test"));
+    }
+
+    #[test]
+    fn two_ports_of_one_host_do_not_overlap_but_a_portless_pattern_covers_both() {
+        assert!(!destinations_overlap(
+            "db.example.test:5432",
+            "db.example.test:6432"
+        ));
+        assert!(destinations_overlap(
+            "db.example.test",
+            "db.example.test:5432"
+        ));
+    }
+
+    #[test]
+    fn unrelated_hosts_do_not_overlap() {
+        assert!(!destinations_overlap("api.example.test", "api.other.test"));
+    }
+
+    #[test]
+    fn two_mid_segment_wildcards_sharing_a_host_are_not_detected() {
+        // Both name api.eu.example.test, and neither `covers` direction fires. Pinned so a caller that must not miss an overlap keeps its ambiguous case reachable rather than assuming this returns true.
+        assert!(!destinations_overlap(
+            "api.*.example.test",
+            "*.eu.example.test"
+        ));
     }
 
     #[test]

@@ -96,6 +96,21 @@ pub fn host_bind_decisions_path() -> Result<PathBuf, LnsHomeError> {
     in_lns_home("host-bind-decisions.json")
 }
 
+/// One directory per installed connector, holding its document verbatim and the digest it came from (sandbox-spec §7.1).
+pub fn connectors_root() -> Result<PathBuf, LnsHomeError> {
+    in_lns_home("connectors")
+}
+
+/// A project's one answer per connector — granted or declined — because `forget` clears either (sandbox-spec §8.4).
+pub fn connector_grants_path() -> Result<PathBuf, LnsHomeError> {
+    in_lns_home("connector-grants.json")
+}
+
+/// Holds the values an authentication returned, so this is the one connector store that is a secret.
+pub fn connector_values_path() -> Result<PathBuf, LnsHomeError> {
+    in_lns_home("connector-values.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,12 +215,31 @@ mod tests {
             registry_auth_path().unwrap(),
             host_path_decisions_path().unwrap(),
             host_bind_decisions_path().unwrap(),
+            connectors_root().unwrap(),
+            connector_grants_path().unwrap(),
+            connector_values_path().unwrap(),
         ] {
             assert!(
                 path.starts_with(&home),
                 "one directory, one thing to back up: {path:?} is outside {home:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_three_connector_stores_are_three_distinct_paths() {
+        // Aliasing two of these would make one store's writes clobber the other's, and the values store is the one holding real tokens.
+        let paths = [
+            connectors_root().unwrap(),
+            connector_grants_path().unwrap(),
+            connector_values_path().unwrap(),
+        ];
+        let distinct: std::collections::BTreeSet<_> = paths.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            paths.len(),
+            "each connector store needs its own file: {paths:?}"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ mod artifact_rig;
 mod assembly_rig;
 #[path = "behaviours/bind_rig.rs"]
 mod bind_rig;
+#[path = "behaviours/connector_rig.rs"]
+mod connector_rig;
 #[path = "behaviours/declared_rig.rs"]
 mod declared_rig;
 #[path = "behaviours/forward_rig.rs"]

@@ -11,7 +11,7 @@ pub mod host_bind_decisions;
 pub mod host_path_decisions;
 pub mod matching;
 pub mod registry_auth;
-mod secure_file;
+pub mod secure_file;
 #[cfg(test)]
 mod test_env;
 
