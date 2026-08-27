@@ -455,7 +455,7 @@ lns logout [REGISTRY]
 | Form | What it does |
 |---|---|
 | `lns login [REGISTRY]` | Logs in to `REGISTRY`, defaulting to `run.registry`, else `hub.lns.run`. Give the secret with `--password-stdin` (recommended) or `-p`/`--password`, and the user with `-u`/`--username`. The credential is verified against the registry before it is stored, so the service must be running. |
-| `lns login --list` | Lists the registries you are logged in to, as `host  username`. Never secrets. |
+| `lns login --list` | Lists the registries you are logged in to. It is a list like any other ([§4.2](#42-human-output), [§4.3](#43-machine-output)): a table of registry and username, `--format <table\|json>`. Never secrets. |
 | `lns logout [REGISTRY]` | Removes the stored credential. |
 
 A registry is matched by host: a fully-qualified reference uses that host's stored
