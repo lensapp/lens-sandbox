@@ -37,18 +37,22 @@ pub fn resolve_policy(project: &Path) -> Result<(PathBuf, PolicySource)> {
     }
 }
 
-/// The size the run will boot with: an explicit flag outranks what the definition declared, which outranks the built-in default.
+/// The size the run will boot with: an explicit flag outranks what the definition declared, which outranks this machine's config defaults, which outrank the built-in size.
 pub fn resolved_size(
     declared: lns_artifact::resources::DeclaredSize,
     args: &RunArgs,
 ) -> lns_artifact::resources::VmSize {
+    let configured = lns_artifact::resources::ConfiguredDefaults {
+        cpus: args.cpus_config,
+        mem_mib: args.mem_config,
+    };
     lns_artifact::resources::resolve_declared(
         declared,
         &lns_artifact::resources::ResourceOverrides {
             cpus: args.cpus,
             mem_mib: args.mem,
         },
-        lns_artifact::resources::DEFAULT_VM_SIZE,
+        configured.over(lns_artifact::resources::DEFAULT_VM_SIZE),
     )
 }
 
@@ -790,6 +794,8 @@ mod tests {
             registry: None,
             cpus: None,
             mem: None,
+            cpus_config: None,
+            mem_config: None,
             user: None,
             auto_remove: false,
             interactive: true,
@@ -1777,6 +1783,38 @@ mod tests {
             &PolicySource::Found,
         );
         assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
+    }
+
+    #[test]
+    fn resolved_size_ranks_the_flag_over_the_document_over_the_config_default() {
+        let declared = lns_artifact::resources::DeclaredSize {
+            cpus: Some(2),
+            mem_mib: Some(1024),
+            disk_bytes: None,
+        };
+        let mut args = run_args(Some("ubuntu"));
+        args.cpus_config = Some(4);
+        args.mem_config = Some(4096);
+        let size = resolved_size(declared, &args);
+        assert_eq!(
+            (size.cpus, size.mem_mib),
+            (2, 1024),
+            "a sandbox that declares its own resources must not be resized by whoever cloned it"
+        );
+
+        args.cpus = Some(8);
+        args.mem = Some(8192);
+        let size = resolved_size(declared, &args);
+        assert_eq!((size.cpus, size.mem_mib), (8, 8192));
+    }
+
+    #[test]
+    fn resolved_size_falls_back_to_a_config_default_when_the_document_is_silent() {
+        let mut args = run_args(Some("ubuntu"));
+        args.cpus_config = Some(4);
+        args.mem_config = Some(4096);
+        let size = resolved_size(Default::default(), &args);
+        assert_eq!((size.cpus, size.mem_mib), (4, 4096));
     }
 
     #[test]

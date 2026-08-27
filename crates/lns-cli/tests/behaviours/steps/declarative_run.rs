@@ -10,7 +10,7 @@ use lns_policy::host_bind_decisions::{HostBindDecisionFile, SecretDisposition};
 
 use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, TEST_HOST};
 
-fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
+pub fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
     let yaml = world
         .author_files
         .get(Path::new("/work/lns.yaml"))

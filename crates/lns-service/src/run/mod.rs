@@ -159,22 +159,51 @@ pub(super) struct SandboxLaunch {
     pub env: Vec<String>,
 }
 
-/// Size a sandbox run's VM: the sandbox's resources are authoritative unless the user set `--cpus`/`-m` explicitly (even to a value equal to the built-in default), in which case the explicit request wins.
+/// What the caller asked for, kept in the three layers the CLI can tell apart: the flags as typed, and the config defaults the machine fills gaps from.
+pub(super) struct RequestedSize {
+    pub cpus: u8,
+    pub cpus_explicit: bool,
+    pub mem_mib: usize,
+    pub mem_explicit: bool,
+    pub cpus_config: Option<u8>,
+    pub mem_config: Option<usize>,
+}
+
+impl RequestedSize {
+    pub fn from_args(args: &lns_ipc::RunImageArgs) -> Self {
+        Self {
+            cpus: args.cpus,
+            cpus_explicit: args.cpus_explicit,
+            mem_mib: args.mem,
+            mem_explicit: args.mem_explicit,
+            cpus_config: args.cpus_config,
+            mem_config: args.mem_config,
+        }
+    }
+}
+
+/// Size a sandbox run's VM: an explicit `--cpus`/`-m` wins (even at a value equal to the built-in default), then the sandbox's own resources, then the machine's config defaults, then the built-in size.
 pub(super) fn sandbox_vm_size(
     resources: Option<&lns_artifact::spec::Resources>,
-    requested_cpus: u8,
-    cpus_explicit: bool,
-    requested_mem_mib: usize,
-    mem_explicit: bool,
+    requested: &RequestedSize,
     host: Option<lns_artifact::resources::HostCapacity>,
 ) -> lns_artifact::resources::VmSize {
     use crate::artifact::resources::resolve_size;
-    use lns_artifact::resources::{DEFAULT_VM_SIZE, ResourceOverrides};
+    use lns_artifact::resources::{ConfiguredDefaults, DEFAULT_VM_SIZE, ResourceOverrides};
     let overrides = ResourceOverrides {
-        cpus: cpus_explicit.then_some(requested_cpus),
-        mem_mib: mem_explicit.then_some(requested_mem_mib),
+        cpus: requested.cpus_explicit.then_some(requested.cpus),
+        mem_mib: requested.mem_explicit.then_some(requested.mem_mib),
     };
-    resolve_size(resources, &overrides, DEFAULT_VM_SIZE, host)
+    let configured = ConfiguredDefaults {
+        cpus: requested.cpus_config,
+        mem_mib: requested.mem_config,
+    };
+    resolve_size(
+        resources,
+        &overrides,
+        configured.over(DEFAULT_VM_SIZE),
+        host,
+    )
 }
 
 /// Merge a resolved sandbox's workload with the user's run args: boot the sandbox base image, take the sandbox command unless the user gave one after `--`, and layer env base-image < sandbox < user `-e`.
@@ -320,15 +349,116 @@ mod tests {
         }
     }
 
+    fn requested(cpus: Option<u8>, mem_mib: Option<usize>) -> RequestedSize {
+        RequestedSize {
+            cpus: cpus.unwrap_or(lns_artifact::resources::DEFAULT_VM_SIZE.cpus),
+            cpus_explicit: cpus.is_some(),
+            mem_mib: mem_mib.unwrap_or(lns_artifact::resources::DEFAULT_VM_SIZE.mem_mib),
+            mem_explicit: mem_mib.is_some(),
+            cpus_config: None,
+            mem_config: None,
+        }
+    }
+
+    fn configured(cpus: Option<u8>, mem_mib: Option<usize>) -> RequestedSize {
+        RequestedSize {
+            cpus_config: cpus,
+            mem_config: mem_mib,
+            ..requested(None, None)
+        }
+    }
+
     #[test]
     fn sandbox_vm_size_uses_the_sandbox_resources_when_no_flag_is_set() {
         let res = resources(4, 2048);
         assert_eq!(
             {
-                let s = sandbox_vm_size(Some(&res), 1, false, 512, false, Some(TEST_HOST));
+                let s = sandbox_vm_size(Some(&res), &requested(None, None), Some(TEST_HOST));
                 (s.cpus, s.mem_mib)
             },
             (4, 2048)
+        );
+    }
+
+    #[test]
+    fn sandbox_vm_size_keeps_the_sandbox_resources_over_a_config_default() {
+        let res = resources(2, 1024);
+        assert_eq!(
+            {
+                let s = sandbox_vm_size(
+                    Some(&res),
+                    &configured(Some(4), Some(4096)),
+                    Some(TEST_HOST),
+                );
+                (s.cpus, s.mem_mib)
+            },
+            (2, 1024),
+            "a sandbox that declares its own resources must not be resized by whoever cloned it"
+        );
+    }
+
+    #[test]
+    fn sandbox_vm_size_lets_a_flag_outrank_both_the_sandbox_and_a_config_default() {
+        let res = resources(2, 1024);
+        let request = RequestedSize {
+            cpus_config: Some(4),
+            mem_config: Some(4096),
+            ..requested(Some(8), Some(8192))
+        };
+        assert_eq!(
+            {
+                let s = sandbox_vm_size(Some(&res), &request, Some(TEST_HOST));
+                (s.cpus, s.mem_mib)
+            },
+            (8, 8192)
+        );
+    }
+
+    #[test]
+    fn sandbox_vm_size_falls_back_to_a_config_default_when_nothing_else_decides() {
+        assert_eq!(
+            {
+                let s = sandbox_vm_size(None, &configured(Some(4), Some(4096)), Some(TEST_HOST));
+                (s.cpus, s.mem_mib)
+            },
+            (4, 4096)
+        );
+    }
+
+    #[test]
+    fn sandbox_vm_size_falls_back_to_the_builtin_when_no_source_says_anything() {
+        assert_eq!(
+            {
+                let s = sandbox_vm_size(None, &requested(None, None), Some(TEST_HOST));
+                (s.cpus, s.mem_mib)
+            },
+            (
+                lns_artifact::resources::DEFAULT_VM_SIZE.cpus,
+                lns_artifact::resources::DEFAULT_VM_SIZE.mem_mib
+            )
+        );
+    }
+
+    #[test]
+    fn requested_size_reads_the_three_layers_the_wire_carries() {
+        let mut args = run_args(None, &[]);
+        args.cpus = 8;
+        args.cpus_explicit = true;
+        args.mem = 8192;
+        args.mem_explicit = false;
+        args.cpus_config = Some(4);
+        args.mem_config = Some(4096);
+        let request = RequestedSize::from_args(&args);
+        assert_eq!(
+            (
+                request.cpus,
+                request.cpus_explicit,
+                request.mem_mib,
+                request.mem_explicit,
+                request.cpus_config,
+                request.mem_config
+            ),
+            (8, true, 8192, false, Some(4), Some(4096))
         );
     }
 
@@ -476,7 +606,8 @@ mod tests {
         let res = resources(4, 2048);
         assert_eq!(
             {
-                let s = sandbox_vm_size(Some(&res), 2, true, 1024, true, Some(TEST_HOST));
+                let s =
+                    sandbox_vm_size(Some(&res), &requested(Some(2), Some(1024)), Some(TEST_HOST));
                 (s.cpus, s.mem_mib)
             },
             (2, 1024)
@@ -488,7 +619,8 @@ mod tests {
         let res = resources(4, 2048);
         assert_eq!(
             {
-                let s = sandbox_vm_size(Some(&res), 1, true, 512, true, Some(TEST_HOST));
+                let s =
+                    sandbox_vm_size(Some(&res), &requested(Some(1), Some(512)), Some(TEST_HOST));
                 (s.cpus, s.mem_mib)
             },
             (1, 512),
@@ -500,14 +632,7 @@ mod tests {
     fn sandbox_vm_size_falls_back_to_the_request_when_the_sandbox_is_silent() {
         assert_eq!(
             {
-                let s = sandbox_vm_size(None, 1, false, 512, false, Some(TEST_HOST));
-                (s.cpus, s.mem_mib)
-            },
-            (1, 512)
-        );
-        assert_eq!(
-            {
-                let s = sandbox_vm_size(None, 8, true, 4096, true, Some(TEST_HOST));
+                let s = sandbox_vm_size(None, &requested(Some(8), Some(4096)), Some(TEST_HOST));
                 (s.cpus, s.mem_mib)
             },
             (8, 4096)

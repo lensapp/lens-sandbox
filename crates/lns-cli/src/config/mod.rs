@@ -375,8 +375,8 @@ where
 }
 
 pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
-    args.cpus = args.cpus.or(defaults.cpus);
-    args.mem = args.mem.or(defaults.mem);
+    args.cpus_config = defaults.cpus;
+    args.mem_config = defaults.mem;
     args.registry = args.registry.or(defaults.registry);
     if let Some(image) = args.image.take() {
         args.image = Some(if crate::run::target::is_definition_path(&image) {
@@ -660,6 +660,8 @@ mod tests {
             registry: None,
             cpus: None,
             mem: None,
+            cpus_config: None,
+            mem_config: None,
             user: None,
             auto_remove: false,
             interactive: true,
@@ -872,6 +874,27 @@ mod tests {
         );
         assert_eq!(resolved.cpus, Some(2));
         assert_eq!(resolved.mem, Some(1024));
+        assert_eq!(resolved.cpus_config, Some(8));
+        assert_eq!(resolved.mem_config, Some(4096));
+    }
+
+    #[test]
+    fn apply_run_defaults_carries_a_configured_size_in_its_own_slot() {
+        let resolved = apply_run_defaults(
+            bare_run_args(),
+            RunDefaults {
+                cpus: Some(8),
+                mem: Some(4096),
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(
+            (resolved.cpus, resolved.mem),
+            (None, None),
+            "folding a configured default into the flags tells the service the user typed it, which would outrank the document"
+        );
+        assert_eq!(resolved.cpus_config, Some(8));
+        assert_eq!(resolved.mem_config, Some(4096));
     }
 
     #[test]

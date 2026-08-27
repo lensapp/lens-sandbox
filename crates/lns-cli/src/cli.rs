@@ -61,7 +61,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_parser = clap::value_parser!(u8).range(1..),
-        help = "Number of vCPUs; falls back to the `run.cpus` config default, then 1."
+        help = "Number of vCPUs; without it the document's `spec.resources` decides, then the `run.cpus` config default, then 1."
     )]
     pub cpus: Option<u8>,
 
@@ -71,9 +71,16 @@ pub struct RunArgs {
         visible_alias = "memory",
         value_name = "SIZE",
         value_parser = parse_mem_arg,
-        help = "RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`; b/k/m/g, rounded up to MiB); falls back to the `run.mem` config default, then 512."
+        help = "RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`, `-m 2Gi`; b/k/m/g and Mi/Gi, rounded up to MiB); without it the document's `spec.resources` decides, then the `run.mem` config default, then 512."
     )]
     pub mem: Option<usize>,
+
+    /// This machine's `run.cpus`/`run.mem` defaults, kept apart from the flags because the document outranks them.
+    #[arg(skip)]
+    pub cpus_config: Option<u8>,
+
+    #[arg(skip)]
+    pub mem_config: Option<usize>,
 
     #[arg(
         short = 'u',

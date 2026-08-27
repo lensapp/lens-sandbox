@@ -34,6 +34,42 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
     });
 }
 
+#[when(regex = r"^the local run summary is composed against the configured defaults$")]
+fn compose_local_summary_against_defaults(world: &mut BehaviourWorld) {
+    compose_declared_summary_against_defaults(world, String::new());
+}
+
+#[when(
+    regex = r#"^the local run summary is composed against the configured defaults with "([^"]+)"$"#
+)]
+fn compose_local_summary_against_defaults_with(world: &mut BehaviourWorld, flags: String) {
+    compose_declared_summary_against_defaults(world, flags);
+}
+
+fn compose_declared_summary_against_defaults(world: &mut BehaviourWorld, flags: String) {
+    let path = config_path(world);
+    let declared = lns_cli::run::declarative::Defaults::from_definition(
+        &crate::steps::declarative_run::definition(world),
+        Some(crate::world::TEST_HOST),
+    );
+    let mut argv = vec!["lns".to_string(), "run".to_string()];
+    argv.extend(flags.split_whitespace().map(str::to_string));
+    argv.push("alpine".to_string());
+    let args: RunArgs = parse_args(&argv).expect("argv must parse against the CLI grammar");
+    let defaults = config::load_run_defaults(&path).expect("gap-filler defaults load");
+    let resolved = config::apply_run_defaults(args, defaults);
+    world.resolved_run = Some(ResolvedRunView {
+        summary: format_summary(
+            &resolved,
+            lns_cli::run::summary::resolved_size(declared.size, &resolved),
+            &Policy::default(),
+            Path::new("./lns-local-mixin.yaml"),
+            &PolicySource::Found,
+        ),
+        ..Default::default()
+    });
+}
+
 #[then(regex = r#"^the run summary shows "([^"]+)"$"#)]
 fn run_summary_shows(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
     let view = world

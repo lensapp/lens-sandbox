@@ -289,10 +289,7 @@ async fn orchestrate(
         sandbox_plan
             .as_ref()
             .and_then(|p| p.workload.resources.as_ref()),
-        args.cpus,
-        args.cpus_explicit,
-        args.mem,
-        args.mem_explicit,
+        &super::RequestedSize::from_args(&args),
         lns_artifact::resources::host::probe(),
     );
 
