@@ -4,6 +4,7 @@
 pub mod conflicts;
 pub mod dir;
 pub mod handler;
+pub mod offer;
 pub mod real;
 mod registry;
 pub mod source;

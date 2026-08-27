@@ -436,7 +436,7 @@ fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::approval_flow::protocol::WireDefaultVerdict;
+    use crate::approval_flow::protocol::{WireDefaultVerdict, WireTcpEgressRule, WireVerdict};
     use lns_policy::{RouteRule, Transport, Verdict};
     use std::io;
     use std::sync::Mutex as StdMutex;
@@ -1202,7 +1202,9 @@ pub(crate) mod tests {
             .expect("a frame without a network section retracts every rule the guest holds");
         assert_eq!(
             network.egress.tcp,
-            vec![TcpEgressRule::allow_destination("db.internal:5432")],
+            vec![WireTcpEgressRule::from(&TcpEgressRule::allow_destination(
+                "db.internal:5432"
+            ))],
             "the guest replaces every map on each apply, so a table left out of this frame is a table withdrawn"
         );
         assert_eq!(
@@ -1226,7 +1228,9 @@ pub(crate) mod tests {
         let network = policy_frame(&mut rx).network.expect("a network section");
         assert_eq!(
             network.egress.tcp,
-            vec![TcpEgressRule::allow_destination("db.internal:5432").approved()]
+            vec![WireTcpEgressRule::from(
+                &TcpEgressRule::allow_destination("db.internal:5432").approved()
+            )]
         );
         assert_eq!(
             network.default_verdict,
@@ -1281,7 +1285,7 @@ pub(crate) mod tests {
         let pushed = policy_frame(&mut rx);
         assert_eq!(
             pushed.network.unwrap().egress.http[0].verdict,
-            Verdict::Deny
+            WireVerdict::Deny
         );
         assert_eq!(decision_frame(&mut rx).decision, Decision::DenyAlways);
 
