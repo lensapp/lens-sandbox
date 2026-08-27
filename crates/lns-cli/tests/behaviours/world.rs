@@ -179,6 +179,8 @@ pub struct ResolvedRunView {
 #[derive(Debug, Default)]
 pub struct ConnectorCliRig {
     pub installed: Option<lns_ipc::ConnectorView>,
+    /// What the user types, in order; `None` means there is no terminal to ask at.
+    pub answers: Option<Vec<String>>,
     /// Which connector the scenario says is installed, so uninstall answers for that name only.
     pub installed_name: Option<String>,
     pub held: Vec<lns_ipc::ConnectorView>,
@@ -186,6 +188,11 @@ pub struct ConnectorCliRig {
     pub dropped_profiles: Option<usize>,
     pub refuse_message: Option<String>,
     pub unreachable: bool,
+    pub connected: Option<String>,
+    pub granted: Option<(String, Option<String>)>,
+    pub disconnected: Option<usize>,
+    pub forgot: Option<bool>,
+    pub grant_unchanged: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub run: Option<crate::runner::CliRun>,
 }
@@ -310,5 +317,9 @@ impl lns_cli::terminal::Terminal for ScriptedTerminal {
 
     fn read_answer(&mut self) -> std::io::Result<String> {
         Ok(self.answers.pop_front().unwrap_or_default())
+    }
+
+    fn read_secret(&mut self) -> std::io::Result<String> {
+        self.read_answer()
     }
 }

@@ -133,6 +133,27 @@ pub enum Request {
         name: String,
     },
     ListConnectors,
+    /// The values an authentication returned, keyed by the credential they belong to. The caller collects them because only it has a terminal to ask at.
+    ConnectConnector {
+        name: String,
+        method: String,
+        profile: String,
+        values: SecretValues,
+    },
+    DisconnectConnector {
+        name: String,
+        profile: Option<String>,
+    },
+    GrantConnector {
+        name: String,
+        project_dir: String,
+        method: String,
+        profile: Option<String>,
+    },
+    ForgetConnector {
+        name: String,
+        project_dir: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +317,39 @@ pub enum Response {
     ConnectorUnknown {
         name: String,
     },
+    /// `invalidated` names the project directories whose grant the returned authority no longer matches, so each is asked again.
+    ConnectorConnected {
+        name: String,
+        profile: String,
+        invalidated: Vec<String>,
+    },
+    ConnectorDisconnected {
+        name: String,
+        dropped: usize,
+    },
+    /// `displaced` names the method this grant replaced, since a project holds one grant per connector; `unchanged` means the project already held exactly this grant.
+    ConnectorGranted {
+        name: String,
+        method: String,
+        profile: Option<String>,
+        displaced: Option<String>,
+        unchanged: bool,
+    },
+    ConnectorForgotten {
+        name: String,
+        had_decision: bool,
+    },
+}
+
+/// Real credential values, wrapped so no `Debug` of a request can put one in a log or a panic message.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct SecretValues(pub std::collections::BTreeMap<String, String>);
+
+impl std::fmt::Debug for SecretValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} redacted>", self.0.len())
+    }
 }
 
 /// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the profiles this machine holds.
@@ -308,6 +362,7 @@ pub struct ConnectorView {
     pub profiles: Vec<ConnectorProfileView>,
 }
 
+/// One method, with the whole payload a grant applies — a card that showed less would take consent for what it did not disclose (sandbox-spec §1.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorMethodView {
     pub name: String,
@@ -316,6 +371,14 @@ pub struct ConnectorMethodView {
     pub needs_connect: bool,
     /// False where this version does not implement the method's `auth.kind`, which the card must not offer.
     pub offerable: bool,
+    /// The egress this method opens, which `serves` does not bound.
+    pub opens: Vec<String>,
+    /// The guest paths its filesets write.
+    pub writes: Vec<String>,
+    /// The plain `env` keys it sets.
+    pub env: Vec<String>,
+    /// Each credential it needs a value for, named by its `envVar` or, absent one, its placeholder.
+    pub credentials: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -965,6 +1028,39 @@ pub enum LogLevel {
     Warn,
     Info,
     Debug,
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn a_debug_of_a_connect_request_cannot_print_the_value_it_carries() {
+        // `Request` derives Debug and is formatted in panic and log paths, so a plaintext token must not be reachable through it.
+        let request = Request::ConnectConnector {
+            name: "some-provider".into(),
+            method: "token".into(),
+            profile: "work".into(),
+            values: SecretValues([("SOME_TOKEN".to_string(), "sk-live-real".to_string())].into()),
+        };
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains("sk-live-real"), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
+        assert!(
+            rendered.contains("some-provider"),
+            "everything that is not the value still has to be diagnosable: {rendered}"
+        );
+    }
+
+    #[test]
+    fn secret_values_still_travel_on_the_wire() {
+        // Redaction is for Debug only; the service must receive what the user typed.
+        let values = SecretValues([("SOME_TOKEN".to_string(), "sk-live-real".to_string())].into());
+        let json = serde_json::to_string(&values).expect("serialises");
+        assert_eq!(json, r#"{"SOME_TOKEN":"sk-live-real"}"#);
+        let back: SecretValues = serde_json::from_str(&json).expect("round trips");
+        assert_eq!(back, values);
+    }
 }
 
 #[cfg(test)]

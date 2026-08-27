@@ -386,26 +386,49 @@ async fn handle_volume_request(verb: VolumeVerb<'_>) -> Response {
     }
 }
 
-/// The connector verbs, kept off the one-shot dispatcher's own branch count the way `VolumeVerb` is.
-enum ConnectorVerb<'a> {
-    Install(&'a str),
-    Uninstall(&'a str),
-    List,
+/// The connector verbs, kept off the one-shot dispatcher's own branch count the way `VolumeVerb` is. Returning the call the wiring takes leaves no pairing for a later arm to get wrong.
+fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
+    use crate::connector::real::Call;
+    Some(match request {
+        Request::InstallConnector { source } => Call::Install(source.clone()),
+        Request::UninstallConnector { name } => Call::Uninstall(name.clone()),
+        Request::ListConnectors => Call::List,
+        Request::ConnectConnector {
+            name,
+            method,
+            profile,
+            values,
+        } => Call::Connect {
+            name: name.clone(),
+            method: method.clone(),
+            profile: profile.clone(),
+            values: values.0.clone(),
+        },
+        Request::DisconnectConnector { name, profile } => Call::Disconnect {
+            name: name.clone(),
+            profile: profile.clone(),
+        },
+        Request::GrantConnector {
+            name,
+            project_dir,
+            method,
+            profile,
+        } => Call::Grant {
+            name: name.clone(),
+            project_dir: project_dir.clone(),
+            method: method.clone(),
+            profile: profile.clone(),
+        },
+        Request::ForgetConnector { name, project_dir } => Call::Forget {
+            name: name.clone(),
+            project_dir: project_dir.clone(),
+        },
+        _ => return None,
+    })
 }
 
-impl<'a> ConnectorVerb<'a> {
-    fn of(request: &'a Request) -> Option<Self> {
-        match request {
-            Request::InstallConnector { source } => Some(ConnectorVerb::Install(source)),
-            Request::UninstallConnector { name } => Some(ConnectorVerb::Uninstall(name)),
-            Request::ListConnectors => Some(ConnectorVerb::List),
-            _ => None,
-        }
-    }
-}
-
-async fn handle_connector_request(verb: ConnectorVerb<'_>) -> Response {
-    match crate::connector::real::answer(verb_call(verb)).await {
+async fn handle_connector_request(call: crate::connector::real::Call) -> Response {
+    match crate::connector::real::answer(call).await {
         Ok(response) => response,
         Err(e) => Response::Error {
             message: format!("{e:#}"),
@@ -413,21 +436,12 @@ async fn handle_connector_request(verb: ConnectorVerb<'_>) -> Response {
     }
 }
 
-/// The verb as the production wiring takes it, so the dispatcher names no store or source of its own.
-fn verb_call(verb: ConnectorVerb<'_>) -> crate::connector::real::Call {
-    match verb {
-        ConnectorVerb::Install(source) => crate::connector::real::Call::Install(source.to_string()),
-        ConnectorVerb::Uninstall(name) => crate::connector::real::Call::Uninstall(name.to_string()),
-        ConnectorVerb::List => crate::connector::real::Call::List,
-    }
-}
-
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
     if let Some(verb) = VolumeVerb::of(request) {
         return handle_volume_request(verb).await;
     }
-    if let Some(verb) = ConnectorVerb::of(request) {
-        return handle_connector_request(verb).await;
+    if let Some(call) = connector_call(request) {
+        return handle_connector_request(call).await;
     }
     match request {
         // A volume or connector verb was answered above; each of the rest opens a stream the caller drives.
@@ -439,6 +453,10 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::InstallConnector { .. }
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
+        | Request::ConnectConnector { .. }
+        | Request::DisconnectConnector { .. }
+        | Request::GrantConnector { .. }
+        | Request::ForgetConnector { .. }
         | Request::RunImage(_)
         | Request::ExecImage(_)
         | Request::StartRun { .. }
@@ -1855,6 +1873,91 @@ mod tests {
             after["connectors"].as_array().expect("an array").is_empty(),
             "got {after}"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_connects_grants_forgets_and_disconnects_a_connector() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("lns.yaml"),
+            "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves: [api.some-provider.example]\n  methods:\n    - name: token\n      auth:\n        kind: token\n",
+        )
+        .unwrap();
+        let now = Instant::now();
+        handle_request(
+            &Request::InstallConnector {
+                source: project.path().display().to_string(),
+            },
+            now,
+        )
+        .await;
+
+        let connected = as_json(
+            handle_request(
+                &Request::ConnectConnector {
+                    name: "some-provider".into(),
+                    method: "token".into(),
+                    profile: "work".into(),
+                    values: lns_ipc::SecretValues(
+                        [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
+                    ),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(connected["type"], "ConnectorConnected", "got {connected}");
+        assert_eq!(connected["profile"], "work");
+
+        let granted = as_json(
+            handle_request(
+                &Request::GrantConnector {
+                    name: "some-provider".into(),
+                    project_dir: "/work".into(),
+                    method: "token".into(),
+                    profile: None,
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(granted["type"], "ConnectorGranted", "got {granted}");
+        assert_eq!(
+            granted["profile"], "work",
+            "the only profile held stands behind it"
+        );
+
+        let forgotten = as_json(
+            handle_request(
+                &Request::ForgetConnector {
+                    name: "some-provider".into(),
+                    project_dir: "/work".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(forgotten["type"], "ConnectorForgotten", "got {forgotten}");
+        assert_eq!(forgotten["had_decision"], true);
+
+        let disconnected = as_json(
+            handle_request(
+                &Request::DisconnectConnector {
+                    name: "some-provider".into(),
+                    profile: None,
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(
+            disconnected["type"], "ConnectorDisconnected",
+            "got {disconnected}"
+        );
+        assert_eq!(disconnected["dropped"], 1);
     }
 
     #[tokio::test]

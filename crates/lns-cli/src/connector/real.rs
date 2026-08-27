@@ -14,7 +14,16 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         crate::service::require_running().await?;
         let svc = RealConnectorService::new(crate::service::socket_path()?);
         let mut out = ctx.out;
-        crate::connector::run(&args.command, &svc, &cwd, &mut out).await
+        let mut terminal = crate::terminal::RealTerminal::open();
+        crate::connector::run(
+            &args.command,
+            &svc,
+            &mut terminal,
+            &cwd,
+            &mut out,
+            &mut std::io::stderr(),
+        )
+        .await
     })
 }
 

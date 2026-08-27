@@ -67,3 +67,114 @@ Feature: lns connector, on this machine
     When the user runs connector command "list"
     Then the connector command fails
     And the connector error mentions lns-service
+
+  Scenario: connecting asks for each credential by the variable it fills
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the user types "sk-live-real"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt names the variable "SOME_TOKEN"
+    And the prompt says the value is not shown
+    And the connector output does not contain "sk-live-real"
+    And the output says connecting is not granting
+
+  Scenario: connecting a method that does not authenticate is refused before a value is typed
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the user types "sk-live-real"
+    When the user runs connector command "connect some-provider --method open"
+    Then the connector command fails
+    And the connector error says "nothing to connect"
+    And the connector output does not contain "sk-live-real"
+
+  Scenario: connecting with no terminal refuses without naming a flag
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And there is no terminal
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command fails
+    And the connector error says "no flag answers it"
+
+  Scenario: an empty token connects nothing
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the user types ""
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command fails
+    And the connector error says "nothing was connected"
+
+  Scenario: granting discloses the whole payload before it asks
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command succeeds
+    And the disclosure names what the method opens
+    And the disclosure names the file it writes
+    And the disclosure names the variables it sets
+    And the output says it was granted
+
+  Scenario: a payload the method does not carry is stated, not omitted
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "open"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --method open"
+    Then the connector command succeeds
+    And the disclosure says the method carries nothing to disclose
+
+  Scenario: a grant this project already holds exits 1 and says so
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service reports the grant unchanged for "some-provider"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command exits 1
+    And the output says it was already granted
+
+  Scenario: declining the disclosure grants nothing and exits 1
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token"
+    And the user types "n"
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command exits 1
+    And the output says nothing was granted
+
+  Scenario: granting with no terminal refuses, and no flag answers it
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command fails
+    And the connector error says "no flag answers a connector grant"
+
+  Scenario: granting again names the method it replaced
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token" replacing "session"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command succeeds
+    And the output says it replaced "session"
+
+  Scenario: disconnecting a connector holding no profile exits 1
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service disconnects "some-provider" dropping 0 profiles
+    When the user runs connector command "disconnect some-provider"
+    Then the connector command exits 1
+    And the output says it holds no profile to disconnect
+
+  Scenario: disconnecting says the connector stays installed
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service disconnects "some-provider" dropping 2 profiles
+    When the user runs connector command "disconnect some-provider"
+    Then the connector command succeeds
+    And the output says it stays installed
+
+  Scenario: forgetting a project that decided nothing exits 1
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service forgets nothing about "some-provider"
+    When the user runs connector command "forget some-provider"
+    Then the connector command exits 1
+
+  Scenario: forgetting clears what the project decided
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service forgets a decision about "some-provider"
+    When the user runs connector command "forget some-provider"
+    Then the connector command succeeds
+    And the output says it forgot the decision

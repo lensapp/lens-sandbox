@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::runner::CliRun;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::{self, ConnectorArgs, ConnectorService};
@@ -23,12 +23,20 @@ fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
                 label: "API token".to_string(),
                 needs_connect: true,
                 offerable: true,
+                opens: vec!["api.some-provider.example".to_string()],
+                writes: vec!["/home/agent/.some-provider".to_string()],
+                env: vec!["SOME_REGION".to_string()],
+                credentials: vec!["SOME_TOKEN".to_string()],
             },
             ConnectorMethodView {
                 name: "open".to_string(),
                 label: "open".to_string(),
                 needs_connect: false,
                 offerable: true,
+                opens: Vec::new(),
+                writes: Vec::new(),
+                env: Vec::new(),
+                credentials: Vec::new(),
             },
         ],
         profiles: profiles
@@ -46,6 +54,11 @@ fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
 struct FakeConnectorService {
     installed: Option<ConnectorView>,
     installed_name: Option<String>,
+    connected: Option<String>,
+    granted: Option<(String, Option<String>)>,
+    disconnected: Option<usize>,
+    forgot: Option<bool>,
+    grant_unchanged: bool,
     held: Vec<ConnectorView>,
     dropped_profiles: Option<usize>,
     refuse_message: Option<String>,
@@ -59,6 +72,11 @@ impl FakeConnectorService {
         Self {
             installed: rig.installed.clone(),
             installed_name: rig.installed_name.clone(),
+            connected: rig.connected.clone(),
+            granted: rig.granted.clone(),
+            disconnected: rig.disconnected,
+            forgot: rig.forgot,
+            grant_unchanged: rig.grant_unchanged,
             held: rig.held.clone(),
             dropped_profiles: rig.dropped_profiles,
             refuse_message: rig.refuse_message.clone(),
@@ -94,6 +112,32 @@ impl FakeConnectorService {
                     }
                 }
                 _ => Response::ConnectorUnknown { name: name.clone() },
+            },
+            Request::ConnectConnector { name, profile, .. } => Response::ConnectorConnected {
+                name: name.clone(),
+                profile: self.connected.clone().unwrap_or_else(|| profile.clone()),
+                invalidated: Vec::new(),
+            },
+            Request::DisconnectConnector { name, .. } => Response::ConnectorDisconnected {
+                name: name.clone(),
+                dropped: self.disconnected.unwrap_or(0),
+            },
+            Request::GrantConnector { name, method, .. } => {
+                let (granted, displaced) = self
+                    .granted
+                    .clone()
+                    .unwrap_or_else(|| (method.clone(), None));
+                Response::ConnectorGranted {
+                    name: name.clone(),
+                    method: granted,
+                    profile: None,
+                    displaced,
+                    unchanged: self.grant_unchanged,
+                }
+            }
+            Request::ForgetConnector { name, .. } => Response::ConnectorForgotten {
+                name: name.clone(),
+                had_decision: self.forgot.unwrap_or(false),
             },
             other => panic!("unexpected connector request {other:?}"),
         })
@@ -146,9 +190,26 @@ async fn run_connector(world: &mut BehaviourWorld, tail: String) {
     let run = match parse_args::<ConnectorArgs, _, _>(&argv) {
         Ok(args) => {
             let svc = FakeConnectorService::from_world(world);
+            let answers = world.connector.answers.clone().unwrap_or_default();
+            let mut terminal = match &world.connector.answers {
+                Some(_) => ScriptedTerminal::answering(
+                    &answers.iter().map(String::as_str).collect::<Vec<_>>(),
+                ),
+                None => ScriptedTerminal::absent(),
+            };
             let mut out = Vec::new();
-            let outcome = connector::run(&args.command, &svc, &PathBuf::from(CWD), &mut out).await;
-            let text = String::from_utf8(out).expect("connector output is utf-8");
+            let mut prompt = Vec::new();
+            let outcome = connector::run(
+                &args.command,
+                &svc,
+                &mut terminal,
+                &PathBuf::from(CWD),
+                &mut out,
+                &mut prompt,
+            )
+            .await;
+            let asked = String::from_utf8(prompt).expect("connector prompt is utf-8");
+            let text = asked + &String::from_utf8(out).expect("connector output is utf-8");
             match outcome {
                 Ok(exit_code) => CliRun {
                     exit_code,
@@ -320,4 +381,207 @@ fn says_not_installed(world: &mut BehaviourWorld, name: String) {
 fn error_mentions_service(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(run.output.contains("lns-service"), "got: {}", run.output);
+}
+
+#[given(expr = "the service connects {string} as {string}")]
+fn service_connects(world: &mut BehaviourWorld, _name: String, profile: String) {
+    world.connector.connected = Some(profile);
+}
+
+#[given(expr = "the service reports the grant unchanged for {string}")]
+fn service_grant_unchanged(world: &mut BehaviourWorld, _name: String) {
+    world.connector.grant_unchanged = true;
+    world.connector.granted = Some(("token".to_string(), None));
+}
+
+#[given(expr = "the service grants {string} the method {string}")]
+fn service_grants(world: &mut BehaviourWorld, _name: String, method: String) {
+    world.connector.granted = Some((method, None));
+}
+
+#[given(expr = "the service grants {string} the method {string} replacing {string}")]
+fn service_grants_replacing(
+    world: &mut BehaviourWorld,
+    _name: String,
+    method: String,
+    displaced: String,
+) {
+    world.connector.granted = Some((method, Some(displaced)));
+}
+
+#[given(expr = "the service disconnects {string} dropping {int} profiles")]
+fn service_disconnects(world: &mut BehaviourWorld, _name: String, dropped: usize) {
+    world.connector.disconnected = Some(dropped);
+}
+
+#[given(expr = "the service forgets a decision about {string}")]
+fn service_forgets(world: &mut BehaviourWorld, _name: String) {
+    world.connector.forgot = Some(true);
+}
+
+#[given(expr = "the service forgets nothing about {string}")]
+fn service_forgets_nothing(world: &mut BehaviourWorld, _name: String) {
+    world.connector.forgot = Some(false);
+}
+
+#[given(expr = "the user types {string}")]
+fn the_user_types(world: &mut BehaviourWorld, answer: String) {
+    world
+        .connector
+        .answers
+        .get_or_insert_with(Vec::new)
+        .push(answer);
+}
+
+#[given(expr = "there is no terminal")]
+fn there_is_no_terminal(world: &mut BehaviourWorld) {
+    world.connector.answers = None;
+}
+
+#[then(expr = "the connector output does not contain {string}")]
+fn output_omits(world: &mut BehaviourWorld, secret: String) {
+    let run = run_of(world);
+    assert!(
+        !run.output.contains(&secret),
+        "a pasted token must never reach the screen: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says connecting is not granting")]
+fn says_connect_is_not_grant(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("connecting is not granting"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it was granted")]
+fn says_granted(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("granted some-provider"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says nothing was granted")]
+fn says_nothing_granted_after_declining(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("nothing was granted"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it replaced {string}")]
+fn says_replaced(world: &mut BehaviourWorld, displaced: String) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains(&format!("replaced {displaced}")),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it holds no profile to disconnect")]
+fn says_no_profile_to_disconnect(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("holds no profile to disconnect"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it stays installed")]
+fn says_stays_installed(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("stays installed"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it forgot the decision")]
+fn says_forgot(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("forgot what this project"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the disclosure names what the method opens")]
+fn discloses_opens(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("opens") && run.output.contains("api.some-provider.example"),
+        "method egress is not bounded by `serves`, so it has to be disclosed: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the disclosure names the file it writes")]
+fn discloses_writes(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("/home/agent/.some-provider"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the disclosure names the variables it sets")]
+fn discloses_sets(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    for named in ["SOME_REGION", "SOME_TOKEN"] {
+        assert!(
+            run.output.contains(named),
+            "{named} missing: {}",
+            run.output
+        );
+    }
+}
+
+#[then(expr = "the disclosure says the method carries nothing to disclose")]
+fn discloses_nothing(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("opens    nothing"),
+        "an empty payload is stated in its own column rather than left looking omitted: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it was already granted")]
+fn says_already_granted(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("already granted"),
+        "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the prompt names the variable {string}")]
+fn prompt_names_variable(world: &mut BehaviourWorld, variable: String) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains(&variable),
+        "the ask names the variable the value fills: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the prompt says the value is not shown")]
+fn prompt_says_hidden(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(run.output.contains("not shown"), "got: {}", run.output);
 }

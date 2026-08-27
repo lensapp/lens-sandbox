@@ -68,10 +68,42 @@ fn view_of(
                 label: method.label().to_string(),
                 needs_connect: method.auth.is_some(),
                 offerable: method.is_offerable(),
+                opens: opened_by(method),
+                writes: method
+                    .filesets
+                    .iter()
+                    .map(|fileset| fileset.guest_path.clone())
+                    .collect(),
+                env: method.env.keys().cloned().collect(),
+                credentials: method
+                    .credentials
+                    .iter()
+                    .map(|credential| credential.owner().to_string())
+                    .collect(),
             })
             .collect(),
         profiles: profile_views(profiles),
     }
+}
+
+/// Every destination a method's egress opens, http and raw alike, because `serves` does not bound what a method opens. A `deny` rule closes rather than opens, so it is not disclosed as one.
+fn opened_by(method: &lns_artifact::connector::Method) -> Vec<String> {
+    let opens = |verdict: lns_policy::Verdict| verdict != lns_policy::Verdict::Deny;
+    method
+        .egress
+        .http
+        .iter()
+        .filter(|rule| opens(rule.verdict))
+        .map(|rule| rule.match_pattern.clone())
+        .chain(
+            method
+                .egress
+                .tcp
+                .iter()
+                .filter(|rule| opens(rule.verdict))
+                .map(|rule| rule.match_pattern.clone()),
+        )
+        .collect()
 }
 
 fn profile_views(profiles: &BTreeMap<String, Profile>) -> Vec<ConnectorProfileView> {
@@ -83,6 +115,191 @@ fn profile_views(profiles: &BTreeMap<String, Profile>) -> Vec<ConnectorProfileVi
             authority: profile.authority.0.iter().cloned().collect(),
         })
         .collect()
+}
+
+/// What one connect produced: the profile it stored, and the project directories whose grant its authority no longer matches (§3.2.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connected {
+    pub profile: String,
+    pub invalidated: Vec<String>,
+}
+
+/// What one grant recorded, and the method it displaced — a project holds one grant per connector (§3.2.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Granted {
+    pub method: String,
+    pub profile: Option<String>,
+    pub displaced: Option<String>,
+    /// True when the project already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
+    pub unchanged: bool,
+}
+
+/// Store what an authentication returned as a profile. A method with no `auth` has nothing to connect and is granted instead (cli-spec §3.3).
+pub fn connect(
+    store: &ConnectorStore<'_>,
+    name: &str,
+    method: &str,
+    label: &str,
+    values: std::collections::BTreeMap<String, String>,
+) -> Result<Connected> {
+    let definition = definition_of(store, name)?;
+    let method = offerable_method(&definition, method)?;
+    if method.auth.is_none() {
+        anyhow::bail!(
+            "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
+            method.name
+        );
+    }
+    let invalidated = store.record_authentication(
+        name,
+        label,
+        super::store::Profile {
+            method: method.name.clone(),
+            // A `kind: token` exchange reports no authority (§3.2.4).
+            authority: super::store::Authority::default(),
+            values,
+        },
+    )?;
+    Ok(Connected {
+        profile: label.to_string(),
+        invalidated,
+    })
+}
+
+/// Drop one profile, or every profile of a connector. The connector stays installed and grants naming a dropped profile stay (cli-spec §3.3).
+pub fn disconnect(store: &ConnectorStore<'_>, name: &str, profile: Option<&str>) -> Result<usize> {
+    installed_entry(store, name)?;
+    Ok(store.drop_profiles(name, profile)?)
+}
+
+/// Record this project's grant of one method, replacing whatever it decided before.
+pub fn grant(
+    store: &ConnectorStore<'_>,
+    name: &str,
+    project_dir: &str,
+    method: &str,
+    profile: Option<&str>,
+) -> Result<Granted> {
+    let entry = installed_entry(store, name)?;
+    let definition = lns_artifact::connector::parse(&entry.document)?;
+    let method = offerable_method(&definition, method)?;
+    let profile = behind_the_method(store, name, method, profile)?;
+    let authority = match &profile {
+        Some(label) => store
+            .profiles_of(name)?
+            .get(label)
+            .map(|held| held.authority.clone())
+            .unwrap_or_default(),
+        None => super::store::Authority::default(),
+    };
+    let decision = super::store::ProjectDecision::Granted {
+        digest: entry.digest.clone(),
+        method: method.name.clone(),
+        profile: profile.clone(),
+        authority,
+    };
+    let held = store.decision(project_dir, name)?;
+    if held.as_ref() == Some(&decision) {
+        return Ok(Granted {
+            method: method.name.clone(),
+            profile,
+            displaced: None,
+            unchanged: true,
+        });
+    }
+    let displaced = store.decide(project_dir, name, decision)?;
+    Ok(Granted {
+        method: method.name.clone(),
+        profile,
+        displaced: displaced.and_then(displaced_method),
+        unchanged: false,
+    })
+}
+
+pub fn forget(store: &ConnectorStore<'_>, name: &str, project_dir: &str) -> Result<bool> {
+    Ok(store.forget(project_dir, name)?)
+}
+
+/// Which profile stands behind a method: none for one that does not authenticate, the named one, or the only one held.
+fn behind_the_method(
+    store: &ConnectorStore<'_>,
+    name: &str,
+    method: &lns_artifact::connector::Method,
+    named: Option<&str>,
+) -> Result<Option<String>> {
+    if method.auth.is_none() {
+        if let Some(named) = named {
+            anyhow::bail!(
+                "method {} of {name} does not authenticate, so it takes no profile; drop --profile {named}",
+                method.name
+            );
+        }
+        return Ok(None);
+    }
+    // A profile records the method that produced it, so one made for another method holds values for another method's credentials.
+    let held: BTreeMap<String, Profile> = store
+        .profiles_of(name)?
+        .into_iter()
+        .filter(|(_, profile)| profile.method == method.name)
+        .collect();
+    match named {
+        Some(named) if held.contains_key(named) => Ok(Some(named.to_string())),
+        Some(named) => anyhow::bail!(
+            "{name} holds no profile named {named} for method {}",
+            method.name
+        ),
+        None if held.len() == 1 => Ok(held.into_keys().next()),
+        None if held.is_empty() => anyhow::bail!(
+            "{name} authenticates and this machine holds no profile for method {}; run `lns connector connect {name} --method {}` first",
+            method.name,
+            method.name
+        ),
+        None => anyhow::bail!(
+            "{name} holds {} profiles for method {}, so name one with --profile",
+            held.len(),
+            method.name
+        ),
+    }
+}
+
+fn displaced_method(decision: super::store::ProjectDecision) -> Option<String> {
+    match decision {
+        super::store::ProjectDecision::Granted { method, .. } => Some(method),
+        super::store::ProjectDecision::Declined => None,
+    }
+}
+
+fn installed_entry(store: &ConnectorStore<'_>, name: &str) -> Result<Installed> {
+    store
+        .installed()?
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no connector named {name} is installed on this machine"))
+}
+
+fn definition_of(
+    store: &ConnectorStore<'_>,
+    name: &str,
+) -> Result<lns_artifact::connector::ConnectorDefinition> {
+    let entry = installed_entry(store, name)?;
+    lns_artifact::connector::parse(&entry.document)
+}
+
+/// The named method, refused when this version cannot offer it — the card could not either (§3.2.2).
+fn offerable_method<'a>(
+    definition: &'a lns_artifact::connector::ConnectorDefinition,
+    method: &str,
+) -> Result<&'a lns_artifact::connector::Method> {
+    let found = definition
+        .spec
+        .methods
+        .iter()
+        .find(|m| m.name == method)
+        .ok_or_else(|| anyhow::anyhow!("{} declares no method named {method}", definition.name))?;
+    if !found.is_offerable() {
+        anyhow::bail!("method {method} of {} needs a newer lns", definition.name);
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -378,5 +595,407 @@ mod tests {
         assert_eq!(listed[0].digest, "sha256:xyz");
         assert!(listed[0].serves.is_empty());
         assert!(listed[0].methods.is_empty());
+    }
+    async fn installed(rig: &Rig) {
+        install(
+            &rig.store(),
+            &source("some-provider", "api.some-provider.example"),
+            "ghcr.io/acme/some-provider:1",
+        )
+        .await
+        .expect("install");
+    }
+
+    fn values() -> std::collections::BTreeMap<String, String> {
+        [("SOME_TOKEN".to_string(), "real-secret".to_string())].into()
+    }
+
+    #[tokio::test]
+    async fn connecting_stores_a_profile_the_machine_then_holds() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        let connected = connect(&rig.store(), "some-provider", "token", "work", values())
+            .expect("token is an offerable method that authenticates");
+        assert_eq!(connected.profile, "work");
+        assert!(connected.invalidated.is_empty());
+        assert_eq!(
+            rig.store().profiles_of("some-provider").unwrap()["work"].method,
+            "token"
+        );
+    }
+
+    #[tokio::test]
+    async fn connecting_a_method_that_does_not_authenticate_is_refused_and_names_granting() {
+        // cli-spec §3.3: a method with no `auth` has nothing to connect, so it is granted instead.
+        let rig = Rig::new();
+        installed(&rig).await;
+        let err = connect(&rig.store(), "some-provider", "open", "work", values())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing to connect"), "{err}");
+        assert!(err.contains("grant it instead"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn connecting_names_the_connector_that_is_not_installed() {
+        let rig = Rig::new();
+        let err = connect(&rig.store(), "absent", "token", "work", values())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absent"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn connecting_a_method_the_connector_does_not_declare_is_refused() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        let err = connect(&rig.store(), "some-provider", "mystery", "work", values())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no method named mystery"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn disconnecting_drops_the_profiles_and_leaves_the_connector_installed() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
+        connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
+
+        assert_eq!(
+            disconnect(&rig.store(), "some-provider", Some("work")).unwrap(),
+            1
+        );
+        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 1);
+        assert_eq!(
+            rig.store().installed().unwrap().len(),
+            1,
+            "the connector stays installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnecting_a_connector_holding_none_drops_nothing() {
+        // The caller exits 1 on this, so it must be an answer rather than an error.
+        let rig = Rig::new();
+        installed(&rig).await;
+        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn granting_a_method_that_authenticates_takes_the_only_profile_held() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
+        let granted = grant(&rig.store(), "some-provider", "/work", "token", None).expect("grant");
+        assert_eq!(granted.method, "token");
+        assert_eq!(granted.profile.as_deref(), Some("work"));
+        assert_eq!(granted.displaced, None);
+    }
+
+    #[tokio::test]
+    async fn granting_binds_to_the_digest_installed_now() {
+        // §7.1: a grant bound to other bytes is not one, so the grant has to record the digest it consented to.
+        let rig = Rig::new();
+        installed(&rig).await;
+        grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        assert!(
+            rig.store()
+                .grant_for("/work", "some-provider", "sha256:abc")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn granting_a_method_that_authenticates_with_no_profile_held_says_to_connect_first() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        let err = grant(&rig.store(), "some-provider", "/work", "token", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("connector connect"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn granting_with_several_profiles_held_and_none_named_asks_for_one() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        for label in ["work", "personal"] {
+            connect(&rig.store(), "some-provider", "token", label, values()).unwrap();
+        }
+        let err = grant(&rig.store(), "some-provider", "/work", "token", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--profile"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn granting_a_profile_the_machine_does_not_hold_is_refused() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
+        let err = grant(
+            &rig.store(),
+            "some-provider",
+            "/work",
+            "token",
+            Some("other"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no profile named other"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn granting_a_method_that_does_not_authenticate_takes_no_profile() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        assert_eq!(granted.profile, None);
+        let err = grant(&rig.store(), "some-provider", "/work", "open", Some("work"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("takes no profile"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn granting_again_names_the_method_it_displaces() {
+        // §3.2.4: a project holds one grant per connector, so what it prints names what it replaced.
+        let rig = Rig::new();
+        installed(&rig).await;
+        connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
+        grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
+        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        assert_eq!(granted.displaced.as_deref(), Some("token"));
+    }
+
+    #[tokio::test]
+    async fn granting_over_a_decline_displaces_no_method() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        rig.store()
+            .decide(
+                "/work",
+                "some-provider",
+                super::super::store::ProjectDecision::Declined,
+            )
+            .unwrap();
+        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        assert_eq!(granted.displaced, None, "a decline is not a method");
+    }
+
+    #[tokio::test]
+    async fn granting_an_unofferable_method_is_refused_because_the_card_could_not_offer_it() {
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{ "name": "future", "auth": { "kind": "oauth_device" } }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        let err = grant(&rig.store(), "some-provider", "/work", "future", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a newer lns"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn forgetting_clears_what_the_project_decided() {
+        let rig = Rig::new();
+        installed(&rig).await;
+        grant(&rig.store(), "some-provider", "/work", "open", None).unwrap();
+        assert!(forget(&rig.store(), "some-provider", "/work").unwrap());
+        assert!(!forget(&rig.store(), "some-provider", "/work").unwrap());
+        assert_eq!(
+            rig.store().decision("/work", "some-provider").unwrap(),
+            None
+        );
+    }
+    fn two_token_methods(name: &str) -> Vec<u8> {
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": name,
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [
+                    { "name": "token", "auth": { "kind": "token" } },
+                    { "name": "token-org", "auth": { "kind": "token" } },
+                ],
+            },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_grant_will_not_take_a_profile_another_method_produced() {
+        // A profile records the method that made it, so one made elsewhere holds values for another method's credentials.
+        let rig = Rig::new();
+        rig.set
+            .put(
+                "some-provider",
+                "sha256:abc",
+                &two_token_methods("some-provider"),
+            )
+            .unwrap();
+        connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
+
+        let err = grant(&rig.store(), "some-provider", "/work", "token-org", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("connector connect"), "{err}");
+        assert_eq!(
+            rig.store().decision("/work", "some-provider").unwrap(),
+            None,
+            "nothing may be recorded when the profile does not belong to the method"
+        );
+    }
+
+    #[tokio::test]
+    async fn naming_a_profile_of_another_method_is_refused() {
+        let rig = Rig::new();
+        rig.set
+            .put(
+                "some-provider",
+                "sha256:abc",
+                &two_token_methods("some-provider"),
+            )
+            .unwrap();
+        connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
+        let err = grant(
+            &rig.store(),
+            "some-provider",
+            "/work",
+            "token-org",
+            Some("personal"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no profile named personal"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_grant_the_project_already_holds_is_unchanged_rather_than_a_replacement() {
+        // cli-spec §3.3: exits 1 when the project already granted that method and profile — and "replaced" would be false.
+        let rig = Rig::new();
+        installed(&rig).await;
+        connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
+        let first = grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
+        assert!(!first.unchanged);
+
+        let again = grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
+        assert!(again.unchanged, "the same grant twice is not a change");
+        assert_eq!(again.displaced, None, "it replaced nothing");
+    }
+
+    #[tokio::test]
+    async fn a_method_view_discloses_the_whole_payload_a_grant_applies() {
+        // §1.5: consent is given to what the card showed, so every part of the payload has to reach it.
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "token",
+                    "auth": { "kind": "token" },
+                    "egress": {
+                        "http": [{ "match": "other.example", "verdict": "allow" }],
+                        "tcp": [{ "match": "db.example:5432", "verdict": "allow" }],
+                    },
+                    "env": { "SOME_REGION": "eu" },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                    }],
+                    "filesets": [{
+                        "inline": { "credentials.json": "{\"token\":\"some_LNSPLACEHOLDER0000000000\"}" },
+                        "guestPath": "/home/agent/.some-provider",
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+
+        let listed = list(&rig.store()).unwrap();
+        let method = &listed[0].methods[0];
+        assert_eq!(
+            method.opens,
+            ["other.example", "db.example:5432"],
+            "a method's egress is not bounded by `serves`, so both tables reach the card"
+        );
+        assert_eq!(method.writes, ["/home/agent/.some-provider"]);
+        assert_eq!(method.env, ["SOME_REGION"]);
+        assert_eq!(method.credentials, ["SOME_TOKEN"]);
+    }
+
+    #[tokio::test]
+    async fn a_credential_with_no_env_var_is_disclosed_by_its_placeholder() {
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "token",
+                    "auth": { "kind": "token" },
+                    "credentials": [{
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                        "injections": [{ "kind": "bearer_header", "domain": "api.some-provider.example" }],
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        let listed = list(&rig.store()).unwrap();
+        assert_eq!(
+            listed[0].methods[0].credentials,
+            ["some_LNSPLACEHOLDER0000000000"],
+            "a credential with no envVar is still something the user must be told about"
+        );
+    }
+    #[tokio::test]
+    async fn a_deny_rule_is_not_disclosed_as_something_the_method_opens() {
+        // "opens" is what the user consents to; a rule that closes a destination belongs under neither that label nor a silent omission of the allow beside it.
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "token",
+                    "auth": { "kind": "token" },
+                    "egress": {
+                        "http": [
+                            { "match": "blocked.example", "verdict": "deny" },
+                            { "match": "allowed.example", "verdict": "allow" },
+                        ],
+                    },
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        let listed = list(&rig.store()).unwrap();
+        assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
     }
 }
