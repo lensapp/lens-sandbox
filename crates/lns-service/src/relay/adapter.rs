@@ -50,7 +50,7 @@ pub(super) async fn accept_loop(
                 let Some(fd) = accepted else { break };
                 supersede_connection(conn_shutdown.take(), conn_task.take()).await;
                 let (tx, rx) = mpsc::unbounded_channel::<HostFrame>();
-                let seeded = seed_frames(std::mem::take(&mut pending), &session.current_policy());
+                let seeded = seed_frames(std::mem::take(&mut pending), session.policy_message());
                 for frame in seeded {
                     let _ = tx.send(frame);
                 }

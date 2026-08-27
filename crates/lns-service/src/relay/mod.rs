@@ -11,7 +11,6 @@ use tracing::Instrument;
 
 use crate::approval_flow::protocol::{GuestFrame, HostFrame, PolicyMessage};
 use crate::approval_flow::session::ApprovalSession;
-use lns_policy::Policy;
 
 mod adapter;
 
@@ -125,10 +124,6 @@ pub fn spawn(
         audit_path: audit,
         fd_tx,
     })
-}
-
-pub(super) fn initial_policy_frame(policy: &Policy) -> HostFrame {
-    HostFrame::Policy(PolicyMessage::seeded(policy.clone()))
 }
 
 pub(super) struct AuditWriter<'a, L: crate::audit::AuditLog, S: crate::audit::AnchorSink> {
@@ -267,11 +262,12 @@ pub(super) async fn supersede_connection(
     }
 }
 
-pub(super) fn seed_frames(mut buffered: Vec<HostFrame>, current_policy: &Policy) -> Vec<HostFrame> {
+/// Takes the policy already shaped by the session, holds and all, so a reconnecting guest is never seeded with a table the live one does not have.
+pub(super) fn seed_frames(mut buffered: Vec<HostFrame>, current: PolicyMessage) -> Vec<HostFrame> {
     if buffered.iter().any(|f| matches!(f, HostFrame::Policy(_))) {
         return buffered;
     }
-    buffered.insert(0, initial_policy_frame(current_policy));
+    buffered.insert(0, HostFrame::Policy(current));
     buffered
 }
 
@@ -320,7 +316,7 @@ mod tests {
     use crate::audit::{AnchorSink, AuditLog};
     use crate::test_env::EnvVarGuard;
     use lns_ipc::Anchor;
-    use lns_policy::RouteRule;
+    use lns_policy::{Policy, RouteRule};
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -426,7 +422,7 @@ mod tests {
     fn policy_with_rule(host: &str) -> HostFrame {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host(host));
-        initial_policy_frame(&p)
+        HostFrame::Policy(PolicyMessage::seeded(p))
     }
 
     #[test]
@@ -467,7 +463,7 @@ mod tests {
         use crate::approval_flow::protocol::Decision;
         let mut buf: Vec<HostFrame> = Vec::new();
 
-        buffer_frame(&mut buf, initial_policy_frame(&Policy::default()));
+        buffer_frame(&mut buf, HostFrame::Policy(PolicyMessage::default()));
         buffer_frame(&mut buf, decision_frame("r1", Decision::AllowOnce));
         buffer_frame(&mut buf, policy_with_rule("later.example"));
         buffer_frame(&mut buf, decision_frame("r2", Decision::DenyOnce));
@@ -498,7 +494,7 @@ mod tests {
             buffer_frame(&mut buf, frame);
         }
 
-        let seeded = seed_frames(buf, &Policy::default());
+        let seeded = seed_frames(buf, PolicyMessage::default());
 
         assert_eq!(
             seeded,
@@ -521,12 +517,12 @@ mod tests {
             decision_frame("r1", Decision::AllowOnce),
             decision_frame("r2", Decision::DenyOnce),
         ];
-        let seeded = seed_frames(buffered, &current);
+        let seeded = seed_frames(buffered, PolicyMessage::seeded(current.clone()));
 
         assert_eq!(
             seeded,
             vec![
-                initial_policy_frame(&current),
+                HostFrame::Policy(PolicyMessage::seeded(current.clone())),
                 decision_frame("r1", Decision::AllowOnce),
                 decision_frame("r2", Decision::DenyOnce),
             ],
@@ -544,7 +540,7 @@ mod tests {
             policy_with_rule("hotswap.example"),
             decision_frame("r2", Decision::DenyOnce),
         ];
-        let seeded = seed_frames(buffered.clone(), &Policy::default());
+        let seeded = seed_frames(buffered.clone(), PolicyMessage::default());
 
         let policy_count = seeded
             .iter()
@@ -565,7 +561,7 @@ mod tests {
     fn seed_frames_on_empty_buffer_emits_just_the_initial_policy() {
         let mut current = Policy::default();
         current.add_rule(RouteRule::allow_host("fresh.example"));
-        let seeded = seed_frames(Vec::new(), &current);
+        let seeded = seed_frames(Vec::new(), PolicyMessage::seeded(current));
         assert_eq!(seeded.len(), 1);
         assert!(matches!(seeded[0], HostFrame::Policy(_)));
     }
@@ -574,7 +570,7 @@ mod tests {
     fn initial_policy_frame_carries_session_network() {
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("api.linear.app"));
-        let frame = initial_policy_frame(&p);
+        let frame = HostFrame::Policy(PolicyMessage::seeded(p));
         let json = serde_json::to_value(&frame).expect("serialise");
         assert_eq!(json["type"], "policy");
         assert_eq!(

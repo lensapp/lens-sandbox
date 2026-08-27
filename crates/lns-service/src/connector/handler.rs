@@ -220,6 +220,42 @@ pub fn forget(store: &ConnectorStore<'_>, name: &str, project_dir: &str) -> Resu
     Ok(store.forget(project_dir, name)?)
 }
 
+/// Every destination an installed connector serves that this project has not decided, so a run holds them for an offer (§3.2.1).
+pub fn held_patterns(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<String>> {
+    let mut patterns = Vec::new();
+    let mut unreadable = Vec::new();
+    for entry in store.installed()? {
+        if decided_here(store, project_dir, &entry) {
+            continue;
+        }
+        match lns_artifact::connector::parse(&entry.document) {
+            Ok(definition) => patterns.extend(definition.spec.serves),
+            Err(_) => unreadable.push(entry.name),
+        }
+    }
+    if !unreadable.is_empty() {
+        let names = unreadable.join(", ");
+        crate::log::warn!(
+            "cannot read the installed connector(s) {names}, so this run is not offered what they serve"
+        );
+    }
+    Ok(patterns)
+}
+
+/// A decision this run cannot read is not one: holding asks, which a grant then answers, where letting the destination through cannot be taken back (§3.2.1).
+fn decided_here(store: &ConnectorStore<'_>, project_dir: &str, entry: &Installed) -> bool {
+    match store.decision(project_dir, &entry.name) {
+        Ok(decision) => decision.is_some_and(|decision| decision.decides(&entry.digest)),
+        Err(e) => {
+            crate::log::warn!(
+                "cannot read what this project decided about {}, so its destinations are held: {e}",
+                entry.name
+            );
+            false
+        }
+    }
+}
+
 /// Which profile stands behind a method: none for one that does not authenticate, the named one, or the only one held.
 fn behind_the_method(
     store: &ConnectorStore<'_>,
@@ -306,24 +342,40 @@ fn offerable_method<'a>(
 mod tests {
     use super::*;
     use crate::connector::source::FetchedConnector;
-    use crate::connector::store::{Authority, InstalledSet};
+    use crate::connector::store::{Authority, InstalledSet, ProjectDecision};
     use lns_policy::decision_store::{DecisionFile, DecisionStore};
     use std::sync::Mutex;
 
     struct FakeMap<T> {
         state: Mutex<DecisionFile<T>>,
+        /// Set when the test needs the file to be there but unreadable, as a truncated or hand-edited json file is.
+        unreadable: std::sync::atomic::AtomicBool,
     }
 
     impl<T> Default for FakeMap<T> {
         fn default() -> Self {
             Self {
                 state: Mutex::new(DecisionFile::new()),
+                unreadable: std::sync::atomic::AtomicBool::new(false),
             }
+        }
+    }
+
+    impl<T> FakeMap<T> {
+        fn make_unreadable(&self) {
+            self.unreadable
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     impl<T: Clone + Send + Sync> DecisionStore<T> for FakeMap<T> {
         fn load(&self) -> std::io::Result<DecisionFile<T>> {
+            if self.unreadable.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "trailing characters",
+                ));
+            }
             Ok(self.state.lock().unwrap().clone())
         }
         fn save(&self, state: &DecisionFile<T>) -> std::io::Result<()> {
@@ -997,5 +1049,185 @@ mod tests {
         rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
+    }
+
+    fn installed_as(rig: &Rig, name: &str, host: &str, digest: &str) {
+        rig.set.put(name, digest, &document(name, host)).unwrap();
+    }
+
+    #[test]
+    fn an_undecided_connector_holds_every_destination_it_serves() {
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        assert_eq!(
+            held_patterns(&rig.store(), "/work").unwrap(),
+            ["api.some-provider.example"]
+        );
+    }
+
+    #[test]
+    fn a_granted_connector_holds_nothing_because_its_egress_applies_instead() {
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        rig.store()
+            .decide(
+                "/work",
+                "some-provider",
+                ProjectDecision::Granted {
+                    digest: "sha256:abc".to_string(),
+                    method: "open".to_string(),
+                    profile: None,
+                    authority: Default::default(),
+                },
+            )
+            .unwrap();
+        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_declined_connector_holds_nothing() {
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        rig.store()
+            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .unwrap();
+        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_grant_made_against_other_bytes_holds_again_so_the_update_is_offered() {
+        // §7.1: a grant does not carry to a different digest. Reading the decision alone would silence the offer for bytes nobody consented to.
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:new",
+        );
+        rig.store()
+            .decide(
+                "/work",
+                "some-provider",
+                ProjectDecision::Granted {
+                    digest: "sha256:old".to_string(),
+                    method: "open".to_string(),
+                    profile: None,
+                    authority: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            held_patterns(&rig.store(), "/work").unwrap(),
+            ["api.some-provider.example"]
+        );
+    }
+
+    #[test]
+    fn one_project_s_decision_does_not_release_the_hold_in_another() {
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        rig.store()
+            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .unwrap();
+        assert_eq!(
+            held_patterns(&rig.store(), "/elsewhere").unwrap(),
+            ["api.some-provider.example"]
+        );
+    }
+
+    #[test]
+    fn a_document_that_will_not_parse_holds_nothing_and_does_not_fail_the_run() {
+        // A run must launch beside a connector this build cannot read; holding nothing is the safe direction, since a destination is asked about only when an offer could follow.
+        let rig = Rig::new();
+        rig.set
+            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}")
+            .unwrap();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        let messages = crate::test_env::captured_messages(|| {
+            assert_eq!(
+                held_patterns(&rig.store(), "/work").unwrap(),
+                ["api.some-provider.example"],
+                "the readable connector still holds what it serves"
+            );
+        });
+        assert!(
+            messages.iter().any(|m| m.contains("broken")),
+            "the operator must learn which connector was skipped, or an offer that never arrives has no explanation: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_decision_file_this_run_cannot_read_holds_rather_than_letting_the_destination_through() {
+        // Holding asks, and a grant answers the ask; letting it through cannot be taken back, so an unreadable decision must not read as consent.
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:abc",
+        );
+        rig.grants.make_unreadable();
+
+        let messages = crate::test_env::captured_messages(|| {
+            assert_eq!(
+                held_patterns(&rig.store(), "/work").unwrap(),
+                ["api.some-provider.example"]
+            );
+        });
+        assert!(
+            messages.iter().any(|m| m.contains("some-provider")),
+            "the operator must learn the decision could not be read: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_connector_this_project_declined_raises_no_unreadable_warning() {
+        // Deciding before parsing keeps the warning true: a declined connector is not one this run failed to read.
+        let rig = Rig::new();
+        rig.set
+            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}")
+            .unwrap();
+        rig.store()
+            .decide("/work", "broken", ProjectDecision::Declined)
+            .unwrap();
+
+        let messages = crate::test_env::captured_messages(|| {
+            assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+        });
+        assert!(
+            messages.is_empty(),
+            "nothing was skipped for being unreadable: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_installed_holds_nothing() {
+        let rig = Rig::new();
+        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
     }
 }

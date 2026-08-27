@@ -56,6 +56,32 @@ impl Paths {
     }
 }
 
+/// The destinations a run in this directory holds for a connector offer (§3.2.1). Unreadable connector state holds nothing, because a run must still launch beside it.
+pub fn held_patterns_for(project_dir: &Path) -> Vec<String> {
+    match read_held_patterns(project_dir) {
+        Ok(patterns) => patterns,
+        Err(e) => {
+            crate::log::warn!(
+                "cannot read this machine's connectors, so this run is offered none: {e:#}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn read_held_patterns(project_dir: &Path) -> Result<Vec<String>> {
+    // The same folded path `lns connector grant` keys a decision by; an unfolded one would read every grant as absent.
+    let folded = lns_artifact::sandbox::fold_path(project_dir);
+    let dir = folded
+        .to_str()
+        .with_context(|| format!("project directory {} is not utf-8", folded.display()))?;
+    let paths = Paths::resolve()?;
+    let installed = super::dir::ConnectorDir::new(paths.connectors);
+    let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
+    let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
+    handler::held_patterns(&ConnectorStore::new(&installed, &values, &grants), dir)
+}
+
 pub async fn answer(call: Call) -> Result<Response> {
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
@@ -199,6 +225,76 @@ mod tests {
         std::fs::write(&path, "\tnot: [yaml").unwrap();
         let err = read_document(&path).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"), "{err:#}");
+    }
+
+    fn install_one(home: &Path, serves: &str) {
+        let dir = home.join("connectors").join("some-provider");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": "some-provider",
+                "spec": {
+                    "serves": [serves],
+                    "methods": [{ "name": "token", "auth": { "kind": "token" } }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
+    }
+
+    /// Through the store rather than hand-written json, so the file this reads back is the shape a real decline writes.
+    fn decline(home: &Path, dir: &str) {
+        let installed = super::super::dir::ConnectorDir::new(home.join("connectors"));
+        let values: JsonDecisionStore<Profile> =
+            JsonDecisionStore::new(home.join("connector-values.json"));
+        let grants: JsonDecisionStore<ProjectDecision> =
+            JsonDecisionStore::new(home.join("connector-grants.json"));
+        ConnectorStore::new(&installed, &values, &grants)
+            .decide(dir, "some-provider", ProjectDecision::Declined)
+            .expect("record a decline");
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_run_holds_what_an_undecided_connector_on_this_machine_serves() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_one(home.path(), "api.some-provider.example");
+        assert_eq!(
+            held_patterns_for(Path::new("/work")),
+            ["api.some-provider.example"]
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn the_project_directory_is_folded_the_way_a_grant_keys_it() {
+        // The decision `lns connector grant` writes is keyed by a folded path; reading an unfolded one here would make every grant invisible and re-offer what the project already decided.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_one(home.path(), "api.some-provider.example");
+        decline(home.path(), "/work");
+        assert!(
+            held_patterns_for(Path::new("/work/sub/..")).is_empty(),
+            "/work/sub/.. is /work, so this project has already declined"
+        );
+        assert_eq!(
+            held_patterns_for(Path::new("/elsewhere")),
+            ["api.some-provider.example"],
+            "the control: an empty answer above must come from the decline, not from state this test failed to write"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn connector_state_this_build_cannot_reach_holds_nothing_rather_than_failing_the_run() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        assert!(held_patterns_for(Path::new("/work")).is_empty());
     }
 
     #[test]
