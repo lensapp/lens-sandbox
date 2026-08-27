@@ -9,14 +9,11 @@ Feature: cached sandbox management end to end
     Given a clean lns cache home
     And the Lens Sandbox service is running in that home
 
-  Scenario: listing an empty cache renders only the table header
+  Scenario: listing an empty cache says so rather than printing a bare header
     When I run "lns artifact ls"
     Then the exit code is 0
-    And the output contains "ARTIFACT"
-    And the output contains "KIND"
-    And the output contains "DIGEST"
-    And the output contains "SIZE"
-    And the output contains "HOLDER"
+    And the output contains "No cached artifacts."
+    And the output does not contain "DIGEST"
 
   Scenario: removing a sandbox that is not cached fails cleanly
     When I run "lns artifact rm registry.example.test/absent:1"
