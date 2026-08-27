@@ -102,6 +102,7 @@ impl CredentialNotifier for WindowCredentialNotifier {
                 env_var: prompt.env_var.clone(),
                 injection_domains: prompt.injection_domains.clone(),
                 is_project_defined: prompt.is_project_defined,
+                run: prompt.run.clone(),
             },
             cancel,
         );
@@ -140,6 +141,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             deny_scope: crate::credential_flow::session::DenyScope::Workload,
+            run: Some("some-run".into()),
         }
     }
 
@@ -261,6 +263,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            run: Some("some-run".into()),
         }
     }
 
@@ -280,6 +283,29 @@ mod tests {
                 command: None,
             }),
             "the card carries the prompt's token fallback so the UI can offer the pivot"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_card_carries_the_run_the_prompt_names() {
+        let (n, state, _rx) = fixture(false, false);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        n.present_sign_in(&sign_in_prompt(), cancel_tx);
+        assert_eq!(
+            state.snapshot().sign_ins[0].run.as_deref(),
+            Some("some-run"),
+            "the run the service attributed to the prompt must reach the card the developer reads"
+        );
+    }
+
+    #[test]
+    fn a_credential_card_carries_the_run_the_prompt_names() {
+        let (n, state, _rx) = fixture(false, false);
+        n.present(&prompt("c1", "some-provider"));
+        assert_eq!(
+            state.snapshot().pending_credentials[0].run.as_deref(),
+            Some("some-run"),
+            "the run the service attributed to the prompt must reach the card the developer reads"
         );
     }
 

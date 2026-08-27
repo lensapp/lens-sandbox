@@ -151,6 +151,7 @@ fn seed_one() -> Snapshot {
             offer: None,
             token_fallback: None,
             treatment: Treatment::Inspected,
+            run: Some("brave-otter".into()),
         }],
         pending_credentials: vec![],
         sign_ins: vec![],
@@ -170,6 +171,7 @@ fn seed_all() -> Snapshot {
                 offer: None,
                 token_fallback: None,
                 treatment: Treatment::Inspected,
+                run: Some("brave-otter".into()),
             },
             PendingPrompt {
                 id: "net-offer".into(),
@@ -178,6 +180,7 @@ fn seed_all() -> Snapshot {
                 offer: Some("OpenRouter".into()),
                 token_fallback: None,
                 treatment: Treatment::Inspected,
+                run: Some("demo".into()),
             },
         ],
         pending_credentials: vec![
@@ -193,6 +196,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.openai.com".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                run: Some("brave-otter".into()),
             },
             CredentialCardPrompt {
                 id: "cred-novalue".into(),
@@ -209,6 +213,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.some-provider.example".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                run: Some("demo".into()),
             },
             CredentialCardPrompt {
                 id: "cred-oauth".into(),
@@ -225,6 +230,7 @@ fn seed_all() -> Snapshot {
                 injection_domains: vec!["api.github.com".into(), "github.com".into()],
                 is_project_defined: false,
                 deny_scope: DenyScope::Workload,
+                run: Some("brave-otter".into()),
             },
         ],
         sign_ins: vec![SignInCard {
@@ -239,6 +245,7 @@ fn seed_all() -> Snapshot {
             env_var: None,
             injection_domains: vec!["api.github.com".into(), "github.com".into()],
             is_project_defined: false,
+            run: Some("brave-otter".into()),
         }],
         informs: vec!["sign-in to GitHub failed: device code expired".into()],
         connecting: vec!["OpenRouter".into()],

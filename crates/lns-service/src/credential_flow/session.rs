@@ -57,6 +57,8 @@ pub struct CredentialPendingPrompt {
     pub bound_value_available: bool,
     /// What this card's "Deny" is allowed to mean, so the durability of a refusal is fixed by the card that asked rather than by which flow happens to receive the answer.
     pub deny_scope: DenyScope,
+    /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
+    pub run: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,8 @@ pub struct SignInPrompt {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
+    pub run: Option<String>,
 }
 
 /// Abstracts the desktop notification surface so tests can drive prompts without the real system.
@@ -200,6 +204,7 @@ pub struct CredentialSession {
     pkce_challenge_gen: ChallengeGen,
     pkce_timeout: Duration,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
+    run: Option<String>,
 }
 
 impl CredentialSession {
@@ -250,7 +255,14 @@ impl CredentialSession {
             pkce_challenge_gen: Box::new(crate::oauth::PkceChallenge::generate),
             pkce_timeout: PKCE_SIGN_IN_TIMEOUT,
             ledger: OnceLock::new(),
+            run: None,
         }
+    }
+
+    /// Names the run every card this session raises speaks for; the service attributes it from the channel the request arrived on, never from the workload.
+    pub fn for_run(mut self, run: String) -> Self {
+        self.run = Some(run);
+        self
     }
 
     pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
@@ -580,6 +592,7 @@ impl CredentialSession {
             is_project_defined,
             bound_value_available,
             deny_scope: DenyScope::Workload,
+            run: self.run.clone(),
         });
     }
 
@@ -802,6 +815,7 @@ impl CredentialSession {
         let challenge = (self.pkce_challenge_gen)();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
         let card_id = credential_id.to_string();
+        let run = self.run.clone();
         let on_authorization_url = move |auth_url: &str| {
             self.notifier.present_sign_in(
                 &SignInPrompt {
@@ -813,6 +827,7 @@ impl CredentialSession {
                     env_var,
                     injection_domains,
                     is_project_defined,
+                    run,
                 },
                 cancel_tx,
             );
@@ -866,6 +881,7 @@ impl CredentialSession {
             self.provider_disclosure(credential_id);
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<crate::oauth::SignInPivot>();
         let card_id = credential_id.to_string();
+        let run = self.run.clone();
         let present = move |code: &crate::oauth::DeviceCode| {
             self.notifier.present_sign_in(
                 &SignInPrompt {
@@ -877,6 +893,7 @@ impl CredentialSession {
                     env_var,
                     injection_domains,
                     is_project_defined,
+                    run,
                 },
                 cancel_tx,
             );
@@ -1958,6 +1975,29 @@ mod tests {
         assert_eq!(p[0].id, "c1");
         assert_eq!(p[0].credential_id, "some-provider");
         assert_eq!(p[0].action, "use of some-provider placeholder");
+    }
+
+    #[test]
+    fn a_credential_card_names_the_run_that_raised_it() {
+        let (s, n, _store, _rx) = fixture();
+        let s = s.for_run("some-run".into());
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].run.as_deref(),
+            Some("some-run"),
+            "handing over a secret is a consent decision, so the card must say which run spends it"
+        );
+    }
+
+    #[test]
+    fn a_credential_card_from_a_session_with_no_run_names_nothing() {
+        let (s, n, _store, _rx) = fixture();
+        s.submit_pending(pending("c1", "some-provider"), Instant::now());
+        assert_eq!(
+            n.presented.lock().unwrap()[0].run,
+            None,
+            "a card with no originating run must stay silent rather than name one"
+        );
     }
 
     #[test]
@@ -3235,7 +3275,8 @@ mod tests {
                 help: Some("https://example.com/pat".into()),
                 command: None,
             },
-        )]));
+        )]))
+        .for_run("some-run".into());
         (session, notifier, store, rx, connected)
     }
 
@@ -3362,6 +3403,21 @@ mod tests {
                 command: None,
             }),
             "a sign-in card for a connector with a token fallback offers the pivot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_sign_in_card_names_the_run_that_raised_it() {
+        let (s, n, _store, _rx, _connected) =
+            oauth_fixture(FakeFlow::polling(vec![crate::oauth::PollOutcome::Token(
+                oauth_token(3600),
+            )]));
+        s.submit_pending(pending("c1", "some-oauth"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            n.sign_ins.lock().unwrap()[0].run.as_deref(),
+            Some("some-run"),
+            "a sign-in card asks the developer to authorize a run, so it must say which one"
         );
     }
 
@@ -3838,7 +3894,8 @@ mod tests {
             Box::new(move |url| opened_cb.lock().unwrap().push(url.to_string())),
             Box::new(fixed_pkce_challenge),
             Duration::from_secs(30),
-        );
+        )
+        .for_run("some-run".into());
         (session, notifier, store, rx, connected, opened)
     }
 
@@ -3884,6 +3941,18 @@ mod tests {
         assert_eq!(
             n.dismissed_sign_ins.lock().unwrap().as_slice(),
             &["some-pkce".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pkce_sign_in_card_names_the_run_that_raised_it() {
+        let (s, n, _store, _rx, _connected, _opened) = pkce_session(Ok("some-key".into()));
+        s.submit_pending(pending("c1", "some-pkce"), Instant::now());
+        s.connect_oauth("c1").await;
+        assert_eq!(
+            n.sign_ins.lock().unwrap()[0].run.as_deref(),
+            Some("some-run"),
+            "a browser-redirect sign-in names its run the same way a device sign-in does"
         );
     }
 

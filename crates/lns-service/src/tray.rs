@@ -1358,6 +1358,19 @@ fn close_button(ui: &mut egui::Ui, id: egui::Id, rect: egui::Rect) -> egui::Resp
     resp
 }
 
+fn run_identity_line(ui: &mut egui::Ui, run: Option<&String>) {
+    use egui::RichText;
+
+    let Some(name) = run else { return };
+    ui.add_space(5.0);
+    ui.label(
+        RichText::new(name)
+            .size(theme::FONT_CAPTION)
+            .strong()
+            .color(window::TEXT_PRIMARY),
+    );
+}
+
 fn render_network_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
@@ -1372,6 +1385,7 @@ fn render_network_card(
         width,
         |ui| {
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_PUBLIC, "NETWORK");
+            run_identity_line(ui, prompt.run.as_ref());
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("Connect to {}?", prompt.host))
@@ -1487,6 +1501,7 @@ fn render_offer_card(
         width,
         |ui| {
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
+            run_identity_line(ui, prompt.run.as_ref());
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("Connect to {display_name}?"))
@@ -1550,6 +1565,7 @@ fn render_credential_card(
         width,
         |ui| {
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_KEY, "CREDENTIAL");
+            run_identity_line(ui, prompt.run.as_ref());
             ui.add_space(6.0);
             ui.label(
                 RichText::new(&prompt.credential_id)
@@ -1674,6 +1690,7 @@ fn render_oauth_consent_card(
         width,
         |ui| {
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
+            run_identity_line(ui, prompt.run.as_ref());
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("Connect to {display_name}?"))
@@ -1759,6 +1776,7 @@ fn render_sign_in_card(
         width,
         |ui| {
             crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_LINK, "CONNECT");
+            run_identity_line(ui, card.run.as_ref());
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("Connect to {}", card.display_name))
@@ -2285,6 +2303,7 @@ mod tests {
                 offer: None,
                 token_fallback: None,
                 treatment: Treatment::Inspected,
+                run: Some("some-run".into()),
             }],
             pending_credentials: Vec::new(),
             sign_ins: Vec::new(),
@@ -2314,6 +2333,7 @@ mod tests {
             is_project_defined: false,
             bound_value_available: false,
             deny_scope: crate::credential_flow::session::DenyScope::Workload,
+            run: Some("some-run".into()),
         }
     }
 
@@ -2403,6 +2423,7 @@ mod tests {
                 offer: None,
                 token_fallback: None,
                 treatment: Treatment::Inspected,
+                run: Some("some-run".into()),
             },
             net_tx,
         );
@@ -2417,6 +2438,7 @@ mod tests {
                 env_var: None,
                 injection_domains: vec![],
                 is_project_defined: false,
+                run: Some("some-run".into()),
             },
             cancel_tx,
         );
@@ -2445,6 +2467,7 @@ mod tests {
             injection_domains: vec![],
             is_project_defined: false,
             deny_scope: DenyScope::Workload,
+            run: Some("some-run".into()),
         }
     }
 
@@ -2488,6 +2511,7 @@ mod tests {
             offer: offer.map(str::to_string),
             token_fallback: None,
             treatment: Treatment::Inspected,
+            run: Some("some-run".into()),
         };
         Snapshot {
             pending: vec![net("n0", "a.test", None), net("n1", "b.test", Some("Svc"))],

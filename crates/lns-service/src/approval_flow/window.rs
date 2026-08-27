@@ -53,6 +53,8 @@ pub struct CredentialCardPrompt {
     pub is_project_defined: bool,
     /// Mirrors [`crate::credential_flow::session::CredentialPendingPrompt::deny_scope`]: how far this card's "Deny" reaches.
     pub deny_scope: DenyScope,
+    /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
+    pub run: Option<String>,
 }
 
 /// An interactive sign-in card: which service, where to sign in, and — for a device flow — the code to type (`None` for a pkce browser redirect). `token_fallback` is `Some` when the connector lets a blocked user pivot to a pasted token.
@@ -66,6 +68,7 @@ pub struct SignInCard {
     pub env_var: Option<String>,
     pub injection_domains: Vec<String>,
     pub is_project_defined: bool,
+    pub run: Option<String>,
 }
 
 pub struct WindowState {
@@ -226,6 +229,7 @@ impl WindowState {
                 injection_domains: prompt.injection_domains,
                 is_project_defined: prompt.is_project_defined,
                 deny_scope: prompt.deny_scope,
+                run: prompt.run,
             },
             decision_tx,
             seq,
@@ -644,6 +648,7 @@ mod tests {
             offer: None,
             token_fallback: None,
             treatment: Treatment::Inspected,
+            run: None,
         }
     }
 
@@ -659,6 +664,7 @@ mod tests {
             is_project_defined: false,
             bound_value_available: false,
             deny_scope: DenyScope::Workload,
+            run: Some("some-run".into()),
         }
     }
 
@@ -670,6 +676,18 @@ mod tests {
         s.insert_pending(prompt("r1", "a.test"), tx.clone());
         s.insert_pending(prompt("r2", "b.test"), tx);
         assert_eq!(s.pending_count(), 2);
+    }
+
+    #[test]
+    fn a_credential_card_keeps_the_run_its_prompt_names() {
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_credential_pending(cred_prompt("c1", "some-provider"), false, tx);
+        assert_eq!(
+            s.snapshot().pending_credentials[0].run.as_deref(),
+            Some("some-run"),
+            "the window must not drop the attribution the service put on the prompt"
+        );
     }
 
     #[test]
@@ -820,6 +838,7 @@ mod tests {
             offer: Some(name.into()),
             token_fallback: None,
             treatment: Treatment::Inspected,
+            run: None,
         }
     }
 
@@ -1142,6 +1161,7 @@ mod tests {
             env_var: None,
             injection_domains: vec![],
             is_project_defined: false,
+            run: None,
         }
     }
 
@@ -1371,6 +1391,7 @@ mod tests {
             is_project_defined: false,
             bound_value_available: false,
             deny_scope: DenyScope::Workload,
+            run: None,
         }
     }
 

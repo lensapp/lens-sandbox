@@ -87,6 +87,7 @@ pub(crate) mod tests {
             offer: None,
             token_fallback: None,
             treatment: Treatment::Inspected,
+            run: None,
         }
     }
 
