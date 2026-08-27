@@ -48,7 +48,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Name the run, addressable in place of its id by every `lns sandbox` verb. Auto-generated (adjective_noun) when omitted; must not be all digits."
+        help = "Name the run, addressable in place of its id by every `lns sandbox` verb. Omitted, a run of a document is named after it plus one word (some-sandbox-falcon) and any other run gets two (amber-falcon); must not be all digits."
     )]
     pub name: Option<String>,
 
