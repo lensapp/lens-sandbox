@@ -3216,7 +3216,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lens-sandbox-core"
 version = "0.1.0"
-source = "git+https://github.com/lensapp/lens-sandbox-core?rev=64d25772331fb6da5569b1c54e61f84ee0730fca#64d25772331fb6da5569b1c54e61f84ee0730fca"
+source = "git+https://github.com/lensapp/lens-sandbox-core?rev=a0a957862c4af523c837ce30a32030d5d9afff37#a0a957862c4af523c837ce30a32030d5d9afff37"
 dependencies = [
  "apollo-parser",
  "async-trait",
