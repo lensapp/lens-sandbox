@@ -22,43 +22,7 @@ mod tests {
     use lns_artifact::resources::DEFAULT_VM_SIZE;
     use lns_artifact::spec::Quantity;
 
-    #[derive(Default)]
-    struct MessageCapture(std::sync::Mutex<Vec<String>>);
-
-    struct MessageLayer(std::sync::Arc<MessageCapture>);
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageLayer {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct Message<'a>(&'a mut String);
-            impl tracing::field::Visit for Message<'_> {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        *self.0 = format!("{value:?}");
-                    }
-                }
-            }
-            let mut message = String::new();
-            event.record(&mut Message(&mut message));
-            self.0.0.lock().unwrap().push(message);
-        }
-    }
-
-    fn captured_messages(f: impl FnOnce()) -> Vec<String> {
-        use tracing_subscriber::layer::SubscriberExt;
-        let capture = std::sync::Arc::new(MessageCapture::default());
-        let subscriber =
-            tracing_subscriber::registry().with(MessageLayer(std::sync::Arc::clone(&capture)));
-        tracing::subscriber::with_default(subscriber, f);
-        capture.0.lock().unwrap().clone()
-    }
+    use crate::test_env::captured_messages;
 
     #[test]
     fn a_request_this_host_will_not_grant_is_said_out_loud_per_field() {

@@ -98,6 +98,7 @@ pub struct ApprovalSession {
     timeout: Duration,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
     shipped: OnceLock<Policy>,
+    holding: OnceLock<Vec<String>>,
     run: Option<String>,
 }
 
@@ -126,6 +127,7 @@ impl ApprovalSession {
             timeout,
             ledger: OnceLock::new(),
             shipped: OnceLock::new(),
+            holding: OnceLock::new(),
             run: None,
         }
     }
@@ -147,6 +149,19 @@ impl ApprovalSession {
 
     pub fn current_policy(&self) -> Policy {
         self.policy.lock().expect("policy mutex poisoned").clone()
+    }
+
+    /// The `serves` patterns of every connector this project has not decided; a destination one covers is held so the run asks (§3.2.1). Idempotent, the first wins.
+    pub fn hold_for_offers(&self, serves: Vec<String>) {
+        let _ = self.holding.set(serves);
+    }
+
+    /// The policy as the guest receives it, holds and all — the one shape both the boot frame and every reload go through.
+    pub fn policy_message(&self) -> PolicyMessage {
+        PolicyMessage::seeded_holding(
+            self.current_policy(),
+            self.holding.get().map(Vec::as_slice).unwrap_or_default(),
+        )
     }
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
@@ -305,9 +320,7 @@ impl ApprovalSession {
     }
 
     fn send_policy_frame(&self) {
-        let _ = self.sink.send(HostFrame::Policy(PolicyMessage::seeded(
-            self.current_policy(),
-        )));
+        let _ = self.sink.send(HostFrame::Policy(self.policy_message()));
     }
 
     fn apply_persistent_rule(&self, rule: RouteRule) -> bool {
@@ -997,6 +1010,90 @@ pub(crate) mod tests {
             HostFrame::RequestDecision(d) => d,
             other => panic!("expected RequestDecision, got {other:?}"),
         }
+    }
+
+    fn tcp_verdicts(message: &PolicyMessage) -> Vec<(String, WireVerdict)> {
+        message
+            .network
+            .as_ref()
+            .expect("a network section")
+            .egress
+            .tcp
+            .iter()
+            .map(|rule| (rule.match_pattern.clone(), rule.verdict))
+            .collect()
+    }
+
+    fn allowing_one_raw_destination(destination: &str) -> Policy {
+        let mut policy = Policy::default();
+        policy
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination(destination));
+        policy
+    }
+
+    #[test]
+    fn a_served_destination_is_held_in_every_policy_this_session_publishes() {
+        // §3.2.1: the run allows the destination, so nothing would ask about it; the hold is what raises the offer.
+        let (s, _n, _store, _rx) = fixture_holding(allowing_one_raw_destination(
+            "db.some-provider.example:5432",
+        ));
+        s.hold_for_offers(vec!["db.some-provider.example".to_string()]);
+
+        assert_eq!(
+            tcp_verdicts(&s.policy_message()),
+            [
+                (
+                    "db.some-provider.example:5432".to_string(),
+                    WireVerdict::Ask
+                ),
+                (
+                    "db.some-provider.example:5432".to_string(),
+                    WireVerdict::Allow
+                ),
+            ],
+            "the hold must lead the allow it narrows, because the guest gate is first-match-wins"
+        );
+    }
+
+    #[test]
+    fn a_session_holding_nothing_publishes_the_policy_unchanged() {
+        let (s, _n, _store, _rx) = fixture_holding(allowing_one_raw_destination(
+            "db.some-provider.example:5432",
+        ));
+        assert_eq!(
+            tcp_verdicts(&s.policy_message()),
+            [(
+                "db.some-provider.example:5432".to_string(),
+                WireVerdict::Allow
+            )],
+            "a machine with no undecided connector installed sends what it always sent"
+        );
+    }
+
+    #[test]
+    fn a_reload_republishes_the_hold_rather_than_dropping_it() {
+        // The developer edits the decisions file mid-run; the connector is still undecided, so its destinations must stay held.
+        let (s, _n, _store, mut rx) = fixture_holding(allowing_one_raw_destination(
+            "db.some-provider.example:5432",
+        ));
+        s.hold_for_offers(vec!["db.some-provider.example".to_string()]);
+
+        s.apply_external_policy(allowing_one_raw_destination(
+            "db.some-provider.example:5432",
+        ));
+
+        let published = policy_frame(&mut rx);
+        assert_eq!(
+            tcp_verdicts(&published)
+                .iter()
+                .filter(|(_, verdict)| *verdict == WireVerdict::Ask)
+                .count(),
+            1,
+            "the reloaded frame still holds the served destination: {published:?}"
+        );
     }
 
     fn policy_frame(rx: &mut mpsc::UnboundedReceiver<HostFrame>) -> PolicyMessage {

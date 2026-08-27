@@ -44,9 +44,53 @@ impl Drop for EnvVarGuard {
     }
 }
 
+#[derive(Default)]
+struct MessageCapture(std::sync::Mutex<Vec<String>>);
+
+struct MessageLayer(std::sync::Arc<MessageCapture>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Message<'a>(&'a mut String);
+        impl tracing::field::Visit for Message<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = String::new();
+        event.record(&mut Message(&mut message));
+        self.0.0.lock().unwrap().push(message);
+    }
+}
+
+/// Every message `f` logs, so a test can pin what an operator is told rather than only that a branch ran.
+pub(crate) fn captured_messages(f: impl FnOnce()) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let capture = std::sync::Arc::new(MessageCapture::default());
+    let subscriber =
+        tracing_subscriber::registry().with(MessageLayer(std::sync::Arc::clone(&capture)));
+    tracing::subscriber::with_default(subscriber, f);
+    capture.0.lock().unwrap().clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_captured_message_carries_what_was_logged() {
+        let messages = captured_messages(|| crate::log::warn!("something to say"));
+        assert!(
+            messages.iter().any(|m| m.contains("something to say")),
+            "{messages:?}"
+        );
+    }
 
     #[test]
     #[serial_test::serial(env)]

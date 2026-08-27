@@ -156,6 +156,18 @@ fn running_policies(
     Ok((effective, own))
 }
 
+/// The decisions file sits in the project directory, which is the directory a grant is keyed by.
+fn held_patterns_for_project(policy_path: &Path) -> Vec<String> {
+    // An empty parent names no directory, so it would match no grant and ask about every served destination with no way to answer.
+    match policy_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        Some(project) => crate::connector::real::held_patterns_for(project),
+        None => Vec::new(),
+    }
+}
+
 pub(super) async fn start(
     run_id: String,
     microvm_name: String,
@@ -192,6 +204,8 @@ pub(super) async fn start(
     if let Some(baseline) = sandbox_policy {
         session.set_shipped_policy(baseline.clone());
     }
+
+    session.hold_for_offers(held_patterns_for_project(policy_path));
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -803,5 +817,69 @@ mod tests {
         assert!(name.starts_with("supervisor-embedded-"), "name: {name}");
         let mode = std::fs::metadata(&first).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "installed binary must be executable");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_run_holds_what_the_connectors_beside_its_decisions_file_serve() {
+        // The project is the decisions file's own directory, which is what a grant is keyed by; reading any other directory would offer a connector the project already answered for.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_some_provider(home.path());
+
+        let decided = tempfile::tempdir().expect("tempdir");
+        let undecided = tempfile::tempdir().expect("tempdir");
+        decline_in(home.path(), decided.path());
+
+        assert!(
+            held_patterns_for_project(&decided.path().join("lns-local-mixin.yaml")).is_empty(),
+            "the decisions file's own directory is what the decline was keyed by"
+        );
+        assert_eq!(
+            held_patterns_for_project(&undecided.path().join("lns-local-mixin.yaml")),
+            ["api.some-provider.example"],
+            "the control: the empty answer above must come from the decline, not from state this test failed to write"
+        );
+    }
+
+    fn install_some_provider(home: &Path) {
+        let connector = home.join("connectors").join("some-provider");
+        std::fs::create_dir_all(&connector).unwrap();
+        std::fs::write(
+            connector.join("document.json"),
+            r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"}}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(connector.join("digest"), "sha256:abc").unwrap();
+    }
+
+    /// Keyed by the project directory itself, the way `lns connector grant` writes one.
+    fn decline_in(home: &Path, project: &Path) {
+        use lns_policy::decision_store::JsonDecisionStore;
+        let installed = crate::connector::dir::ConnectorDir::new(home.join("connectors"));
+        let values: JsonDecisionStore<crate::connector::store::Profile> =
+            JsonDecisionStore::new(home.join("connector-values.json"));
+        let grants: JsonDecisionStore<crate::connector::store::ProjectDecision> =
+            JsonDecisionStore::new(home.join("connector-grants.json"));
+        crate::connector::store::ConnectorStore::new(&installed, &values, &grants)
+            .decide(
+                lns_artifact::sandbox::fold_path(project)
+                    .to_str()
+                    .expect("a utf-8 tempdir"),
+                "some-provider",
+                crate::connector::store::ProjectDecision::Declined,
+            )
+            .expect("record a decline");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_relative_decisions_file_holds_nothing_rather_than_asking_about_everything() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_some_provider(home.path());
+        // Its parent is "", which matches no grant, so every served destination would ask and no grant could ever silence it.
+        assert!(held_patterns_for_project(Path::new("lns-local-mixin.yaml")).is_empty());
+        assert!(held_patterns_for_project(Path::new("")).is_empty());
     }
 }

@@ -81,6 +81,16 @@ pub enum ProjectDecision {
     Declined,
 }
 
+impl ProjectDecision {
+    /// Whether this answers for the bytes installed now. A grant bound to other bytes does not, so any update offers again; a decline answers for every version (§7.1).
+    pub fn decides(&self, installed_digest: &str) -> bool {
+        match self {
+            Self::Granted { digest, .. } => digest == installed_digest,
+            Self::Declined => true,
+        }
+    }
+}
+
 fn profile_key(name: &str, label: &str) -> String {
     format!("{name}{SEP}{label}")
 }
@@ -256,7 +266,8 @@ impl<'a> ConnectorStore<'a> {
         installed_digest: &str,
     ) -> io::Result<Option<ProjectDecision>> {
         Ok(self.decision(dir, name)?.filter(|decision| {
-            matches!(decision, ProjectDecision::Granted { digest, .. } if digest == installed_digest)
+            matches!(decision, ProjectDecision::Granted { .. })
+                && decision.decides(installed_digest)
         }))
     }
 
