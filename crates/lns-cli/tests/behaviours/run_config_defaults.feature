@@ -19,6 +19,23 @@ Feature: lns run falls back to configured defaults
     When the user resolves `lns run alpine` against the configured defaults
     Then the run summary shows "1 vCPU · 512 MiB"
 
+  Scenario: A bare mixin reference is qualified with the built-in default registry
+    When the user resolves `lns run --mixin acme/obs-tools:2 alpine` against the configured defaults
+    Then the run carries the mixin "hub.lns.run/acme/obs-tools:2"
+
+  Scenario: A configured registry qualifies a bare mixin reference
+    Given the default "run.registry" is "ghcr.io"
+    When the user resolves `lns run --mixin acme/obs-tools:2 alpine` against the configured defaults
+    Then the run carries the mixin "ghcr.io/acme/obs-tools:2"
+
+  Scenario: A fully-qualified mixin reference is used as the user typed it
+    When the user resolves `lns run --mixin ghcr.io/acme/obs-tools:2 alpine` against the configured defaults
+    Then the run carries the mixin "ghcr.io/acme/obs-tools:2"
+
+  Scenario: A mixin named by a path is a local document, never a reference
+    When the user resolves `lns run --mixin ./obs alpine` against the configured defaults
+    Then the run carries the mixin "./obs"
+
   Scenario: The resources a document declares outrank a configured default
     Given the default "run.cpus" is "4"
     And the default "run.mem" is "2048"

@@ -73,10 +73,22 @@ Feature: inspecting a typed artifact before running it
     And the inspect request names the "obs" mixin directory by its absolute path
 
   Scenario: a mixin the user names reads as the tag and the digest it pinned to
-    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox the user's mixin "obs-tools:2" resolved into "ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
-    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin obs-tools:2"
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox the user's mixin "ghcr.io/acme/obs:2" resolved into "ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin ghcr.io/acme/obs:2"
     Then the exit code is 0
-    And the output contains "mixin: obs-tools:2 → ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
+    And the output contains "mixin: ghcr.io/acme/obs:2 → ghcr.io/acme/obs@sha256:5b9e1f0a7c3d284e6b15f907a2c8d63b40e19a7c25f8b0d3e6a94c17f582aa41"
+
+  Scenario: a bare mixin reference is qualified with the default registry before it reaches the service
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox with launch settings
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin acme/obs-tools:2"
+    Then the exit code is 0
+    And the inspect request names the mixin "hub.lns.run/acme/obs-tools:2"
+
+  Scenario: a fully-qualified mixin reference reaches the service as the user typed it
+    Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox with launch settings
+    When the user runs "lns inspect registry.example.test/some-sandbox:1.0 --mixin ghcr.io/acme/obs-tools:2"
+    Then the exit code is 0
+    And the inspect request names the mixin "ghcr.io/acme/obs-tools:2"
 
   Scenario: inspecting a published sandbox names the mixins it resolved into
     Given the service inspects "registry.example.test/some-sandbox:1.0" as a sandbox resolved from the mixin "ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582"

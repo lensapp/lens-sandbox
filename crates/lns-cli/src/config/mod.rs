@@ -378,14 +378,23 @@ pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.cpus_config = defaults.cpus;
     args.mem_config = defaults.mem;
     args.registry = args.registry.or(defaults.registry);
+    let registry = args.registry.clone();
     if let Some(image) = args.image.take() {
-        args.image = Some(if crate::run::target::is_definition_path(&image) {
-            image
-        } else {
-            resolve_default_registry(&image, args.registry.as_deref())
-        });
+        args.image = Some(qualify_unless_local(&image, registry.as_deref()));
+    }
+    for mixin in &mut args.mixins {
+        *mixin = qualify_unless_local(mixin, registry.as_deref());
     }
     args
+}
+
+/// A path names a document on this machine, so only a reference is addressed to a registry — §2.3.
+pub fn qualify_unless_local(reference: &str, default_registry: Option<&str>) -> String {
+    if crate::run::target::is_definition_path(reference) {
+        reference.to_string()
+    } else {
+        resolve_default_registry(reference, default_registry)
+    }
 }
 
 /// Qualifies a bare image reference with the configured default registry, falling back to [`DEFAULT_REGISTRY`]; a reference that already names a registry — or a docker.io default, which the parser already assumes — is left untouched so implicit `library/` namespacing is preserved.
