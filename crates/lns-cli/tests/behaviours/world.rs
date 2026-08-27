@@ -171,6 +171,7 @@ pub struct DeclaredMountRig {
 #[derive(Debug, Default)]
 pub struct ResolvedRunView {
     pub summary: String,
+    pub mixins: Vec<String>,
     pub workdir: Option<String>,
     pub volumes: Vec<String>,
     pub binds: Vec<String>,

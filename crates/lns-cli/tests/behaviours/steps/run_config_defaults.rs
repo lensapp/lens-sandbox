@@ -30,8 +30,25 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
             Path::new("./lns-local-mixin.yaml"),
             &PolicySource::Found,
         ),
+        mixins: resolved.mixins.clone(),
         ..Default::default()
     });
+}
+
+#[then(regex = r#"^the run carries the mixin "([^"]+)"$"#)]
+fn run_carries_the_mixin(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let view = world
+        .resolved_run
+        .as_ref()
+        .ok_or("no resolved run captured")?;
+    if view.mixins == [expected.clone()] {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the run to carry the mixin {expected:?}, got {:?}",
+            view.mixins
+        ))
+    }
 }
 
 #[when(regex = r"^the local run summary is composed against the configured defaults$")]

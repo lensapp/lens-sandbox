@@ -838,6 +838,19 @@ fn inspect_request_roots_the_mixin(w: &mut BehaviourWorld, name: String) {
     );
 }
 
+#[then(regex = r#"^the inspect request names the mixin "([^"]+)"$"#)]
+fn inspect_request_names_the_mixin(w: &mut BehaviourWorld, expected: String) {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let mixins = requests
+        .iter()
+        .find_map(|request| match request {
+            Request::InspectImage { mixins, .. } => Some(mixins.clone()),
+            _ => None,
+        })
+        .expect("an inspect request");
+    assert_eq!(mixins, vec![expected]);
+}
+
 #[then("the pull request is bound to the inspected digest")]
 fn pull_is_bound_to_inspected_digest(w: &mut BehaviourWorld) {
     let requests = w.sandbox.requests.lock().unwrap();

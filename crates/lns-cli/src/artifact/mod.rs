@@ -88,7 +88,7 @@ shortcut_spec!(
     "Re-reference a cached artifact (shortcut for `lns artifact tag`)."
 );
 
-/// Qualifies every REF a verb addresses with `registry`, or the built-in default when nothing is configured — §2.3: a bare REF is qualified, never guessed. A path-shaped inspect target is a local document and stays as written, and a bare tag target follows its qualified source's registry.
+/// Qualifies every REF a verb addresses with `registry`, or the built-in default when nothing is configured — §2.3: a bare REF is qualified, never guessed. A path-shaped inspect target or `--mixin` is a local document and stays as written, and a bare tag target follows its qualified source's registry.
 pub fn apply_registry_default(command: &mut ArtifactCommand, registry: Option<&str>) {
     let qualify = |reference: &mut String| {
         *reference = crate::config::resolve_default_registry(reference, registry)
@@ -102,6 +102,9 @@ pub fn apply_registry_default(command: &mut ArtifactCommand, registry: Option<&s
                 && !crate::run::target::is_definition_path(reference)
             {
                 qualify(reference);
+            }
+            for mixin in &mut args.mixins {
+                *mixin = crate::config::qualify_unless_local(mixin, registry);
             }
         }
         ArtifactCommand::Tag(args) => {
@@ -1562,6 +1565,30 @@ mod tests {
                 "ghcr.io/team/obs:1".to_string()
             ],
             "a directory roots where the user typed it; a registry reference passes untouched"
+        );
+    }
+
+    #[test]
+    fn a_path_shaped_mixin_is_never_addressed_to_a_registry() {
+        let mut command = ArtifactCommand::Inspect(InspectArgs {
+            reference: Some("ghcr.io/team/hermes:1.4.0".into()),
+            file: None,
+            mixins: vec![
+                ".".into(),
+                "./obs".into(),
+                "../obs".into(),
+                "/opt/obs".into(),
+                "obs/lns.yaml".into(),
+            ],
+        });
+        apply_registry_default(&mut command, Some("ghcr.io"));
+        let ArtifactCommand::Inspect(args) = command else {
+            panic!("inspect stays inspect")
+        };
+        assert_eq!(
+            args.mixins,
+            vec![".", "./obs", "../obs", "/opt/obs", "obs/lns.yaml"],
+            "qualification runs before a directory roots, so a path must survive it as written"
         );
     }
 
