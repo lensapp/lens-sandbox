@@ -673,6 +673,14 @@ appears on a [`hostPath` fileset](#3111-filesets) and means the same thing.
 - MUST NOT overlap the `/.lens` runtime namespace, which belongs to the sandbox
   itself. `/` is likewise refused.
 - MUST be unique across **all** `volumes` and `filesets` in the document.
+  Uniqueness is decided on path segments, not on the string, so `/home/node` and
+  `/home/node/` are one claim, not two.
+- A fileset `guestPath` and a volume `target` whose paths **nest** — `/home/node`
+  and `/home/node/.config` — are two claims the mount order decides between;
+  [§3.1.11](#3111-filesets) says which of those a document may make. Two
+  `volumes` that nest, and two `filesets` that nest, are both allowed: the guest
+  mounts nested volumes in declaration order, and two filesets writing under one
+  another are just files.
 
 #### 3.1.11 `filesets`
 
@@ -712,6 +720,30 @@ filesystem before the workload starts. Nothing is mounted at the path, and
 nothing can be unmounted from it. The field says where the files land, which is
 what `guestPath` names. The two keep separate words because they are separate
 things — one attaches a filesystem, the other places files.
+
+**A `guestPath` nested under a volume `target`.** The mounts happen after the
+files are placed, so a `guestPath` under a volume `target` names a path the mount
+covers. The run does not leave the file where the mount hides it: it writes the
+file into the volume once the volume is mounted, and it does so on **every** boot,
+because a fileset is re-derived from its source every run. What the workload wrote
+there last run does not survive — the document is what decides that path.
+
+Two volumes take no such write, and a document declaring one under them is
+**refused**:
+
+- a **bind**, because writing there would create files in the host directory the
+  bind shares, and they would outlive the run. A fileset never writes to the host
+  filesystem.
+- a **read-only** volume, because it takes no write at all, so the file could
+  never land.
+
+Both refusals name the fileset entry and the volume entry. The nesting may run
+either way — a `guestPath` under a `target`, or a `target` under a `guestPath` —
+and is refused the same.
+
+A document validates against its own `volumes`, so a run that adds one of those
+two mounts itself — a read-only or bind mount the launch names rather than the
+document — is refused when the run starts instead, before anything boots.
 
 A `path` or `inline` fileset is **not a separate artifact**. `inline` content
 lives in this document, and a `path` directory is packed into a layer of the same
@@ -1186,7 +1218,7 @@ What "wins" means per block:
 | `egress` | Union of entries, later sources placed ahead of earlier ones, so the latest entry matching a destination is the one that decides ([§4.2](#42-the-egress-definition)). |
 | `credentials` | Union by `envVar`. A later source redefining one replaces it whole — its `placeholder` and `injections` together, never half of each. |
 | `tools` | Union by name. The last version declared wins. |
-| `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace. The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
+| `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace, compared on path segments ([§3.1.10](#3110-volumes)). The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
 | `ports` | Union by `container`. The last mapping wins. |
 | `scripts` | **Append**, in source order. Not last-wins: every source's scripts run, the sandbox's own first and the local mixin's last. |
 
