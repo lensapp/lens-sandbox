@@ -79,14 +79,37 @@ impl Identity {
     }
 }
 
+const MAX_FIELD_LEN: usize = 64;
+
+/// `$SHELL` is whatever the user exported and a uname field is whatever the kernel reports, so a field is folded to a bounded, header-legal token before it reaches a `User-Agent`: a control character makes the header invalid outright, and the format's own separators would otherwise forge a field.
+fn field(raw: &str) -> String {
+    let safe: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '/' | ':') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(MAX_FIELD_LEN)
+        .collect();
+    if safe.is_empty() {
+        "unknown".to_string()
+    } else {
+        safe
+    }
+}
+
 pub fn user_agent(version: &str, p: &PlatformInfo, method: Method) -> String {
     format!(
         "{product}/{version} (os={os}; arch={arch}; kernel={os}/{rel}; shell={shell}; method={method})",
         product = method.product(),
-        os = p.os,
-        arch = p.arch,
-        rel = p.kernel_release,
-        shell = p.shell,
+        version = field(version),
+        os = field(&p.os),
+        arch = field(&p.arch),
+        rel = field(&p.kernel_release),
+        shell = field(&p.shell),
         method = method.as_str(),
     )
 }
@@ -191,6 +214,55 @@ mod tests {
             ua,
             "lns/0.16.0 (os=Darwin; arch=arm64; kernel=Darwin/24.6.0; shell=zsh; method=cli-login)"
         );
+    }
+
+    fn is_header_safe(ua: &str) -> bool {
+        ua.bytes().all(|b| b >= 32 && b != 127)
+    }
+
+    #[test]
+    fn a_control_character_in_the_shell_name_cannot_produce_an_invalid_header() {
+        let ua = user_agent(
+            "0.21.0",
+            &platform("Darwin", "arm64", "24.6.0", "z\nsh\r"),
+            Method::RegistryPull,
+        );
+        assert!(is_header_safe(&ua), "{ua:?}");
+        assert!(ua.contains("shell=z_sh_;"), "{ua}");
+    }
+
+    #[test]
+    fn a_field_that_mimics_the_format_cannot_forge_another_one() {
+        let ua = user_agent(
+            "0.21.0",
+            &platform("Darwin", "arm64", "24.6.0", "zsh; method=install-script"),
+            Method::RegistryPull,
+        );
+        assert!(ua.ends_with("method=registry-pull)"), "{ua}");
+        assert!(!ua.contains("method=install-script"), "{ua}");
+    }
+
+    #[test]
+    fn a_hostile_length_field_is_truncated() {
+        let ua = user_agent(
+            "0.21.0",
+            &platform("Darwin", "arm64", "24.6.0", &"z".repeat(500)),
+            Method::RegistryPull,
+        );
+        assert!(ua.contains(&format!("shell={};", "z".repeat(64))), "{ua}");
+    }
+
+    #[test]
+    fn a_field_left_empty_by_sanitising_says_unknown() {
+        let ua = user_agent(
+            "",
+            &platform("Darwin", "arm64", "", "\u{1}"),
+            Method::RegistryPull,
+        );
+        assert!(is_header_safe(&ua), "{ua:?}");
+        assert!(ua.starts_with("lns/unknown ("), "{ua}");
+        assert!(ua.contains("kernel=Darwin/unknown;"), "{ua}");
+        assert!(ua.contains("shell=_;"), "{ua}");
     }
 
     #[test]

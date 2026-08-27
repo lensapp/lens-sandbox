@@ -45,6 +45,7 @@ async fn ensure_with(env_get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Re
     ensure_pinned(
         &RealFetcher {
             max_bytes: MAX_KERNEL_BYTES,
+            method: lns_ipc::Method::AssetDownload,
         },
         &RealFs,
         &cache,

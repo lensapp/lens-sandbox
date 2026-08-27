@@ -124,6 +124,38 @@ mod tests {
         format!("{:x}", Sha256::digest(payload()))
     }
 
+    async fn user_agent_seen_by_a_server(method: lns_ipc::Method) -> String {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(payload()))
+            .mount(&server)
+            .await;
+        RealFetcher {
+            max_bytes: 1024,
+            method,
+        }
+        .fetch(&format!("{}/artifact", server.uri()))
+        .await
+        .expect("the mock server answers");
+        let received = server.received_requests().await.expect("recorded requests");
+        received[0]
+            .headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_download_announces_the_traffic_its_caller_declared() {
+        let asset = user_agent_seen_by_a_server(lns_ipc::Method::AssetDownload).await;
+        assert!(asset.starts_with("lns/"), "{asset}");
+        assert!(asset.ends_with("method=asset-download)"), "{asset}");
+
+        let index = user_agent_seen_by_a_server(lns_ipc::Method::ToolIndex).await;
+        assert!(index.ends_with("method=tool-index)"), "{index}");
+    }
+
     fn art<'a>(sha: &'a str, mode: Option<u32>) -> PinnedArtifact<'a> {
         PinnedArtifact {
             filename: "artifact.bin",
