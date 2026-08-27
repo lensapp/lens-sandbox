@@ -1,9 +1,44 @@
 @serial
 Feature: naming runs — the service owns names and resolution
   Every run carries a numeric id and a name. `--name` sets the name;
-  omitting it draws one. Names are unique among listed runs, are
-  addressable in place of the id, and are freed for reuse once their run
-  is removed. `lns sandbox rename` changes a run's name in place.
+  omitting it names the run after the document it runs, plus one drawn
+  word, and a run with no document takes two drawn words. Names are
+  unique among listed runs, are addressable in place of the id, and are
+  freed for reuse once their run is removed. `lns sandbox rename` changes
+  a run's name in place.
+
+  Scenario: a run of a named document takes its name from the document
+    Given a fresh service handler
+    And a document that declares the name "some-sandbox"
+    When a run is registered without a name
+    Then the run's name starts with "some-sandbox-"
+    And the name is "some-sandbox" followed by one more word
+
+  Scenario: two runs of the same document get different names
+    Given a fresh service handler
+    And a document that declares the name "some-sandbox"
+    When a run is registered without a name
+    And a second run of the same document is registered without a name
+    Then the two runs have different names
+
+  Scenario: an explicit name still wins over the document's
+    Given a fresh service handler
+    And a document that declares the name "some-sandbox"
+    When a run is registered with the name "some-run"
+    Then the run's name is "some-run"
+
+  Scenario: the generator never hands out a name a live run holds
+    Given a registered run named "some-sandbox-otter"
+    And a document that declares the name "some-sandbox"
+    When a run is registered without a name
+    Then the run's name is not "some-sandbox-otter"
+    And the run's name starts with "some-sandbox-"
+
+  Scenario: a name freed by a removed run can be drawn again
+    Given a registered run named "some-sandbox-otter" that has already exited
+    When a RemoveRun request for run "some-sandbox-otter" arrives
+    Then the response is Acknowledged
+    And a run can then be registered with the name "some-sandbox-otter"
 
   Scenario: a run registered without a name is auto-assigned two hyphenated words
     Given a fresh service handler

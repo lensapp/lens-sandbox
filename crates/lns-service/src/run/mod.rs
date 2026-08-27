@@ -270,6 +270,13 @@ fn canonical_dir_key(dir: &str) -> String {
         .unwrap_or_else(|_| dir.to_string())
 }
 
+/// The name a document gives the runs it launches; nothing for a run that carries no document, and nothing for one too malformed to name itself — the plan that parses it for real is what refuses it.
+pub fn document_name(definition: Option<&str>) -> Option<String> {
+    lns_artifact::sandbox::parse_resolved(definition?.as_bytes())
+        .ok()
+        .map(|d| d.name)
+}
+
 /// The identity a run's connector grants key against: a local definition by its directory (every `-f` variant of one project, and every symlink alias of it, shares it), a published sandbox by `repo@digest` (a republished digest re-offers). A run resolving neither refuses — plain-image runs are retired, and a shared fallback bucket would let one run's grant arm another's without a card.
 pub(super) fn workload_identity(
     args: &lns_ipc::RunImageArgs,
@@ -327,6 +334,33 @@ mod assembling_progress_tests {
             });
         });
         assert_eq!(frames, vec![assembling_frame(0, 8192)]);
+    }
+}
+
+#[cfg(test)]
+mod document_name_tests {
+    use super::*;
+
+    fn document(name: &str) -> String {
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"{name}","spec":{{"image":"x:1"}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_document_names_the_runs_it_launches() {
+        let def = document("some-sandbox");
+        assert_eq!(document_name(Some(&def)), Some("some-sandbox".to_string()));
+    }
+
+    #[test]
+    fn a_run_with_no_document_has_no_document_name() {
+        assert_eq!(document_name(None), None);
+    }
+
+    #[test]
+    fn a_definition_that_cannot_be_parsed_names_nothing() {
+        assert_eq!(document_name(Some("not json")), None);
     }
 }
 

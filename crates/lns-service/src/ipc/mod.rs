@@ -3555,7 +3555,7 @@ mod tests {
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
         handle.exec_environment.tools = tools.clone();
-        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        crate::run_registry::register_named(run_id.clone(), None, None, handle).expect("register");
         let mut args = exec_args(vec!["node".into()], false, false);
         args.env = vec!["PATH=/usr/bin".into()];
         let params = build_session_params(args, &run_id);
@@ -3598,7 +3598,7 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        crate::run_registry::register_named(run_id.clone(), None, None, handle).expect("register");
 
         let args = exec_args(vec!["printenv".into()], false, false);
         assert!(args.env.is_empty(), "the CLI sends no env for an exec");
@@ -3640,7 +3640,7 @@ mod tests {
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
         handle.exec_environment.tools = tools.clone();
-        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        crate::run_registry::register_named(run_id.clone(), None, None, handle).expect("register");
         let args = exec_args(vec!["node".into()], false, false);
         assert!(args.env.is_empty(), "the CLI sends no env for exec");
         let params = build_session_params(args, &run_id);
@@ -3667,8 +3667,13 @@ mod tests {
             bin_paths: vec!["/.lens/tools/node/22.11.0/bin".to_string()],
             env: Vec::new(),
         };
-        crate::run_registry::register_named(run_id.clone(), Some("calm-finch".into()), handle)
-            .expect("register the run");
+        crate::run_registry::register_named(
+            run_id.clone(),
+            Some("calm-finch".into()),
+            None,
+            handle,
+        )
+        .expect("register the run");
 
         let by_name = crate::run_registry::resolve("calm-finch").expect("name resolves");
         let params = build_session_params(exec_args(vec!["node".into()], false, false), &by_name);

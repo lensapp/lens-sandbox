@@ -32,23 +32,35 @@ pub trait Generate {
 
 pub struct Generator<D> {
     draw: D,
+    document: Option<String>,
 }
 
 impl<D: Draw> Generator<D> {
-    pub fn new(draw: D) -> Self {
-        Self { draw }
+    pub fn new(draw: D, document: Option<&str>) -> Self {
+        Self {
+            draw,
+            document: document.map(str::to_string),
+        }
     }
 }
 
 impl<D: Draw> Generate for Generator<D> {
     fn draw(&mut self) -> String {
-        let adjective = ADJECTIVES[self.draw.index(ADJECTIVES.len())];
         let noun = NOUNS[self.draw.index(NOUNS.len())];
-        format!("{adjective}-{noun}")
+        match &self.document {
+            Some(document) => format!("{document}-{noun}"),
+            None => {
+                let adjective = ADJECTIVES[self.draw.index(ADJECTIVES.len())];
+                format!("{adjective}-{noun}")
+            }
+        }
     }
 
     fn pool_size(&self) -> usize {
-        ADJECTIVES.len() * NOUNS.len()
+        match self.document {
+            Some(_) => NOUNS.len(),
+            None => ADJECTIVES.len() * NOUNS.len(),
+        }
     }
 }
 
@@ -65,7 +77,11 @@ mod tests {
     }
 
     fn generator(picks: &[usize]) -> Generator<ScriptedDraw> {
-        Generator::new(ScriptedDraw(picks.to_vec()))
+        Generator::new(ScriptedDraw(picks.to_vec()), None)
+    }
+
+    fn generator_for(document: &str, picks: &[usize]) -> Generator<ScriptedDraw> {
+        Generator::new(ScriptedDraw(picks.to_vec()), Some(document))
     }
 
     #[test]
@@ -75,9 +91,35 @@ mod tests {
     }
 
     #[test]
-    fn the_adjective_is_drawn_before_the_noun() {
-        assert_eq!(generator(&[0, 1]).draw(), "amber-falcon");
-        assert_eq!(generator(&[1, 0]).draw(), "bold-otter");
+    fn the_noun_is_drawn_before_the_adjective() {
+        assert_eq!(generator(&[0, 1]).draw(), "bold-otter");
+        assert_eq!(generator(&[1, 0]).draw(), "amber-falcon");
+    }
+
+    #[test]
+    fn a_document_takes_the_place_of_the_adjective() {
+        assert_eq!(
+            generator_for("some-sandbox", &[0]).draw(),
+            "some-sandbox-otter"
+        );
+        assert_eq!(
+            generator_for("some-sandbox", &[1]).draw(),
+            "some-sandbox-falcon"
+        );
+    }
+
+    #[test]
+    fn a_document_name_leaves_the_pool_one_word_wide() {
+        assert_eq!(generator_for("some-sandbox", &[]).pool_size(), 50);
+    }
+
+    #[test]
+    fn every_name_a_document_generates_is_a_legal_run_name() {
+        for noun in 0..NOUNS.len() {
+            let name = generator_for("some-sandbox", &[noun]).draw();
+            lns_ipc::validate_run_name(&name)
+                .unwrap_or_else(|e| panic!("generated name {name:?} is illegal: {e}"));
+        }
     }
 
     #[test]
@@ -94,9 +136,9 @@ mod tests {
 
     #[test]
     fn every_generated_name_is_a_legal_run_name() {
-        for adjective in 0..ADJECTIVES.len() {
-            for noun in 0..NOUNS.len() {
-                let name = generator(&[adjective, noun]).draw();
+        for noun in 0..NOUNS.len() {
+            for adjective in 0..ADJECTIVES.len() {
+                let name = generator(&[noun, adjective]).draw();
                 lns_ipc::validate_run_name(&name)
                     .unwrap_or_else(|e| panic!("generated name {name:?} is illegal: {e}"));
             }
@@ -106,9 +148,9 @@ mod tests {
     #[test]
     fn the_pool_holds_pool_size_distinct_names() {
         let mut names = std::collections::HashSet::new();
-        for adjective in 0..ADJECTIVES.len() {
-            for noun in 0..NOUNS.len() {
-                names.insert(generator(&[adjective, noun]).draw());
+        for noun in 0..NOUNS.len() {
+            for adjective in 0..ADJECTIVES.len() {
+                names.insert(generator(&[noun, adjective]).draw());
             }
         }
         assert_eq!(names.len(), generator(&[]).pool_size());

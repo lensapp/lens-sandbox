@@ -12,10 +12,15 @@ fn clear_name(name: &str) {
 }
 
 fn do_register(world: &mut BehaviourWorld, requested: Option<String>) {
+    let document = world
+        .naming_document
+        .as_deref()
+        .and_then(|d| lns_service::run::document_name(Some(d)));
     let id = run_registry::allocate_run_id();
     match run_registry::register_named(
         id.clone(),
         requested,
+        document.as_deref(),
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     ) {
         Ok(name) => {
@@ -50,6 +55,53 @@ async fn given_registered_named_exited(world: &mut BehaviourWorld, name: String)
     if let Some(id) = &world.naming_run {
         run_registry::set_exit_code(id, 0);
     }
+}
+
+#[given(regex = r#"^a document that declares the name "([^"]+)"$"#)]
+async fn given_document_named(world: &mut BehaviourWorld, name: String) {
+    world.naming_document = Some(format!(
+        r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"{name}","spec":{{"image":"x:1"}}}}"#
+    ));
+}
+
+#[when("a second run of the same document is registered without a name")]
+async fn register_second_without_name(world: &mut BehaviourWorld) {
+    world.naming_first_name = world.naming_name.clone();
+    do_register(world, None);
+}
+
+#[then(regex = r#"^the run's name starts with "([^"]+)"$"#)]
+fn then_name_starts_with(world: &mut BehaviourWorld, prefix: String) -> Result<(), String> {
+    let name = world.naming_name.as_deref().ok_or("no name assigned")?;
+    if name.starts_with(&prefix) {
+        Ok(())
+    } else {
+        Err(format!("name {name:?} does not start with {prefix:?}"))
+    }
+}
+
+#[then(regex = r#"^the name is "([^"]+)" followed by one more word$"#)]
+fn then_one_more_word(world: &mut BehaviourWorld, prefix: String) -> Result<(), String> {
+    let name = world.naming_name.as_deref().ok_or("no name assigned")?;
+    match name.strip_prefix(&format!("{prefix}-")) {
+        Some(word) if !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase()) => Ok(()),
+        _ => Err(format!("name {name:?} is not {prefix:?} plus one word")),
+    }
+}
+
+#[then(regex = r#"^the run's name is not "([^"]+)"$"#)]
+fn then_name_is_not(world: &mut BehaviourWorld, taken: String) -> Result<(), String> {
+    let name = world.naming_name.as_deref().ok_or("no name assigned")?;
+    if name == taken {
+        Err(format!("the generator handed out the held name {taken:?}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[then("the two runs have different names")]
+fn then_two_runs_differ(world: &mut BehaviourWorld) -> Result<(), String> {
+    then_auto_name_differs(world)
 }
 
 #[given("a registered run whose name is the generator's first pick")]
@@ -200,6 +252,7 @@ fn then_can_register_name(world: &mut BehaviourWorld, name: String) -> Result<()
     let result = run_registry::register_named(
         id.clone(),
         Some(name.clone()),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     );
     let outcome = match &result {

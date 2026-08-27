@@ -172,9 +172,10 @@ fn stopped_names_in(map: Option<&HashMap<String, RunEntry>>) -> Vec<String> {
 pub fn register_named(
     run_id: String,
     requested: Option<String>,
+    document: Option<&str>,
     handle: RunHandle,
 ) -> Result<String, String> {
-    let mut names = run_name::Generator::new(run_name::ThreadDraw);
+    let mut names = run_name::Generator::new(run_name::ThreadDraw, document);
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     let map = g.get_or_insert_with(HashMap::new);
     register_named_in(map, run_id, requested, handle, &mut names)
@@ -790,7 +791,7 @@ mod tests {
     async fn ensure_name_available_rejects_taken_or_invalid_names_and_accepts_free_ones() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        register_named(id.clone(), Some(format!("rev-{id}")), None, h).unwrap();
         assert!(ensure_name_available(&format!("rev-{id}")).is_err());
         assert!(ensure_name_available("abcdef").is_err());
         assert!(ensure_name_available(&format!("free-{id}")).is_ok());
@@ -919,7 +920,7 @@ mod tests {
     async fn register_named_assigns_an_auto_name_and_resolves_by_name_and_id() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        let name = register_named(id.clone(), None, h).unwrap();
+        let name = register_named(id.clone(), None, None, h).unwrap();
         assert!(!name.is_empty());
         assert_eq!(resolve(&name), Ok(id.clone()));
         assert_eq!(resolve(&id), Ok(id.clone()));
@@ -933,7 +934,7 @@ mod tests {
         let id = allocate_run_id();
         let (mut h, _rx) = make_handle();
         h.exec_environment = exec_environment_fixture();
-        register_named(id.clone(), None, h).unwrap();
+        register_named(id.clone(), None, None, h).unwrap();
         assert_eq!(exec_environment(&id), exec_environment_fixture());
         assert_eq!(exec_environment("ghost"), Default::default());
         deregister(&id);
@@ -969,7 +970,7 @@ mod tests {
         // The connector is the gate `lns exec` passes; publishing it a moment before the environment would let an exec in that window run without it and with no error.
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        register_named(id.clone(), None, h).unwrap();
+        register_named(id.clone(), None, None, h).unwrap();
         set_connector_with_environment(
             &id,
             std::sync::Arc::new(StubTransport),
@@ -985,7 +986,7 @@ mod tests {
     async fn rename_via_the_global_registry_updates_the_name() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        register_named(id.clone(), Some(format!("rev-{id}")), None, h).unwrap();
         rename(&format!("rev-{id}"), &format!("aud-{id}")).unwrap();
         assert_eq!(resolve(&format!("aud-{id}")), Ok(id.clone()));
         deregister(&id);
@@ -1689,7 +1690,7 @@ mod tests {
     async fn transition_to_live_replaces_a_run_that_exited_in_this_session() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        register_named(id.clone(), Some(format!("rev-{id}")), None, h).unwrap();
         set_exit_code(&id, 0);
         let (fresh, _rx2) = make_handle();
         let name = transition_to_live(&id, fresh).unwrap();
@@ -1703,7 +1704,7 @@ mod tests {
     async fn transition_to_live_refuses_a_running_run_and_an_unknown_one() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
-        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
+        register_named(id.clone(), Some(format!("rev-{id}")), None, h).unwrap();
         let (fresh, _rx2) = make_handle();
         assert!(
             transition_to_live(&id, fresh)

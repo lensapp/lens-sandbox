@@ -99,6 +99,8 @@ pub struct BehaviourWorld {
     pub naming_name: Option<String>,
     /// First auto-generated name captured when comparing auto-name uniqueness.
     pub naming_first_name: Option<String>,
+    /// The document a naming scenario's runs carry, as the canonical JSON the CLI would send.
+    pub naming_document: Option<String>,
     /// Refusal message from the last registration / rename in a naming scenario.
     pub naming_error: Option<String>,
     /// What a run-start scenario's host refuses with; `None` means it refuses nothing.
