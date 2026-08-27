@@ -657,6 +657,11 @@ pub struct RunImageArgs {
     pub cpus_explicit: bool,
     #[serde(default)]
     pub mem_explicit: bool,
+    /// This machine's `run.cpus`/`run.mem` defaults, carried apart from the flag because they rank below the document: a sandbox that declares its own resources is not silently resized by whoever cloned it.
+    #[serde(default)]
+    pub cpus_config: Option<u8>,
+    #[serde(default)]
+    pub mem_config: Option<usize>,
     pub policy_path: Option<String>,
     #[serde(default)]
     pub sandbox_user: Option<String>,
@@ -1140,6 +1145,8 @@ mod tests {
             mem: 512,
             cpus_explicit: false,
             mem_explicit: false,
+            cpus_config: None,
+            mem_config: None,
             policy_path: None,
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
@@ -1181,6 +1188,8 @@ mod tests {
             mem: 512,
             cpus_explicit: false,
             mem_explicit: false,
+            cpus_config: None,
+            mem_config: None,
             policy_path: None,
             sandbox_user: None,
             sandbox_uid: None,
@@ -1324,6 +1333,8 @@ mod tests {
             mem: 1024,
             cpus_explicit: true,
             mem_explicit: true,
+            cpus_config: None,
+            mem_config: None,
             policy_path: Some("/work/lns-local-mixin.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
@@ -1541,6 +1552,27 @@ mod tests {
         });
         let parsed: RunImageArgs = serde_json::from_value(frame).unwrap();
         assert_eq!(parsed.name, None);
+    }
+
+    #[test]
+    fn a_config_default_travels_in_its_own_slot_apart_from_the_flags() {
+        let mut args = sample_run_args();
+        args.cpus_explicit = false;
+        args.mem_explicit = false;
+        args.cpus_config = Some(4);
+        args.mem_config = Some(4096);
+        let frame = crate::encode_frame(&args).unwrap();
+        let decoded: RunImageArgs = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(
+            (
+                decoded.cpus_explicit,
+                decoded.mem_explicit,
+                decoded.cpus_config,
+                decoded.mem_config
+            ),
+            (false, false, Some(4), Some(4096)),
+            "a configured default must not reach the service as an explicit flag, or it would outrank the document"
+        );
     }
 
     #[test]

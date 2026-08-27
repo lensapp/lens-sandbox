@@ -21,6 +21,24 @@ pub struct ResourceOverrides {
     pub mem_mib: Option<usize>,
 }
 
+/// The `run.cpus`/`run.mem` gap-fillers a machine configured; they sit below the document, so a sandbox that declares its own resources is not silently resized by whoever cloned it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfiguredDefaults {
+    pub cpus: Option<u8>,
+    pub mem_mib: Option<usize>,
+}
+
+impl ConfiguredDefaults {
+    /// The floor a run lands on when neither a flag nor the document decided its size.
+    pub fn over(self, builtin: VmSize) -> VmSize {
+        VmSize {
+            cpus: self.cpus.unwrap_or(builtin.cpus),
+            mem_mib: self.mem_mib.unwrap_or(builtin.mem_mib),
+            disk_bytes: builtin.disk_bytes,
+        }
+    }
+}
+
 /// What a definition asked for, already read and range-checked — `None` where it asked for nothing the host can grant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclaredSize {
@@ -177,6 +195,53 @@ mod tests {
     ) -> VmSize {
         let (declared, _) = DeclaredSize::from_resources(resources, None);
         resolve_declared(declared, overrides, defaults)
+    }
+
+    #[test]
+    fn a_configured_default_fills_a_size_the_builtin_would_have() {
+        let configured = ConfiguredDefaults {
+            cpus: Some(4),
+            mem_mib: Some(2048),
+        };
+        assert_eq!(
+            configured.over(DEFAULT_VM_SIZE),
+            VmSize {
+                cpus: 4,
+                mem_mib: 2048,
+                disk_bytes: DEFAULT_VM_SIZE.disk_bytes,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_machine_keeps_the_builtin_size() {
+        assert_eq!(
+            ConfiguredDefaults::default().over(DEFAULT_VM_SIZE),
+            DEFAULT_VM_SIZE
+        );
+    }
+
+    #[test]
+    fn a_configured_default_never_outranks_what_the_document_declared() {
+        let res = Resources {
+            cpu: Some(Quantity::Int(2)),
+            memory: Some(Quantity::Int(1024)),
+            disk: None,
+        };
+        let configured = ConfiguredDefaults {
+            cpus: Some(4),
+            mem_mib: Some(2048),
+        };
+        let size = resolve(
+            Some(&res),
+            &ResourceOverrides::default(),
+            configured.over(DEFAULT_VM_SIZE),
+        );
+        assert_eq!(
+            (size.cpus, size.mem_mib),
+            (2, 1024),
+            "a sandbox that declares its own resources must not be resized by whoever cloned it"
+        );
     }
 
     #[test]

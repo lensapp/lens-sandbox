@@ -76,6 +76,8 @@ fn sample_args() -> lns_ipc::RunImageArgs {
         mem: 0,
         cpus_explicit: false,
         mem_explicit: false,
+        cpus_config: None,
+        mem_config: None,
         policy_path: None,
         denied_host_paths: Vec::new(),
         sandbox_user: None,

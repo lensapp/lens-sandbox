@@ -316,14 +316,17 @@ digits (so it is never mistaken for an id). Names are unique among the runs
 ### Persistent defaults
 
 The resource gap-fillers you'd otherwise repeat on every run can be stored once
-with [`lns config`](cli-reference.md#lns-config). A per-run flag always overrides
-its configured default:
+with [`lns config`](cli-reference.md#lns-config). A configured default fills a
+gap only: a per-run flag wins, and so do the resources the document declares in
+`spec.resources`, so a sandbox that sizes itself is not resized by whoever
+cloned it:
 
 ```bash
 lns config set run.cpus 4
 lns config set run.mem 2048
 lns run ghcr.io/acme/builder            # boots with 4 vCPUs · 2048 MiB
 lns run --cpus 2 ghcr.io/acme/builder   # per-run flag wins: 2 vCPUs
+lns run .                               # a document declaring cpu: 2 boots 2 vCPUs
 ```
 
 The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment

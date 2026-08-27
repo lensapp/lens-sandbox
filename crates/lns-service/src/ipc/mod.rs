@@ -1160,6 +1160,8 @@ mod tests {
                 mem: 0,
                 cpus_explicit: false,
                 mem_explicit: false,
+                cpus_config: None,
+                mem_config: None,
                 policy_path: None,
                 sandbox_user: None,
                 sandbox_uid: None,

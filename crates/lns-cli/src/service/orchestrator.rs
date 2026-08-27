@@ -536,6 +536,8 @@ pub async fn run_image(
         mem: args.effective_mem(),
         cpus_explicit: args.cpus.is_some(),
         mem_explicit: args.mem.is_some(),
+        cpus_config: args.cpus_config,
+        mem_config: args.mem_config,
         cmd: args.cmd,
         env: args.env,
         image: Some(target.image()),

@@ -174,8 +174,8 @@ the `./lns.yaml` definition with its command overridden.
 
 | Option                       | Default          | Meaning                                                                 |
 | ---------------------------- | ---------------- | ----------------------------------------------------------------------- |
-| `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1); falls back to the `run.cpus` config default. |
-| `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`, `-m 38Gi` — the same sizes `spec.resources.memory` accepts, all binary, rounded up to a whole MiB); falls back to the `run.mem` config default. |
+| `--cpus <N>`                 | `1`              | Number of vCPUs (at least 1). Without it the document's `spec.resources` decides, then the `run.cpus` config default, then `1`. |
+| `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`, `-m 38Gi` — the same sizes `spec.resources.memory` accepts, all binary, rounded up to a whole MiB). Without it the document's `spec.resources` decides, then the `run.mem` config default, then `512`. |
 | `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory is the project, so it roots the definition's relative binds and filesets and holds the decisions file. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
 | `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
@@ -468,4 +468,5 @@ set them per run (`-e`, `-v`, `-p`) or in the sandbox definition's `spec`.
 
 Values are validated when stored, with the same parsers the run flags use.
 Defaults live in `~/.lns/config.yaml`, with everything else lns keeps for you.
-A per-run flag always wins.
+A per-run flag always wins, and so do the resources a document declares in
+`spec.resources` — a configured default only fills what no one else decided.
