@@ -21,7 +21,7 @@ Feature: cached sandbox management end to end
   Scenario: removing a sandbox that is not cached fails cleanly
     When I run "lns artifact rm registry.example.test/absent:1"
     Then the exit code is non-zero
-    And the output contains "no such image"
+    And the output contains "no such artifact: registry.example.test/absent:1"
 
   Scenario: pruning an empty cache reclaims nothing
     When I run "lns artifact prune --force"

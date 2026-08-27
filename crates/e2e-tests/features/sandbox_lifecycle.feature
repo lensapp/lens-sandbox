@@ -30,7 +30,7 @@ Feature: sandbox lifecycle verbs reach the service end to end
     And the output contains "attach"
     And the output contains "kill"
 
-  Scenario: sandbox kill of an unknown run reports the daemon's error
+  Scenario: sandbox kill of an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
     When I run sandbox command "kill 4242" against the service
     Then the exit code is non-zero
@@ -55,41 +55,41 @@ Feature: sandbox lifecycle verbs reach the service end to end
     And the output contains "CPU"
     And the output contains "MEM"
 
-  Scenario: stopping an unknown run reports the daemon's error
+  Scenario: stopping an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
     When I run sandbox command "stop 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
   Scenario: stop accepts a --timeout override while reporting an unknown run
     Given the Lens Sandbox service is running
     When I run lns "stop --timeout 1 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
-  Scenario: requesting logs of an unknown run reports the daemon's error
+  Scenario: requesting logs of an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
     When I run sandbox command "logs 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
-  Scenario: logs -f of an unknown run reports the daemon's error
+  Scenario: logs -f of an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
     When I run lns "logs -f 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
-  Scenario: attaching to an unknown run reports the daemon's error
+  Scenario: attaching to an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
     When I run sandbox command "attach 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
   Scenario: attach accepts a custom detach chord while reporting an unknown run
     Given the Lens Sandbox service is running
     When I run lns "attach --detach-keys ctrl-a,ctrl-b 4242" against the service
     Then the exit code is non-zero
-    And the output contains "no such run: 4242"
+    And the output contains "no such sandbox: 4242"
 
   Scenario: attach rejects an unparseable detach chord
     When I run lns "attach --detach-keys bogus 4242" against the service

@@ -229,6 +229,11 @@ fn names_a_sandbox_only(w: &mut BehaviourWorld, name: String) {
     w.sandbox.cached_references = Vec::new();
 }
 
+#[given(regex = r#"^the service will answer a RemoveRun error "([^"]+)"$"#)]
+fn canned_remove_run_error(w: &mut BehaviourWorld, message: String) {
+    w.sandbox.remove_run_response = Some(Response::Error { message });
+}
+
 #[given(regex = r#"^the service refuses to remove the running sandbox "([^"]+)"$"#)]
 fn service_refuses_a_running_removal(w: &mut BehaviourWorld, name: String) {
     reference_resolves_to_running(w, name.clone());

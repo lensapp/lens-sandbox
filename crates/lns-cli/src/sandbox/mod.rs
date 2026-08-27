@@ -369,7 +369,7 @@ async fn ps<W: std::io::Write>(
             .into_iter()
             .filter(|r| args.all || matches!(r.status, lns_ipc::RunStatus::Running))
             .collect::<Vec<_>>(),
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => return Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     };
     let mut rows = Vec::with_capacity(listed.len());
@@ -478,7 +478,9 @@ async fn kill<W: std::io::Write>(
             writeln!(out, "killed run {}", run_label(&args.run))?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "kill", &args.run, &message,
+        )),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -508,7 +510,9 @@ async fn stop<W: std::io::Write>(
             )?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "stop", &args.run, &message,
+        )),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -535,7 +539,9 @@ async fn rm<W: std::io::Write>(
             writeln!(out, "removed sandbox {}", args.run)?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "rm", &args.run, &message,
+        )),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -561,7 +567,7 @@ where
             stdin: args.interactive,
         })
         .await?;
-    let run_id = expect_run_started(&mut stream).await?;
+    let run_id = expect_run_started(&mut stream, "start", &args.run).await?;
     if !args.attach {
         writeln!(out, "{}", run_label(&args.run))?;
         return Ok(0);
@@ -617,7 +623,7 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
             }
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -639,7 +645,7 @@ async fn stopped_run_names(svc: &impl SandboxService) -> Result<Vec<String>> {
             names.sort_unstable();
             Ok(names)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -685,8 +691,12 @@ async fn inspect<W: std::io::Write>(
             render_inspect(&details, policy, format, out)?;
             Ok(0)
         }
-        Response::RunUnknown { run } => bail!("no such run: {run}"),
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::RunUnknown { run } => {
+            Err(crate::service::reply::unknown_sandbox("inspect", &run, ""))
+        }
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "inspect", target, &message,
+        )),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -806,7 +816,7 @@ where
             follow: args.follow,
         })
         .await?;
-    expect_run_started(&mut stream).await?;
+    expect_run_started(&mut stream, "logs", &args.run).await?;
     drive_logs(stream, stdout, stderr).await
 }
 
@@ -827,7 +837,7 @@ where
             run: args.run.clone(),
         })
         .await?;
-    let run_id = expect_run_started(&mut stream).await?;
+    let run_id = expect_run_started(&mut stream, "attach", &args.run).await?;
     crate::service::drive_attached_session_with_writers(
         stream,
         svc.aux_socket(),
@@ -844,13 +854,19 @@ where
     .await
 }
 
-async fn expect_run_started<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
+async fn expect_run_started<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    verb: &str,
+    run: &str,
+) -> Result<String> {
     let bytes = read_frame_bytes_async(stream)
         .await
         .context("reading stream handshake")?;
     match decode_wire_frame_from_bytes(&bytes).context("decoding stream handshake")? {
         WireFrame::Json(Response::RunStarted { run_id }) => Ok(run_id),
-        WireFrame::Json(Response::Error { message }) => bail!("daemon error: {message}"),
+        WireFrame::Json(Response::Error { message }) => {
+            Err(crate::service::reply::sandbox_failure(verb, run, &message))
+        }
         other => bail!("expected RunStarted, got {other:?}"),
     }
 }
@@ -876,7 +892,9 @@ where
             }
             WireFrame::Json(Response::Acknowledged) => return Ok(0),
             WireFrame::Json(Response::RunExit { .. }) => return Ok(0),
-            WireFrame::Json(Response::Error { message }) => bail!("daemon error: {message}"),
+            WireFrame::Json(Response::Error { message }) => {
+                return Err(crate::service::reply::failure(&message));
+            }
             other => bail!("unexpected logs frame: {other:?}"),
         }
     }
@@ -1339,7 +1357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_answers_the_typed_miss_as_no_such_run() {
+    async fn inspect_answers_the_typed_miss_in_the_product_s_own_word() {
         let svc = CannedService::new(Response::RunUnknown {
             run: "ghost".into(),
         });
@@ -1347,7 +1365,7 @@ mod tests {
         let err = inspect(&svc, "ghost", crate::output::Format::Table, &mut out)
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("no such run: ghost"));
+        assert!(format!("{err:#}").contains("no such sandbox: ghost"));
     }
 
     #[tokio::test]
@@ -1373,7 +1391,9 @@ mod tests {
     async fn handshake_rejects_an_unexpected_first_frame() {
         let frame = lns_ipc::encode_wire_frame(&WireFrame::Stdout(b"early".to_vec())).unwrap();
         let mut stream = stream_with(&[frame]).await;
-        let err = expect_run_started(&mut stream).await.unwrap_err();
+        let err = expect_run_started(&mut stream, "start", "7")
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("expected RunStarted"));
     }
 

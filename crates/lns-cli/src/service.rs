@@ -7,6 +7,7 @@ use lns_ipc::{SignalKind, StatusInfo};
 pub mod client;
 mod login_agent;
 pub(crate) mod real;
+pub(crate) mod reply;
 
 pub use client::{SandboxService, ServiceClient, TermInfo};
 pub use login_agent::DisableOutcome;

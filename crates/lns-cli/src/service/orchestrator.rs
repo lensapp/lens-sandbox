@@ -338,7 +338,7 @@ async fn await_published_preflight(
         })?;
     match response {
         Some(Response::ImageInspected { inspection }) => published_target(reference, inspection),
-        Some(Response::Error { message }) => anyhow::bail!("daemon error: {message}"),
+        Some(Response::Error { message }) => Err(crate::service::reply::failure(&message)),
         Some(other) => anyhow::bail!("expected sandbox preflight, got {other:?}"),
         None => anyhow::bail!("no response from lns-service during sandbox preflight"),
     }
@@ -578,7 +578,7 @@ pub async fn run_image(
         .context("reading RunStarted frame")?;
     let run_id = match decode_frame(&mut &bytes[..]).context("decoding RunStarted")? {
         Response::RunStarted { run_id } => run_id,
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        Response::Error { message } => return Err(crate::service::reply::failure(&message)),
         other => anyhow::bail!("expected RunStarted, got {other:?}"),
     };
 
@@ -657,6 +657,7 @@ where
     let tty = args.tty;
     let stdin = args.interactive;
     let detach_chord = args.detach_keys.0.clone();
+    let run = args.run.clone();
 
     let request = Request::ExecImage(build_exec_request(
         args.run,
@@ -674,7 +675,7 @@ where
     let bytes = read_frame_bytes_async(&mut stream)
         .await
         .context("reading ExecStarted frame")?;
-    let target = decode_exec_started(&bytes)?;
+    let target = decode_exec_started(&bytes, &run)?;
     crate::log::debug!(run_id = %target.run_id(), "exec session opened");
 
     drive_targeted_session_with_writers(
@@ -711,12 +712,14 @@ pub fn build_exec_request(
     }
 }
 
-fn decode_exec_started(bytes: &[u8]) -> Result<lns_ipc::SessionTarget> {
+fn decode_exec_started(bytes: &[u8], run: &str) -> Result<lns_ipc::SessionTarget> {
     match decode_frame(&mut &bytes[..]).context("decoding ExecStarted")? {
         Response::ExecStarted { run_id, session_id } => {
             Ok(lns_ipc::SessionTarget::Exec { run_id, session_id })
         }
-        Response::Error { message } => anyhow::bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "exec", run, &message,
+        )),
         other => anyhow::bail!("expected ExecStarted, got {other:?}"),
     }
 }
@@ -958,7 +961,7 @@ where
                     WireFrame::Json(Response::RunProgress { .. }) => {}
                     WireFrame::Json(Response::RunExit { code }) => break code,
                     WireFrame::Json(Response::Error { message }) => {
-                        anyhow::bail!("daemon error: {message}")
+                        return Err(crate::service::reply::failure(&message))
                     }
                     other => anyhow::bail!("unexpected response from daemon: {other:?}"),
                 }
@@ -1430,7 +1433,7 @@ where
         }
         WireFrame::Json(Response::RunExit { .. }) => Ok(PrePhaseStep::EarlyExit(PRE_START_FAILURE)),
         WireFrame::Json(Response::Error { message }) => {
-            anyhow::bail!("daemon error: {message}")
+            Err(crate::service::reply::failure(&message))
         }
         other => anyhow::bail!("unexpected frame before SessionReady: {other:?}"),
     }
@@ -1561,7 +1564,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            decode_exec_started(&frame).unwrap(),
+            decode_exec_started(&frame, "7").unwrap(),
             lns_ipc::SessionTarget::Exec {
                 run_id: "run-7".to_string(),
                 session_id: "exec-2".to_string(),

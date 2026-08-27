@@ -410,7 +410,7 @@ fn image_has_registry(image: &str) -> bool {
     }
 }
 
-fn is_registry_host(first: &str) -> bool {
+pub(crate) fn is_registry_host(first: &str) -> bool {
     first.contains('.') || first.contains(':') || first == "localhost"
 }
 
