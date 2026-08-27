@@ -402,9 +402,15 @@ One chronological timeline, newest first, across every sandbox — or scoped to 
 lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 ```
 
-`SANDBOX` is a `RUN`. `--kind` takes one of `launch`,
-`egress`, `env`, `volume`, `bind`, `approval`, `connection`, `credential`, or
-`tool`. Filters compose.
+`SANDBOX` is a `RUN`. `--kind` takes one of `launch`, `exit`, `restart`,
+`sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
+`approval`, `connection`, `credential`, or `tool`. Filters compose.
+
+A sandbox's own life is in the timeline as much as what it reached for: `launch`
+is the workload starting, `exit` is it ending, `restart` is a stopped sandbox
+running again, `sandbox_run` records the run against the artifact it ran, and
+`run_removed` and `runs_pruned` are the sandbox being removed — one by name, or
+swept with every other stopped one.
 
 It is not `lns sandbox audit`, because half of what it reads is not a sandbox's:
 the timeline merges each sandbox's own chain with the durable ledger of
