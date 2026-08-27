@@ -29,7 +29,9 @@ impl Terminal for NoTerminal {
     }
 
     fn read_secret(&mut self) -> std::io::Result<String> {
-        Err(std::io::Error::other("there is no terminal to ask at"))
+        Err(std::io::Error::other(
+            "there is no terminal to read a secret at",
+        ))
     }
 }
 
@@ -87,6 +89,16 @@ mod tests {
         assert!(
             err.to_string().contains("no terminal to ask at"),
             "a caller that reads anyway must fail, never see a silent empty answer: {err}"
+        );
+    }
+
+    #[test]
+    fn a_command_with_no_terminal_never_gets_a_secret_either() {
+        let mut terminal = NoTerminal;
+        let err = terminal.read_secret().unwrap_err();
+        assert!(
+            err.to_string().contains("no terminal to read a secret at"),
+            "a caller that reads anyway must fail naming the absent terminal, not bail on an empty value: {err}"
         );
     }
 

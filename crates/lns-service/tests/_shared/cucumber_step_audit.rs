@@ -103,11 +103,15 @@ fn parse_step_patterns(file: &Path, src: &str) -> Vec<StepPattern> {
 
 fn parse_attr_body(src: &str, pos: usize) -> Option<(String, usize)> {
     let rest = src.get(pos..)?;
-    for (head, hashes) in [("regex = r#\"", true), ("regex = r\"", false)] {
+    for (head, close) in [("regex = r#\"", "\"#"), ("regex = r\"", "\"")] {
         if rest.starts_with(head) {
             let abs = pos + head.len();
-            let close = if hashes { "\"#" } else { "\"" };
-            let end_off = src[abs..].find(close)?;
+            let end_off = src[abs..].find(close).unwrap_or_else(|| {
+                panic!(
+                    "unterminated {head} literal at byte {abs}: {:?}",
+                    &src[abs..src.len().min(abs + 40)]
+                )
+            });
             return Some((
                 src[abs..abs + end_off].to_string(),
                 abs + end_off + close.len(),
@@ -266,6 +270,13 @@ mod tests {
             #[when(r#"a raw literal with a "quote""#)]
         "###;
         assert_eq!(patterns_of(src).len(), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "unterminated")]
+    fn an_unterminated_literal_names_that_fault_rather_than_the_spelling() {
+        // Falling through to `None` here reports "not a spelling this audit understands", which sends the reader looking for a parser gap that is not there.
+        patterns_of(r##"#[given(regex = r#"^x$)]"##);
     }
 
     #[test]
