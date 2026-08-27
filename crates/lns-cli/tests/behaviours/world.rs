@@ -89,6 +89,7 @@ pub struct ExecCliRig {
 pub struct WebLoginRig {
     pub outcome: Option<lns_cli::login::WebLoginOutcome>,
     pub verifier_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    pub logins: Vec<lns_ipc::RegistryLoginSummary>,
 }
 
 /// Drives `decide_host_paths`: what the artifact declares, what this machine already recorded, and what the developer answers.

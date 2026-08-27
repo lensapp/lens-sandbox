@@ -70,7 +70,7 @@ parse the human table:
 
 `lns ps`, `lns sandbox ls`, `lns sandbox inspect <RUN>`, `lns artifact ls`,
 `lns volume ls`, `lns volume inspect`, `lns connector list`, `lns connector grants`,
-`lns config list`, `lns config get`, `lns service status`.
+`lns login --list`, `lns config list`, `lns config get`, `lns service status`.
 
 `table` is the default everywhere, including the two `inspect` verbs — the table is
 a summary a reader scans, the JSON is the record. `lns artifact inspect` renders a
@@ -314,7 +314,7 @@ registries can be logged in at once.
 ```bash
 lns login
 echo "$TOKEN" | lns login -u <USERNAME> --password-stdin <REGISTRY>
-lns login --list
+lns login --list [--format <table|json>]
 lns logout <REGISTRY>
 ```
 
@@ -328,7 +328,7 @@ login (such as `ghcr.io`) still take the flag-driven forms below.
 | Form                                  | Meaning                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
 | `lns login [REGISTRY]`                | Log in to `REGISTRY` (defaults to `run.registry`, else `hub.lns.run`). With no credential flags, runs the browser login; pass `-u`/`--username` and the secret via `--password-stdin` (recommended) or `-p`/`--password` to log in with an existing token. |
-| `lns login --list`                    | List the registries you are logged in to, as `host  username` — never secrets. |
+| `lns login --list`                    | List the registries you are logged in to, as a `REGISTRY`/`USERNAME` table — never secrets. Takes `--format <table\|json>`. |
 | `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
 
 The registry is matched by host: a bare published-sandbox reference uses the

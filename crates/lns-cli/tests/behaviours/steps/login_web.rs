@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 /// Stands in for the running service: records what it was asked to store and accepts everything.
 struct RecordingAuthClient {
     calls: Arc<Mutex<Vec<(String, String, String)>>>,
+    logins: Vec<lns_ipc::RegistryLoginSummary>,
 }
 impl RegistryAuthClient for RecordingAuthClient {
     fn available<'a>(&'a self) -> LocalBoxFuture<'a, anyhow::Result<bool>> {
@@ -41,7 +42,8 @@ impl RegistryAuthClient for RecordingAuthClient {
     }
 
     fn list<'a>(&'a self) -> LocalBoxFuture<'a, anyhow::Result<ListLoginsOutcome>> {
-        Box::pin(async move { Ok(ListLoginsOutcome::Logins(Vec::new())) })
+        let logins = self.logins.clone();
+        Box::pin(async move { Ok(ListLoginsOutcome::Logins(logins)) })
     }
 }
 
@@ -77,6 +79,19 @@ fn given_web_issues(world: &mut BehaviourWorld, username: String) {
     });
 }
 
+#[given(regex = r#"^the service reports a login to "([^"]+)" as "([^"]+)"$"#)]
+fn given_service_reports_login(world: &mut BehaviourWorld, registry: String, username: String) {
+    world
+        .web_login
+        .logins
+        .push(lns_ipc::RegistryLoginSummary { registry, username });
+}
+
+#[given("the service reports no registry logins")]
+fn given_service_reports_no_logins(world: &mut BehaviourWorld) {
+    world.web_login.logins.clear();
+}
+
 #[given("the web flow would panic if it were consulted")]
 fn given_web_panics(world: &mut BehaviourWorld) {
     world.web_login.outcome = None;
@@ -101,6 +116,7 @@ fn given_web_expired(world: &mut BehaviourWorld) {
 async fn when_log_in(world: &mut BehaviourWorld, command: String) {
     let client = RecordingAuthClient {
         calls: world.web_login.verifier_calls.clone(),
+        logins: world.web_login.logins.clone(),
     };
     let web = FakeWebLoginFlow {
         outcome: world.web_login.outcome.clone(),

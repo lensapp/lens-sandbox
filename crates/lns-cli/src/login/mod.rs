@@ -41,6 +41,8 @@ pub struct LoginArgs {
         help = "List the registries you are logged in to (hosts and usernames, never secrets)."
     )]
     pub list: bool,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -142,7 +144,7 @@ pub async fn run(
     out: &mut impl Write,
 ) -> Result<i32> {
     if args.list {
-        return list(client, out).await;
+        return list(client, args.output.format, out).await;
     }
     login(args, default_registry, client, web, input, out).await
 }
@@ -193,18 +195,37 @@ pub async fn logout(
     Ok(0)
 }
 
-async fn list(client: &dyn RegistryAuthClient, out: &mut impl Write) -> Result<i32> {
+#[derive(serde::Serialize)]
+struct LoginRow {
+    registry: String,
+    username: String,
+}
+
+impl crate::output::TableRow for LoginRow {
+    const HEADERS: &'static [&'static str] = &["REGISTRY", "USERNAME"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![self.registry.clone(), self.username.clone()]
+    }
+}
+
+async fn list(
+    client: &dyn RegistryAuthClient,
+    format: crate::output::Format,
+    out: &mut impl Write,
+) -> Result<i32> {
     let logins = match client.list().await? {
         ListLoginsOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
         ListLoginsOutcome::Logins(logins) => logins,
     };
-    if logins.is_empty() {
-        writeln!(out, "Not logged in to any registry.")?;
-        return Ok(0);
-    }
-    for login in logins {
-        writeln!(out, "{}  {}", login.registry, login.username)?;
-    }
+    let rows: Vec<LoginRow> = logins
+        .into_iter()
+        .map(|login| LoginRow {
+            registry: login.registry,
+            username: login.username,
+        })
+        .collect();
+    crate::output::emit(format, &rows, "Not logged in to any registry.", out)?;
     Ok(0)
 }
 
@@ -394,6 +415,9 @@ mod tests {
             password: password.map(str::to_string),
             password_stdin: false,
             list: false,
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
         }
     }
 
@@ -562,7 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_dispatches_to_list_and_renders_hosts_and_usernames() {
+    async fn run_dispatches_to_list_and_renders_a_table_of_hosts_and_usernames() {
         let client = FakeClient::listing(ListLoginsOutcome::Logins(vec![
             lns_ipc::RegistryLoginSummary {
                 registry: "ghcr.io".into(),
@@ -590,8 +614,8 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "ghcr.io  octocat\nquay.io  robot\n",
-            "hosts + usernames as the service reported them"
+            "REGISTRY  USERNAME\nghcr.io   octocat\nquay.io   robot\n",
+            "an uppercase header row over the hosts and usernames the service reported"
         );
         assert!(
             client.calls.lock().unwrap().is_empty(),
@@ -622,7 +646,9 @@ mod tests {
     async fn list_reports_when_no_registries_are_logged_in() {
         let client = FakeClient::listing(ListLoginsOutcome::Logins(Vec::new()));
         let mut out = Vec::new();
-        let code = list(&client, &mut out).await.unwrap();
+        let code = list(&client, crate::output::Format::Table, &mut out)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -634,7 +660,9 @@ mod tests {
     async fn list_requires_the_service_that_keeps_the_logins() {
         let client = FakeClient::listing(ListLoginsOutcome::ServiceUnavailable);
         let mut out = Vec::new();
-        let err = list(&client, &mut out).await.unwrap_err();
+        let err = list(&client, crate::output::Format::Table, &mut out)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("service must be running"));
     }
 
