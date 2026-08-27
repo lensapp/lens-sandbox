@@ -911,8 +911,9 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
 - **Keep** mounts the real file through; **Drop** masks it so the workload can't
   read it (the file is never modified or deleted on the host).
 - The default on a bare Enter is **drop** — the safe choice.
-- A non-interactive run (`-d`, or no terminal) drops any undecided secret and notes
-  it on stderr, rather than exposing it unasked.
+- A run with no terminal to ask at drops any undecided secret and notes it on
+  stderr, rather than exposing it unasked. `-d` is not that: the scan happens
+  before the run starts, so a detached run asks at your terminal like any other.
 - Decisions to **keep** a real secret are per-machine and never written to a shared
   file. To share a "never expose these" rule with your team, commit a `.lensignore`
   in the bind root — one path per line — and those paths are dropped with no prompt.
