@@ -419,6 +419,12 @@ async fn orchestrate(
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
     fileset_specs.extend(workload_ca_spec);
+    crate::artifact::fileset::refuse_writes_a_mount_would_hide(
+        &fileset_specs,
+        &args.volumes,
+        &args.binds,
+    )?;
+    crate::artifact::fileset::stage_what_a_volume_would_hide(&mut fileset_specs, &args.volumes);
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,

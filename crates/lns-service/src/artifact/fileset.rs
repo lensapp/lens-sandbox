@@ -12,6 +12,50 @@ use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 
 pub const OWNED_MANIFEST_PATH: &str = "/.lens/fileset-owned";
 
+/// Where a guest write a volume mount would cover is staged instead, for lns-init to copy onto its final path once the volume is mounted.
+pub const DEFERRED_ROOT: &str = "/.lens/fileset-deferred";
+
+/// A volume mounts after the runtime layer is in place, so a write under its target is staged here for lns-init to copy in once the volume is mounted.
+pub fn stage_what_a_volume_would_hide(
+    specs: &mut [RuntimeFileSpec],
+    volumes: &[lns_ipc::VolumeMount],
+) {
+    for spec in specs {
+        if volumes
+            .iter()
+            .filter(|volume| !volume.read_only)
+            .any(|volume| lns_artifact::sandbox::encloses(&volume.target, &spec.guest_path))
+        {
+            spec.guest_path = format!("{DEFERRED_ROOT}{}", spec.guest_path);
+        }
+    }
+}
+
+/// A read-only volume takes no write and a bind would leave the file in the host directory it shares, so a run whose write lands under either is refused rather than started without it.
+pub fn refuse_writes_a_mount_would_hide(
+    specs: &[RuntimeFileSpec],
+    volumes: &[lns_ipc::VolumeMount],
+    binds: &[lns_ipc::BindMount],
+) -> Result<()> {
+    let covering = volumes
+        .iter()
+        .filter(|volume| volume.read_only)
+        .map(|volume| ("read-only volume", volume.target.as_str()))
+        .chain(binds.iter().map(|bind| ("bind", bind.target.as_str())));
+    for (kind, target) in covering {
+        let hidden = specs
+            .iter()
+            .find(|spec| lns_artifact::sandbox::encloses(target, &spec.guest_path));
+        if let Some(hidden) = hidden {
+            bail!(
+                "the fileset at {} lands under the {kind} mounted at {target}, which takes no write from a fileset; the workload would never see the file",
+                hidden.guest_path
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct FilesetBudget {
     bytes: u64,
     entries: usize,
@@ -358,6 +402,100 @@ mod tests {
     use super::*;
     use oci_client::manifest::OciDescriptor;
     use sha2::{Digest, Sha256};
+
+    fn spec_at(guest_path: &str) -> RuntimeFileSpec {
+        RuntimeFileSpec {
+            guest_path: guest_path.to_string(),
+            mode: 0o644,
+            source: RuntimeSource::Bytes(b"x".to_vec()),
+        }
+    }
+
+    fn volume_at(target: &str, read_only: bool) -> lns_ipc::VolumeMount {
+        lns_ipc::VolumeMount {
+            name: "home".to_string(),
+            target: target.to_string(),
+            read_only,
+            size_bytes: None,
+        }
+    }
+
+    #[test]
+    fn staging_leaves_a_write_no_volume_target_encloses_where_it_was_written() {
+        let mut specs = vec![
+            spec_at("/home/node/.config/tool.md"),
+            spec_at("/home/nodejs/tool.md"),
+            spec_at(OWNED_MANIFEST_PATH),
+        ];
+        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", false)]);
+        let paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/.lens/fileset-deferred/home/node/.config/tool.md",
+                "/home/nodejs/tool.md",
+                OWNED_MANIFEST_PATH,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_write_at_the_volume_target_itself_is_the_mount_point_and_is_left_alone() {
+        let mut specs = vec![spec_at("/home/node")];
+        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", false)]);
+        assert_eq!(specs[0].guest_path, "/home/node");
+    }
+
+    #[test]
+    fn a_write_under_a_read_only_volume_is_left_where_it_was_written_because_no_copy_can_land() {
+        let mut specs = vec![spec_at("/home/node/tool.md")];
+        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", true)]);
+        assert_eq!(specs[0].guest_path, "/home/node/tool.md");
+    }
+
+    fn bind_at(target: &str) -> lns_ipc::BindMount {
+        lns_ipc::BindMount {
+            host_source: "/Users/dev/project".to_string(),
+            target: target.to_string(),
+            read_only: false,
+            kept_paths: Vec::new(),
+            dropped_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_read_only_mount_the_flags_added_refuses_the_run_the_document_could_not_refuse() {
+        let specs = [spec_at("/home/node/.config/tool.md")];
+        let err = refuse_writes_a_mount_would_hide(&specs, &[volume_at("/home/node", true)], &[])
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("/home/node/.config/tool.md") && message.contains("/home/node"),
+            "the refusal has to name the write and the mount: {message}"
+        );
+        assert!(message.contains("read-only volume"), "got: {message}");
+    }
+
+    #[test]
+    fn a_bind_the_flags_added_refuses_the_run_rather_than_seeding_the_host_directory() {
+        let specs = [spec_at("/work/.agent/settings.json")];
+        let err = refuse_writes_a_mount_would_hide(&specs, &[], &[bind_at("/work")]).unwrap_err();
+        assert!(format!("{err:#}").contains("bind"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_writable_named_volume_refuses_nothing_because_the_staged_copy_lands_in_it() {
+        let specs = [spec_at("/home/node/.config/tool.md")];
+        refuse_writes_a_mount_would_hide(&specs, &[volume_at("/home/node", false)], &[])
+            .expect("a writable named volume takes the copy lns-init makes once it is mounted");
+    }
+
+    #[test]
+    fn a_mount_beside_every_write_refuses_nothing() {
+        let specs = [spec_at("/home/node/tool.md")];
+        refuse_writes_a_mount_would_hide(&specs, &[volume_at("/data", true)], &[bind_at("/work")])
+            .expect("neither mount covers where the write lands");
+    }
 
     fn tar_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());

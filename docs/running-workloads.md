@@ -578,6 +578,15 @@ spec:
   guest path; duplicates — including collisions with a volume `target` — are
   rejected offline, as is any mount into the sandbox's own `/.lens` runtime
   namespace.
+- A `guestPath` **under** a volume `target` still lands. The volume mounts after
+  the files are placed, so the run writes the file into the volume once it is
+  mounted, on every boot — the document decides that path, not what the workload
+  left there last run. Two volumes take no such write and are rejected offline:
+  a **bind**, because a fileset never writes into the host directory a bind
+  shares, and a **read-only** volume, which takes no write at all. Either
+  refusal names the fileset entry and the volume entry. Add one of those two
+  mounts with a `-v` flag instead of in the document and the run is refused when
+  it starts, before anything boots.
 - **`owner`** decides who owns the materialized files in the guest.
   The default, `workload`, transfers the guest path and everything it ships
   to the run-as user, so a seeded config the tool rewrites at runtime

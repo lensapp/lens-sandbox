@@ -121,6 +121,29 @@ fn lns_yaml_with_path_fileset(w: &mut BehaviourWorld, path: String, mount: Strin
 }
 
 #[given(
+    regex = r#"^an lns\.yaml declaring a (bind|read-only|named) volume at "([^"]+)" and fileset "([^"]+)" mounted at "([^"]+)"$"#
+)]
+fn lns_yaml_with_volume_and_nested_fileset(
+    w: &mut BehaviourWorld,
+    kind: String,
+    target: String,
+    path: String,
+    mount: String,
+) {
+    let volume = match kind.as_str() {
+        "bind" => format!("    - type: bind\n      source: ./src\n      target: {target}\n"),
+        "read-only" => format!("    - name: home\n      target: {target}\n      readOnly: true\n"),
+        _ => format!("    - name: home\n      target: {target}\n"),
+    };
+    seed(
+        w,
+        &format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  volumes:\n{volume}  filesets:\n    - path: {path}\n      guestPath: {mount}\n"
+        ),
+    );
+}
+
+#[given(
     regex = r#"^an lns\.yaml declaring a hostPath fileset "([^"]+)" mounted at "([^"]+)" and optional$"#
 )]
 fn lns_yaml_with_host_path_fileset(w: &mut BehaviourWorld, source: String, mount: String) {
