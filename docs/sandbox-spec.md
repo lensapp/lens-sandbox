@@ -33,7 +33,7 @@ and a `spec`, published as one OCI artifact. Three artifact kinds exist:
 |---|---|
 | **`sandbox`** | A complete sandbox: the base image, the egress it needs, the credentials it needs, and the files, tools, and mounts it brings. |
 | **`mixin`** | A capability layered onto a sandbox: tools, filesets, egress, credentials. |
-| **`connector`** | A mixin the user installs on their machine, offered when a run reaches a service it covers. It carries only what can be applied to a guest that is already running, and it applies only after the user connects it. |
+| **`connector`** | A mixin the user installs on their machine, offered when a run reaches a service it covers. It carries only what can be applied to a guest that is already running, and it applies only after the user grants it. |
 
 [Chapter 3](#3-artifact-kinds) specifies each in full.
 
@@ -89,9 +89,9 @@ them:
   and is never asked about.
 
 A `connector` is the one kind that grants nothing even after it arrives.
-Installing it opens nothing, arms nothing, writes nothing, and sets nothing; what
-grants is the user granting one of its profiles to a project
-([§3.2.4](#324-installing-connecting-and-applying)).
+Installing it opens nothing, arms nothing, writes nothing, and sets nothing — it
+only makes the destinations it serves ask. What grants is the user granting one of
+its methods to a project ([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.4 Credentials, and what a connector adds
 
@@ -135,12 +135,11 @@ still be given — egress, credentials, filesets, and env — and no others
 rules in [§3.3.2](#332-merge-rules), so a profile granted at the gate and one
 already granted at boot produce the same run.
 
-**Nothing applies until the user grants a profile.** Installing is not a merge
-and not a seed: it makes a connector offerable and does nothing else. A
-**connect** produces a profile — the user picks a method and satisfies its
-`auth` — and a **grant** applies one to a project
-([§3.2.4](#324-installing-connecting-and-applying)). The card does both at once
-when the profile does not exist yet.
+**Nothing applies until the user grants a method.** Installing is not a merge and
+not a seed: it grants nothing, and only makes the connector's destinations ask.
+A **grant** applies one method to one project; a **connect** authenticates where a
+method requires it, and the card does both at once
+([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.5 One disclosure
 
@@ -208,7 +207,7 @@ common: each is authored, published, versioned, and approved the same way
 |---|---|---|
 | [`sandbox`](#31-kind-sandbox) | The workload's author | `lns run <reference>`, or a local `./lns.yaml`. Exactly one. |
 | [`mixin`](#33-kind-mixin) | Anyone | Referenced by a sandbox, merged at startup. |
-| [`connector`](#32-kind-connector) | The user, on their machine | Installed once, then offered when a run reaches a service it covers. Merged when the user connects it. |
+| [`connector`](#32-kind-connector) | The user, on their machine | Installed once, then offered when a run reaches a service it covers. Merged when the user grants it. |
 
 The middle column is the distinction to keep in view. A `sandbox` and a `mixin`
 travel **with the workload** — an author writes them, and a consumer approves what
@@ -534,8 +533,8 @@ variable.
 
 **A declaration is answered here, not by a connector.** A
 [connector](#32-kind-connector) is offered when a request reaches a destination
-nothing decided ([§3.2.4](#324-installing-connecting-and-applying)), which is
-after boot — so it is not what satisfies a declaration the run resolves before
+the run does not deny ([§3.2.4](#324-installing-connecting-and-applying)), which
+is after boot — so it is not what satisfies a declaration the run resolves before
 boot. The two paths meet at the same mechanism and nowhere else: both end in an
 injection, and the injection is identical.
 
@@ -1057,10 +1056,12 @@ spec:
         SOME_PROVIDER_REGION: eu
 ```
 
-**Installing applies nothing** — no destination opens, no injection is armed, no
-file is written, no variable is set. Two independent acts do that: a **connect**
-produces a profile, and a **grant** applies one. A granted profile this machine no
-longer holds still applies, with its credentials unarmed
+**Installing grants nothing** — no destination opens, no injection is armed, no
+file is written, no variable is set. What it does do is make its `serves`
+destinations **ask** ([§3.2.1](#321-serves)).
+
+Two later acts change what a run gets: a **grant** applies one method to one
+project, and a **connect** authenticates where a method requires it
 ([§3.2.4](#324-installing-connecting-and-applying)).
 
 Three stored facts, each about a different scope:
@@ -1069,22 +1070,28 @@ Three stored facts, each about a different scope:
 |---|---|---|
 | **installed** | the document is on this machine, so it can be offered | the machine |
 | **connected** | at least one **profile** exists — one successful connect, holding what its `auth` produced | the machine |
-| **granted** | this project may use a named profile | the project directory |
+| **granted** | this project may use a named method, and the profile behind it where that method authenticates | the project directory |
 
-A run has a granted profile **applied**: its payload in force in the guest. That
-is not a fourth stored fact, only what a run does with the three above.
+A run has a granted method's payload **applied**: in force in the guest. That is
+not a fourth stored fact, only what a run does with the three above.
 
 #### 3.2.1 `serves`
 
 The destinations that make this connector relevant, written in the
 [`match`](#42-the-egress-definition) grammar. At least one entry.
 
-**`serves` grants nothing.** The gate reads it only for a destination the run's
-own [egress](#42-the-egress-definition) does not decide. What opens is the
-granted method's `egress`, which MAY be narrower than `serves` and MAY name
-destinations `serves` never mentions — a sign-in host, for instance. So write
-`serves` broadly: a destination it misses is one the connector is never offered
-for.
+**`serves` grants nothing — it asks.** While a project has neither granted nor
+declined this connector, every destination `serves` covers is held and asked
+about, **whatever the run's own [egress](#42-the-egress-definition) allowed** — a
+request that reaches a service unauthenticated fails just as surely as one that is
+blocked.
+
+A destination the run **denies** does not ask: a deny is an explicit refusal.
+
+What opens on a grant is the granted method's `egress`, which MAY be narrower than
+`serves` and MAY name destinations `serves` never mentions — a sign-in host, for
+instance. So write `serves` broadly: a destination it misses is one the connector
+is never offered for.
 
 **An entry with no port matches any port.** A port narrows it
 (`db.some-provider.example:5432`). This is the opposite default from
@@ -1149,7 +1156,7 @@ may also appear under `spec`. A connector whose methods share a payload repeats
 it.
 
 A method with no `auth` is not a lesser method — a connector that only opens
-`docs.rs` has nothing to sign in to, and connecting it is consent alone:
+`docs.rs` has nothing to sign in to. It is never connected, only granted:
 
 ```yaml
 spec:
@@ -1222,22 +1229,24 @@ already running, and tools are installed before the guest boots
 
 #### 3.2.4 Installing, connecting, and applying
 
-**Installing makes a connector offerable, and does nothing else.** An installed
-connector appears nowhere in a resolved sandbox ([§1.5](#15-one-disclosure)) and
-nowhere in a running guest.
+**Installing grants nothing**, and an installed connector appears nowhere in a
+resolved sandbox ([§1.5](#15-one-disclosure)) and nowhere in a running guest — it
+only makes its destinations ask ([§3.2.1](#321-serves)).
 
-**Connecting has three parts, in this order:**
+**Granting has three parts, in this order:**
 
-1. **Choose a profile, or a method to make one from.** The card offers every
-   profile this machine already holds and every offerable method, each labelled
-   with what applying it will do — the destinations it opens, the variables it
-   sets, the files it writes.
-2. **Satisfy the method's `auth`**, if a new profile is being made. This happens
-   on the host, outside the guest, and produces the values the method's
-   `credentials` draw from. An existing profile skips this part.
-3. **Apply the profile.** Its method's `egress`, `credentials`, and `filesets`
-   reach the running guest, and a grant naming that profile is recorded for this
-   project ([§8.4](#84-where-a-connector-grant-goes)).
+1. **Choose a method**, and where it authenticates, a profile — one this machine
+   already holds, or a new one. The card offers each, labelled with what applying
+   it will do: the destinations it opens, the variables it sets, the files it
+   writes.
+2. **Satisfy the method's `auth`**, where it has one and a new profile is being
+   made. This happens on the host, outside the guest, and produces the values the
+   method's `credentials` draw from. A method with no `auth`, and an existing
+   profile, both skip this part.
+3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
+   running guest, and a grant is recorded for this project — the method, and the
+   profile behind it where one exists
+   ([§8.4](#84-where-a-connector-grant-goes)).
 
 Authentication that fails or is abandoned grants nothing and leaves the offer
 standing.
@@ -1246,22 +1255,30 @@ standing.
 
 | Prompt | Asks | Fires on |
 |---|---|---|
-| The **consent** card | choose a profile, or a method to make one from, and use it in this project | a destination `serves` covers that the run's own egress **does not decide** |
+| The **consent** card | choose a method — and a profile, where it authenticates — and use it in this project | a destination `serves` covers that the run's own egress does not **deny** |
 | The **connect** prompt | re-authenticate the profile this project granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
 
 A grant MAY also be given ahead of any request, with the same disclosure and no
 held connection (`lns connector grant`). The trigger decides when the card
 appears, never whether consent must be informed.
 
-**"Does not decide" is exact**, and it bounds the consent card: a `verdict: deny`
-is a decision, so a connector is never offered over one. The gate asks only about
-a destination nothing decided. A connector is not offered before boot either,
-because nothing yet said the run needs it.
+**A `deny` is the only verdict that silences the card.** Everything else asks —
+a destination nothing decided, and a destination the run allows. So a run holds a
+request for a served destination it would otherwise have allowed, until this
+project grants or declines the connector. A connector is not offered before boot
+either, because nothing yet said the run needs it.
 
-**A granted profile can still override a document's `deny`.** A profile granted
-while a destination was undecided keeps applying after a pulled update denies it,
-because a connector is source 4 and [§4.2](#42-the-egress-definition) lets a later
-source turn a `deny` into an `allow`. The override MUST be named in the pre-boot
+The card is what a `deny` silences, not a grant. `lns connector grant` gives a
+grant ahead of any request, and it is not refused because some run's document
+denies the destination — the developer is choosing, not being prompted to
+overturn.
+
+**A granted method can still override a document's `deny`.** A grant outlives
+the verdict that stood when it was given, and `lns connector grant` may be given
+over a live deny, so a granted method keeps applying whether the deny arrived
+before or after it — a connector is source 4, and
+[§4.2](#42-the-egress-definition) lets a later source turn a `deny` into an
+`allow`. The override MUST be named in the pre-boot
 disclosure ([§1.5](#15-one-disclosure)) and on the consent card that introduces
 it. The [local mixin](#8-the-local-mixin) is unaffected: it is source 5, so a
 `deny` the developer typed still wins.
@@ -1297,9 +1314,13 @@ interpreting it. A `kind: token` exchange reports none.
 report identically, and anything that varies between exchanges — an expiry, a
 token id, an issue time, the order of a set — MUST NOT be part of it.
 
-**A grant names a profile, not a method**, because two profiles of one method may
-hold different authority. A project that granted one profile has not granted its
-sibling.
+**A grant names a method, and — where that method has `auth` — the profile that
+supplies its values.** Two profiles of one method may hold different authority, so
+a project that granted one has not granted its sibling.
+
+A method with no `auth` produces no profile. Its grant names the method alone, and
+it is granted like any other: **a connector is never applied without a grant, with
+or without authentication.**
 
 **The card discloses the profile** — its label and its authority — not just
 the method. This is the one thing on the card that no document contains, so it is
@@ -1320,20 +1341,21 @@ authority comes back unchanged, and raises the consent card when it does not.
 
 A grant MUST NOT be silently widened.
 
-**A project grants at most one profile per connector.** Granting another replaces
-the prior grant: its payload is retracted — egress closes, injections disarm,
-filesets are removed — and the new profile's applies. That is what keeps a
-connector one merge source ([§3.3.2](#332-merge-rules)) rather than one per
-profile, and it is how a project moves between profiles.
+**A project holds at most one grant per connector, so it grants at most one
+method.** Granting again replaces the prior grant: that method's payload is
+retracted — egress closes, injections disarm, filesets are removed — and the new
+one's applies. That is what keeps a connector one merge source
+([§3.3.2](#332-merge-rules)), and it is how a project moves between methods and
+between profiles of one method.
 
 **Granted is not connected.** The combination is reachable: `lns connector
 disconnect` drops a profile and keeps the grants naming it, and reinstalling a
 connector restores the document without restoring what it held
 ([§7.1](#71-connectors)). In that state:
 
-- The granted profile's method **is** the run's source in
-  [§3.3.2](#332-merge-rules), so its `egress`, its `filesets`, and its `env`
-  apply as the project consented. They needed no value.
+- The granted method **is** the run's source in [§3.3.2](#332-merge-rules), so
+  its `egress`, its `filesets`, and its `env` apply as the project consented.
+  They needed no value.
 - Its `credentials` ship **unarmed** — the placeholder is registered, no value
   substitutes for it. A request carrying the placeholder is held rather than
   relayed ([§4.1](#41-the-credential-definition)), and that hold raises the
@@ -1387,11 +1409,6 @@ Two rules govern it, and only the second is checkable:
   secret-shaped name and no declared placeholder is refused. The placeholder MUST
   be one the same method declares, because a sibling's injection is not armed
   when this one applies.
-
-The second rule is scoped to secret-shaped names, and a file containing a
-placeholder may contain a second field beside it — so a method shipping a real
-token under a benign filename passes every check. That residual risk is the first
-rule's, and it is addressed by the author and the card, not by validation.
 
 A `connector` document carries the placeholder, never a value. Values stay
 per-machine.
@@ -1516,8 +1533,8 @@ it:
    own `mixins`, expanded the same way.
 3. Each `--mixin`, in flag order; after each, that mixin's own `mixins`, expanded
    the same way.
-4. Each granted [connector](#32-kind-connector) — the **granted profile's method**
-   only, in grant order. User consent on this machine, so it beats anything a document
+4. Each granted [connector](#32-kind-connector) — its **granted method** only, in
+   grant order. User consent on this machine, so it beats anything a document
    shipped.
 5. The directory's [local mixin](#8-the-local-mixin) — the developer's own
    decisions, so neither what they pulled nor what they connected can overrule
@@ -1532,16 +1549,15 @@ weakest ────────────────────────
 
 **A connector is the one source no document names**, so it is the one source
 whose position is not a consequence of where it was written down. It sits after
-every document because the user connected it here and now; it sits before the
+every document because the user granted it here and now; it sits before the
 local mixin because a `deny` the developer typed by hand is still the last word.
 A connector shadowed that way is reported in the approval window, rather than
 silently taking no effect.
 
 **A connector contributes one source, not one per method.** Methods are
-alternatives ([§3.2.2](#322-methods)), so the source is the method behind the
-profile the project granted, and the others are not in the list at all. A grant is
-what puts it here; whether the machine still holds that profile decides only
-whether its credentials are armed
+alternatives ([§3.2.2](#322-methods)), so the source is the granted method, and
+the others are not in the list at all. A grant is what puts it here; whether the
+machine still holds that profile decides only whether its credentials are armed
 ([§3.2.4](#324-installing-connecting-and-applying)).
 
 Two properties fall out of the shape:
@@ -1804,7 +1820,7 @@ only who is speaking:
 | Declared by | Reads as |
 |---|---|
 | [`sandbox`](#316-egress) / [`mixin`](#33-kind-mixin) | What this workload may reach. A destination no entry decides is asked about. |
-| [`connector`](#32-kind-connector) | What this service needs in order to work, declared inside one [method](#322-methods). Granting a profile grants every entry its method declares, not only the one that raised the offer. |
+| [`connector`](#32-kind-connector) | What this service needs in order to work, declared inside one [method](#322-methods). Granting a method grants every entry it declares, not only the one that raised the offer. |
 
 **Combining egress from several sources.** A run's egress is rarely one table: a
 sandbox, the mixins it resolves, and each granted connector method contribute one.
@@ -1900,7 +1916,7 @@ there, because they depend on state no document carries — they run at launch:
 | Check | Depends on |
 |---|---|
 | Whether a declared credential has a value bound ([§3.1.7](#317-credentials)) | Per-machine credential values. |
-| Which connector profile this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the profiles it holds, and the project's own grants. |
+| Which connector method this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the profiles it holds, and the project's own grants. |
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
@@ -2038,13 +2054,17 @@ Four things live per machine, none of them in any document:
 |---|---|---|
 | The installed set — each connector's document, stored verbatim at the digest it came from | name | The machine |
 | Each **profile** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then profile | The machine |
-| Which profile a project granted, and the authority it consented to | directory, then name, digest | The project directory |
+| Which method a project granted, the profile behind it where the method authenticates, and the authority it consented to | directory, then name, digest | The project directory |
 | Which connectors a project declined | directory, then name | The project directory |
 
 The second row admits many profiles per connector, including many of one method
-([§3.2.4](#324-installing-connecting-and-applying)). The third names one of them,
-because a grant is consent to the authority a profile holds and two profiles of
-one method may hold different authority.
+([§3.2.4](#324-installing-connecting-and-applying)). The third names the method a
+project consented to, and the profile behind it where one exists — a method with
+no `auth` has none.
+
+A connector that is installed and neither granted nor declined here holds no row
+of its own, and still changes the run: its `serves` destinations ask
+([§3.2.1](#321-serves)).
 
 **The two keys differ deliberately.** A profile's key starts with the connector
 name and survives an update; a grant is keyed by the digest too and does not. So
@@ -2077,7 +2097,7 @@ Three rules follow from a connector arriving over the network:
   one is ever applied ([§3.2.2](#322-methods)).
 
 **Uninstalling stops the offer; it does not retract a grant.** A project that
-already granted a profile keeps that decision, and reinstalling the same digest
+already granted a method keeps that decision, and reinstalling the same digest
 resumes that grant with no fresh consent prompt — the grant was bound to those
 bytes and those bytes came back. This is deliberate: uninstalling is housekeeping
 on the machine, and withdrawing consent is a decision about a project. A project
@@ -2209,13 +2229,13 @@ exactly why it is tempting, and exactly why it is wrong.
 destination ([§7.1](#71-connectors)), given by one person on one machine, and
 consent does not travel in a git clone. A teammate is asked on their own machine
 rather than inheriting an answer. Worse, the answer would not even work there:
-what a grant points at is a profile of this machine, and another machine holds
-none of them.
+where a grant names a profile, that profile is this machine's and no other
+machine holds it.
 
 So a grant lives in the per-project store the machine already keeps
 ([§7.1](#71-connectors)), keyed by directory. The run reads it and merges the
-granted profile's method at the position [§3.3.2](#332-merge-rules) gives it — the
-same merge, from a different source.
+granted method at the position [§3.3.2](#332-merge-rules) gives it — the same
+merge, from a different source.
 
 A decline lives beside it, and both are retractable: a project can forget what it
 decided about one connector, so the next run asks again. Neither is a document,
