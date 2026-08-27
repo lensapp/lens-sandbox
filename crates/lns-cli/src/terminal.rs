@@ -7,9 +7,16 @@ pub trait Terminal {
     fn read_answer(&mut self) -> std::io::Result<String>;
 }
 
-/// Stands in wherever a command must never block on a question, so every prompt takes the same no-terminal path.
-pub struct NoTerminal;
+pub fn is_affirmative(answer: &str) -> bool {
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
+}
 
+/// The strict absent terminal: unlike `ScriptedTerminal::absent`, reading from it fails, so a caller that asks anyway cannot pass by seeing an empty answer.
+#[cfg(test)]
+pub(crate) struct NoTerminal;
+
+#[cfg(test)]
 impl Terminal for NoTerminal {
     fn is_available(&self) -> bool {
         false
@@ -18,11 +25,6 @@ impl Terminal for NoTerminal {
     fn read_answer(&mut self) -> std::io::Result<String> {
         Err(std::io::Error::other("there is no terminal to ask at"))
     }
-}
-
-pub fn is_affirmative(answer: &str) -> bool {
-    let answer = answer.trim();
-    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 #[cfg(test)]

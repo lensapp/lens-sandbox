@@ -450,12 +450,8 @@ pub async fn run_image(
     };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
-    // A detached run must never block on a prompt, so it has no terminal to ask at even when one is attached to the process.
-    let mut terminal: Box<dyn crate::terminal::Terminal> = if args.detach {
-        Box::new(crate::terminal::NoTerminal)
-    } else {
-        Box::new(crate::terminal::RealTerminal::open())
-    };
+    // Every question is asked before anything boots, so a detached run can still ask at the controlling terminal: detaching decides who holds the terminal after boot, not whether one exists.
+    let mut terminal = crate::terminal::RealTerminal::open();
     let reference = target.image();
     let declared_mounts = published.is_some().then(|| {
         crate::run::pull_confirm::artifact_declared_mounts(&args.mounts, &consumer_mount_targets)
@@ -491,7 +487,7 @@ pub async fn run_image(
             ),
             assume_yes: args.assume_yes,
         },
-        terminal.as_mut(),
+        &mut terminal,
     )?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
@@ -2325,6 +2321,49 @@ mod tests {
             binds[0].kept,
             vec![".env".to_string()],
             "the keyboard answer at the terminal decides, so a run whose stdin is a pipe can still be answered"
+        );
+    }
+
+    /// `PreBootQuestions` has no detach field to set, which is the whole point: `-d` cannot reach a question that is asked before anything boots, so a detached run answers at the terminal like any other.
+    #[test]
+    fn detaching_is_not_one_of_the_questions_asked_before_boot() {
+        let dir = tempfile::tempdir().expect("a temp dir for the bind source");
+        std::fs::write(dir.path().join(".env"), b"TOKEN=1").expect("a secret-shaped file");
+        let bind_specs = vec![lns_ipc::BindSpec {
+            host_source: dir.path().to_string_lossy().into_owned(),
+            target: "/work".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+        }];
+        let reference = "ghcr.io/team/hermes:1.4.0";
+
+        let (_, binds) = ask_before_boot(
+            &PreBootQuestions {
+                pulled: Some(crate::run::pull_confirm::PulledEffects {
+                    reference,
+                    binds: &bind_specs,
+                    volumes: &[],
+                    filesets: &[],
+                    tools: &[],
+                    scripts: &[],
+                }),
+                origin: crate::run::host_path_consent::DocumentOrigin::Pulled {
+                    reference: reference.to_string(),
+                },
+                filesets: &[],
+                host_paths: &NoHostPathDecisions,
+                bind_specs: &bind_specs,
+                bind_decisions: &RecordingDecisions::default(),
+                assume_yes: false,
+            },
+            &mut crate::terminal::ScriptedTerminal::answering(&["y\n", "k\n"]),
+        )
+        .expect("the declared effects are accepted at the terminal");
+        assert_eq!(
+            binds[0].kept,
+            vec![".env".to_string()],
+            "both questions took the terminal's answer, so `-d --yes` is a choice and not the only way through"
         );
     }
 
