@@ -154,6 +154,7 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
 | `RUN` | A sandbox's numeric id (`7`), its name (`reviewer`), or a unique id prefix. |
 | `PATTERN` | A destination: host, wildcard host (`*.github.com`), CIDR, or `host:port`. |
 | `NAME` | A volume name, a connector id, or a registry host. |
+| `PROFILE` | A connector profile's label, unique per connector. |
 | `KEY` | A dotted config key (`run.mem`). |
 
 - A command takes a `REF` or a `RUN`, never either. Given the wrong kind, it says
@@ -322,35 +323,50 @@ not the document: whether it is available on **this machine**.
 lns connector install <REF|PATH>
 lns connector uninstall <ID>
 lns connector list [--format <table|json>]
-lns connector connect <ID> [--method <NAME>]
-lns connector disconnect <ID>
+lns connector connect <ID> [--method <NAME>] [--as <PROFILE>]
+lns connector disconnect <ID> [--profile <PROFILE>]
+lns connector grant <ID> [--profile <PROFILE>] [--project <PATH>]
 lns connector forget <ID> [--project <PATH>]
 ```
 
 | Verb | What it does |
 |---|---|
 | `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
-| `uninstall` | Removes it from this machine, with the values it held. A project that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
-| `list` | Lists what is installed: what each connector serves, its methods, and which method this machine is connected with. |
-| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — and runs whatever authentication that method declares. Connecting is not granting: a project still decides whether to use it. |
-| `disconnect` | Drops the values for one connector. It stays installed, the projects that granted it keep their grants, and you are asked to connect again the next time a request needs a value. |
-| `forget` | Clears this project's decision about one connector, granted or declined, so the next run asks again. `--project <PATH>` acts on another directory. Exits `1` when there was nothing to forget. |
+| `uninstall` | Removes it from this machine, with every profile it held. A project that already granted a profile keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
+| `list` | Lists what is installed: what each connector serves, its methods, and the profiles this machine holds for it. |
+| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **profile**. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several profiles of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a project still decides which profile to use. |
+| `disconnect` | Drops one profile, or every profile of a connector when `--profile` is absent. The connector stays installed, projects that granted a dropped profile keep their grants, and you are asked to connect again the next time a request needs a value. |
+| `grant` | Grants this project a profile before a run asks for it. Prints what the card would show — the destinations the profile opens, the files it writes, the variables it sets, its authority — and asks. `--profile` names one; omitted, you choose from what this machine holds. When it holds none, `grant` says to `connect` first rather than starting an authentication of its own. A project grants one profile per connector, so this replaces any prior grant, and what it prints names the profile it displaces. `--project <PATH>` acts on another directory. Exits `1` when the project already granted that profile. |
+| `forget` | Clears this project's decision about one connector, granted or declined, so the next run asks again. The inverse of `grant`. `--project <PATH>` acts on another directory. Exits `1` when there was nothing to forget. |
 
-There is no `accept` verb, and that is the point: a connector is granted in the
-approval window, at the moment a run reaches a service it serves. Installing
-makes a connector offerable, `connect` signs this machine in, and granting is a
-decision you make in front of the request that provoked it.
+Four verbs bound the decision, across two scopes. On the machine: `install`
+makes a connector offerable, and `connect` signs in and stores a profile. In a
+project: `grant` lets it use one profile, and `forget` takes that back.
 
-**Connecting from the card is the normal path.** The card offers each method, so
-choosing one there is what most people ever do, and `lns connector connect` is
-for signing in ahead of time or switching method later. Either way the sequence
-is the same: choose a method, satisfy its authentication, and only then does its
-egress, its files, and its injections apply.
+**`--as` naming a profile that already exists re-authenticates that one in
+place.** Where the authentication comes back with different authority, the grants
+naming that profile are invalidated and asked again
+([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
+
+**`grant` is the card in a terminal, not a shortcut past it.** It discloses
+exactly what the card discloses and then asks, so consent is never given to a
+payload nobody saw ([§7.2](#72-answering)). What it moves is *when* you decide,
+not *whether* you were told. There is deliberately no flag that answers it: with
+no terminal to ask at, `grant` refuses like any other prompt
+([§7.2](#72-answering)), so a script cannot consent on a person's behalf.
+
+**The card is the normal path.** It offers every profile this machine holds and
+every method it could make one from, so choosing there is what most people ever
+do. `connect` and `grant` are for deciding ahead of time — signing in on a new
+machine, adding a second profile, or pointing a fresh clone at the profile you
+know it needs. Either way the sequence is the same: choose a profile or a method,
+satisfy any authentication, and only then do its egress, its files, and its
+injections apply.
 
 **The request that raised the card waits while you do it.** How long it waits is
 not something `lns` controls — the workload set that deadline. A slow sign-in can
 outlast it, and then that one request fails. It does not cancel the connect: you
-finish, the method applies, and the next request works.
+finish, the profile applies, and the next request works.
 
 ### 3.4 `lns volume`
 
@@ -583,11 +599,12 @@ never half-written. Warnings never change the exit code.
 | Let these host files in, including the secret-shaped ones? | `run` with a host bind |
 | Delete this data? | `prune`, `uninstall` |
 | Bind a value for this credential? | The approval window, when a run needs one |
-| Connect this connector, and use it here? | The approval window, when a run reaches a service it serves |
+| Connect this connector, and use this profile here? | The approval window, when a run reaches a service it serves — or your terminal, via `lns connector connect` and `lns connector grant` |
 
-The first three are asked at your terminal. The last two are not: a credential or
-connector decision is made in the approval window the background service owns,
-because it has to be answerable while a sandbox is already running.
+The first three are asked at your terminal. A credential or connector decision is
+asked in the approval window the background service owns, because it has to be
+answerable while a sandbox is already running. The connector question is the one
+you may also answer early, at your terminal, with the same disclosure.
 
 ### 7.2 Answering
 
@@ -657,8 +674,8 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 |---|---|
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
 | `~/.lns/connectors/` | The connectors installed on this machine, each stored verbatim at the digest it came from. |
-| `~/.lns/connector-grants.json` | Which connector method a project granted, and which connectors it declined. |
-| `~/.lns/connector-values.json` | The values a connected method produced, mode `0600`. |
+| `~/.lns/connector-grants.json` | Which connector profile a project granted, the authority it consented to, and which connectors it declined. |
+| `~/.lns/connector-values.json` | The profiles this machine holds — each one's authority and the values its `auth` returned, mode `0600`. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
 
