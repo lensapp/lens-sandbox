@@ -308,6 +308,10 @@ machine.
 lns connector install <REF|PATH>
 lns connector uninstall <ID>
 lns connector list [--format <table|json>]
+lns connector connect <ID> [--method <NAME>] [--as <PROFILE>]
+lns connector disconnect <ID> [--profile <PROFILE>]
+lns connector grant <ID> [--method <NAME>] [--profile <PROFILE>] [--project <PATH>]
+lns connector forget <ID> [--project <PATH>]
 ```
 
 | Subcommand            | Meaning                                                                              |
@@ -315,11 +319,20 @@ lns connector list [--format <table|json>]
 | `install <REF\|PATH>` | Make a published or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. Refused when a method carries a block a connector may not, when the document's `serves` overlaps an installed connector's, or when it claims a variable one already claims. |
 | `uninstall <ID>`      | Remove it from this machine, with every profile it held. A project that already granted a method keeps that decision, and reinstalling the same bytes resumes it. |
 | `list`                | List what is installed: what each connector serves, its methods — marking those that need no connect — and the profiles this machine holds. |
+| `connect <ID>`        | Ask for the value each of the method's credentials needs, at the terminal and without echoing it, and keep the result as a profile named by `--as` or after the method. Grants nothing: a project still decides whether to use it. Refused for a method with no `auth` — grant that instead. |
+| `disconnect <ID>`     | Drop one profile, or every profile of the connector when `--profile` is absent. Exits `1` when it holds none. The connector stays installed, and projects that granted a dropped profile keep their grants. |
+| `grant <ID>`          | Let this project use one method. Prints what that method opens, writes and sets, and the authority of each profile held, then asks. Exits `1` when you decline, and `1` when this project already granted that method and profile. `--project <PATH>` acts on another directory. |
+| `forget <ID>`         | Clear this project's decision about one connector, granted or declined. Exits `1` when there was nothing to forget. `--project <PATH>` acts on another directory. |
 
 `install` takes either a published reference or a path to a directory holding the
 connector's `lns.yaml`; a relative path is resolved against your working
 directory. The digest a local install records is the one publishing that
 directory would produce, so a grant survives the publish.
+
+`connect` and `grant` need a terminal by design: no flag answers either, so a
+script cannot consent or paste a secret on your behalf. `--method` is required
+when a connector declares more than one method this version can offer — `lns`
+refuses rather than choosing for you.
 
 The connector document format is specified in
 [Sandbox specification §3.2](sandbox-spec.md#32-kind-connector).

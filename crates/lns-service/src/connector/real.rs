@@ -16,6 +16,26 @@ pub enum Call {
     Install(String),
     Uninstall(String),
     List,
+    Connect {
+        name: String,
+        method: String,
+        profile: String,
+        values: std::collections::BTreeMap<String, String>,
+    },
+    Disconnect {
+        name: String,
+        profile: Option<String>,
+    },
+    Grant {
+        name: String,
+        project_dir: String,
+        method: String,
+        profile: Option<String>,
+    },
+    Forget {
+        name: String,
+        project_dir: String,
+    },
 }
 
 /// The three paths a connector store is kept at, resolved together so one missing home refuses all three rather than half.
@@ -55,6 +75,42 @@ pub async fn answer(call: Call) -> Result<Response> {
         }),
         Call::List => Ok(Response::ConnectorList {
             connectors: handler::list(&store)?,
+        }),
+        Call::Connect {
+            name,
+            method,
+            profile,
+            values,
+        } => {
+            let connected = handler::connect(&store, &name, &method, &profile, values)?;
+            Ok(Response::ConnectorConnected {
+                name,
+                profile: connected.profile,
+                invalidated: connected.invalidated,
+            })
+        }
+        Call::Disconnect { name, profile } => Ok(Response::ConnectorDisconnected {
+            dropped: handler::disconnect(&store, &name, profile.as_deref())?,
+            name,
+        }),
+        Call::Grant {
+            name,
+            project_dir,
+            method,
+            profile,
+        } => {
+            let granted = handler::grant(&store, &name, &project_dir, &method, profile.as_deref())?;
+            Ok(Response::ConnectorGranted {
+                name,
+                method: granted.method,
+                profile: granted.profile,
+                displaced: granted.displaced,
+                unchanged: granted.unchanged,
+            })
+        }
+        Call::Forget { name, project_dir } => Ok(Response::ConnectorForgotten {
+            had_decision: handler::forget(&store, &name, &project_dir)?,
+            name,
         }),
     }
 }

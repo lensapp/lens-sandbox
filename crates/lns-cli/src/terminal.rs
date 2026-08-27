@@ -5,6 +5,8 @@ pub use real::RealTerminal;
 pub trait Terminal {
     fn is_available(&self) -> bool;
     fn read_answer(&mut self) -> std::io::Result<String>;
+    /// Reads one line without echoing it, for a value that must not reach the screen or the scrollback.
+    fn read_secret(&mut self) -> std::io::Result<String>;
 }
 
 pub fn is_affirmative(answer: &str) -> bool {
@@ -23,6 +25,10 @@ impl Terminal for NoTerminal {
     }
 
     fn read_answer(&mut self) -> std::io::Result<String> {
+        Err(std::io::Error::other("there is no terminal to ask at"))
+    }
+
+    fn read_secret(&mut self) -> std::io::Result<String> {
         Err(std::io::Error::other("there is no terminal to ask at"))
     }
 }
@@ -61,6 +67,10 @@ impl Terminal for ScriptedTerminal {
     }
 
     fn read_answer(&mut self) -> std::io::Result<String> {
+        Ok(self.answers.pop_front().unwrap_or_default())
+    }
+
+    fn read_secret(&mut self) -> std::io::Result<String> {
         Ok(self.answers.pop_front().unwrap_or_default())
     }
 }
