@@ -54,6 +54,40 @@ fn output_is_empty_json_array(world: &mut BehaviourWorld) -> Result<(), String> 
     }
 }
 
+#[then(regex = r"^the output is a JSON object$")]
+fn output_is_json_object(world: &mut BehaviourWorld) -> Result<(), String> {
+    let doc = parsed(world)?;
+    if doc.is_object() {
+        Ok(())
+    } else {
+        Err(format!("expected a single json object, got {doc}"))
+    }
+}
+
+#[then(regex = r"^the output is JSON null$")]
+fn output_is_json_null(world: &mut BehaviourWorld) -> Result<(), String> {
+    let doc = parsed(world)?;
+    if doc.is_null() {
+        Ok(())
+    } else {
+        Err(format!("expected json null, got {doc}"))
+    }
+}
+
+#[then(regex = r#"^the JSON object has "([^"]+)" set to "([^"]*)"$"#)]
+fn json_object_string(
+    world: &mut BehaviourWorld,
+    key: String,
+    expected: String,
+) -> Result<(), String> {
+    let found = field(&parsed(world)?, &key)?;
+    if found == serde_json::Value::String(expected.clone()) {
+        Ok(())
+    } else {
+        Err(format!("expected {key} to be {expected:?}, got {found}"))
+    }
+}
+
 #[then(regex = r#"^JSON row (\d+) has "([^"]+)" set to "([^"]*)"$"#)]
 fn json_row_string(
     world: &mut BehaviourWorld,

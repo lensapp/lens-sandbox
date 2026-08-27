@@ -85,13 +85,14 @@ works as an alias for `--format jsonl`.
 What the JSON gives you:
 
 - **A bare array of objects** for the list verbs, pretty-printed. `lns service status`,
-  `lns sandbox inspect`, and `lns volume inspect` emit a single object instead.
+  `lns sandbox inspect`, `lns volume inspect`, and `lns config get` emit a single
+  object instead.
 - **camelCase keys**, always present — a key with no value is `null`, never omitted, so
   `jq .inUseBy` needs no guard.
 - **Raw numbers**, so nothing has to be un-humanized: `sizeBytes: 92274688`, not
   `"88.0 MiB"`. Timestamps pass through as the service reports them.
 - **The same exit code as the table.** `--format` changes the shape and nothing else:
-  `lns config get` on an unset key still exits 1, emitting `[]`.
+  `lns config get` on an unset key still exits 1, emitting `null`.
 - Some verbs report more in JSON than the table has room for. `lns sandbox ls` is the
   clearest case: the table abbreviates the digest and formats the size, and the JSON
   adds the whole digest, the raw byte count, the layer count, and the pull time.
