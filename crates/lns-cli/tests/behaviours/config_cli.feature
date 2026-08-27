@@ -68,15 +68,15 @@ Feature: lns config stores persistent run defaults
     Then the exit code is 0
     And the output is an empty JSON array
 
-  Scenario: Getting a set default as JSON gives the key alongside its value
+  Scenario: Getting a set default as JSON gives one object, not a list of one
     Given the default "run.cpus" is "4"
     When the developer gets the default "run.cpus" as JSON
     Then the exit code is 0
-    And the output is a JSON array of 1 rows
-    And JSON row 0 has "key" set to "run.cpus"
-    And JSON row 0 has "value" set to "4"
+    And the output is a JSON object
+    And the JSON object has "key" set to "run.cpus"
+    And the JSON object has "value" set to "4"
 
-  Scenario: Getting an unset default as JSON still exits 1, with an empty array
+  Scenario: Getting an unset default as JSON still exits 1, answering null
     When the developer gets the default "run.cpus" as JSON
     Then the exit code is 1
-    And the output is an empty JSON array
+    And the output is JSON null
