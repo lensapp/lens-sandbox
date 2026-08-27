@@ -100,6 +100,14 @@ Feature: managing named volumes from the CLI
     And the output contains "Aborted."
     And no prune request reached the service
 
+  Scenario: with no terminal to ask at, prune refuses rather than assuming
+    Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
+    And volume input is non-interactive
+    When the user runs volume command "prune"
+    Then the command fails with an exit code other than 0
+    And the output contains "--force"
+    And no request reached the service
+
   Scenario: pruning with nothing to remove says so
     Given the service will prune no volumes
     When the user runs volume command "prune --force"

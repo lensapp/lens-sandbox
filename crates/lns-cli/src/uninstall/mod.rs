@@ -7,7 +7,7 @@ use lns_ipc::{Request, Response, RunStatus, short_run_id};
 
 use crate::command::{CommandSpec, subcommand};
 use crate::connector::LocalBoxFuture;
-use crate::service::{DisableOutcome, ServiceClient};
+use crate::service::{DisableOutcome, ServiceClient, TermInfo};
 
 mod real;
 
@@ -78,8 +78,10 @@ pub async fn run_with<S, C, A, F>(
     args: &UninstallArgs,
     plan: &UninstallPlan,
     deps: &Deps<'_, S, C, A, F>,
+    term: TermInfo,
     input: &mut dyn BufRead,
     writer: &mut impl Write,
+    err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32>
 where
     S: UninstallService,
@@ -87,9 +89,17 @@ where
     A: LoginAgent,
     F: Fs,
 {
-    if !args.yes && !confirm(args.purge, &plan.purge_dirs, input, writer)? {
-        writeln!(writer, "Uninstall cancelled.")?;
-        return Ok(0);
+    if !args.yes {
+        if !term.stdin_is_tty {
+            bail!(
+                "this stops your sandboxes and removes the lns binaries; there is no terminal to ask at, so pass -y/--yes to confirm"
+            );
+        }
+        if !confirm(args.purge, &plan.purge_dirs, input, err).await? {
+            err.write_all(b"Uninstall cancelled.\n").await?;
+            err.flush().await?;
+            return Ok(0);
+        }
     }
     if deps.client.ping().await {
         stop_running_sandboxes(deps.svc, writer).await?;
@@ -104,38 +114,38 @@ where
     Ok(0)
 }
 
-fn confirm(
+async fn confirm(
     purge: bool,
     purge_dirs: &[PathBuf],
     input: &mut dyn BufRead,
-    writer: &mut impl Write,
+    err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<bool> {
-    if purge {
-        let targets = purge_dirs
-            .iter()
-            .map(|dir| dir.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" and ");
-        let data_clause = if targets.is_empty() {
-            "deletes all local data".to_string()
-        } else {
-            format!("deletes all local data under {targets}")
-        };
-        write!(
-            writer,
-            "This stops all running sandboxes, removes the lns binaries and background service, and {data_clause} (cached images, named volumes, the audit trail, and stored credentials). Continue? [y/N] "
-        )?;
-    } else {
-        write!(
-            writer,
-            "This stops all running sandboxes and removes the lns binaries and background service. Your local data and named volumes are kept — re-run with --purge to remove them too. Continue? [y/N] "
-        )?;
-    }
-    writer.flush()?;
+    err.write_all(question(purge, purge_dirs).as_bytes())
+        .await?;
+    err.flush().await?;
     let mut line = String::new();
     input.read_line(&mut line)?;
     let answer = line.trim();
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+}
+
+fn question(purge: bool, purge_dirs: &[PathBuf]) -> String {
+    if !purge {
+        return "This stops all running sandboxes and removes the lns binaries and background service. Your local data and named volumes are kept — re-run with --purge to remove them too. Continue? [y/N] ".to_string();
+    }
+    let targets = purge_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let data_clause = if targets.is_empty() {
+        "deletes all local data".to_string()
+    } else {
+        format!("deletes all local data under {targets}")
+    };
+    format!(
+        "This stops all running sandboxes, removes the lns binaries and background service, and {data_clause} (cached images, named volumes, the audit trail, and stored credentials). Continue? [y/N] "
+    )
 }
 
 async fn stop_running_sandboxes(
@@ -482,6 +492,13 @@ mod tests {
         fs: FakeFs,
     }
 
+    fn at_a_terminal() -> TermInfo {
+        TermInfo {
+            stdin_is_tty: true,
+            stdout_is_terminal: true,
+        }
+    }
+
     impl Rig {
         async fn run(
             &self,
@@ -489,16 +506,32 @@ mod tests {
             plan: &UninstallPlan,
             input: &str,
         ) -> (Result<i32>, String) {
+            let (result, out, _err) = self.run_at(args, plan, at_a_terminal(), input).await;
+            (result, out)
+        }
+
+        async fn run_at(
+            &self,
+            args: &UninstallArgs,
+            plan: &UninstallPlan,
+            term: TermInfo,
+            input: &str,
+        ) -> (Result<i32>, String, String) {
             let mut reader = input.as_bytes();
             let mut out: Vec<u8> = Vec::new();
+            let mut err: Vec<u8> = Vec::new();
             let deps = Deps {
                 svc: &self.svc,
                 client: &self.client,
                 agent: &self.agent,
                 fs: &self.fs,
             };
-            let result = run_with(args, plan, &deps, &mut reader, &mut out).await;
-            (result, String::from_utf8(out).unwrap())
+            let result = run_with(args, plan, &deps, term, &mut reader, &mut out, &mut err).await;
+            (
+                result,
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
         }
     }
 
@@ -535,18 +568,64 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs::default(),
         );
-        let (code, out) = rig
-            .run(
+        let (code, out, err) = rig
+            .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
                 "n\n",
             )
             .await;
         assert_eq!(code.unwrap(), 0);
-        assert!(out.contains("Uninstall cancelled."), "got: {out}");
+        assert!(err.contains("Uninstall cancelled."), "got: {err}");
+        assert!(!out.contains("Uninstall cancelled."), "got: {out}");
         assert!(rig.client.calls().is_empty(), "service must not be pinged");
         assert!(rig.fs.removed().is_empty(), "nothing removed");
         assert_eq!(*rig.agent.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn with_no_terminal_to_ask_at_the_uninstall_refuses_and_names_the_flag_that_answers_it() {
+        let rig = rig(
+            FakeService::default(),
+            stopped_client(),
+            FakeAgent::new(DisableOutcome::WasNotRegistered),
+            FakeFs::default(),
+        );
+        let (result, _out, _err) = rig
+            .run_at(
+                &args(false, false),
+                &plan_with_binaries(&["/bin/lns"]),
+                TermInfo::default(),
+                "",
+            )
+            .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("--yes"), "got: {err}");
+        assert!(err.contains("no terminal to ask at"), "got: {err}");
+        assert!(rig.fs.removed().is_empty(), "nothing removed");
+        assert!(rig.client.calls().is_empty(), "service must not be pinged");
+    }
+
+    #[tokio::test]
+    async fn the_confirmation_question_is_asked_on_stderr_so_a_piped_stdout_never_hides_it() {
+        let rig = rig(
+            FakeService::default(),
+            stopped_client(),
+            FakeAgent::new(DisableOutcome::WasNotRegistered),
+            FakeFs::default(),
+        );
+        let (code, out, err) = rig
+            .run_at(
+                &args(false, false),
+                &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
+                "n\n",
+            )
+            .await;
+        assert_eq!(code.unwrap(), 0);
+        assert!(err.contains("Continue? [y/N]"), "got: {err}");
+        assert!(!out.contains("Continue?"), "got: {out}");
     }
 
     #[tokio::test]
@@ -557,15 +636,16 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs::default(),
         );
-        let (code, out) = rig
-            .run(
+        let (code, _out, err) = rig
+            .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
                 "\n",
             )
             .await;
         assert_eq!(code.unwrap(), 0);
-        assert!(out.contains("Uninstall cancelled."), "got: {out}");
+        assert!(err.contains("Uninstall cancelled."), "got: {err}");
     }
 
     #[tokio::test]
@@ -599,11 +679,16 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs::default(),
         );
-        let (code, out) = rig
-            .run(&args(false, true), &plan_with_binaries(&["/bin/lns"]), "")
+        let (code, out, err) = rig
+            .run_at(
+                &args(false, true),
+                &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
+                "",
+            )
             .await;
         assert_eq!(code.unwrap(), 0);
-        assert!(!out.contains("Continue?"), "prompt must be skipped: {out}");
+        assert!(!err.contains("Continue?"), "prompt must be skipped: {err}");
         assert!(out.contains("lns has been uninstalled."), "got: {out}");
     }
 
@@ -907,17 +992,18 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs::default(),
         );
-        let (code, out) = rig
-            .run(
+        let (code, _out, err) = rig
+            .run_at(
                 &args(true, false),
                 &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
                 "n\n",
             )
             .await;
         assert_eq!(code.unwrap(), 0);
         assert!(
-            out.contains("deletes all local data"),
-            "purge wording: {out}"
+            err.contains("deletes all local data"),
+            "purge wording: {err}"
         );
     }
 
@@ -937,11 +1023,13 @@ mod tests {
             ],
             purge_files: Vec::new(),
         };
-        let (code, out) = rig.run(&args(true, false), &plan, "n\n").await;
+        let (code, _out, err) = rig
+            .run_at(&args(true, false), &plan, at_a_terminal(), "n\n")
+            .await;
         assert_eq!(code.unwrap(), 0);
         assert!(
-            out.contains("/home/me/.lns") && out.contains("/run/user/1000/lns"),
-            "the prompt must show what will actually be deleted: {out}"
+            err.contains("/home/me/.lns") && err.contains("/run/user/1000/lns"),
+            "the prompt must show what will actually be deleted: {err}"
         );
     }
 
@@ -953,14 +1041,15 @@ mod tests {
             FakeAgent::new(DisableOutcome::WasNotRegistered),
             FakeFs::default(),
         );
-        let (_code, out) = rig
-            .run(
+        let (_code, _out, err) = rig
+            .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
+                at_a_terminal(),
                 "n\n",
             )
             .await;
-        assert!(out.contains("kept"), "non-purge keeps data: {out}");
+        assert!(err.contains("kept"), "non-purge keeps data: {err}");
     }
 
     #[tokio::test]

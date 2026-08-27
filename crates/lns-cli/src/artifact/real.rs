@@ -254,9 +254,13 @@ fn run_author(command: &ArtifactCommand, ctx: RunCtx<'_>) -> Result<i32> {
     let cwd = ctx.cwd()?;
     let mut out = std::io::stdout();
     match command {
-        ArtifactCommand::Init(args) => {
-            super::author::init(&RealFs, &cwd, args.kind, args.file.as_deref(), &mut out)
-        }
+        ArtifactCommand::Init(args) => super::author::init(
+            &RealFs,
+            &cwd,
+            args.kind,
+            args.file.as_deref(),
+            &mut std::io::stderr(),
+        ),
         ArtifactCommand::Validate(args) => {
             super::author::validate(&RealFs, &cwd, args.kind, args.file.as_deref(), &mut out)
         }

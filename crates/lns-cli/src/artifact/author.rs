@@ -125,12 +125,12 @@ pub fn selected_definition_path(file: Option<&Path>, cwd: &Path) -> PathBuf {
     }
 }
 
-pub fn init<F: Fs, W: Write>(
+pub fn init<F: Fs, E: Write>(
     fs: &F,
     cwd: &Path,
     kind: DocumentKind,
     file: Option<&Path>,
-    out: &mut W,
+    err: &mut E,
 ) -> Result<i32> {
     let path = selected_definition_path(file, cwd);
     let name = file.map_or_else(|| LNS_YAML.to_string(), |f| f.display().to_string());
@@ -154,7 +154,7 @@ pub fn init<F: Fs, W: Write>(
         DocumentKind::Mixin => "mixin",
     };
     writeln!(
-        out,
+        err,
         "✓ created {name} — your {noun}, every field ready to edit\n\n{next_steps}"
     )?;
     Ok(0)

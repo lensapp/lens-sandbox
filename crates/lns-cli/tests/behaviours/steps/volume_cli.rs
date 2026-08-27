@@ -200,6 +200,17 @@ fn service_unreachable(world: &mut BehaviourWorld) {
 #[given(expr = "the user will answer {string} to the prompt")]
 fn prompt_answer(world: &mut BehaviourWorld, answer: String) {
     world.volume.prompt_answer = Some(answer);
+    world.volume.stdin_is_tty = true;
+}
+
+#[given("volume input is a terminal")]
+fn volume_input_is_a_terminal(world: &mut BehaviourWorld) {
+    world.volume.stdin_is_tty = true;
+}
+
+#[given("volume input is non-interactive")]
+fn volume_input_is_noninteractive(world: &mut BehaviourWorld) {
+    world.volume.stdin_is_tty = false;
 }
 
 #[when(expr = "the user runs volume command {string}")]
@@ -218,21 +229,33 @@ async fn run_volume(world: &mut BehaviourWorld, tail: String) {
             let mut input = std::io::Cursor::new(stdin_text);
             let mut buf = Vec::<u8>::new();
             let mut err_buf = Vec::<u8>::new();
-            let run =
-                match volume::run(&args.command, &svc, &mut input, &mut buf, &mut err_buf).await {
-                    Ok(exit_code) => CliRun {
-                        exit_code,
-                        output: format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&buf),
-                            String::from_utf8_lossy(&err_buf)
-                        ),
-                    },
-                    Err(e) => CliRun {
-                        exit_code: 1,
-                        output: format!("{}{e:#}", String::from_utf8_lossy(&buf)),
-                    },
-                };
+            let term = volume::TermInfo {
+                stdin_is_tty: world.volume.stdin_is_tty,
+                stdout_is_terminal: false,
+            };
+            let run = match volume::run(
+                &args.command,
+                &svc,
+                term,
+                &mut input,
+                &mut buf,
+                &mut err_buf,
+            )
+            .await
+            {
+                Ok(exit_code) => CliRun {
+                    exit_code,
+                    output: format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&buf),
+                        String::from_utf8_lossy(&err_buf)
+                    ),
+                },
+                Err(e) => CliRun {
+                    exit_code: 1,
+                    output: format!("{}{e:#}", String::from_utf8_lossy(&buf)),
+                },
+            };
             world.split_streams = Some((
                 String::from_utf8_lossy(&buf).into_owned(),
                 String::from_utf8_lossy(&err_buf).into_owned(),
