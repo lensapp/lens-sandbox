@@ -5,7 +5,7 @@ use lns_ipc::{Request, Response};
 use tokio::io::AsyncWriteExt;
 
 use crate::command::{CommandSpec, subcommand};
-use crate::service::client::{SandboxService, TermInfo};
+use crate::service::client::SandboxService;
 
 pub mod author;
 pub mod distribute;
@@ -343,16 +343,14 @@ pub struct RmArgs {
     pub reference: String,
 }
 
-async fn pull<I, W, E>(
+async fn pull<W, E>(
     svc: &impl SandboxService,
     args: &PullArgs,
-    term: TermInfo,
-    input: &mut I,
+    terminal: &mut dyn crate::terminal::Terminal,
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32>
 where
-    I: std::io::BufRead,
     W: std::io::Write,
     E: AsyncWriteExt + Unpin,
 {
@@ -398,8 +396,7 @@ where
             scripts: &[],
         },
         args.assume_yes,
-        term.stdin_is_tty,
-        input,
+        terminal,
         out,
     )?;
     let response = svc
@@ -559,23 +556,22 @@ pub(crate) async fn remove_cached<W: std::io::Write>(
     }
 }
 
-async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>(
+async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
     svc: &impl SandboxService,
     args: &PruneArgs,
-    term: TermInfo,
-    input: &mut I,
+    terminal: &mut dyn crate::terminal::Terminal,
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32> {
     if !args.force {
-        if !term.stdin_is_tty {
+        if !terminal.is_available() {
             bail!(
                 "this removes every cached sandbox not held by a running one and, when none is live, the provisioned tool cache; there is no terminal to ask at, so pass --force to confirm"
             );
         }
         let candidates = prunable_references(svc).await?;
         crate::output::announce_prune_candidates(&candidates, stderr).await?;
-        if !confirm_prune(input, stderr).await? {
+        if !confirm_prune(terminal, stderr).await? {
             return Ok(0);
         }
     }
@@ -613,8 +609,8 @@ async fn prunable_references(svc: &impl SandboxService) -> Result<Vec<String>> {
     }
 }
 
-async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
-    input: &mut I,
+async fn confirm_prune<E: AsyncWriteExt + Unpin>(
+    terminal: &mut dyn crate::terminal::Terminal,
     err: &mut E,
 ) -> Result<bool> {
     err.write_all(
@@ -622,10 +618,7 @@ async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
     )
     .await?;
     err.flush().await?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim();
-    let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    let yes = crate::terminal::is_affirmative(&terminal.read_answer()?);
     if !yes {
         err.write_all(b"Aborted.\n").await?;
         err.flush().await?;
@@ -822,17 +815,15 @@ fn render_policy_flags<W: std::io::Write>(out: &mut W, flags: &[String]) -> Resu
     Ok(())
 }
 
-pub async fn run_with_writers<S, I, W, E>(
+pub async fn run_with_writers<S, W, E>(
     cmd: &ArtifactCommand,
     svc: &S,
-    term: TermInfo,
-    input: &mut I,
+    terminal: &mut dyn crate::terminal::Terminal,
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32>
 where
     S: SandboxService,
-    I: std::io::BufRead,
     W: std::io::Write,
     E: AsyncWriteExt + Unpin,
 {
@@ -843,7 +834,7 @@ where
         ArtifactCommand::Push(_) => {
             bail!("push builds and uploads locally, not through the service dispatch")
         }
-        ArtifactCommand::Pull(args) => pull(svc, args, term, input, out, stderr).await,
+        ArtifactCommand::Pull(args) => pull(svc, args, terminal, out, stderr).await,
         ArtifactCommand::Tag(args) => tag(svc, args, out).await,
         ArtifactCommand::Ls(args) => ls(svc, args, out).await,
         ArtifactCommand::Inspect(args) => {
@@ -853,13 +844,14 @@ where
             inspect_cached(svc, reference, &args.mixins, out).await
         }
         ArtifactCommand::Rm(args) => remove_cached(svc, &args.reference, out).await,
-        ArtifactCommand::Prune(args) => prune(svc, args, term, input, out, stderr).await,
+        ArtifactCommand::Prune(args) => prune(svc, args, terminal, out, stderr).await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
     use crate::test_service::{
         CannedService, pulled_response, sandbox_inspection, sandbox_inspection_with_digest,
     };
@@ -887,8 +879,7 @@ mod tests {
             let err = run_with_writers(
                 &cmd,
                 &svc,
-                TermInfo::default(),
-                &mut std::io::Cursor::new(""),
+                &mut ScriptedTerminal::absent(),
                 &mut out,
                 &mut stderr,
             )
@@ -912,8 +903,7 @@ mod tests {
         let err = run_with_writers(
             &cmd,
             &svc,
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stderr,
         )
@@ -948,8 +938,7 @@ mod tests {
                 assume_yes: false,
             }),
             &svc,
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stderr,
         )
@@ -990,11 +979,7 @@ mod tests {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 assume_yes: false,
             },
-            TermInfo {
-                stdin_is_tty: true,
-                stdout_is_terminal: false,
-            },
-            &mut std::io::Cursor::new("yes\n"),
+            &mut ScriptedTerminal::answering(&["yes\n"]),
             &mut out,
             &mut Vec::new(),
         )
@@ -1026,11 +1011,7 @@ mod tests {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 assume_yes: false,
             },
-            TermInfo {
-                stdin_is_tty: true,
-                stdout_is_terminal: false,
-            },
-            &mut std::io::Cursor::new("n\n"),
+            &mut ScriptedTerminal::answering(&["n\n"]),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1056,8 +1037,7 @@ mod tests {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 assume_yes: false,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1080,8 +1060,7 @@ mod tests {
                 reference: "ghcr.io/team/hermes:1.4.0".into(),
                 assume_yes: true,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut Vec::new(),
         )
@@ -1105,8 +1084,7 @@ mod tests {
                 reference: "x:1".into(),
                 assume_yes: false,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1120,8 +1098,7 @@ mod tests {
                 reference: "x:1".into(),
                 assume_yes: false,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1141,8 +1118,7 @@ mod tests {
                 reference: "x:1".into(),
                 assume_yes: false,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1164,8 +1140,7 @@ mod tests {
                 reference: "x:1".into(),
                 assume_yes: false,
             },
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1191,8 +1166,7 @@ mod tests {
                     reference: "x:1".into(),
                     assume_yes: false,
                 },
-                TermInfo::default(),
-                &mut std::io::Cursor::new(""),
+                &mut ScriptedTerminal::absent(),
                 &mut Vec::new(),
                 &mut Vec::new(),
             )
@@ -1443,11 +1417,7 @@ mod tests {
         let code = prune(
             &svc,
             &PruneArgs { force: false },
-            TermInfo {
-                stdin_is_tty: true,
-                stdout_is_terminal: false,
-            },
-            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &mut ScriptedTerminal::answering(&["n\n"]),
             &mut out,
             &mut err,
         )
@@ -1504,8 +1474,7 @@ mod tests {
         let code = prune(
             &svc,
             &PruneArgs { force: true },
-            TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut Vec::new(),
         )
@@ -1527,8 +1496,7 @@ mod tests {
                 message: "registry poisoned".into(),
             }),
             &PruneArgs { force: true },
-            TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1539,8 +1507,7 @@ mod tests {
         let err = prune(
             &CannedService::new(Response::Pong),
             &PruneArgs { force: true },
-            TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )

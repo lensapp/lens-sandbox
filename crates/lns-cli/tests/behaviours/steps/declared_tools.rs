@@ -3,12 +3,11 @@ use std::path::PathBuf;
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::run::summary::print_run_summary;
-use lns_cli::sandbox::TermInfo;
 use lns_ipc::{ArtifactInspection, Response, SandboxView};
 
 use super::sandbox_cli::fake_sandbox_service;
 use crate::runner::CliRun;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 
 const TOOLS_REFERENCE: &str = "registry.example.test/team/sandbox:1";
 const PINNED_TOOLS: [&str; 2] = ["node@22.11.0", "python@3.12.6"];
@@ -108,8 +107,7 @@ async fn run_inspect_on_its_reference(w: &mut BehaviourWorld) {
             file: None,
         }),
         &svc,
-        TermInfo::default(),
-        &mut std::io::Cursor::new(""),
+        &mut ScriptedTerminal::absent(),
         &mut out,
         &mut stderr,
     )

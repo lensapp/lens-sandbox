@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::runner::CliRun;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::LocalBoxFuture;
@@ -200,17 +200,22 @@ fn service_unreachable(world: &mut BehaviourWorld) {
 #[given(expr = "the user will answer {string} to the prompt")]
 fn prompt_answer(world: &mut BehaviourWorld, answer: String) {
     world.volume.prompt_answer = Some(answer);
-    world.volume.stdin_is_tty = true;
+    world.volume.terminal_available = true;
 }
 
-#[given("volume input is a terminal")]
-fn volume_input_is_a_terminal(world: &mut BehaviourWorld) {
-    world.volume.stdin_is_tty = true;
+#[given("a terminal is attached")]
+fn a_terminal_is_attached(world: &mut BehaviourWorld) {
+    world.volume.terminal_available = true;
 }
 
-#[given("volume input is non-interactive")]
-fn volume_input_is_noninteractive(world: &mut BehaviourWorld) {
-    world.volume.stdin_is_tty = false;
+#[given("there is no terminal to ask at")]
+fn no_terminal_to_ask_at(world: &mut BehaviourWorld) {
+    world.volume.terminal_available = false;
+}
+
+#[given(expr = "stdin is a pipe carrying {string}")]
+fn stdin_is_a_pipe(_world: &mut BehaviourWorld, _piped: String) {
+    // no-op: no prompt reads stdin, so piped bytes have nowhere to reach a question.
 }
 
 #[when(expr = "the user runs volume command {string}")]
@@ -220,28 +225,21 @@ async fn run_volume(world: &mut BehaviourWorld, tail: String) {
     let run = match parse_args::<VolumeArgs, _, _>(&argv) {
         Ok(args) => {
             let svc = FakeVolumeService::from_world(world);
-            let stdin_text = world
+            let answer = world
                 .volume
                 .prompt_answer
                 .clone()
                 .map(|a| format!("{a}\n"))
                 .unwrap_or_default();
-            let mut input = std::io::Cursor::new(stdin_text);
+            let mut terminal = if world.volume.terminal_available {
+                ScriptedTerminal::answering(&[&answer])
+            } else {
+                ScriptedTerminal::absent()
+            };
             let mut buf = Vec::<u8>::new();
             let mut err_buf = Vec::<u8>::new();
-            let term = volume::TermInfo {
-                stdin_is_tty: world.volume.stdin_is_tty,
-                stdout_is_terminal: false,
-            };
-            let run = match volume::run(
-                &args.command,
-                &svc,
-                term,
-                &mut input,
-                &mut buf,
-                &mut err_buf,
-            )
-            .await
+            let run = match volume::run(&args.command, &svc, &mut terminal, &mut buf, &mut err_buf)
+                .await
             {
                 Ok(exit_code) => CliRun {
                     exit_code,

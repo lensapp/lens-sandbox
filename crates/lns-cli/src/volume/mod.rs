@@ -1,14 +1,14 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use anyhow::{Result, bail};
 use lns_ipc::{Request, Response, VolumeInfo};
 
 use crate::command::{CommandSpec, subcommand};
 use crate::connector::LocalBoxFuture;
+use crate::terminal::Terminal;
 
 mod real;
 
-pub use crate::service::TermInfo;
 pub use real::RealVolumeService;
 
 #[derive(clap::Args)]
@@ -97,8 +97,7 @@ pub trait VolumeService {
 pub async fn run(
     cmd: &VolumeCommand,
     svc: &dyn VolumeService,
-    term: TermInfo,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn Terminal,
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
@@ -107,7 +106,7 @@ pub async fn run(
         VolumeCommand::Create(args) => create(svc, &args.name, writer).await,
         VolumeCommand::Inspect(args) => inspect(svc, &args.name, args.output.format, writer).await,
         VolumeCommand::Rm(args) => rm(svc, &args.name, writer).await,
-        VolumeCommand::Prune(args) => prune(svc, args.force, term, input, writer, err).await,
+        VolumeCommand::Prune(args) => prune(svc, args.force, terminal, writer, err).await,
     }
 }
 
@@ -228,13 +227,12 @@ async fn rm(svc: &dyn VolumeService, name: &str, writer: &mut impl Write) -> Res
 async fn prune(
     svc: &dyn VolumeService,
     force: bool,
-    term: TermInfo,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn Terminal,
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
     if !force {
-        if !term.stdin_is_tty {
+        if !terminal.is_available() {
             bail!(
                 "this removes every volume not attached to a running sandbox; there is no terminal to ask at, so pass --force to confirm"
             );
@@ -245,7 +243,7 @@ async fn prune(
             return Ok(0);
         }
         crate::output::announce_prune_candidates(&unused, err).await?;
-        if !confirm_prune(input, err).await? {
+        if !confirm_prune(terminal, err).await? {
             return Ok(0);
         }
     }
@@ -293,16 +291,13 @@ async fn unused_volume_names(svc: &dyn VolumeService) -> Result<Vec<String>> {
 }
 
 async fn confirm_prune(
-    input: &mut dyn BufRead,
+    terminal: &mut dyn Terminal,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<bool> {
     err.write_all(b"This removes every volume not attached to a running sandbox. Continue? [y/N] ")
         .await?;
     err.flush().await?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim();
-    let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    let yes = crate::terminal::is_affirmative(&terminal.read_answer()?);
     if !yes {
         err.write_all(b"Aborted.\n").await?;
         err.flush().await?;
@@ -335,8 +330,8 @@ pub(crate) fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
     use std::collections::VecDeque;
-    use std::io::Cursor;
     use std::sync::Mutex;
 
     struct CannedService {
@@ -373,26 +368,18 @@ mod tests {
         }
     }
 
-    fn at_a_terminal() -> TermInfo {
-        TermInfo {
-            stdin_is_tty: true,
-            stdout_is_terminal: true,
-        }
-    }
-
     async fn run_cmd(cmd: &VolumeCommand, svc: &dyn VolumeService) -> Result<(i32, String)> {
-        run_cmd_at(cmd, svc, at_a_terminal()).await
+        run_cmd_at(cmd, svc, ScriptedTerminal::answering(&[])).await
     }
 
     async fn run_cmd_at(
         cmd: &VolumeCommand,
         svc: &dyn VolumeService,
-        term: TermInfo,
+        mut terminal: ScriptedTerminal,
     ) -> Result<(i32, String)> {
-        let mut input = Cursor::new(String::new());
         let mut buf = Vec::new();
         let mut err_buf = Vec::new();
-        let code = run(cmd, svc, term, &mut input, &mut buf, &mut err_buf).await?;
+        let code = run(cmd, svc, &mut terminal, &mut buf, &mut err_buf).await?;
         buf.extend_from_slice(&err_buf);
         Ok((code, String::from_utf8(buf).unwrap()))
     }
@@ -439,7 +426,7 @@ mod tests {
         let err = run_cmd_at(
             &VolumeCommand::Prune(VolumePruneArgs { force: false }),
             &svc,
-            TermInfo::default(),
+            ScriptedTerminal::absent(),
         )
         .await
         .unwrap_err();
@@ -477,10 +464,10 @@ mod tests {
     #[tokio::test]
     async fn confirm_prune_accepts_yes_in_any_case() {
         for answer in ["y\n", "Y\n", "yes\n", "YES\n"] {
-            let mut input = Cursor::new(answer.to_string());
+            let mut terminal = ScriptedTerminal::answering(&[answer]);
             let mut buf = Vec::new();
             assert!(
-                confirm_prune(&mut input, &mut buf).await.unwrap(),
+                confirm_prune(&mut terminal, &mut buf).await.unwrap(),
                 "{answer:?}"
             );
         }
@@ -489,10 +476,10 @@ mod tests {
     #[tokio::test]
     async fn confirm_prune_treats_anything_else_as_decline() {
         for answer in ["n\n", "no\n", "\n", "yep\n"] {
-            let mut input = Cursor::new(answer.to_string());
+            let mut terminal = ScriptedTerminal::answering(&[answer]);
             let mut buf = Vec::new();
             assert!(
-                !confirm_prune(&mut input, &mut buf).await.unwrap(),
+                !confirm_prune(&mut terminal, &mut buf).await.unwrap(),
                 "{answer:?}"
             );
             let out = String::from_utf8(buf).unwrap();

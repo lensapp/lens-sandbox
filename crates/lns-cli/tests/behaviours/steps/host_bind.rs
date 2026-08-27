@@ -1,4 +1,4 @@
-use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView};
+use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, ScriptedTerminal};
 use cucumber::{given, then, when};
 use lns_cli::cli::{RunArgs, split_mounts};
 use lns_cli::command::parse_args;
@@ -125,10 +125,15 @@ fn run_resolve(world: &mut BehaviourWorld, flags: &str, interactive: bool) {
     let store = FakeStore {
         state: Mutex::new(world.host_bind.decisions.clone()),
     };
-    let mut input = std::io::Cursor::new(world.host_bind.answer.clone().unwrap_or_default());
+    let answer = world.host_bind.answer.clone().unwrap_or_default();
+    let mut terminal = if interactive {
+        ScriptedTerminal::answering(&[&answer])
+    } else {
+        ScriptedTerminal::absent()
+    };
     let mut out = Vec::new();
-    let result = resolve_binds(&specs, &dir, &store, interactive, &mut input, &mut out)
-        .map_err(|e| e.to_string());
+    let result =
+        resolve_binds(&specs, &dir, &store, &mut terminal, &mut out).map_err(|e| e.to_string());
     let summary = match &result {
         Ok(resolved) => {
             let mut argv = vec!["lns".to_string(), "run".to_string()];
@@ -319,9 +324,9 @@ fn later_run_no_prompt(world: &mut BehaviourWorld) -> Result<(), String> {
     let store = FakeStore {
         state: Mutex::new(persisted),
     };
-    let mut input = std::io::Cursor::new(String::new());
+    let mut terminal = ScriptedTerminal::answering(&[]);
     let mut out = Vec::new();
-    resolve_binds(&specs, &dir, &store, true, &mut input, &mut out).map_err(|e| e.to_string())?;
+    resolve_binds(&specs, &dir, &store, &mut terminal, &mut out).map_err(|e| e.to_string())?;
     let prompt = String::from_utf8(out).unwrap();
     if prompt.contains("looks like a secret") {
         Err(format!("a later run re-prompted: {prompt:?}"))
@@ -472,10 +477,11 @@ fn declared_binds_resolved(world: &mut BehaviourWorld) {
     let store = FakeStore {
         state: Mutex::new(world.host_bind.decisions.clone()),
     };
-    let mut input = std::io::Cursor::new(world.host_bind.answer.clone().unwrap_or_default());
+    let answer = world.host_bind.answer.clone().unwrap_or_default();
+    let mut terminal = ScriptedTerminal::answering(&[&answer]);
     let mut out = Vec::new();
     let result =
-        resolve_binds(&specs, &dir, &store, true, &mut input, &mut out).map_err(|e| e.to_string());
+        resolve_binds(&specs, &dir, &store, &mut terminal, &mut out).map_err(|e| e.to_string());
     world.resolved_run = Some(ResolvedRunView {
         binds: result
             .as_deref()

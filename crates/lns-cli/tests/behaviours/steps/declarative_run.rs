@@ -8,7 +8,7 @@ use lns_cli::run::host_bind::{DirScan, resolve_binds};
 use lns_policy::decision_store::DecisionStore;
 use lns_policy::host_bind_decisions::{HostBindDecisionFile, SecretDisposition};
 
-use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, TEST_HOST};
+use crate::world::{BehaviourWorld, HostBindOutcome, ResolvedRunView, ScriptedTerminal, TEST_HOST};
 
 pub fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
     let yaml = world
@@ -296,9 +296,10 @@ fn resolve_binds_with(world: &mut BehaviourWorld, defaults: Defaults) {
         missing: world.host_bind.missing,
     };
     let store = FakeStore(std::sync::Mutex::new(world.host_bind.decisions.clone()));
-    let mut input = std::io::Cursor::new(world.host_bind.answer.clone().unwrap_or_default());
+    let answer = world.host_bind.answer.clone().unwrap_or_default();
+    let mut terminal = ScriptedTerminal::answering(&[&answer]);
     let mut output = Vec::new();
-    let result = resolve_binds(&bind_specs, &dir, &store, true, &mut input, &mut output)
+    let result = resolve_binds(&bind_specs, &dir, &store, &mut terminal, &mut output)
         .map_err(|error| error.to_string());
     world.host_bind.outcome = Some(HostBindOutcome {
         result,

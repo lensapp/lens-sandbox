@@ -289,18 +289,17 @@ shortcut_spec!(
     crate::command::always_owns_terminal
 );
 
-pub async fn run_with_writers<S, I, W, O, E>(
+pub async fn run_with_writers<S, W, O, E>(
     cmd: &SandboxCommand,
     svc: &S,
     term: TermInfo,
-    input: &mut I,
+    terminal: &mut dyn crate::terminal::Terminal,
     out: &mut W,
     stdout: &mut O,
     stderr: &mut E,
 ) -> Result<i32>
 where
     S: SandboxService,
-    I: std::io::BufRead,
     W: std::io::Write,
     O: AsyncWriteExt + Unpin,
     E: AsyncWriteExt + Unpin,
@@ -319,7 +318,7 @@ where
         SandboxCommand::Exec(_) => bail!("sandbox exec is dispatched on its own interactive path"),
         SandboxCommand::Stop(args) => stop(svc, args, out).await,
         SandboxCommand::Start(args) => start(svc, args, term, out, stdout, stderr).await,
-        SandboxCommand::Prune(args) => prune(svc, args, term, input, out, stderr).await,
+        SandboxCommand::Prune(args) => prune(svc, args, terminal, out, stderr).await,
         SandboxCommand::Inspect(args) => inspect(svc, &args.run, args.output.format, out).await,
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
@@ -593,16 +592,15 @@ where
     .await
 }
 
-async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>(
+async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
     svc: &impl SandboxService,
     args: &SandboxPruneArgs,
-    term: TermInfo,
-    input: &mut I,
+    terminal: &mut dyn crate::terminal::Terminal,
     out: &mut W,
     stderr: &mut E,
 ) -> Result<i32> {
     if !args.force {
-        if !term.stdin_is_tty {
+        if !terminal.is_available() {
             bail!(
                 "this removes every stopped sandbox, writable layers included; there is no terminal to ask at, so pass --force to confirm"
             );
@@ -613,7 +611,7 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
             return Ok(0);
         }
         crate::output::announce_prune_candidates(&stopped, stderr).await?;
-        if !confirm_prune(input, stderr).await? {
+        if !confirm_prune(terminal, stderr).await? {
             return Ok(0);
         }
     }
@@ -655,8 +653,8 @@ async fn stopped_run_names(svc: &impl SandboxService) -> Result<Vec<String>> {
     }
 }
 
-async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
-    input: &mut I,
+async fn confirm_prune<E: AsyncWriteExt + Unpin>(
+    terminal: &mut dyn crate::terminal::Terminal,
     err: &mut E,
 ) -> Result<bool> {
     err.write_all(
@@ -664,10 +662,7 @@ async fn confirm_prune<I: std::io::BufRead, E: AsyncWriteExt + Unpin>(
     )
     .await?;
     err.flush().await?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim();
-    let yes = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    let yes = crate::terminal::is_affirmative(&terminal.read_answer()?);
     if !yes {
         err.write_all(b"Aborted.\n").await?;
         err.flush().await?;
@@ -908,6 +903,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
     use crate::test_service::{CannedService, stream_with};
     use lns_ipc::encode_frame;
 
@@ -998,7 +994,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1020,7 +1016,7 @@ mod tests {
             &cmd,
             &svc,
             TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1197,8 +1193,7 @@ mod tests {
         let err = prune(
             &svc,
             &SandboxPruneArgs { force: true },
-            TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -1210,8 +1205,7 @@ mod tests {
         let err = prune(
             &svc,
             &SandboxPruneArgs { force: true },
-            TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
