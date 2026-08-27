@@ -48,12 +48,12 @@ Feature: sandbox lifecycle verbs reach the service end to end
     Then the exit code is non-zero
     And the output contains "USR1"
 
-  Scenario: ps renders only its header when nothing is running
+  Scenario: ps says nothing is running rather than printing a bare header
     Given the Lens Sandbox service is running
     When I run lns "ps" against the service
     Then the exit code is 0
-    And the output contains "CPU"
-    And the output contains "MEM"
+    And the output contains "No running sandboxes."
+    And the output does not contain "CPU"
 
   Scenario: stopping an unknown run reports the miss in one sentence
     Given the Lens Sandbox service is running
