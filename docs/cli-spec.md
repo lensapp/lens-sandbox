@@ -234,7 +234,7 @@ keeping its `ENTRYPOINT`; `--` is accepted but not required.
 | Option | Default | Meaning |
 |---|---|---|
 | `-f`, `--file <FILE>` | `./lns.yaml` | Document to run instead of `./lns.yaml`. Cannot be combined with `REF`. |
-| `--name <NAME>` | auto | Name the sandbox, usable in place of its id everywhere. Auto-generated (`adjective_noun`) when omitted; never all digits. |
+| `--name <NAME>` | auto | Name the sandbox, usable in place of its id everywhere. Auto-generated when omitted: the document's own `name:` and one drawn word (`hermes-falcon`), or two drawn words (`amber-falcon`) when the run has no document. Never all digits. |
 | `--registry <HOST>` | `hub.lns.run` | Registry that qualifies a bare reference. |
 | `--cpus <N>` | `1` | vCPUs. Falls back to the `run.cpus` default. |
 | `-m`, `--mem <SIZE>` | `512` | RAM in MiB, or with a unit (`2g`, `512m`, `38Gi`; binary, rounded up to a whole MiB). Falls back to `run.mem`. Alias: `--memory`. |
