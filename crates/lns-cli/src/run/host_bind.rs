@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -121,8 +121,7 @@ pub fn resolve_binds(
     specs: &[lns_ipc::BindSpec],
     scan: &dyn DirScan,
     store: &HostBindDecisionStore,
-    interactive: bool,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<Vec<ResolvedBind>> {
     let mut decisions = store.load().context("loading host-bind decisions")?;
@@ -166,8 +165,8 @@ pub fn resolve_binds(
             let key = root.join(&name).to_string_lossy().into_owned();
             let disposition = match decisions.get(&key).copied() {
                 Some(d) => d,
-                None if interactive => {
-                    let chosen = prompt_disposition(&key, input, output)?;
+                None if terminal.is_available() => {
+                    let chosen = prompt_disposition(&key, terminal, output)?;
                     decisions.insert(key.clone(), chosen);
                     recorded = true;
                     chosen
@@ -214,7 +213,7 @@ fn push_drop(dropped: &mut Vec<String>, name: String) -> Result<()> {
 
 fn prompt_disposition(
     secret_path: &str,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<SecretDisposition> {
     write!(
@@ -222,9 +221,8 @@ fn prompt_disposition(
         "Host bind: {secret_path} looks like a secret. Expose it to the workload? [k]eep / [D]rop (default): "
     )?;
     output.flush()?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim().to_ascii_lowercase();
+    let answer = terminal.read_answer()?;
+    let answer = answer.trim().to_ascii_lowercase();
     Ok(if answer == "k" || answer == "keep" {
         SecretDisposition::Keep
     } else {
@@ -235,6 +233,7 @@ fn prompt_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
     use lns_policy::decision_store::DecisionStore;
     use lns_policy::host_bind_decisions::HostBindDecisionFile;
     use std::collections::HashMap;
@@ -296,9 +295,13 @@ mod tests {
         interactive: bool,
         answer: &str,
     ) -> (Result<Vec<ResolvedBind>>, String) {
-        let mut input = std::io::Cursor::new(answer.to_string());
+        let mut terminal = if interactive {
+            ScriptedTerminal::answering(&[answer])
+        } else {
+            ScriptedTerminal::absent()
+        };
         let mut out = Vec::new();
-        let r = resolve_binds(specs, dir, store, interactive, &mut input, &mut out);
+        let r = resolve_binds(specs, dir, store, &mut terminal, &mut out);
         (r, String::from_utf8(out).unwrap())
     }
 

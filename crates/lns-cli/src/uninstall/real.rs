@@ -8,7 +8,7 @@ use super::{Deps, Fs, LoginAgent, PurgeSources, UninstallArgs, UninstallPlan, Un
 use crate::command::{RunCtx, RunFuture};
 use crate::connector::LocalBoxFuture;
 use crate::service::real::RealServiceClient;
-use crate::service::{DisableOutcome, TermInfo, disable_login_agent};
+use crate::service::{DisableOutcome, disable_login_agent};
 
 pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
@@ -32,17 +32,13 @@ async fn run(args: UninstallArgs, ctx: RunCtx<'_>) -> Result<i32> {
         agent: &agent,
         fs: &fs,
     };
-    let term = TermInfo {
-        stdin_is_tty: crate::raw_mode::stdin_is_tty(),
-        stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
-    };
+    let mut terminal = crate::terminal::RealTerminal::open();
     let mut out = ctx.out;
     super::run_with(
         &args,
         &plan,
         &deps,
-        term,
-        ctx.input,
+        &mut terminal,
         &mut out,
         &mut tokio::io::stderr(),
     )

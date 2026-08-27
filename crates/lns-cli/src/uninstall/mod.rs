@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,7 +7,7 @@ use lns_ipc::{Request, Response, RunStatus, short_run_id};
 
 use crate::command::{CommandSpec, subcommand};
 use crate::connector::LocalBoxFuture;
-use crate::service::{DisableOutcome, ServiceClient, TermInfo};
+use crate::service::{DisableOutcome, ServiceClient};
 
 mod real;
 
@@ -78,8 +78,7 @@ pub async fn run_with<S, C, A, F>(
     args: &UninstallArgs,
     plan: &UninstallPlan,
     deps: &Deps<'_, S, C, A, F>,
-    term: TermInfo,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32>
@@ -90,12 +89,12 @@ where
     F: Fs,
 {
     if !args.yes {
-        if !term.stdin_is_tty {
+        if !terminal.is_available() {
             bail!(
                 "this stops your sandboxes and removes the lns binaries; there is no terminal to ask at, so pass -y/--yes to confirm"
             );
         }
-        if !confirm(args.purge, &plan.purge_dirs, input, err).await? {
+        if !confirm(args.purge, &plan.purge_dirs, terminal, err).await? {
             err.write_all(b"Uninstall cancelled.\n").await?;
             err.flush().await?;
             return Ok(0);
@@ -117,16 +116,13 @@ where
 async fn confirm(
     purge: bool,
     purge_dirs: &[PathBuf],
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<bool> {
     err.write_all(question(purge, purge_dirs).as_bytes())
         .await?;
     err.flush().await?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim();
-    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+    Ok(crate::terminal::is_affirmative(&terminal.read_answer()?))
 }
 
 fn question(purge: bool, purge_dirs: &[PathBuf]) -> String {
@@ -298,6 +294,7 @@ pub(crate) fn purge_targets(src: PurgeSources) -> Result<(Vec<PathBuf>, Vec<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -492,13 +489,6 @@ mod tests {
         fs: FakeFs,
     }
 
-    fn at_a_terminal() -> TermInfo {
-        TermInfo {
-            stdin_is_tty: true,
-            stdout_is_terminal: true,
-        }
-    }
-
     impl Rig {
         async fn run(
             &self,
@@ -506,7 +496,9 @@ mod tests {
             plan: &UninstallPlan,
             input: &str,
         ) -> (Result<i32>, String) {
-            let (result, out, _err) = self.run_at(args, plan, at_a_terminal(), input).await;
+            let (result, out, _err) = self
+                .run_at(args, plan, ScriptedTerminal::answering(&[input]))
+                .await;
             (result, out)
         }
 
@@ -514,10 +506,8 @@ mod tests {
             &self,
             args: &UninstallArgs,
             plan: &UninstallPlan,
-            term: TermInfo,
-            input: &str,
+            mut terminal: ScriptedTerminal,
         ) -> (Result<i32>, String, String) {
-            let mut reader = input.as_bytes();
             let mut out: Vec<u8> = Vec::new();
             let mut err: Vec<u8> = Vec::new();
             let deps = Deps {
@@ -526,7 +516,7 @@ mod tests {
                 agent: &self.agent,
                 fs: &self.fs,
             };
-            let result = run_with(args, plan, &deps, term, &mut reader, &mut out, &mut err).await;
+            let result = run_with(args, plan, &deps, &mut terminal, &mut out, &mut err).await;
             (
                 result,
                 String::from_utf8(out).unwrap(),
@@ -572,8 +562,7 @@ mod tests {
             .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "n\n",
+                ScriptedTerminal::answering(&["n\n"]),
             )
             .await;
         assert_eq!(code.unwrap(), 0);
@@ -596,8 +585,7 @@ mod tests {
             .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                TermInfo::default(),
-                "",
+                ScriptedTerminal::absent(),
             )
             .await;
         let err = format!("{:#}", result.unwrap_err());
@@ -619,8 +607,7 @@ mod tests {
             .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "n\n",
+                ScriptedTerminal::answering(&["n\n"]),
             )
             .await;
         assert_eq!(code.unwrap(), 0);
@@ -640,8 +627,7 @@ mod tests {
             .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "\n",
+                ScriptedTerminal::answering(&["\n"]),
             )
             .await;
         assert_eq!(code.unwrap(), 0);
@@ -683,8 +669,7 @@ mod tests {
             .run_at(
                 &args(false, true),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "",
+                ScriptedTerminal::answering(&[]),
             )
             .await;
         assert_eq!(code.unwrap(), 0);
@@ -996,8 +981,7 @@ mod tests {
             .run_at(
                 &args(true, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "n\n",
+                ScriptedTerminal::answering(&["n\n"]),
             )
             .await;
         assert_eq!(code.unwrap(), 0);
@@ -1024,7 +1008,11 @@ mod tests {
             purge_files: Vec::new(),
         };
         let (code, _out, err) = rig
-            .run_at(&args(true, false), &plan, at_a_terminal(), "n\n")
+            .run_at(
+                &args(true, false),
+                &plan,
+                ScriptedTerminal::answering(&["n\n"]),
+            )
             .await;
         assert_eq!(code.unwrap(), 0);
         assert!(
@@ -1045,8 +1033,7 @@ mod tests {
             .run_at(
                 &args(false, false),
                 &plan_with_binaries(&["/bin/lns"]),
-                at_a_terminal(),
-                "n\n",
+                ScriptedTerminal::answering(&["n\n"]),
             )
             .await;
         assert!(err.contains("kept"), "non-purge keeps data: {err}");

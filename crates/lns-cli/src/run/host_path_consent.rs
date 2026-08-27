@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use lns_policy::host_path_decisions::{
@@ -26,8 +26,7 @@ pub fn decide_host_paths(
     filesets: &[FilesetSummary],
     store: &HostPathDecisionStore,
     assume_yes: bool,
-    interactive: bool,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<HostPathGrant> {
     let declared: Vec<Declared<'_>> = filesets
@@ -55,7 +54,7 @@ pub fn decide_host_paths(
             // `--yes` answers a question this machine has not been asked; it does not overrule one it already answered.
             None if assume_yes => HostPathDecision::Allow,
             None => {
-                let asked = ask(&entry, interactive, input, output)?;
+                let asked = ask(&entry, terminal, output)?;
                 recorded.insert(key, asked);
                 save(store, &recorded)?;
                 asked
@@ -110,8 +109,7 @@ fn apply(
 
 fn ask(
     entry: &Declared<'_>,
-    interactive: bool,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<HostPathDecision> {
     let host_path = entry.host_path;
@@ -122,21 +120,20 @@ fn ask(
         "{repository} wants to read {host_path} from this machine and mount a copy at {}.",
         entry.guest_path
     )?;
-    if !interactive {
+    if !terminal.is_available() {
         bail!(
             "{reference} reads {host_path} from this machine and there is no terminal to decide — run interactively, or pass --yes to accept it"
         );
     }
     write!(output, "Let it read {host_path}? [y/N]: ")?;
     output.flush()?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim().to_ascii_lowercase();
-    Ok(if answer == "y" || answer == "yes" {
-        HostPathDecision::Allow
-    } else {
-        HostPathDecision::Deny
-    })
+    Ok(
+        if crate::terminal::is_affirmative(&terminal.read_answer()?) {
+            HostPathDecision::Allow
+        } else {
+            HostPathDecision::Deny
+        },
+    )
 }
 
 /// A failed write must not pass for a recorded answer: the developer is asked again next run rather than told a decision was kept.

@@ -102,11 +102,21 @@ Feature: managing named volumes from the CLI
 
   Scenario: with no terminal to ask at, prune refuses rather than assuming
     Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
-    And volume input is non-interactive
+    And there is no terminal to ask at
     When the user runs volume command "prune"
     Then the command fails with an exit code other than 0
     And the output contains "--force"
     And no request reached the service
+
+  Scenario: a prune whose stdin is a pipe is still asked at the terminal
+    Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
+    And stdin is a pipe carrying "y"
+    And the user will answer "n" to the prompt
+    When the user runs volume command "prune"
+    Then the exit code is 0
+    And the output contains "Continue? [y/N]"
+    And the output contains "Aborted."
+    And no prune request reached the service
 
   Scenario: pruning with nothing to remove says so
     Given the service will prune no volumes

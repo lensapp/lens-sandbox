@@ -16,7 +16,7 @@ use lns_ipc::{
 };
 
 use crate::runner::CliRun;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 
 pub(crate) struct FakeSandboxService {
     response: Option<Response>,
@@ -250,7 +250,15 @@ fn then_no_such_request(w: &mut BehaviourWorld, variant: String) -> Result<(), S
 
 #[given("sandbox input is a terminal")]
 fn sandbox_input_is_a_terminal(w: &mut BehaviourWorld) {
-    w.sandbox.stdin_is_tty = true;
+    w.sandbox.terminal_available = true;
+}
+
+fn terminal_for(w: &BehaviourWorld, answer: &str) -> ScriptedTerminal {
+    if w.sandbox.terminal_available {
+        ScriptedTerminal::answering(&[answer])
+    } else {
+        ScriptedTerminal::absent()
+    }
 }
 
 #[then(regex = r#"^the command's stdout does not contain "([^"]*)"$"#)]
@@ -536,11 +544,8 @@ pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
     let result = run_with_writers(
         &args.command,
         &svc,
-        TermInfo {
-            stdin_is_tty: w.sandbox.stdin_is_tty,
-            stdout_is_terminal: false,
-        },
-        &mut std::io::Cursor::new(answer),
+        TermInfo::default(),
+        &mut terminal_for(w, &answer),
         &mut out,
         &mut stdout,
         &mut stderr,
@@ -601,11 +606,7 @@ pub(crate) async fn drive_artifact_command(w: &mut BehaviourWorld, cmd: &str) {
     let result = lns_cli::artifact::run_with_writers(
         &args.command,
         &svc,
-        TermInfo {
-            stdin_is_tty: w.sandbox.stdin_is_tty,
-            stdout_is_terminal: false,
-        },
-        &mut std::io::Cursor::new(answer),
+        &mut terminal_for(w, &answer),
         &mut out,
         &mut stderr,
     )
@@ -650,13 +651,8 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                 versions: w.tool_index.clone(),
                 unlisted: w.unlisted_pins.clone(),
             };
-            let mut input = std::io::Cursor::new(
-                w.sandbox
-                    .prompt_answer
-                    .clone()
-                    .unwrap_or_default()
-                    .into_bytes(),
-            );
+            let answer = w.sandbox.prompt_answer.clone().unwrap_or_default();
+            let mut terminal = terminal_for(w, &answer);
             distribute::push(
                 distribute::PushPorts {
                     fs: &fs,
@@ -668,8 +664,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                 &push_args.reference,
                 distribute::Confirm {
                     assume_yes: push_args.assume_yes,
-                    interactive: w.sandbox.stdin_is_tty,
-                    input: &mut input,
+                    terminal: &mut terminal,
                 },
                 &mut out,
             )
@@ -802,12 +797,12 @@ fn published_sandbox_declares_tool(w: &mut BehaviourWorld, tool: String) {
 #[given(regex = r#"^the user will answer "([^"]+)" to the sandbox prompt$"#)]
 fn sandbox_prompt_answer(w: &mut BehaviourWorld, answer: String) {
     w.sandbox.prompt_answer = Some(answer);
-    w.sandbox.stdin_is_tty = true;
+    w.sandbox.terminal_available = true;
 }
 
 #[given("sandbox input is non-interactive")]
 fn sandbox_input_is_noninteractive(w: &mut BehaviourWorld) {
-    w.sandbox.stdin_is_tty = false;
+    w.sandbox.terminal_available = false;
 }
 
 #[then("the service received no pull request")]
@@ -941,8 +936,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
         lns_cli::artifact::run_with_writers(
             &command,
             &svc,
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stderr,
         )
@@ -957,7 +951,7 @@ async fn run_lns_inspect(w: &mut BehaviourWorld, tail: String) {
             }),
             &svc,
             TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1005,8 +999,7 @@ async fn run_lns_rm(w: &mut BehaviourWorld, force: String, operand: String) {
         lns_cli::artifact::run_with_writers(
             &command,
             &svc,
-            TermInfo::default(),
-            &mut std::io::Cursor::new(""),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stderr,
         )
@@ -1019,7 +1012,7 @@ async fn run_lns_rm(w: &mut BehaviourWorld, force: String, operand: String) {
             }),
             &svc,
             TermInfo::default(),
-            &mut std::io::empty(),
+            &mut ScriptedTerminal::absent(),
             &mut out,
             &mut stdout,
             &mut stderr,
@@ -1053,7 +1046,7 @@ async fn run_lns_ps(w: &mut BehaviourWorld) {
         }),
         &svc,
         TermInfo::default(),
-        &mut std::io::empty(),
+        &mut ScriptedTerminal::absent(),
         &mut out,
         &mut stdout,
         &mut stderr,
