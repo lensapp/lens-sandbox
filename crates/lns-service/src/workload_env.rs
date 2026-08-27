@@ -99,7 +99,17 @@ fn ca_bundle_env() -> [(&'static str, &'static str); 5] {
     ]
 }
 
-/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, the CA bundle the workload trusts, and last the credential placeholders — which override, because the workload's real env carries the placeholder for those vars too.
+/// The proxy vars the supervisor hands its workload, so an HTTP client in an exec takes the route the agent's does rather than one the gate never sees.
+fn proxy_env() -> [(&'static str, &'static str); 4] {
+    [
+        ("HTTPS_PROXY", lns_session::GUEST_PROXY_URL),
+        ("https_proxy", lns_session::GUEST_PROXY_URL),
+        ("HTTP_PROXY", lns_session::GUEST_PROXY_URL),
+        ("http_proxy", lns_session::GUEST_PROXY_URL),
+    ]
+}
+
+/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, the proxy and CA bundle the workload is given, and last the credential placeholders — which override, because the workload's real env carries the placeholder for those vars too.
 pub fn exec_session_env(
     exec_environment: &crate::run_registry::ExecEnvironment,
     exec_env: &[String],
@@ -118,7 +128,7 @@ pub fn exec_session_env(
         .collect();
     let mut env = compose_workload_env(Some(&joined), &caller, &[]).env;
     compose_guest_tool_env(&mut env, &exec_environment.tools);
-    for (key, value) in ca_bundle_env() {
+    for (key, value) in proxy_env().into_iter().chain(ca_bundle_env()) {
         overwrite(&mut env, key, value);
     }
     for (key, value) in &exec_environment.placeholders {
@@ -673,6 +683,37 @@ mod tests {
                 "a python or node command in an exec fails TLS without {key}: {env:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_exec_session_reaches_the_network_through_the_same_proxy_the_workload_does() {
+        let env = exec_session_env(&Default::default(), &[]);
+
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            assert!(
+                env.contains(&format!("{key}={}", lns_session::GUEST_PROXY_URL)),
+                "a curl in an exec would take a different route than the workload without {key}, so a probe would report on a path the agent never uses: {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_runs_proxy_outranks_a_proxy_the_exec_caller_names() {
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["HTTPS_PROXY=http://an-image-baked-proxy".into()],
+            ..Default::default()
+        };
+
+        let env = exec_session_env(
+            &run,
+            &["http_proxy=http://a-caller-named-proxy".to_string()],
+        );
+
+        assert!(
+            env.contains(&format!("HTTPS_PROXY={}", lns_session::GUEST_PROXY_URL))
+                && env.contains(&format!("http_proxy={}", lns_session::GUEST_PROXY_URL)),
+            "the supervisor overrides a workload-set proxy for the same reason: a route around the gate is not the caller's to choose: {env:?}"
+        );
     }
 
     #[test]

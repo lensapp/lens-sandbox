@@ -12,6 +12,9 @@ pub const STAGED_CA_BUNDLE_PATH: &str = "/.lens/ca-certificates.crt";
 /// The store every workload env var names, the broker seeds, and the supervisor appends the proxy CA to; one spelling, or TLS falls back to no roots with no error.
 pub const SYSTEM_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
+/// The proxy the supervisor runs and points its workload at, so the service can point an exec session at the same one; one spelling, or an exec takes a route the workload never takes.
+pub const GUEST_PROXY_URL: &str = "http://127.0.0.1:3128";
+
 /// Where the service stages each `pre-start` script and the supervisor reads them from; one spelling, or the guest runs nothing and reports success.
 pub const SCRIPTS_DIR: &str = "/.lens/scripts";
 

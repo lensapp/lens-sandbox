@@ -834,6 +834,20 @@ mod tests {
     }
 
     #[test]
+    fn the_proxy_the_workload_is_pointed_at_is_the_one_an_exec_session_is_pointed_at() {
+        let mut config = make_agent_config();
+        config.core.is_root = true;
+
+        let env = build_agent_env(&config, None, &HashMap::new());
+
+        assert_eq!(
+            env.get("HTTPS_PROXY").map(String::as_str),
+            Some(lns_session::GUEST_PROXY_URL),
+            "the service points an exec session at this spelling without asking the guest, so a change here that leaves the constant behind sends an exec around the gate"
+        );
+    }
+
+    #[test]
     fn build_agent_command_ca_env_overrides_project_env() {
         let config = make_agent_config();
         let mut env = HashMap::new();
