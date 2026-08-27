@@ -76,6 +76,56 @@ pub fn destinations_overlap(one: &str, other: &str) -> bool {
     destination_covers(one, other) || destination_covers(other, one)
 }
 
+/// The destinations two `match` patterns both name, as a pattern, or `None` when they name none in common. Narrower than [`destinations_overlap`], which answers "either covers the other" and so misses a crossing pair like `api.example` (any port) and `*.example:443`, whose common ground is `api.example:443`.
+pub fn intersection(one: &str, other: &str) -> Option<String> {
+    let (a, b) = (classify(one), classify(other));
+    let port = intersect_ports(&a.port, &b.port)?;
+    let host = intersect_hosts(&a.hosts, &b.hosts)?;
+    Some(match port {
+        PortScope::Any => host,
+        PortScope::Only(port) => format!("{}:{port}", bracketed_if_v6(&host)),
+    })
+}
+
+/// A portless pattern names every port, so it yields to whichever port the other names.
+fn intersect_ports(one: &PortScope, other: &PortScope) -> Option<PortScope> {
+    match (one, other) {
+        (PortScope::Any, PortScope::Any) => Some(PortScope::Any),
+        (PortScope::Any, PortScope::Only(p)) | (PortScope::Only(p), PortScope::Any) => {
+            Some(PortScope::Only(*p))
+        }
+        (PortScope::Only(one), PortScope::Only(other)) => {
+            (one == other).then_some(PortScope::Only(*one))
+        }
+    }
+}
+
+/// The narrower of two host sets when one contains the other; two that merely might share hosts have no expressible intersection, for the reason [`wildcard_covers`] gives.
+fn intersect_hosts(one: &Hosts, other: &Hosts) -> Option<String> {
+    if hosts_cover(one, other) {
+        return Some(rendered(other));
+    }
+    if hosts_cover(other, one) {
+        return Some(rendered(one));
+    }
+    None
+}
+
+fn rendered(hosts: &Hosts) -> String {
+    match hosts {
+        Hosts::Range(range) => range.to_string(),
+        Hosts::Pattern(pattern) => (*pattern).to_string(),
+    }
+}
+
+/// An IPv6 address or range needs its brackets back before a port can be appended, or the result reparses as a bare address and the port is lost.
+fn bracketed_if_v6(host: &str) -> String {
+    if host.contains(':') {
+        return format!("[{host}]");
+    }
+    host.to_string()
+}
+
 fn shadows(existing: &RouteRule, new: &RouteRule) -> bool {
     scheme_covers(existing.scheme, new.scheme)
         && destination_covers(&existing.match_pattern, &new.match_pattern)
@@ -816,6 +866,137 @@ mod tests {
             "api.*.example.test",
             "*.eu.example.test"
         ));
+    }
+
+    #[test]
+    fn a_portless_pattern_intersected_with_a_ported_one_takes_the_port() {
+        // The case `destinations_overlap` cannot answer: neither covers the other, yet they share `api.example.test:443`.
+        assert_eq!(
+            intersection("api.example.test", "*.example.test:443").as_deref(),
+            Some("api.example.test:443")
+        );
+        assert_eq!(
+            intersection("*.example.test:443", "api.example.test").as_deref(),
+            Some("api.example.test:443")
+        );
+    }
+
+    #[test]
+    fn the_intersection_is_the_narrower_host_when_one_covers_the_other() {
+        assert_eq!(
+            intersection("*.example.test", "api.example.test").as_deref(),
+            Some("api.example.test")
+        );
+        assert_eq!(
+            intersection("api.example.test", "api.example.test").as_deref(),
+            Some("api.example.test")
+        );
+    }
+
+    #[test]
+    fn two_portless_patterns_intersect_without_inventing_a_port() {
+        assert_eq!(
+            intersection("*.example.test", "api.example.test").as_deref(),
+            Some("api.example.test"),
+            "a port neither named must not appear"
+        );
+    }
+
+    #[test]
+    fn two_different_ports_share_nothing() {
+        assert_eq!(
+            intersection("api.example.test:443", "api.example.test:8443"),
+            None
+        );
+    }
+
+    #[test]
+    fn unrelated_hosts_share_nothing() {
+        assert_eq!(intersection("api.example.test", "api.other.test"), None);
+    }
+
+    #[test]
+    fn two_mid_segment_wildcards_yield_no_intersection_rather_than_a_guess() {
+        // Both name api.eu.example.test, but which hosts one mid-segment wildcard shares with another is guesswork, and a wrong guess would ask about traffic the rule never covered.
+        assert_eq!(
+            intersection("api.*.example.test", "*.eu.example.test"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_cidr_intersected_with_a_nested_cidr_is_the_narrower_range() {
+        assert_eq!(
+            intersection("10.0.0.0/8", "10.1.0.0/16").as_deref(),
+            Some("10.1.0.0/16")
+        );
+        assert_eq!(intersection("10.0.0.0/8", "192.168.0.0/16"), None);
+    }
+
+    #[test]
+    fn a_cidr_intersected_with_an_address_it_holds_is_that_address() {
+        assert_eq!(
+            intersection("10.0.0.0/8", "10.1.2.3").as_deref(),
+            Some("10.1.2.3")
+        );
+    }
+
+    #[test]
+    fn an_ipv6_intersection_keeps_the_brackets_a_port_needs() {
+        // Without them the result reparses as a bare IPv6 literal and the port is lost.
+        let narrowed = intersection("2001:db8::1", "*:443");
+        assert_eq!(narrowed.as_deref(), Some("[2001:db8::1]:443"));
+        assert_eq!(
+            split_destination("[2001:db8::1]:443"),
+            ("2001:db8::1", Some("443")),
+            "the rendered form has to survive a round trip through the splitter"
+        );
+    }
+
+    #[test]
+    fn an_ipv6_range_keeps_its_brackets_too() {
+        // Core refuses `2001:db8::/32:5432` as an ambiguous unbracketed address, and a rule it refuses fails the whole policy closed — so one held destination would cost the run its entire egress table.
+        let narrowed = intersection("[2001:db8::/32]:5432", "[2001:db8::/32]:5432");
+        assert_eq!(narrowed.as_deref(), Some("[2001:db8::/32]:5432"));
+        assert_eq!(
+            split_destination("[2001:db8::/32]:5432"),
+            ("2001:db8::/32", Some("5432"))
+        );
+    }
+
+    #[test]
+    fn an_intersection_is_always_covered_by_both_patterns_it_came_from() {
+        // The whole ask layer rests on this: a held rule is a subset of the rule it precedes, so it can only intercept traffic that rule would have matched.
+        let pairs = [
+            ("api.example.test", "*.example.test:443"),
+            ("*.example.test", "api.example.test"),
+            ("10.0.0.0/8", "10.1.0.0/16"),
+            ("10.0.0.0/8", "10.1.2.3"),
+            ("[2001:db8::/32]:5432", "[2001:db8::/32]:5432"),
+            ("2001:db8::1", "*:443"),
+            ("*", "api.example.test:443"),
+            ("db.example.test", "db.example.test:5432"),
+        ];
+        for (one, other) in pairs {
+            let shared = intersection(one, other)
+                .unwrap_or_else(|| panic!("{one} and {other} share destinations"));
+            assert!(
+                destination_covers(one, &shared),
+                "{one} must cover its intersection {shared}"
+            );
+            assert!(
+                destination_covers(other, &shared),
+                "{other} must cover its intersection {shared}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_catch_all_intersected_with_anything_is_that_thing() {
+        assert_eq!(
+            intersection("*", "api.example.test:443").as_deref(),
+            Some("api.example.test:443")
+        );
     }
 
     #[test]
