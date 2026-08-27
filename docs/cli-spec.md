@@ -210,7 +210,7 @@ Create, run, watch, and remove sandboxes.
 
 ```bash
 lns sandbox run [OPTIONS] [REF] [-- COMMAND...]
-lns sandbox start <RUN> [-a] [-i]
+lns sandbox start <RUN> [-a] [-i] [--detach-keys <CHORD>]
 lns sandbox stop <RUN> [-t <SECONDS>]
 lns sandbox kill <RUN> [--signal <SIG>]
 lns sandbox exec [OPTIONS] <RUN> [-- COMMAND...]
@@ -274,7 +274,7 @@ contributed it. That summary is the one thing you approve.
 
 | Verb | Shortcut | What it does |
 |---|---|---|
-| `start` | `lns start` | Runs a stopped sandbox again. The launch replays exactly as recorded — image, command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot, and the **recorded** `pre-start` scripts run again — the ones the approved launch resolved, not a fresh resolution. Detached by default; `-a` attaches, `-i` also forwards stdin. A conflict (a taken host port, a held volume, a missing bind source) aborts the start and leaves the sandbox stopped. |
+| `start` | `lns start` | Runs a stopped sandbox again. The launch replays exactly as recorded — image, command, env, mounts, ports, resources, run-as — while the network rules and credentials re-resolve as they would for a fresh boot, and the **recorded** `pre-start` scripts run again — the ones the approved launch resolved, not a fresh resolution. Detached by default; `-a` attaches, `-i` also forwards stdin, and `--detach-keys <CHORD>` (default `ctrl-p,ctrl-q`) sets the chord that returns your terminal from an attached start. A conflict (a taken host port, a held volume, a missing bind source) aborts the start and leaves the sandbox stopped. |
 | `stop` | `lns stop` | Asks the workload to exit, then escalates to `SIGKILL` after `-t <SECONDS>` (default `10`). Reports whether it had to escalate. A run still inside its `pre-start` scripts has no workload yet; `stop` ends it too. |
 | `kill` | `lns kill` | Sends one signal and returns. `--signal` takes `TERM` (default), `INT`, `QUIT`, `HUP`, `WINCH`, or `KILL`, bare or `SIG`-prefixed, case-insensitive. |
 | `exec` | `lns exec` | Runs another command inside a running sandbox. `-i` and `-t` work as on `run`, `--detach-keys` closes only this session, and `-q` silences the status lines. |
