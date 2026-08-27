@@ -381,7 +381,7 @@ where
             "{} is an OCI image, not a published sandbox",
             args.reference
         ),
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => return Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     };
     crate::run::pull_confirm::confirm_pulled_effects(
@@ -429,7 +429,7 @@ where
             }
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -450,7 +450,7 @@ async fn tag<W: std::io::Write>(
             writeln!(out, "tagged {from} as {to}")?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::artifact_failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -471,7 +471,7 @@ async fn ls<W: std::io::Write>(
             crate::output::emit(args.output.format, &rows, out)?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -551,7 +551,7 @@ pub(crate) async fn remove_cached<W: std::io::Write>(
             )?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::artifact_failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -592,7 +592,7 @@ async fn prune<I: std::io::BufRead, W: std::io::Write, E: AsyncWriteExt + Unpin>
             )?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -605,7 +605,7 @@ async fn prunable_references(svc: &impl SandboxService) -> Result<Vec<String>> {
             references.sort_unstable();
             Ok(references)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -648,7 +648,7 @@ pub(crate) async fn inspect_cached<W: std::io::Write>(
             render_cached_inspect(&inspection, mixins, out)?;
             Ok(0)
         }
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => Err(crate::service::reply::artifact_failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rm_of_a_cached_sandbox_surfaces_the_daemon_error() {
+    async fn rm_of_an_uncached_reference_says_so_without_naming_the_wire() {
         let svc = CannedService::with_remove_image(
             Response::Error {
                 message: "no such run: ghcr.io/team/x:1".into(),
@@ -1415,7 +1415,8 @@ mod tests {
         let err = remove_cached(&svc, "ghcr.io/team/x:1", &mut out)
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("no such image"));
+        let message = format!("{err:#}");
+        assert_eq!(message, "no such artifact: ghcr.io/team/x:1");
     }
 
     #[tokio::test]

@@ -42,5 +42,5 @@ Feature: interactive exec sessions from the CLI
     Given no active run is named "ghost"
     When the user runs "lns exec -it ghost sh"
     Then the command fails with an exit code other than 0
-    And the output contains "no such run: ghost"
+    And the output contains "no such sandbox: ghost"
     And no exec session is started

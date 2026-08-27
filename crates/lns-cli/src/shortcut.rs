@@ -78,7 +78,7 @@ async fn ask_both(
     {
         Response::RunInspect { .. } => true,
         Response::RunUnknown { .. } => false,
-        Response::Error { message } => bail!("daemon error: {message}"),
+        Response::Error { message } => return Err(crate::service::reply::failure(&message)),
         other => bail!("unexpected response from daemon: {other:?}"),
     };
     let is_an_artifact = match svc.one_shot(Request::ListImages).await? {
