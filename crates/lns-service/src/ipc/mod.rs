@@ -386,17 +386,59 @@ async fn handle_volume_request(verb: VolumeVerb<'_>) -> Response {
     }
 }
 
+/// The connector verbs, kept off the one-shot dispatcher's own branch count the way `VolumeVerb` is.
+enum ConnectorVerb<'a> {
+    Install(&'a str),
+    Uninstall(&'a str),
+    List,
+}
+
+impl<'a> ConnectorVerb<'a> {
+    fn of(request: &'a Request) -> Option<Self> {
+        match request {
+            Request::InstallConnector { source } => Some(ConnectorVerb::Install(source)),
+            Request::UninstallConnector { name } => Some(ConnectorVerb::Uninstall(name)),
+            Request::ListConnectors => Some(ConnectorVerb::List),
+            _ => None,
+        }
+    }
+}
+
+async fn handle_connector_request(verb: ConnectorVerb<'_>) -> Response {
+    match crate::connector::real::answer(verb_call(verb)).await {
+        Ok(response) => response,
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
+}
+
+/// The verb as the production wiring takes it, so the dispatcher names no store or source of its own.
+fn verb_call(verb: ConnectorVerb<'_>) -> crate::connector::real::Call {
+    match verb {
+        ConnectorVerb::Install(source) => crate::connector::real::Call::Install(source.to_string()),
+        ConnectorVerb::Uninstall(name) => crate::connector::real::Call::Uninstall(name.to_string()),
+        ConnectorVerb::List => crate::connector::real::Call::List,
+    }
+}
+
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
     if let Some(verb) = VolumeVerb::of(request) {
         return handle_volume_request(verb).await;
     }
+    if let Some(verb) = ConnectorVerb::of(request) {
+        return handle_connector_request(verb).await;
+    }
     match request {
-        // A volume verb was answered above; each of the rest opens a stream the caller drives.
+        // A volume or connector verb was answered above; each of the rest opens a stream the caller drives.
         Request::ListVolumes
         | Request::CreateVolume { .. }
         | Request::InspectVolume { .. }
         | Request::RemoveVolume { .. }
         | Request::PruneVolumes
+        | Request::InstallConnector { .. }
+        | Request::UninstallConnector { .. }
+        | Request::ListConnectors
         | Request::RunImage(_)
         | Request::ExecImage(_)
         | Request::StartRun { .. }
@@ -1760,6 +1802,101 @@ mod tests {
 
     fn as_json(resp: Response) -> serde_json::Value {
         serde_json::to_value(&resp).expect("responses serialize")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_installs_lists_and_uninstalls_a_connector_from_a_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("lns.yaml"),
+            "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves: [api.some-provider.example]\n  methods:\n    - name: token\n      auth:\n        kind: token\n",
+        )
+        .unwrap();
+        let now = Instant::now();
+
+        let installed = as_json(
+            handle_request(
+                &Request::InstallConnector {
+                    source: project.path().display().to_string(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(installed["type"], "ConnectorInstalled", "got {installed}");
+        assert_eq!(installed["connector"]["name"], "some-provider");
+        assert_eq!(
+            installed["connector"]["serves"][0],
+            "api.some-provider.example"
+        );
+        assert_eq!(installed["connector"]["methods"][0]["needs_connect"], true);
+
+        let listed = as_json(handle_request(&Request::ListConnectors, now).await);
+        assert_eq!(listed["type"], "ConnectorList", "got {listed}");
+        assert_eq!(listed["connectors"][0]["name"], "some-provider");
+
+        let removed = as_json(
+            handle_request(
+                &Request::UninstallConnector {
+                    name: "some-provider".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(removed["type"], "ConnectorUninstalled", "got {removed}");
+        assert_eq!(removed["dropped_profiles"], 0);
+
+        let after = as_json(handle_request(&Request::ListConnectors, now).await);
+        assert!(
+            after["connectors"].as_array().expect("an array").is_empty(),
+            "got {after}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_answers_uninstalling_an_unknown_connector_rather_than_faulting() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let answered = as_json(
+            handle_request(
+                &Request::UninstallConnector {
+                    name: "absent".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(answered["type"], "ConnectorUnknown", "got {answered}");
+        assert_eq!(answered["name"], "absent");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn handle_request_surfaces_a_connector_refusal_as_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let refused = as_json(
+            handle_request(
+                &Request::InstallConnector {
+                    source: "./relative".into(),
+                },
+                Instant::now(),
+            )
+            .await,
+        );
+        assert_eq!(refused["type"], "Error", "got {refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .expect("a message")
+                .contains("relative"),
+            "got {refused}"
+        );
     }
 
     #[tokio::test]

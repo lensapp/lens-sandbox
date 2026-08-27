@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -299,38 +298,11 @@ impl super::author::Fs for RealFs {
 
 impl lns_artifact::walk::SnapshotFs for RealFs {
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
+        lns_artifact::walk::real_read_limited(path, max_bytes)
     }
+
     fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|name| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("non-utf8 file name {name:?}"),
-                )
-            })?;
-            let file_type = entry.file_type()?;
-            if file_type.is_symlink() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("symlink {name} — filesets carry only regular files"),
-                ));
-            }
-            use std::os::unix::fs::PermissionsExt;
-            entries.push(lns_artifact::walk::DirEntry {
-                name,
-                dir: file_type.is_dir(),
-                mode: entry.metadata()?.permissions().mode() & 0o777,
-            });
-        }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(entries)
+        lns_artifact::walk::real_dir_entries(dir)
     }
 }
 
