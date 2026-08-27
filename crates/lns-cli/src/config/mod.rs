@@ -974,6 +974,25 @@ mod tests {
     }
 
     #[test]
+    fn a_path_shaped_reference_is_never_addressed_to_a_registry() {
+        for path in [
+            ".",
+            "..",
+            "./obs",
+            "../obs",
+            "/opt/obs",
+            "lns.yaml",
+            "obs/lns.yaml",
+        ] {
+            assert_eq!(
+                qualify_unless_local(path, Some("ghcr.io")),
+                path,
+                "a path names a document on this machine, and qualification runs before one roots"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_default_registry_does_not_prepend_a_docker_io_default() {
         // docker.io is the parser's own default; prepending it would break the implicit `library/` namespacing.
         for d in ["docker.io", "index.docker.io"] {
