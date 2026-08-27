@@ -368,7 +368,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             );
         }
         validate_volume(volume).with_context(|| format!("volume targeting {}", volume.target))?;
-        if !targets.insert(&volume.target) {
+        if !targets.insert(claimed_path(&volume.target)) {
             bail!("duplicate volume target {}", volume.target);
         }
     }
@@ -385,10 +385,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset)?;
-        if !targets.insert(&fileset.guest_path) {
+        if !targets.insert(claimed_path(&fileset.guest_path)) {
             bail!("duplicate guest path {}", fileset.guest_path);
         }
     }
+    refuse_a_fileset_no_mount_can_carry(&doc.spec)?;
     validate_scripts(&doc.spec.scripts)?;
     let mut container_ports = BTreeSet::new();
     let mut host_ports = BTreeSet::new();
@@ -577,6 +578,47 @@ fn overlaps_runtime_namespace(path: &str) -> bool {
         None => true,
         Some(first) => first == ".lens",
     }
+}
+
+/// The segments a guest path claims, so two spellings of one path — a trailing slash, a `.` segment, a doubled separator — are one claim rather than two.
+fn claimed_path(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect()
+}
+
+/// Whether `outer` is a strict path prefix of `inner`: the prefix-based rule the shared volume/fileset guest-path namespace is held to (§3.1.10).
+pub fn encloses(outer: &str, inner: &str) -> bool {
+    let mut inner_segments = claimed_path(inner).into_iter();
+    claimed_path(outer)
+        .into_iter()
+        .all(|segment| inner_segments.next() == Some(segment))
+        && inner_segments.next().is_some()
+}
+
+/// A fileset nested under a volume target reaches the workload only because lns-init copies it into the volume once mounted (§3.1.11), and these two kinds of volume take no such copy.
+fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
+    for volume in &spec.volumes {
+        let refusal = match (volume.is_bind(), volume.read_only) {
+            (true, _) => {
+                "a bind mounts a host directory over that path, and a fileset never writes to the host filesystem"
+            }
+            (_, true) => "a read-only volume takes no write, so the file could never land",
+            _ => continue,
+        };
+        for fileset in &spec.filesets {
+            if encloses(&volume.target, &fileset.guest_path)
+                || encloses(&fileset.guest_path, &volume.target)
+            {
+                bail!(
+                    "fileset guestPath {} is nested with volume target {}: {refusal}",
+                    fileset.guest_path,
+                    volume.target
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One rule for who a guest process runs as, whether the workload's own user or a script's: the workload's reaches the guest on a space-joined kernel cmdline, so anything that could split it or be read as another key is refused here.
@@ -2296,6 +2338,76 @@ mod tests {
         .unwrap_err();
         assert!(
             format!("{err:#}").contains("duplicate guest path /s"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_sibling_whose_name_merely_starts_with_a_target_is_not_nested_under_it() {
+        assert!(encloses("/home/node", "/home/node/.config"));
+        assert!(
+            !encloses("/home/node", "/home/nodejs/.config"),
+            "a prefix rule on characters rather than segments would swallow an unrelated directory"
+        );
+        assert!(
+            !encloses("/home/node", "/home/node/"),
+            "one path spelled two ways is a duplicate claim, not a nested one"
+        );
+    }
+
+    #[test]
+    fn a_fileset_nested_under_a_bind_target_is_refused_because_a_fileset_never_writes_the_host() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"./src","target":"/work"}],"filesets":[{"path":"./cfg","guestPath":"/work/.agent"}]}"#,
+        ))
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("/work/.agent") && message.contains("/work"),
+            "the refusal has to name both entries: {message}"
+        );
+        assert!(message.contains("host filesystem"), "got: {message}");
+    }
+
+    #[test]
+    fn a_bind_target_nested_under_a_fileset_guest_path_is_refused_the_same_way() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"./src","target":"/work/inner"}],"filesets":[{"path":"./cfg","guestPath":"/work"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("/work/inner"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_fileset_nested_under_a_read_only_volume_is_refused_because_the_write_could_never_land() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"home","target":"/home/node","readOnly":true}],"filesets":[{"hostPath":"~/.config/tool.md","guestPath":"/home/node/.config/tool.md","optional":true}]}"#,
+        ))
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("/home/node/.config/tool.md") && message.contains("/home/node"),
+            "the refusal has to name both entries: {message}"
+        );
+        assert!(message.contains("read-only"), "got: {message}");
+    }
+
+    #[test]
+    fn a_fileset_nested_under_a_writable_named_volume_is_accepted_because_the_run_copies_it_in() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"home","target":"/home/node"}],"filesets":[{"hostPath":"~/.config/tool.md","guestPath":"/home/node/.config/tool.md","optional":true}]}"#,
+        ))
+        .expect("a writable named volume takes the copy lns-init makes once it is mounted");
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_buy_a_second_claim_on_one_guest_path() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"name":"home","target":"/home/node"}],"filesets":[{"path":"./cfg","guestPath":"/home/node/"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate guest path"),
             "got: {err:#}"
         );
     }

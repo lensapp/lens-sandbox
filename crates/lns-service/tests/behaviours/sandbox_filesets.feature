@@ -90,3 +90,16 @@ Feature: a sandbox's declared filesets are planned into the launch
     Given a published sandbox declaring a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig"
     When the sandbox is planned
     Then the plan accepts the hostPath fileset
+
+  Scenario: a fileset landing under a volume target is staged so the mount cannot hide it
+    Given a sandbox declaring inline file "tool.md" with content `read me` at "/home/node/.config"
+    And the run mounts a writable named volume at "/home/node"
+    When the sandbox is planned
+    Then the plan stages the guest-write spec for "/home/node/.config/tool.md" for lns-init to copy in after the mount
+    And the plan carries no guest-write spec for "/home/node/.config/tool.md"
+
+  Scenario: a fileset landing outside every volume target is written straight into the rootfs
+    Given a sandbox declaring inline file "tool.md" with content `read me` at "/etc/agent"
+    And the run mounts a writable named volume at "/home/node"
+    When the sandbox is planned
+    Then the plan carries an inline guest-write spec for "/etc/agent/tool.md"

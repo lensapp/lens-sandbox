@@ -375,6 +375,23 @@ fn chown_fileset_owned(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, 
     }
 }
 
+/// The chown manifest is applied a second time here because the paths it names inside a volume did not exist during the first pass.
+fn land_writes_the_mounts_would_have_hidden(
+    sys: &dyn Syscalls,
+    newroot: &str,
+    run_ids: Option<(u32, u32)>,
+) -> Result<(), MountError> {
+    crate::staged::land(newroot).map_err(|err| MountError::Syscall {
+        op: format!(
+            "landing the writes staged under {}",
+            crate::staged::STAGED_ROOT
+        ),
+        err,
+    })?;
+    chown_fileset_owned(sys, newroot, run_ids);
+    Ok(())
+}
+
 /// One place converts a path for `lchown` and logs what went wrong, so a path the syscall cannot take or a failure on one entry never abandons the rest of the walk.
 fn lchown_logged(sys: &dyn Syscalls, path: &str, uid: u32, gid: u32) {
     match CString::new(path) {
@@ -891,6 +908,8 @@ fn mount_composefs_and_exec_broker_inner(
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
     mount_binds(sys, &params.binds, newroot)?;
+
+    land_writes_the_mounts_would_have_hidden(sys, newroot, run_ids)?;
 
     mount_run_tmpfs(sys, newroot, run_ids)?;
 
@@ -2242,6 +2261,56 @@ mod tests {
         assert!(
             sys.calls.borrow().is_empty(),
             "a root workload already writes its own trees"
+        );
+    }
+
+    #[test]
+    fn a_write_that_lands_after_the_mounts_still_transfers_to_the_workload_user() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(&dir, "/home/node/tool.md\n");
+        let staged = format!("{newroot}{}/home/node", crate::staged::STAGED_ROOT);
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(format!("{staged}/tool.md"), b"read me").unwrap();
+        let sys = FakeSyscalls::new();
+
+        land_writes_the_mounts_would_have_hidden(&sys, &newroot, Some((1000, 1000))).unwrap();
+
+        assert_eq!(
+            std::fs::read(format!("{newroot}/home/node/tool.md")).unwrap(),
+            b"read me"
+        );
+        let landed = Call::Lchown {
+            path: format!("{newroot}/home/node/tool.md"),
+            uid: 1000,
+            gid: 1000,
+        };
+        assert!(
+            sys.calls().contains(&landed),
+            "the first chown pass ran before the mount, when this path did not exist yet"
+        );
+    }
+
+    #[test]
+    fn a_staged_write_that_cannot_land_refuses_the_boot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = newroot_with_manifest(&dir, "");
+        let staged = format!("{newroot}{}/home/node", crate::staged::STAGED_ROOT);
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(format!("{staged}/tool.md"), b"x").unwrap();
+        std::fs::create_dir_all(format!("{newroot}/home")).unwrap();
+        std::fs::write(format!("{newroot}/home/node"), b"in the way").unwrap();
+
+        let err = land_writes_the_mounts_would_have_hidden(&FakeSyscalls::new(), &newroot, None)
+            .unwrap_err();
+
+        let refusal = format!("{err}");
+        assert!(
+            refusal.contains("fileset-deferred"),
+            "a workload that would start without its file is a boot failure, not a warning"
+        );
+        assert!(
+            refusal.contains("/home/node/tool.md"),
+            "a bare errno leaves the operator with no path to look at"
         );
     }
 

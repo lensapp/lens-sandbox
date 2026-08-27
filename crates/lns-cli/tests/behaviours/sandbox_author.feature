@@ -227,6 +227,24 @@ Feature: authoring a document
     Then the command fails with an exit code other than 0
     And the output contains "duplicate"
 
+  Scenario: validate refuses a fileset nested under a bind volume target
+    Given an lns.yaml declaring a bind volume at "/work" and fileset "./cfg" mounted at "/work/.agent"
+    When the user runs artifact command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "host filesystem"
+
+  Scenario: validate refuses a fileset nested under a read-only volume target
+    Given an lns.yaml declaring a read-only volume at "/home/node" and fileset "./cfg" mounted at "/home/node/.config"
+    When the user runs artifact command "validate"
+    Then the command fails with an exit code other than 0
+    And the output contains "read-only volume takes no write"
+
+  Scenario: validate accepts a fileset nested under a writable named volume, which the run copies in after the mount
+    Given an lns.yaml declaring a named volume at "/home/node" and fileset "./cfg" mounted at "/home/node/.config"
+    And the project directory "./cfg" contains "tool.md"
+    When the user runs artifact command "validate"
+    Then the exit code is 0
+
   Scenario: validate refuses a secret-shaped file inside a path fileset
     Given an lns.yaml declaring fileset "./skills" mounted at "/root/.agent/skills"
     And the project directory "./skills" contains ".env"

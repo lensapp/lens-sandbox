@@ -75,7 +75,11 @@ fn plan_published_sandbox(world: &mut BehaviourWorld) {
 }
 
 fn capture_materialized(world: &mut BehaviourWorld, materialized: MaterializedFilesets) {
-    let specs = materialized.into_specs();
+    let mut specs = materialized.into_specs();
+    lns_service::artifact::fileset::stage_what_a_volume_would_hide(
+        &mut specs,
+        &world.fileset_volumes,
+    );
     world.fileset_manifest = specs
         .iter()
         .find(|spec| spec.guest_path == OWNED_MANIFEST_PATH)
@@ -444,4 +448,39 @@ fn plan_accepts_host_path(world: &mut BehaviourWorld) -> Result<(), String> {
             plan.local_filesets, plan.host_filesets
         ))
     }
+}
+
+#[given(regex = r#"^the run mounts a writable named volume at "([^"]+)"$"#)]
+fn run_mounts_a_writable_named_volume(world: &mut BehaviourWorld, target: String) {
+    world.fileset_volumes.push(lns_ipc::VolumeMount {
+        name: "home".to_string(),
+        target,
+        read_only: false,
+        size_bytes: None,
+    });
+}
+
+#[then(
+    regex = r#"^the plan stages the guest-write spec for "([^"]+)" for lns-init to copy in after the mount$"#
+)]
+fn plan_stages_spec_for_deferred_copy(
+    world: &mut BehaviourWorld,
+    guest_path: String,
+) -> Result<(), String> {
+    let staged = format!(
+        "{}{guest_path}",
+        lns_service::artifact::fileset::DEFERRED_ROOT
+    );
+    plan_carries_spec(world, staged)
+}
+
+#[then(regex = r#"^the plan carries no guest-write spec for "([^"]+)"$"#)]
+fn plan_carries_no_spec_at(world: &mut BehaviourWorld, guest_path: String) -> Result<(), String> {
+    let specs = world.fileset_specs.as_ref().ok_or("no plan ran")?;
+    if specs.contains(&guest_path) {
+        return Err(format!(
+            "{guest_path:?} is written straight into the rootfs, where the volume mount hides it"
+        ));
+    }
+    Ok(())
 }

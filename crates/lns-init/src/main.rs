@@ -3,6 +3,7 @@ mod boot;
 mod cmdline;
 mod mount;
 mod seed;
+mod staged;
 
 use std::io::Write;
 use std::process::ExitCode;
