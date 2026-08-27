@@ -186,7 +186,7 @@ pub struct VolumeCliRig {
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub prompt_answer: Option<String>,
-    pub stdin_is_tty: bool,
+    pub terminal_available: bool,
 }
 
 /// Drives the in-process `lns run` target resolution: what image a run request would carry, and a service refusal to surface.
@@ -223,7 +223,7 @@ pub struct SandboxCliRig {
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub workload_stdout: Vec<u8>,
     pub prompt_answer: Option<String>,
-    pub stdin_is_tty: bool,
+    pub terminal_available: bool,
 }
 
 #[derive(Debug, Default)]
@@ -264,5 +264,37 @@ impl PhasePipe {
     pub fn new() -> Self {
         let (client, server) = tokio::io::duplex(8192);
         Self { client, server }
+    }
+}
+
+/// Answers the prompts a scenario drives, so no step ever hands a command the process stdin.
+pub struct ScriptedTerminal {
+    answers: std::collections::VecDeque<String>,
+    available: bool,
+}
+
+impl ScriptedTerminal {
+    pub fn answering(answers: &[&str]) -> Self {
+        Self {
+            answers: answers.iter().map(|a| (*a).to_string()).collect(),
+            available: true,
+        }
+    }
+
+    pub fn absent() -> Self {
+        Self {
+            answers: std::collections::VecDeque::new(),
+            available: false,
+        }
+    }
+}
+
+impl lns_cli::terminal::Terminal for ScriptedTerminal {
+    fn is_available(&self) -> bool {
+        self.available
+    }
+
+    fn read_answer(&mut self) -> std::io::Result<String> {
+        Ok(self.answers.pop_front().unwrap_or_default())
     }
 }

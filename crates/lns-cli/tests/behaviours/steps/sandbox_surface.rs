@@ -5,7 +5,7 @@ use lns_cli::sandbox::{SandboxArgs, SandboxCommand, TermInfo, run_with_writers};
 use lns_ipc::Response;
 
 use crate::steps::sandbox_cli::fake_sandbox_service;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 
 /// Either namespace's decoding of one shortcut argv, so a shortcut and its namespaced form can be driven the same way.
 enum Verb {
@@ -36,7 +36,7 @@ async fn record_invocation(w: &mut BehaviourWorld, verb: Verb) {
                 &cmd,
                 &svc,
                 TermInfo::default(),
-                &mut std::io::empty(),
+                &mut ScriptedTerminal::absent(),
                 &mut out,
                 &mut stdout,
                 &mut stderr,
@@ -47,8 +47,7 @@ async fn record_invocation(w: &mut BehaviourWorld, verb: Verb) {
             let _ = lns_cli::artifact::run_with_writers(
                 &cmd,
                 &svc,
-                TermInfo::default(),
-                &mut std::io::Cursor::new(""),
+                &mut ScriptedTerminal::absent(),
                 &mut out,
                 &mut stderr,
             )

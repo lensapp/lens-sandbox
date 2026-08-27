@@ -10,7 +10,7 @@ use lns_cli::run::summary::{fileset_source_display, print_run_summary};
 use lns_cli::run::target::{RunTarget, resolve};
 
 use crate::runner::CliRun;
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 
 struct StepFs {
     files: RefCell<HashMap<PathBuf, String>>,
@@ -329,10 +329,13 @@ fn pulled_effects_confirmed(world: &mut BehaviourWorld) {
         tools: &[],
         scripts: &[],
     };
-    let mut input = std::io::Cursor::new(String::new());
+    let mut terminal = ScriptedTerminal::answering(&[]);
     let mut out = Vec::new();
     let outcome = lns_cli::run::pull_confirm::confirm_pulled_effects(
-        &effects, false, true, &mut input, &mut out,
+        &effects,
+        false,
+        &mut terminal,
+        &mut out,
     );
     world.summary_output = String::from_utf8(out).expect("non-utf8 disclosure");
     world.result = Some(CliRun {

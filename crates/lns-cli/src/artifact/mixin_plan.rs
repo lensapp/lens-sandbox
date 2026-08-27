@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -217,8 +217,7 @@ pub fn confirm_mixin_publication(
     plan: &MixinPlan,
     parent_reference: &str,
     assume_yes: bool,
-    interactive: bool,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<()> {
     if plan.is_empty() || assume_yes {
@@ -242,19 +241,17 @@ pub fn confirm_mixin_publication(
             node.declared, node.repository
         )?;
     }
-    if !interactive {
+    if !terminal.is_available() {
         bail!(
             "{parent_reference} publishes the mixins above and there is no terminal to confirm — run interactively, or pass --yes to accept them"
         );
     }
     write!(output, "Continue? [y/N]: ")?;
     output.flush()?;
-    let mut answer = String::new();
-    input
-        .read_line(&mut answer)
+    let answer = terminal
+        .read_answer()
         .context("reading the answer to the mixin publication prompt")?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer == "y" || answer == "yes" {
+    if crate::terminal::is_affirmative(&answer) {
         return Ok(());
     }
     bail!("declined; nothing was published")
@@ -264,6 +261,7 @@ pub fn confirm_mixin_publication(
 mod tests {
     use super::*;
     use crate::artifact::test_support::MapFs;
+    use crate::terminal::ScriptedTerminal;
 
     const PARENT: &str = "ghcr.io/acme/dev:1.4";
     const CHILD_DIGEST: &str = "ghcr.io/acme/postgres-tools@sha256:cccc000000000000000000000000000000000000000000000000000000000000";
@@ -682,8 +680,7 @@ mod tests {
             &MixinPlan::default(),
             PARENT,
             false,
-            true,
-            &mut std::io::Cursor::new(Vec::new()),
+            &mut ScriptedTerminal::answering(&[]),
             &mut out,
         )
         .expect("a push with no local mixin publishes exactly one artifact, as it always did");
@@ -701,8 +698,7 @@ mod tests {
             &one_node_plan(),
             PARENT,
             false,
-            true,
-            &mut std::io::Cursor::new(b"y\n".to_vec()),
+            &mut ScriptedTerminal::answering(&["y\n"]),
             &mut out,
         )
         .expect("y accepts");
@@ -720,8 +716,7 @@ mod tests {
             &one_node_plan(),
             PARENT,
             false,
-            true,
-            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &mut ScriptedTerminal::answering(&["n\n"]),
             &mut out,
         )
         .unwrap_err();
@@ -738,8 +733,7 @@ mod tests {
             &one_node_plan(),
             PARENT,
             false,
-            false,
-            &mut std::io::Cursor::new(Vec::new()),
+            &mut ScriptedTerminal::absent(),
             &mut out,
         )
         .unwrap_err();
@@ -756,8 +750,7 @@ mod tests {
             &one_node_plan(),
             PARENT,
             true,
-            false,
-            &mut std::io::Cursor::new(Vec::new()),
+            &mut ScriptedTerminal::absent(),
             &mut out,
         )
         .expect("--yes accepts without a terminal");

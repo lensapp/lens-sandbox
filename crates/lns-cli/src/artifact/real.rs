@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,7 +6,6 @@ use clap::FromArgMatches;
 
 use super::{ArtifactArgs, ArtifactCommand, run_with_writers};
 use crate::command::{RunCtx, RunFuture};
-use crate::service::client::TermInfo;
 use crate::service::real::RealSandboxService;
 
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -24,7 +23,6 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
                 push.assume_yes,
                 push.file.clone().as_deref(),
                 cwd,
-                ctx.input,
             )
             .await;
         }
@@ -34,7 +32,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             inspect.root_mixins(&ctx.cwd()?)?;
         }
         crate::service::require_running().await?;
-        dispatch(args.command, ctx.input).await
+        dispatch(args.command).await
     })
 }
 
@@ -66,26 +64,25 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
             args.assume_yes,
             args.file.as_deref(),
             ctx.cwd()?,
-            ctx.input,
         )
         .await
     })
 }
 
-pub fn run_pull<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_pull<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let mut args = super::PullArgs::from_arg_matches(matches)?;
         args.reference = qualified_reference(&args.reference)?;
-        run_after_gate(ArtifactCommand::Pull(args), ctx.input).await
+        run_after_gate(ArtifactCommand::Pull(args)).await
     })
 }
 
-pub fn run_tag<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_tag<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::TagArgs::from_arg_matches(matches)?;
         let mut command = ArtifactCommand::Tag(args);
         super::apply_registry_default(&mut command, configured_registry()?.as_deref());
-        run_after_gate(command, ctx.input).await
+        run_after_gate(command).await
     })
 }
 
@@ -94,19 +91,19 @@ pub fn run_inspect_offline(args: super::InspectArgs, ctx: RunCtx<'_>) -> Result<
     run_author(&ArtifactCommand::Inspect(args), ctx)
 }
 
-pub fn run_rm<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
+pub fn run_rm<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::RmArgs::from_arg_matches(matches)?;
         let mut command = ArtifactCommand::Rm(args);
         super::apply_registry_default(&mut command, configured_registry()?.as_deref());
         crate::service::require_running().await?;
-        dispatch(command, ctx.input).await
+        dispatch(command).await
     })
 }
 
-async fn run_after_gate(command: ArtifactCommand, input: &mut dyn std::io::BufRead) -> Result<i32> {
+async fn run_after_gate(command: ArtifactCommand) -> Result<i32> {
     crate::service::require_running().await?;
-    dispatch(command, input).await
+    dispatch(command).await
 }
 
 async fn push_local(
@@ -115,7 +112,6 @@ async fn push_local(
     assume_yes: bool,
     file: Option<&std::path::Path>,
     cwd: PathBuf,
-    input: &mut dyn std::io::BufRead,
 ) -> Result<i32> {
     let path = super::author::selected_definition_path(file, &cwd);
     let project_dir = path.parent().unwrap_or(&cwd).to_path_buf();
@@ -135,8 +131,7 @@ async fn push_local(
         reference,
         super::distribute::Confirm {
             assume_yes,
-            interactive: crate::raw_mode::stdin_is_tty(),
-            input,
+            terminal: &mut crate::terminal::RealTerminal::open(),
         },
         &mut out,
     )
@@ -333,15 +328,10 @@ impl super::author::Fs for RealFs {
     }
 }
 
-// The caller already holds the process-wide stdin lock (run_from_matches), so this must borrow it — a second Stdin::lock on the same thread deadlocks every dispatched verb.
-pub async fn dispatch(command: ArtifactCommand, input: &mut dyn std::io::BufRead) -> Result<i32> {
+pub async fn dispatch(command: ArtifactCommand) -> Result<i32> {
     let svc = RealSandboxService::new(crate::service::socket_path()?);
-    let term = TermInfo {
-        stdin_is_tty: crate::raw_mode::stdin_is_tty(),
-        stdout_is_terminal: std::io::stdout().is_terminal(),
-    };
     let mut out = std::io::stdout();
     let mut stderr = tokio::io::stderr();
-    let mut input = input;
-    run_with_writers(&command, &svc, term, &mut input, &mut out, &mut stderr).await
+    let mut terminal = crate::terminal::RealTerminal::open();
+    run_with_writers(&command, &svc, &mut terminal, &mut out, &mut stderr).await
 }

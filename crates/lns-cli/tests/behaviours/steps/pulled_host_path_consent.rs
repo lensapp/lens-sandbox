@@ -6,7 +6,7 @@ use lns_cli::run::summary::FilesetSummary;
 use lns_policy::decision_store::DecisionStore;
 use lns_policy::host_path_decisions::{HostPathDecision, HostPathDecisionFile, decision_key};
 
-use crate::world::BehaviourWorld;
+use crate::world::{BehaviourWorld, ScriptedTerminal};
 
 struct FakeStore {
     state: Mutex<HostPathDecisionFile>,
@@ -157,16 +157,20 @@ fn decide(world: &mut BehaviourWorld, origin: DocumentOrigin) {
         saves: Mutex::new(0),
         load_fails: world.host_paths.load_fails,
     };
-    let answer = world.host_paths.answer.clone().unwrap_or_default();
-    let mut input = std::io::Cursor::new(answer.into_bytes());
+    let answers = world.host_paths.answer.clone().unwrap_or_default();
+    let answers: Vec<&str> = answers.lines().collect();
+    let mut terminal = if world.host_paths.interactive {
+        ScriptedTerminal::answering(&answers)
+    } else {
+        ScriptedTerminal::absent()
+    };
     let mut output = Vec::<u8>::new();
     let outcome = decide_host_paths(
         &origin,
         &world.host_paths.filesets,
         &store,
         world.host_paths.assume_yes,
-        world.host_paths.interactive,
-        &mut input,
+        &mut terminal,
         &mut output,
     );
     world.host_paths.denied = outcome

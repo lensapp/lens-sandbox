@@ -15,6 +15,7 @@ pub mod run;
 pub mod sandbox;
 pub mod service;
 pub mod shortcut;
+pub mod terminal;
 #[cfg(test)]
 mod test_env;
 #[cfg(test)]

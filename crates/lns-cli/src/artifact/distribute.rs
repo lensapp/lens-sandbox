@@ -201,8 +201,7 @@ pub struct PushPorts<'a, F: Fs + ?Sized, P: Producer + ?Sized, R: ToolResolver +
 /// How a push may accept publishing the local mixins a document names.
 pub struct Confirm<'a> {
     pub assume_yes: bool,
-    pub interactive: bool,
-    pub input: &'a mut dyn std::io::BufRead,
+    pub terminal: &'a mut dyn crate::terminal::Terminal,
 }
 
 /// What each local mixin published as, keyed by its document so every entry naming it pins the same digest.
@@ -318,8 +317,7 @@ where
     } = ports;
     let Confirm {
         assume_yes,
-        interactive,
-        input,
+        terminal,
     } = confirm;
     refuse_unpushable_tools(doc)?;
     // Packing first reads the directories offline, so a broken document or fileset refuses the push before it consults the index or uploads a mixin.
@@ -327,14 +325,7 @@ where
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
-    super::mixin_plan::confirm_mixin_publication(
-        &plan,
-        reference,
-        assume_yes,
-        interactive,
-        input,
-        out,
-    )?;
+    super::mixin_plan::confirm_mixin_publication(&plan, reference, assume_yes, terminal, out)?;
     let published = publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
     let doc = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
@@ -456,8 +447,7 @@ mod tests {
             reference,
             Confirm {
                 assume_yes: false,
-                interactive: true,
-                input: &mut std::io::Cursor::new(Vec::new()),
+                terminal: &mut crate::terminal::ScriptedTerminal::answering(&["y\n"]),
             },
             out,
         )

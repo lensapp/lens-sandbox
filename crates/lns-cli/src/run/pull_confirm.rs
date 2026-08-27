@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use anyhow::{Result, bail};
 
@@ -42,15 +42,14 @@ pub fn artifact_declared_mounts(
 pub fn confirm_pulled_effects(
     effects: &PulledEffects,
     assume_yes: bool,
-    interactive: bool,
-    input: &mut dyn BufRead,
+    terminal: &mut dyn crate::terminal::Terminal,
     output: &mut dyn Write,
 ) -> Result<()> {
     if effects.is_empty() || assume_yes {
         return Ok(());
     }
     output.write_all(disclosure(effects).as_bytes())?;
-    if !interactive {
+    if !terminal.is_available() {
         bail!(
             "{} declares the effects above and there is no terminal to confirm — run interactively, or pass --yes to accept them",
             effects.reference
@@ -58,10 +57,7 @@ pub fn confirm_pulled_effects(
     }
     write!(output, "Continue? [y/N]: ")?;
     output.flush()?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let answer = line.trim().to_ascii_lowercase();
-    if answer == "y" || answer == "yes" {
+    if crate::terminal::is_affirmative(&terminal.read_answer()?) {
         Ok(())
     } else {
         bail!("declined; nothing was installed, mounted, or started");
@@ -136,6 +132,7 @@ fn disclosure(effects: &PulledEffects) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::ScriptedTerminal;
 
     fn script(head: &str, user: &str) -> crate::run::summary::ScriptSummary {
         crate::run::summary::ScriptSummary {
@@ -197,9 +194,13 @@ mod tests {
         interactive: bool,
         answer: &str,
     ) -> (Result<()>, String) {
-        let mut input = std::io::Cursor::new(answer.to_string());
+        let mut terminal = if interactive {
+            ScriptedTerminal::answering(&[answer])
+        } else {
+            ScriptedTerminal::absent()
+        };
         let mut out = Vec::new();
-        let r = confirm_pulled_effects(effects, assume_yes, interactive, &mut input, &mut out);
+        let r = confirm_pulled_effects(effects, assume_yes, &mut terminal, &mut out);
         (r, String::from_utf8(out).unwrap())
     }
 
@@ -450,9 +451,9 @@ mod tests {
             scripts: &[],
         };
 
-        let mut input = std::io::Cursor::new("n\n");
+        let mut terminal = ScriptedTerminal::answering(&["n\n"]);
         let mut out = Vec::new();
-        let err = confirm_pulled_effects(&effects, false, true, &mut input, &mut out).unwrap_err();
+        let err = confirm_pulled_effects(&effects, false, &mut terminal, &mut out).unwrap_err();
         let out = String::from_utf8(out).unwrap();
 
         assert!(err.to_string().contains("declined"), "got: {err}");
@@ -475,9 +476,9 @@ mod tests {
             scripts: &[],
         };
 
-        let mut input = std::io::Cursor::new("");
+        let mut terminal = ScriptedTerminal::absent();
         let mut out = Vec::new();
-        confirm_pulled_effects(&effects, false, false, &mut input, &mut out).unwrap();
+        confirm_pulled_effects(&effects, false, &mut terminal, &mut out).unwrap();
 
         assert!(out.is_empty());
     }
