@@ -696,7 +696,7 @@ filesets:
 |---|---|---|
 | `path` | string | Conditional. A directory beside this document, packed at publish. Non-empty. |
 | `inline` | map<string,string> | Conditional. Relative path → file content. MUST NOT be empty. |
-| `hostPath` | string | Conditional. One file on the machine that runs the document. See the rules below. |
+| `hostPath` | string | Conditional. One file on the machine that runs the document, read at launch and never packed at publish ([§6](#6-publish-time-transforms)). See the rules below. |
 | `guestPath` | string | REQUIRED. Where the files land in the guest. Same rules as a volume `target` ([§3.1.10](#3110-volumes)). A `hostPath` entry carries one file, so its `guestPath` MUST NOT end in `/`. |
 | `owner` | string | optional. `workload` (default) or `root`. |
 | `optional` | bool | optional. Default `false`. `hostPath` only. A file the running machine does not have is skipped instead of refusing the run. |
