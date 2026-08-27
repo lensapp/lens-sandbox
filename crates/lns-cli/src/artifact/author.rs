@@ -42,54 +42,12 @@ spec:
 ";
 
 /// A minimal filesystem seam so the author verbs are host-tested with an in-memory fake; `RealFs` in `real.rs` is the std::fs leaf.
-pub trait Fs {
+pub trait Fs: lns_artifact::walk::SnapshotFs {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
     fn is_symlink(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
-    fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>>;
-    fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirEntry {
-    pub name: String,
-    pub dir: bool,
-    pub mode: u32,
-}
-
-/// Derive a directory listing from a flat path-keyed map, so every in-memory fake Fs shares one implementation.
-pub fn map_dir_entries<'a>(
-    paths: impl Iterator<Item = &'a PathBuf>,
-    dir: &Path,
-) -> io::Result<Vec<DirEntry>> {
-    let mut seen: std::collections::BTreeMap<String, bool> = Default::default();
-    for key in paths {
-        let Ok(rest) = key.strip_prefix(dir) else {
-            continue;
-        };
-        let mut components = rest.components();
-        let Some(std::path::Component::Normal(first)) = components.next() else {
-            continue;
-        };
-        let nested = components.next().is_some();
-        let slot = seen
-            .entry(first.to_string_lossy().into_owned())
-            .or_default();
-        *slot = *slot || nested;
-    }
-    if seen.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "no such directory"));
-    }
-    Ok(seen
-        .into_iter()
-        .map(|(name, dir)| DirEntry {
-            name,
-            dir,
-            mode: if dir { 0o755 } else { 0o644 },
-        })
-        .collect())
 }
 
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
@@ -435,16 +393,13 @@ fn render_connector<W: Write>(
             Some(auth) => auth.kind.as_str(),
             None => "none",
         };
-        writeln!(
-            out,
-            "  method:       {} (auth: {auth}){}",
-            method.name,
-            if method.is_offerable() {
-                ""
-            } else {
-                " — needs a newer lns"
-            }
-        )?;
+        let name = &method.name;
+        let unsupported = if method.is_offerable() {
+            ""
+        } else {
+            " — needs a newer lns"
+        };
+        writeln!(out, "  method:       {name} (auth: {auth}){unsupported}")?;
         writeln!(
             out,
             "    egress:     {} route(s){}",
@@ -475,7 +430,6 @@ fn raw_rule_note(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use crate::artifact::test_support::MapFs;
 
@@ -1017,14 +971,6 @@ mod tests {
         assert_eq!(code, 1);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("fileset ./skills"), "got: {text}");
-    }
-
-    #[test]
-    fn map_dir_entries_treats_a_file_path_as_no_directory() {
-        let files: HashMap<PathBuf, String> =
-            [(PathBuf::from("/work/skills"), String::new())].into();
-        let err = map_dir_entries(files.keys(), Path::new("/work/skills")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

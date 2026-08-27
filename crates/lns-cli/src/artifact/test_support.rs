@@ -3,15 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::artifact::author::{DirEntry, Fs, map_dir_entries};
+use crate::artifact::author::Fs;
+use lns_artifact::walk::{DirEntry, map_dir_entries};
 
-/// The one in-memory Fs fake shared by every sandbox-side unit suite: a flat path→contents map with optional unreadable/read-only failure modes.
+/// The one in-memory Fs fake shared by every sandbox-side unit suite: a flat path→contents map with an optional write failure.
 #[derive(Default)]
 pub(crate) struct MapFs {
     pub files: RefCell<HashMap<PathBuf, String>>,
-    pub unreadable: bool,
     pub fail_write: bool,
-    pub executables: HashSet<String>,
     pub symlinks: HashSet<PathBuf>,
 }
 
@@ -59,21 +58,15 @@ impl Fs for MapFs {
     fn is_symlink(&self, path: &Path) -> bool {
         self.symlinks.contains(path)
     }
+}
+
+impl lns_artifact::walk::SnapshotFs for MapFs {
     fn read_limited(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
-        if self.unreadable {
-            return Err(io::Error::other("permission denied"));
-        }
         let mut bytes = self.read_to_string(path)?.into_bytes();
         bytes.truncate(max_bytes.saturating_add(1) as usize);
         Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-        let mut entries = map_dir_entries(self.files.borrow().keys(), dir)?;
-        for entry in &mut entries {
-            if self.executables.contains(&entry.name) {
-                entry.mode = 0o755;
-            }
-        }
-        Ok(entries)
+        map_dir_entries(self.files.borrow().keys(), dir)
     }
 }

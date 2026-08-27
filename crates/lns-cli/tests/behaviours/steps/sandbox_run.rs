@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cucumber::{given, then, when};
-use lns_cli::artifact::author::{DirEntry, Fs, map_dir_entries};
+use lns_artifact::walk::{DirEntry, map_dir_entries};
+use lns_cli::artifact::author::Fs;
 use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
 use lns_cli::run::progress::ProgressRenderer;
@@ -45,6 +46,9 @@ impl Fs for StepFs {
     fn is_symlink(&self, _path: &Path) -> bool {
         false
     }
+}
+
+impl lns_artifact::walk::SnapshotFs for StepFs {
     fn read_limited(&self, path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
         let mut bytes = self.read_to_string(path)?.into_bytes();
         bytes.truncate(max_bytes.saturating_add(1) as usize);
