@@ -7,9 +7,22 @@ static BUILD_ID: OnceCell<String> = OnceCell::const_new();
 
 pub(super) struct RealFetcher;
 
+fn package_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(crate::identity::header(lns_ipc::Method::AssetDownload))
+            .build()
+            // Same failure reqwest::get panics on: the process has no usable TLS backend, so there is nothing to fall back to.
+            .expect("a TLS-backed HTTP client")
+    })
+}
+
 impl Fetcher for RealFetcher {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = reqwest::get(url)
+        let resp = package_client()
+            .get(url)
+            .send()
             .await
             .with_context(|| format!("downloading {url}"))?
             .error_for_status()

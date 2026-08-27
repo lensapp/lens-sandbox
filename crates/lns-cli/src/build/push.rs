@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use http::HeaderValue;
 use lns_artifact::build::BuiltArtifact;
 use lns_policy::registry_auth::{JsonFileRegistryAuthStore, RegistryAuthStore};
-use oci_client::{Reference, RegistryOperation, client::ClientConfig, secrets::RegistryAuth};
+use oci_client::{Reference, RegistryOperation, secrets::RegistryAuth};
 
 use crate::build::push_auth::{auth_error, push_error, select_auth};
 
@@ -17,10 +17,7 @@ pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
     let reference: Reference = target
         .parse()
         .with_context(|| format!("invalid target ref {target}"))?;
-    let client = oci_client::Client::new(ClientConfig {
-        protocol: lns_artifact::client_protocol_for(reference.registry()),
-        ..Default::default()
-    });
+    let client = oci_client::Client::new(super::push_client_config(reference.registry()));
     let auth = registry_auth_for(&reference)?;
     client
         .auth(&reference, &auth, RegistryOperation::Push)

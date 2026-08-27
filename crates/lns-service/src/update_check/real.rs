@@ -4,47 +4,12 @@ use crate::http_cap::CappedBuffer;
 use crate::shutdown::Shutdown;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use lns_ipc::{Method, PlatformInfo, Uname, shell_basename_from, uname_fields_with};
+use lns_ipc::Method;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-
-struct RealUname;
-impl Uname for RealUname {
-    fn uname(&self) -> Option<(String, String, String)> {
-        // SAFETY: `libc::uname` writes into a zeroed `utsname` and the returned C strings live as long as the struct on our stack.
-        unsafe {
-            let mut buf: libc::utsname = std::mem::zeroed();
-            if libc::uname(&mut buf) != 0 {
-                return None;
-            }
-            let to_string = |arr: &[libc::c_char]| {
-                std::ffi::CStr::from_ptr(arr.as_ptr())
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            Some((
-                to_string(&buf.sysname),
-                to_string(&buf.machine),
-                to_string(&buf.release),
-            ))
-        }
-    }
-}
-
-fn detect_user_agent() -> String {
-    let (os, arch, kernel_release) =
-        uname_fields_with(&RealUname, std::env::consts::OS, std::env::consts::ARCH);
-    let platform = PlatformInfo {
-        os,
-        arch,
-        kernel_release,
-        shell: shell_basename_from(std::env::var_os("SHELL")),
-    };
-    lns_ipc::user_agent(super::LNS_VERSION, &platform, Method::ServiceUpdateCheck)
-}
 
 struct RealClock;
 impl Clock for RealClock {
@@ -113,7 +78,7 @@ pub async fn run_periodic(shutdown: Arc<Shutdown>) {
     if let Err(e) = super::establish_install_id(|k| std::env::var(k).ok(), &RealStore) {
         crate::log::debug!("establishing install id failed: {e:#}");
     }
-    let user_agent = detect_user_agent();
+    let user_agent = crate::identity::header(Method::ServiceUpdateCheck);
     let first_tick = tokio::time::Instant::now() + super::CHECK_INTERVAL;
     let mut tick = tokio::time::interval_at(first_tick, super::CHECK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -126,7 +91,7 @@ pub async fn run_periodic(shutdown: Arc<Shutdown>) {
                     &RealStore,
                     &RealClock,
                     super::CDN_BASE,
-                    &user_agent,
+                    user_agent,
                 )
                 .await
                 {

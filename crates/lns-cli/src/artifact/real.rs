@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::FromArgMatches;
+use lns_ipc::Method;
 
 use super::{ArtifactArgs, ArtifactCommand, run_with_writers};
 use crate::command::{RunCtx, RunFuture};
@@ -153,6 +154,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
             let url = lns_artifact::tools::version_index_url(&tool.name);
             let response = reqwest::Client::builder()
                 .timeout(TOOL_INDEX_TIMEOUT)
+                .user_agent(crate::identity::header(Method::ToolIndex))
                 .build()
                 .context("building the tool version index client")?
                 .get(&url)
@@ -183,6 +185,7 @@ impl super::distribute::ToolResolver for RealToolResolver {
             let url = lns_artifact::tools::version_index_url(&tool.name);
             let Ok(client) = reqwest::Client::builder()
                 .timeout(TOOL_INDEX_TIMEOUT)
+                .user_agent(crate::identity::header(Method::ToolIndex))
                 .build()
             else {
                 return IndexVerification::Unavailable;
