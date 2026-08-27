@@ -252,7 +252,7 @@ keeping its `ENTRYPOINT`; `--` is accepted but not required.
 | `-u`, `--user <USER[:GROUP]>` | image `USER`, else `sandbox` | Run-as user or uid inside the sandbox. Outranks `spec.user`, which outranks the image. `HOME` and `USER` follow that user's guest passwd entry unless `env:` or `-e` sets them. |
 | `--entrypoint <COMMAND>` | image `ENTRYPOINT` | Override the image entrypoint; the `COMMAND` after the reference becomes its arguments. `--entrypoint ""` clears it. |
 | `-h`, `--hostname <NAME>` | | Guest hostname for this sandbox. |
-| `--yes` | `false` | Accept the tool installers, host binds, named volumes, and filesets a pulled sandbox declares. Required for a non-interactive run that declares any of them. |
+| `--yes` | `false` | Accept the tool installers, `pre-start` scripts, host binds, named volumes, and filesets a pulled sandbox declares. Required for a non-interactive run that declares any of them. |
 | `-q`, `--quiet` | `false` | Suppress the launch banner and `✓` lines. Warnings, errors, and the workload's output still print. |
 
 Two things a run does without being asked to:
