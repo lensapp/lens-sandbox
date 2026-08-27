@@ -107,15 +107,6 @@ fn parse_error_names_flag(world: &mut BehaviourWorld, flag: String) -> Result<()
     }
 }
 
-#[then(regex = r"^the command succeeds$")]
-fn command_succeeds(world: &mut BehaviourWorld) -> Result<(), String> {
-    match world.result.as_ref() {
-        Some(run) if run.exit_code == 0 => Ok(()),
-        Some(run) => Err(format!("exited {}:\n{}", run.exit_code, run.output)),
-        None => Err("the command did not run".to_string()),
-    }
-}
-
 #[then(regex = r"^the command fails with an exit code other than 0$")]
 fn command_fails(world: &mut BehaviourWorld) -> Result<(), String> {
     match world.result.as_ref().map(|r| r.exit_code) {
