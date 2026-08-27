@@ -9,6 +9,8 @@ use crate::http_cap::CappedBuffer;
 
 pub(crate) struct RealFetcher {
     pub max_bytes: u64,
+    /// Which traffic this fetch belongs to: the same pool carries pinned artifacts and the tool version index.
+    pub method: lns_ipc::Method,
 }
 
 /// A connect bound, not a total one: the same client carries the kernel and VMM transfers, where a slow-but-progressing body must not be cut off.
@@ -17,7 +19,6 @@ fn shared_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .user_agent(crate::identity::header(lns_ipc::Method::AssetDownload))
             .build()
             // Same failure reqwest::get panics on: the process has no usable TLS backend, so there is nothing to fall back to.
             .expect("a TLS-backed HTTP client")
@@ -28,6 +29,10 @@ impl Fetcher for RealFetcher {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
         let resp = shared_client()
             .get(url)
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::identity::header(self.method),
+            )
             .send()
             .await
             .with_context(|| format!("downloading {url}"))?

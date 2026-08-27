@@ -26,6 +26,7 @@ impl ToolProvisioner for MiseProvisioner {
             let url = lns_artifact::tools::version_index_url(&name);
             let body = RealFetcher {
                 max_bytes: MAX_INDEX_BYTES,
+                method: lns_ipc::Method::ToolIndex,
             }
             .fetch(&url)
             .await
@@ -267,6 +268,7 @@ pub(crate) async fn ensure_engine_artifacts(
     super::ensure_engine_artifacts_with(
         &RealFetcher {
             max_bytes: MAX_ARTIFACT_BYTES,
+            method: lns_ipc::Method::AssetDownload,
         },
         &RealFs,
         mise::manifest(),
@@ -284,6 +286,7 @@ pub(crate) async fn workload_ca_spec(
     crate::ca_bundle::workload_spec(
         &RealFetcher {
             max_bytes: MAX_ARTIFACT_BYTES,
+            method: lns_ipc::Method::AssetDownload,
         },
         &RealFs,
         mise::manifest(),
@@ -301,6 +304,7 @@ pub(crate) async fn workload_companion_specs(
     super::ensure_workload_companions_with(
         &RealFetcher {
             max_bytes: MAX_ARTIFACT_BYTES,
+            method: lns_ipc::Method::AssetDownload,
         },
         &RealFs,
         mise::manifest(),
