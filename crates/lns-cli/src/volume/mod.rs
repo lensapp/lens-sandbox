@@ -124,7 +124,7 @@ async fn ls(svc: &dyn VolumeService, args: &VolumeLsArgs, writer: &mut impl Writ
     match send(svc, Request::ListVolumes).await? {
         Response::VolumeList { volumes } => {
             let rows: Vec<VolumeRow> = volumes.iter().map(VolumeRow::new).collect();
-            crate::output::emit(args.output.format, &rows, writer)?;
+            crate::output::emit(args.output.format, &rows, "No volumes.", writer)?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -474,18 +474,6 @@ mod tests {
             );
             let out = String::from_utf8(buf).unwrap();
             assert!(out.contains("Aborted."), "got: {out}");
-        }
-    }
-
-    #[tokio::test]
-    async fn ls_renders_an_empty_table_with_headers_only() {
-        let svc = CannedService::with([Some(Response::VolumeList {
-            volumes: Vec::new(),
-        })]);
-        let (code, out) = run_cmd(&VolumeCommand::Ls(ls_args()), &svc).await.unwrap();
-        assert_eq!(code, 0);
-        for header in ["NAME", "ON DISK", "CREATED", "IN USE"] {
-            assert!(out.contains(header), "missing {header} in {out:?}");
         }
     }
 

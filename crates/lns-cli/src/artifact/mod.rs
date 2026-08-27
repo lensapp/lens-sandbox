@@ -468,7 +468,7 @@ async fn ls<W: std::io::Write>(
                 .filter(|image| args.kind.is_none_or(|kind| kind.matches(image.kind)))
                 .map(ArtifactRow::new)
                 .collect();
-            crate::output::emit(args.output.format, &rows, out)?;
+            crate::output::emit(args.output.format, &rows, "No cached artifacts.", out)?;
             Ok(0)
         }
         Response::Error { message } => Err(crate::service::reply::failure(&message)),

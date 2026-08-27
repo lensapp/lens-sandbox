@@ -41,6 +41,13 @@ Feature: managing cached sandboxes
     And the output contains "team/lint:1.0"
     And the output does not contain "hermes:1.4.0"
 
+  Scenario: with an empty cache, ls says so instead of printing a bare header
+    Given the service reports no cached sandboxes
+    When the user runs artifact command "ls"
+    Then the exit code is 0
+    And the output contains "No cached artifacts."
+    And the output does not contain "DIGEST"
+
   Scenario: ls --kind rejects a kind the cache cannot hold
     When I run "lns artifact ls --kind sorcery"
     Then the exit code is 2
@@ -146,6 +153,20 @@ Feature: managing cached sandboxes
     And the output contains "scribe"
     And the output contains "STATE"
     And the output contains "stopped (0)"
+
+  Scenario: with nothing running, ls says so instead of printing a bare header
+    Given the service reports no runs
+    When the user runs sandbox command "ls"
+    Then the exit code is 0
+    And the output contains "No running sandboxes."
+    And the output does not contain "STATE"
+
+  Scenario: with nothing to list at all, ls -a says so rather than naming only the running ones
+    Given the service reports no runs
+    When the user runs sandbox command "ls -a"
+    Then the exit code is 0
+    And the output contains "No sandboxes."
+    And the output does not contain "STATE"
 
   Scenario: a stopped sandbox is listed without sampling a guest that is not there
     Given the service reports one running sandbox and one that stopped

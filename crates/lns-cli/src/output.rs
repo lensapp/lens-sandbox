@@ -26,32 +26,23 @@ pub trait TableRow {
     fn cells(&self) -> Vec<String>;
 }
 
+/// Every list verb states its own empty case, so a human reading nothing gets prose where a script still gets `[]`.
 pub fn emit<T: TableRow + serde::Serialize>(
     format: Format,
     rows: &[T],
+    empty_note: &str,
     out: &mut dyn Write,
 ) -> Result<()> {
     match format {
+        Format::Table if rows.is_empty() => {
+            writeln!(out, "{empty_note}").context("writing the empty-list note")
+        }
         Format::Table => {
             let cells: Vec<Vec<String>> = rows.iter().map(TableRow::cells).collect();
             render_table(out, T::HEADERS, &cells).context("writing the table")
         }
         Format::Json => emit_object(&rows, out),
     }
-}
-
-/// Like `emit`, but a human reading an empty list gets prose where a script still gets `[]`.
-pub fn emit_or_note<T: TableRow + serde::Serialize>(
-    format: Format,
-    rows: &[T],
-    note: &str,
-    out: &mut dyn Write,
-) -> Result<()> {
-    if rows.is_empty() && format == Format::Table {
-        writeln!(out, "{note}").context("writing the empty-list note")?;
-        return Ok(());
-    }
-    emit(format, rows, out)
 }
 
 /// One thing rather than a list: the JSON is a single object, and the table is the FIELD/VALUE summary of it that a reader can scan.
@@ -189,7 +180,7 @@ mod tests {
 
     fn emitted(format: Format, rows: &[Sample]) -> String {
         let mut buf = Vec::new();
-        emit(format, rows, &mut buf).unwrap();
+        emit(format, rows, "Nothing here.", &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -237,31 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn the_table_format_still_prints_the_header_when_there_is_nothing_to_list() {
-        let text = emitted(Format::Table, &[]);
-        assert_eq!(text, "NAME  SIZE\n");
-    }
-
-    fn noted(format: Format, rows: &[Sample]) -> String {
-        let mut buf = Vec::new();
-        emit_or_note(format, rows, "Nothing here.", &mut buf).unwrap();
-        String::from_utf8(buf).unwrap()
-    }
-
-    #[test]
-    fn an_empty_list_reads_as_prose_for_a_human_and_as_an_empty_array_for_a_script() {
-        assert_eq!(noted(Format::Table, &[]), "Nothing here.\n");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&noted(Format::Json, &[])).unwrap(),
-            serde_json::json!([]),
-            "prose would break a json consumer"
-        );
+    fn the_table_format_says_there_is_nothing_to_list_instead_of_printing_a_bare_header() {
+        assert_eq!(emitted(Format::Table, &[]), "Nothing here.\n");
     }
 
     #[test]
     fn a_non_empty_list_ignores_the_note_in_both_formats() {
-        assert!(!noted(Format::Table, &[sample()]).contains("Nothing here."));
-        assert!(!noted(Format::Json, &[sample()]).contains("Nothing here."));
+        assert!(!emitted(Format::Table, &[sample()]).contains("Nothing here."));
+        assert!(!emitted(Format::Json, &[sample()]).contains("Nothing here."));
     }
 
     #[test]
