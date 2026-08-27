@@ -125,6 +125,14 @@ pub enum Request {
         registry: String,
     },
     ListRegistryLogins,
+    /// `<REF|PATH>` as the user typed it, absolutised by `lns` when it is a path — only the service can reach a registry, and a connector's `path` filesets arrive as layers of its own artifact.
+    InstallConnector {
+        source: String,
+    },
+    UninstallConnector {
+        name: String,
+    },
+    ListConnectors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +281,48 @@ pub enum Response {
         /// 0 means the size of the work is unknown (render as indeterminate).
         total: u64,
     },
+    ConnectorInstalled {
+        connector: ConnectorView,
+    },
+    /// Uninstalling drops profiles and keeps grants, so it reports both rather than a bare acknowledgement.
+    ConnectorUninstalled {
+        name: String,
+        dropped_profiles: usize,
+    },
+    ConnectorList {
+        connectors: Vec<ConnectorView>,
+    },
+    /// No connector answers to the name — an answer, never a fault, the way `RunUnknown` is.
+    ConnectorUnknown {
+        name: String,
+    },
+}
+
+/// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the profiles this machine holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorView {
+    pub name: String,
+    pub digest: String,
+    pub serves: Vec<String>,
+    pub methods: Vec<ConnectorMethodView>,
+    pub profiles: Vec<ConnectorProfileView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorMethodView {
+    pub name: String,
+    pub label: String,
+    /// False for a method with no `auth`: there is nothing to connect, so it is granted directly.
+    pub needs_connect: bool,
+    /// False where this version does not implement the method's `auth.kind`, which the card must not offer.
+    pub offerable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorProfileView {
+    pub label: String,
+    pub method: String,
+    pub authority: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

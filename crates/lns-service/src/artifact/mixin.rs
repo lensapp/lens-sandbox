@@ -38,15 +38,6 @@ pub trait MixinSource: Send + Sync {
     ) -> impl std::future::Future<Output = Result<FetchedMixin>> + Send;
 }
 
-/// Whether a pulled manifest is a mixin artifact, decided on the media types alone so the refusal reads the same whether the artifact is mistyped or another kind entirely.
-pub fn is_a_mixin_artifact(artifact_type: Option<&str>, config_media_type: Option<&str>) -> bool {
-    let mixin = lns_artifact::spec::Kind::Mixin;
-    match artifact_type.filter(|t| !t.is_empty()) {
-        Some(declared) => declared == mixin.artifact_type(),
-        None => config_media_type.is_some_and(|t| t == mixin.config_media_type()),
-    }
-}
-
 /// Resolve one reference against the document that named it: a path the user typed is one this machine read whatever the run is, while a path a document declares roots at that document and so needs one this machine read.
 fn locate(reference: &str, home: &Locator, the_user_named_it: bool) -> Result<Locator> {
     if !lns_artifact::sandbox::names_a_local_path(reference) {
@@ -1338,29 +1329,6 @@ mod tests {
             format!("{err:#}").contains("1 mixin(s) this sandbox layers on merge into a document that is not a valid sandbox"),
             "a merge that ever produced a document no author could have written has to name the mixins that produced it, or it reads as a malformed publish; got: {err:#}"
         );
-    }
-
-    #[test]
-    fn a_mixin_artifact_is_recognised_by_its_declared_type_and_only_then_by_its_config() {
-        let mixin = lns_artifact::spec::Kind::Mixin;
-        let sandbox = lns_artifact::spec::Kind::Sandbox;
-        assert!(is_a_mixin_artifact(
-            Some(&mixin.artifact_type()),
-            Some(&sandbox.config_media_type())
-        ));
-        assert!(
-            !is_a_mixin_artifact(
-                Some(&sandbox.artifact_type()),
-                Some(&mixin.config_media_type())
-            ),
-            "a present artifactType is the answer; the config type must never second-guess it"
-        );
-        assert!(
-            is_a_mixin_artifact(None, Some(&mixin.config_media_type())),
-            "an artifact pushed by a tool that writes no artifactType is still readable"
-        );
-        assert!(!is_a_mixin_artifact(None, None));
-        assert!(!is_a_mixin_artifact(Some(""), None));
     }
 
     #[tokio::test]

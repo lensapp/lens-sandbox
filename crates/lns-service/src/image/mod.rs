@@ -337,7 +337,7 @@ pub(crate) async fn pull_mixin_with<R: Registry>(
         .with_context(|| format!("invalid mixin reference {reference}"))?;
     let (manifest, manifest_digest, config_json) = client.pull_manifest_and_config(&parsed).await?;
     verify_digest_pin(&parsed, &manifest_digest, reference)?;
-    if !crate::artifact::mixin::is_a_mixin_artifact(
+    if !lns_artifact::spec::Kind::Mixin.describes(
         manifest.artifact_type.as_deref(),
         Some(manifest.config.media_type.as_str()),
     ) {
@@ -347,6 +347,28 @@ pub(crate) async fn pull_mixin_with<R: Registry>(
         pinned: parsed.clone_with_digest(manifest_digest).to_string(),
         document: config_json,
         layers: crate::artifact::fileset::packed_layers(&manifest),
+    })
+}
+
+/// Pull a connector's document. The pin is verified before the type, for the reason a mixin's is: a grant binds to exactly these bytes, so a reference that does not name them has nothing to be typed.
+pub(crate) async fn pull_connector_with<R: Registry>(
+    client: &R,
+    reference: &str,
+) -> Result<crate::connector::source::FetchedConnector> {
+    let parsed: Reference = reference
+        .parse()
+        .with_context(|| format!("invalid connector reference {reference}"))?;
+    let (manifest, manifest_digest, config_json) = client.pull_manifest_and_config(&parsed).await?;
+    verify_digest_pin(&parsed, &manifest_digest, reference)?;
+    if !lns_artifact::spec::Kind::Connector.describes(
+        manifest.artifact_type.as_deref(),
+        Some(manifest.config.media_type.as_str()),
+    ) {
+        anyhow::bail!("{reference} is not a connector artifact");
+    }
+    Ok(crate::connector::source::FetchedConnector {
+        digest: manifest_digest,
+        document: config_json.into_bytes(),
     })
 }
 
@@ -1261,6 +1283,96 @@ mod tests {
             manifest_digest: format!("sha256:{}", "c".repeat(64)),
             blobs: vec![],
         }
+    }
+
+    fn build_connector_artifact() -> FakeImage {
+        let document = r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"}}]}}"#.to_string();
+        let manifest = OciImageManifest {
+            artifact_type: Some("application/vnd.lens.connector.v1+json".into()),
+            config: OciDescriptor {
+                media_type: "application/vnd.lens.connector.config.v1+json".into(),
+                digest: sha256_hex(document.as_bytes()),
+                size: document.len() as i64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        FakeImage {
+            manifest,
+            config_json: document,
+            manifest_digest: format!("sha256:{}", "c".repeat(64)),
+            blobs: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_connector_returns_the_document_and_the_digest_a_grant_binds_to() {
+        ensure_global_trace_subscriber();
+        let registry = build_connector_artifact().into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+        let fetched = pull_connector_with(&registry, &pinned).await.unwrap();
+        assert_eq!(fetched.digest, format!("sha256:{}", "c".repeat(64)));
+        assert!(
+            String::from_utf8_lossy(&fetched.document).contains(r#""kind":"connector""#),
+            "got: {}",
+            String::from_utf8_lossy(&fetched.document)
+        );
+        assert_eq!(
+            registry.calls.lock().unwrap().as_slice(),
+            ["manifest"],
+            "a connector's document is its config, so no layer blob is fetched for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_a_pin_the_registry_did_not_answer_with() {
+        // A grant binds to these bytes, so the pin gates their use before anything reads them.
+        ensure_global_trace_subscriber();
+        let registry = build_connector_artifact().into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "d".repeat(64));
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_an_artifact_of_another_kind() {
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not a connector artifact"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_answers_with_the_pin_when_the_kind_is_wrong_too() {
+        // Pins before types: a reference that does not name these bytes has nothing to be typed, and a grant binds to the bytes.
+        ensure_global_trace_subscriber();
+        let registry = build_mixin_artifact().into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "d".repeat(64));
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest digest mismatch"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_a_reference_that_does_not_parse() {
+        ensure_global_trace_subscriber();
+        let registry = build_connector_artifact().into_registry();
+        let err = pull_connector_with(&registry, "not a reference")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid connector reference"),
+            "got: {err:#}"
+        );
     }
 
     #[test]

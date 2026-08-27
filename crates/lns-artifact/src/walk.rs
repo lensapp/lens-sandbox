@@ -108,6 +108,45 @@ fn walk_into<F: SnapshotFs + ?Sized>(
     Ok(())
 }
 
+/// Read at most `max_bytes` plus one, so a caller can tell the limit was exceeded rather than silently truncating.
+pub fn real_read_limited(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// List one real directory for a snapshot, refusing what a fileset may not carry. Both `lns push` and `lns connector install` read a tree through this, so the refusal reads one way.
+pub fn real_dir_entries(dir: &Path) -> io::Result<Vec<DirEntry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|name| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("non-utf8 file name {name:?}"),
+            )
+        })?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("symlink {name} — filesets carry only regular files"),
+            ));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        entries.push(DirEntry {
+            name,
+            dir: file_type.is_dir(),
+            mode: entry.metadata()?.permissions().mode() & 0o777,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
 /// Derive a directory listing from a flat path-keyed map, so every in-memory fake shares one implementation.
 pub fn map_dir_entries<'a>(
     paths: impl Iterator<Item = &'a std::path::PathBuf>,
@@ -145,6 +184,9 @@ pub fn map_dir_entries<'a>(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::fs::symlink as os_symlink;
     use std::path::PathBuf;
 
     #[derive(Default)]
@@ -383,5 +425,53 @@ mod tests {
         let listed = map_dir_entries(paths.iter(), Path::new("/f")).unwrap();
         assert_eq!(listed.len(), 1);
         assert!(listed[0].dir, "{listed:?}");
+    }
+    #[test]
+    fn a_directory_listing_reports_names_modes_and_which_entries_are_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("credentials.json"), b"{}").unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        let listed = real_dir_entries(dir.path()).expect("listing");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|e| (e.name.as_str(), e.dir))
+                .collect::<Vec<_>>(),
+            [("credentials.json", false), ("nested", true)]
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_file_name_is_refused_rather_than_lossily_packed() {
+        // A packed entry's path is a tar header string, so a lossy conversion would write a different file than the author has.
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = OsStr::from_bytes(&[0xff, 0xfe]);
+        fs::write(dir.path().join(name), b"x").unwrap();
+        let err = real_dir_entries(dir.path()).expect_err("a non-utf8 name must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("non-utf8"), "{err}");
+    }
+
+    #[test]
+    fn a_symlink_in_a_fileset_is_refused_rather_than_followed() {
+        // A fileset is packed into the artifact, so following a link would ship whatever it points at.
+        let dir = tempfile::tempdir().expect("tempdir");
+        os_symlink("/etc/passwd", dir.path().join("link")).unwrap();
+        let err = real_dir_entries(dir.path()).expect_err("a symlink must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_read_stops_one_byte_past_the_limit_so_the_caller_can_tell_it_was_exceeded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big");
+        fs::write(&path, b"0123456789").unwrap();
+        let read = real_read_limited(&path, 4).expect("read");
+        assert_eq!(
+            read.len(),
+            5,
+            "one past the limit, so the walk can refuse it"
+        );
     }
 }

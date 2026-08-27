@@ -42,6 +42,14 @@ impl Kind {
     pub fn from_kind_str(kind: &str) -> Option<Kind> {
         ALL_KINDS.into_iter().find(|k| k.as_str() == kind)
     }
+
+    /// Whether a pulled manifest is an artifact of this kind, decided on the media types alone so the refusal reads the same whether the artifact is mistyped or another kind entirely.
+    pub fn describes(self, artifact_type: Option<&str>, config_media_type: Option<&str>) -> bool {
+        match artifact_type.filter(|t| !t.is_empty()) {
+            Some(declared) => declared == self.artifact_type(),
+            None => config_media_type.is_some_and(|t| t == self.config_media_type()),
+        }
+    }
 }
 
 /// The identity every document carries, read before the kind's own `spec` is decoded so another group's field names cannot answer as unknown fields of this one (§2).
@@ -325,6 +333,42 @@ mod tests {
                 )),
                 None
             );
+        }
+    }
+    #[test]
+    fn a_kind_is_recognised_by_its_declared_artifact_type_and_only_then_by_its_config() {
+        let mixin = Kind::Mixin;
+        let sandbox = Kind::Sandbox;
+        assert!(mixin.describes(
+            Some(&mixin.artifact_type()),
+            Some(&sandbox.config_media_type())
+        ));
+        assert!(
+            !mixin.describes(
+                Some(&sandbox.artifact_type()),
+                Some(&mixin.config_media_type())
+            ),
+            "a present artifactType is the answer; the config type must never second-guess it"
+        );
+        assert!(
+            mixin.describes(None, Some(&mixin.config_media_type())),
+            "an artifact pushed by a tool that writes no artifactType is still readable"
+        );
+        assert!(!mixin.describes(None, None));
+        assert!(!mixin.describes(Some(""), None));
+    }
+
+    #[test]
+    fn each_kind_recognises_only_itself() {
+        // One shared predicate now answers for every kind, so a connector must never read as a mixin.
+        for kind in ALL_KINDS {
+            for other in ALL_KINDS {
+                assert_eq!(
+                    kind.describes(Some(&other.artifact_type()), None),
+                    kind == other,
+                    "{kind:?} vs {other:?}"
+                );
+            }
         }
     }
 }
