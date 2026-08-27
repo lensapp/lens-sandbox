@@ -520,6 +520,7 @@ async fn start_credential_subsystem(
     consent: CredentialConsent,
     connectable_routes: Arc<HashMap<String, Vec<RouteRule>>>,
     oauth: OauthWiring,
+    run_name: String,
 ) -> Result<CredentialSubsystem> {
     // The credentials file is per-machine $HOME state, so its path is independent of `--policy`.
     let credentials_path = lns_ipc::credentials_path()?;
@@ -590,7 +591,8 @@ async fn start_credential_subsystem(
             crate::credential_flow::session::PKCE_SIGN_IN_TIMEOUT,
         )
         .with_oauth_display_names(oauth.display_names)
-        .with_token_fallbacks(oauth.token_fallbacks),
+        .with_token_fallbacks(oauth.token_fallbacks)
+        .for_run(run_name),
     );
 
     tokio::spawn(credential_delivery_loop(
@@ -751,7 +753,8 @@ pub(super) async fn start(
             frame_tx,
             APPROVAL_TIMEOUT,
         )
-        .with_offers(offerable),
+        .with_offers(offerable)
+        .for_run(microvm_name.clone()),
     );
 
     session.set_connector_route_deriver(make_connector_route_deriver(catalog.clone()));
@@ -806,6 +809,7 @@ pub(super) async fn start(
             display_names: oauth_display_names,
             token_fallbacks,
         },
+        microvm_name.clone(),
     )
     .await?;
 

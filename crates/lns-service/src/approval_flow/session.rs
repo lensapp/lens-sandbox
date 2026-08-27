@@ -71,6 +71,8 @@ pub struct PendingPrompt {
     pub token_fallback: Option<TokenFallback>,
     /// `Raw` when approving splices the connection through unread, which the card has to say out loud.
     pub treatment: Treatment,
+    /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
+    pub run: Option<String>,
 }
 
 impl PendingPrompt {
@@ -152,6 +154,7 @@ pub struct ApprovalSession {
     connecting: Mutex<HashSet<String>>,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
     shipped: OnceLock<Policy>,
+    run: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,12 +189,19 @@ impl ApprovalSession {
             connecting: Mutex::new(HashSet::new()),
             ledger: OnceLock::new(),
             shipped: OnceLock::new(),
+            run: None,
         }
     }
 
     /// Captures the run's connectable connectors so a held request to one of their domains offers to connect before the plain allow/deny.
     pub fn with_offers(mut self, offerable: Vec<OfferableConnector>) -> Self {
         self.offerable = offerable;
+        self
+    }
+
+    /// Names the run every card this session raises speaks for; the service attributes it from the channel the request arrived on, never from the workload.
+    pub fn for_run(mut self, run: String) -> Self {
+        self.run = Some(run);
         self
     }
 
@@ -312,6 +322,7 @@ impl ApprovalSession {
             offer,
             token_fallback,
             treatment: req.treatment,
+            run: self.run.clone(),
         });
     }
 
@@ -888,6 +899,29 @@ pub(crate) mod tests {
     fn only_approval(events: &[LedgerEvent]) -> &LedgerEvent {
         assert_eq!(events.len(), 1, "expected exactly one ledger event");
         &events[0]
+    }
+
+    #[test]
+    fn a_network_card_names_the_run_that_raised_it() {
+        let (session, notifier, _s, _rx) = fixture();
+        let session = session.for_run("some-run".into());
+        session.submit_pending(pending("r1", "api.example.test"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap()[0].run.as_deref(),
+            Some("some-run"),
+            "two sandboxes asking for the same host raise identical cards unless each names its run"
+        );
+    }
+
+    #[test]
+    fn a_network_card_from_a_session_with_no_run_names_nothing() {
+        let (session, notifier, _s, _rx) = fixture();
+        session.submit_pending(pending("r1", "api.example.test"), Instant::now());
+        assert_eq!(
+            notifier.presented.lock().unwrap()[0].run,
+            None,
+            "a card with no originating run must stay silent rather than name one"
+        );
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub fn bind_prompt(integ: &Connector) -> Option<CredentialPendingPrompt> {
         bound_value_available: false,
         // The bind card holds no request and speaks for the machine, so its deny is the standing one.
         deny_scope: DenyScope::Machine,
+        // A bind is the developer's own `lns connect`, so there is no run to name.
+        run: None,
     })
 }
 
@@ -129,6 +131,16 @@ mod tests {
             vec!["api.example.test".to_string()]
         );
         assert!(prompt.oauth_display_name.is_none());
+    }
+
+    #[test]
+    fn bind_prompt_names_no_run() {
+        let prompt = bind_prompt(&credential_connector("some-provider", "SOME_TOKEN"))
+            .expect("a credential connector is bindable");
+        assert_eq!(
+            prompt.run, None,
+            "a bind is the developer's own connect, so naming a run would attribute it to a sandbox that never asked"
+        );
     }
 
     #[test]
