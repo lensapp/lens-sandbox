@@ -196,31 +196,27 @@ fn set(args: &ConfigSetArgs, path: &Path, writer: &mut impl Write) -> Result<i32
 
 fn get(args: &ConfigKeyArgs, path: &Path, writer: &mut impl Write) -> Result<i32> {
     let cfg = load(path)?;
-    let values = values_of(&cfg, args.key);
+    let value = value_of(&cfg, args.key);
     if args.output.format == crate::output::Format::Json {
-        let rows = rows_for(args.key, &values);
-        crate::output::emit_object(&rows, writer)?;
-        return Ok(exit_code_for(&values));
+        crate::output::emit_object(&row_for(args.key, value.clone()), writer)?;
+        return Ok(exit_code_for(&value));
     }
-    for v in &values {
+    if let Some(v) = &value {
         writeln!(writer, "{v}")?;
     }
-    Ok(exit_code_for(&values))
+    Ok(exit_code_for(&value))
 }
 
 /// An unset key is reported by the exit code in both formats: --format changes the shape, never the semantics.
-fn exit_code_for(values: &[String]) -> i32 {
-    i32::from(values.is_empty())
+fn exit_code_for(value: &Option<String>) -> i32 {
+    i32::from(value.is_none())
 }
 
-fn rows_for(key: ConfigKey, values: &[String]) -> Vec<ConfigRow> {
-    values
-        .iter()
-        .map(|v| ConfigRow {
-            key: key.name(),
-            value: v.clone(),
-        })
-        .collect()
+fn row_for(key: ConfigKey, value: Option<String>) -> Option<ConfigRow> {
+    value.map(|value| ConfigRow {
+        key: key.name(),
+        value,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -232,7 +228,7 @@ struct ConfigRow {
 
 fn unset(key: ConfigKey, path: &Path, writer: &mut impl Write) -> Result<i32> {
     let mut cfg = load(path)?;
-    if values_of(&cfg, key).is_empty() {
+    if value_of(&cfg, key).is_none() {
         bail!("{} is not set in {}", key.name(), path.display());
     }
     clear(&mut cfg, key);
@@ -245,7 +241,7 @@ fn list(output: &crate::output::OutputArgs, path: &Path, writer: &mut impl Write
     let cfg = load(path)?;
     let rows: Vec<ConfigRow> = ConfigKey::ALL
         .iter()
-        .flat_map(|&key| rows_for(key, &values_of(&cfg, key)))
+        .filter_map(|&key| row_for(key, value_of(&cfg, key)))
         .collect();
     for legacy in legacy_entries(&cfg) {
         crate::log::warn!(
@@ -308,11 +304,11 @@ fn parse_mem(key: ConfigKey, value: &str) -> Result<usize> {
         .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))
 }
 
-fn values_of(cfg: &ConfigFile, key: ConfigKey) -> Vec<String> {
+fn value_of(cfg: &ConfigFile, key: ConfigKey) -> Option<String> {
     match key {
-        ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()).into_iter().collect(),
-        ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()).into_iter().collect(),
-        ConfigKey::RunRegistry => cfg.run.registry.clone().into_iter().collect(),
+        ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()),
+        ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()),
+        ConfigKey::RunRegistry => cfg.run.registry.clone(),
     }
 }
 
