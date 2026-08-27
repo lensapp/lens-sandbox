@@ -93,7 +93,7 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
 
   Scenario: A non-interactive run defaults undecided secrets to DROP
     Given the host directory "/Users/me/proj" contains an undecided ".env"
-    When the user runs `lns run -d -v /Users/me/proj:/work alpine` with no terminal
+    When the user runs `lns run -v /Users/me/proj:/work alpine` with no terminal
     Then ".env" is dropped from the bind
     And the dropped path "/Users/me/proj/.env" is reported on stderr
     And no KEEP or DROP prompt is shown
