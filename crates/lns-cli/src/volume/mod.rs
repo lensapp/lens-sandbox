@@ -8,6 +8,7 @@ use crate::connector::LocalBoxFuture;
 
 mod real;
 
+pub use crate::service::TermInfo;
 pub use real::RealVolumeService;
 
 #[derive(clap::Args)]
@@ -96,6 +97,7 @@ pub trait VolumeService {
 pub async fn run(
     cmd: &VolumeCommand,
     svc: &dyn VolumeService,
+    term: TermInfo,
     input: &mut dyn BufRead,
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
@@ -105,7 +107,7 @@ pub async fn run(
         VolumeCommand::Create(args) => create(svc, &args.name, writer).await,
         VolumeCommand::Inspect(args) => inspect(svc, &args.name, args.output.format, writer).await,
         VolumeCommand::Rm(args) => rm(svc, &args.name, writer).await,
-        VolumeCommand::Prune(args) => prune(svc, args.force, input, writer, err).await,
+        VolumeCommand::Prune(args) => prune(svc, args.force, term, input, writer, err).await,
     }
 }
 
@@ -226,11 +228,17 @@ async fn rm(svc: &dyn VolumeService, name: &str, writer: &mut impl Write) -> Res
 async fn prune(
     svc: &dyn VolumeService,
     force: bool,
+    term: TermInfo,
     input: &mut dyn BufRead,
     writer: &mut impl Write,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<i32> {
     if !force {
+        if !term.stdin_is_tty {
+            bail!(
+                "this removes every volume not attached to a running sandbox; there is no terminal to ask at, so pass --force to confirm"
+            );
+        }
         let unused = unused_volume_names(svc).await?;
         if unused.is_empty() {
             writeln!(writer, "No unused volumes.")?;
@@ -365,11 +373,26 @@ mod tests {
         }
     }
 
+    fn at_a_terminal() -> TermInfo {
+        TermInfo {
+            stdin_is_tty: true,
+            stdout_is_terminal: true,
+        }
+    }
+
     async fn run_cmd(cmd: &VolumeCommand, svc: &dyn VolumeService) -> Result<(i32, String)> {
+        run_cmd_at(cmd, svc, at_a_terminal()).await
+    }
+
+    async fn run_cmd_at(
+        cmd: &VolumeCommand,
+        svc: &dyn VolumeService,
+        term: TermInfo,
+    ) -> Result<(i32, String)> {
         let mut input = Cursor::new(String::new());
         let mut buf = Vec::new();
         let mut err_buf = Vec::new();
-        let code = run(cmd, svc, &mut input, &mut buf, &mut err_buf).await?;
+        let code = run(cmd, svc, term, &mut input, &mut buf, &mut err_buf).await?;
         buf.extend_from_slice(&err_buf);
         Ok((code, String::from_utf8(buf).unwrap()))
     }
@@ -411,18 +434,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_without_force_reads_eof_as_decline() {
-        let svc = CannedService::with([Some(Response::VolumeList {
-            volumes: vec![volume("scratch")],
-        })]);
-        let (code, out) = run_cmd(
+    async fn prune_without_a_terminal_refuses_and_names_the_flag_that_answers_it() {
+        let svc = CannedService::with([]);
+        let err = run_cmd_at(
             &VolumeCommand::Prune(VolumePruneArgs { force: false }),
             &svc,
+            TermInfo::default(),
         )
         .await
-        .unwrap();
-        assert_eq!(code, 0);
-        assert!(out.contains("Aborted."), "got: {out}");
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("--force"), "got: {err}");
+        assert!(err.contains("no terminal to ask at"), "got: {err}");
     }
 
     #[tokio::test]

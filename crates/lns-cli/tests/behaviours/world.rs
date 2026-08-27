@@ -186,6 +186,7 @@ pub struct VolumeCliRig {
     pub unreachable: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub prompt_answer: Option<String>,
+    pub stdin_is_tty: bool,
 }
 
 /// Drives the in-process `lns run` target resolution: what image a run request would carry, and a service refusal to surface.

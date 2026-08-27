@@ -59,6 +59,7 @@ Feature: a prune lists what it would remove before asking
 
   Scenario: a volume prune with nothing unused never asks
     Given the service reports a volume "prism-data" using 1024 bytes on disk held by run 7
+    And volume input is a terminal
     When the user runs volume command "prune"
     Then the exit code is 0
     And the output contains "No unused volumes."

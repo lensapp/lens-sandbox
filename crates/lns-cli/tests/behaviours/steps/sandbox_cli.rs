@@ -448,9 +448,10 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
         files: RefCell::new(w.author_files.clone()),
     };
     let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
     let result = match cmd {
         ArtifactCommand::Init(args) => {
-            author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
+            author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut err)
         }
         ArtifactCommand::Validate(args) => {
             author::validate(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
@@ -466,6 +467,11 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
         _ => unreachable!("run_author_verb is only called for the offline author verbs"),
     };
     w.author_files = fs.files.into_inner();
+    w.split_streams = Some((
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
+    ));
+    out.extend_from_slice(&err);
     w.result = Some(match result {
         Ok(exit_code) => CliRun {
             exit_code,

@@ -13,9 +13,14 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
         crate::service::require_running().await?;
         let svc = RealVolumeService::new(crate::service::socket_path()?);
         let mut out = ctx.out;
+        let term = super::TermInfo {
+            stdin_is_tty: crate::raw_mode::stdin_is_tty(),
+            stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        };
         crate::volume::run(
             &args.command,
             &svc,
+            term,
             ctx.input,
             &mut out,
             &mut tokio::io::stderr(),
