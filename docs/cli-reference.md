@@ -351,8 +351,8 @@ unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 
 Filters compose:
 
-- `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
-  `tool`.
+- `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`,
+  `approval`, `tool`.
 - `--format jsonl` — one raw JSON event per line instead of the table.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
@@ -390,7 +390,6 @@ lns update [--force] [--dry-run]
 | ----------- | ------- | ------------------------------------------------------------------------------ |
 | `--force`   | `false` | Reinstall even if the running version matches (e.g. corrupt or unsigned binary).|
 | `--dry-run` | `false` | Print the anonymous update-check payload that would be sent (install ID, version, OS/arch) and exit without contacting the network. |
-
 
 ## `lns config`
 
