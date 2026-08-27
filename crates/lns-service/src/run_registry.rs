@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lns_ipc::{RunStatus, validate_run_name};
 
@@ -12,8 +11,6 @@ use tokio::task::JoinHandle;
 
 use crate::vm::GuestTransport;
 use crate::vm::session_client::SessionInput;
-
-static NEXT_NAME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 static ACTIVE: Mutex<Option<HashMap<String, RunEntry>>> = Mutex::new(None);
 
@@ -177,10 +174,10 @@ pub fn register_named(
     requested: Option<String>,
     handle: RunHandle,
 ) -> Result<String, String> {
-    let mut next_name = || run_name::name_for_index(NEXT_NAME_SEQ.fetch_add(1, Ordering::Relaxed));
+    let mut names = run_name::Generator::new(run_name::ThreadDraw);
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     let map = g.get_or_insert_with(HashMap::new);
-    register_named_in(map, run_id, requested, handle, &mut next_name)
+    register_named_in(map, run_id, requested, handle, &mut names)
 }
 
 fn register_named_in(
@@ -188,14 +185,14 @@ fn register_named_in(
     run_id: String,
     requested: Option<String>,
     mut handle: RunHandle,
-    next_name: &mut dyn FnMut() -> String,
+    names: &mut dyn run_name::Generate,
 ) -> Result<String, String> {
     let name = match requested {
         Some(requested) => {
             check_name_available(Some(&*map), &requested)?;
             requested
         }
-        None => unique_auto_name(map, next_name),
+        None => unique_auto_name(map, names),
     };
     handle.name = name.clone();
     map.insert(run_id, RunEntry::Live(handle));
@@ -218,19 +215,16 @@ fn check_name_available(map: Option<&HashMap<String, RunEntry>>, name: &str) -> 
     }
 }
 
-fn unique_auto_name(
-    map: &HashMap<String, RunEntry>,
-    next_name: &mut dyn FnMut() -> String,
-) -> String {
-    for _ in 0..run_name::pool_size() {
-        let candidate = next_name();
+fn unique_auto_name(map: &HashMap<String, RunEntry>, names: &mut dyn run_name::Generate) -> String {
+    for _ in 0..names.pool_size() {
+        let candidate = names.draw();
         if name_holder(map, &candidate).is_none() {
             return candidate;
         }
     }
-    let base = next_name();
+    let base = names.draw();
     (0..=map.len() as u32)
-        .map(|n| format!("{base}_{n}"))
+        .map(|n| format!("{base}-{n}"))
         .find(|name| name_holder(map, name).is_none())
         .expect("more distinct suffixes than names in use")
 }
@@ -674,8 +668,28 @@ mod tests {
         super::test_handle()
     }
 
-    fn gen_amber() -> String {
-        "amber_otter".to_string()
+    struct OneName(&'static str);
+
+    impl run_name::Generate for OneName {
+        fn draw(&mut self) -> String {
+            self.0.to_string()
+        }
+
+        fn pool_size(&self) -> usize {
+            1
+        }
+    }
+
+    struct ScriptedNames(Vec<&'static str>);
+
+    impl run_name::Generate for ScriptedNames {
+        fn draw(&mut self) -> String {
+            self.0.remove(0).to_string()
+        }
+
+        fn pool_size(&self) -> usize {
+            self.0.len()
+        }
     }
 
     async fn named_handle(map: &mut HashMap<String, RunEntry>, id: &str, name: &str) {
@@ -693,7 +707,7 @@ mod tests {
             "aa01".into(),
             Some("reviewer".into()),
             h,
-            &mut (gen_amber as fn() -> String),
+            &mut OneName("amber-otter"),
         )
         .unwrap();
         assert_eq!(name, "reviewer");
@@ -710,7 +724,7 @@ mod tests {
             "aa08".into(),
             Some("reviewer".into()),
             h,
-            &mut (gen_amber as fn() -> String),
+            &mut OneName("amber-otter"),
         )
         .unwrap_err();
         assert!(err.contains("already in use by run aa07"), "got: {err}");
@@ -725,7 +739,7 @@ mod tests {
             "aa01".into(),
             Some("abcdef".into()),
             h,
-            &mut (gen_amber as fn() -> String),
+            &mut OneName("amber-otter"),
         )
         .unwrap_err();
     }
@@ -739,31 +753,36 @@ mod tests {
             "aa01".into(),
             None,
             h,
-            &mut (gen_amber as fn() -> String),
+            &mut OneName("amber-otter"),
         )
         .unwrap();
-        assert_eq!(name, "amber_otter");
+        assert_eq!(name, "amber-otter");
     }
 
     #[tokio::test]
-    async fn register_named_in_regenerates_until_the_auto_name_is_unique() {
+    async fn register_named_in_redraws_until_the_auto_name_is_unique() {
         let mut map = HashMap::new();
-        named_handle(&mut map, "aa07", "amber_otter").await;
+        named_handle(&mut map, "aa07", "amber-otter").await;
         let (h, _rx) = make_handle();
-        let mut seq = ["amber_otter", "amber_otter", "bold_falcon"].into_iter();
-        let mut next_name = || seq.next().unwrap().to_string();
-        let name = register_named_in(&mut map, "aa08".into(), None, h, &mut next_name).unwrap();
-        assert_eq!(name, "bold_falcon");
+        let mut names = ScriptedNames(vec!["amber-otter", "amber-otter", "bold-falcon"]);
+        let name = register_named_in(&mut map, "aa08".into(), None, h, &mut names).unwrap();
+        assert_eq!(name, "bold-falcon");
     }
 
     #[tokio::test]
     async fn register_named_in_suffixes_a_name_when_the_pretty_pool_is_exhausted() {
         let mut map = HashMap::new();
-        named_handle(&mut map, "aa07", "amber_otter").await;
+        named_handle(&mut map, "aa07", "amber-otter").await;
         let (h, _rx) = make_handle();
-        let mut next_name = || "amber_otter".to_string();
-        let name = register_named_in(&mut map, "aa08".into(), None, h, &mut next_name).unwrap();
-        assert_eq!(name, "amber_otter_0");
+        let name = register_named_in(
+            &mut map,
+            "aa08".into(),
+            None,
+            h,
+            &mut OneName("amber-otter"),
+        )
+        .unwrap();
+        assert_eq!(name, "amber-otter-0");
     }
 
     #[tokio::test]
@@ -1585,7 +1604,7 @@ mod tests {
             "aa08".into(),
             Some("reviewer".into()),
             h,
-            &mut (gen_amber as fn() -> String),
+            &mut OneName("amber-otter"),
         )
         .unwrap_err();
         assert!(err.contains("already in use by run aa07"), "got: {err}");

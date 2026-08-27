@@ -79,6 +79,24 @@ fn then_not_all_hex(world: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
+#[then("the assigned name is two words joined by a hyphen")]
+fn then_two_hyphenated_words(world: &mut BehaviourWorld) -> Result<(), String> {
+    let name = world.naming_name.as_deref().ok_or("no name assigned")?;
+    match name.split_once('-') {
+        Some((first, second))
+            if !first.is_empty()
+                && !second.is_empty()
+                && !second.contains('-')
+                && name.chars().all(|c| c.is_ascii_lowercase() || c == '-') =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "name {name:?} is not two hyphenated lowercase words"
+        )),
+    }
+}
+
 #[then(regex = r#"^the run's name is "([^"]+)"$"#)]
 fn then_run_name_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
     match world.naming_name.as_deref() {

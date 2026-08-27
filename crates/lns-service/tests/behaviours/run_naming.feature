@@ -1,16 +1,16 @@
 @serial
 Feature: naming runs — the service owns names and resolution
   Every run carries a numeric id and a name. `--name` sets the name;
-  omitting it auto-generates an adjective_noun one. Names are unique
-  among listed runs, are addressable in place of the id, and are freed
-  for reuse once their run is removed. `lns sandbox rename` changes a
-  run's name in place.
+  omitting it draws one. Names are unique among listed runs, are
+  addressable in place of the id, and are freed for reuse once their run
+  is removed. `lns sandbox rename` changes a run's name in place.
 
-  Scenario: a run registered without a name is auto-assigned an adjective_noun name
+  Scenario: a run registered without a name is auto-assigned two hyphenated words
     Given a fresh service handler
     When a run is registered without a name
     Then the run is assigned a non-empty name
     And the assigned name is not all hex
+    And the assigned name is two words joined by a hyphen
 
   Scenario: a run registered with a name keeps that name
     Given a fresh service handler
