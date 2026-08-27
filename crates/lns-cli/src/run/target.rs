@@ -154,17 +154,20 @@ impl RunTarget {
 pub fn root_named_directories(mixins: &[String], cwd: &Path) -> Result<Vec<String>> {
     mixins
         .iter()
-        .map(|reference| {
-            if !lns_artifact::sandbox::names_a_local_path(reference) {
-                return Ok(reference.clone());
-            }
-            let rooted = lns_artifact::sandbox::fold_path(&cwd.join(reference));
-            rooted
-                .to_str()
-                .map(str::to_string)
-                .with_context(|| format!("mixin directory {} is not utf-8", rooted.display()))
-        })
+        .map(|reference| root_named_directory(reference, cwd, "mixin directory"))
         .collect()
+}
+
+/// The same rooting for one reference. `noun` names what the path is, so the refusal reads for the operand the caller took.
+pub fn root_named_directory(reference: &str, cwd: &Path, noun: &str) -> Result<String> {
+    if !lns_artifact::sandbox::names_a_local_path(reference) {
+        return Ok(reference.to_string());
+    }
+    let rooted = lns_artifact::sandbox::fold_path(&cwd.join(reference));
+    rooted
+        .to_str()
+        .map(str::to_string)
+        .with_context(|| format!("{noun} {} is not utf-8", rooted.display()))
 }
 
 #[cfg(test)]

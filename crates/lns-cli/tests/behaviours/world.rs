@@ -38,6 +38,7 @@ pub struct BehaviourWorld {
     pub uc: UpdateCheckRig,
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
+    pub connector: ConnectorCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
     pub sandbox_run: SandboxRunRig,
@@ -172,6 +173,21 @@ pub struct ResolvedRunView {
     pub workdir: Option<String>,
     pub volumes: Vec<String>,
     pub binds: Vec<String>,
+}
+
+/// Scripted state for the fake connector service, plus what the command printed.
+#[derive(Debug, Default)]
+pub struct ConnectorCliRig {
+    pub installed: Option<lns_ipc::ConnectorView>,
+    /// Which connector the scenario says is installed, so uninstall answers for that name only.
+    pub installed_name: Option<String>,
+    pub held: Vec<lns_ipc::ConnectorView>,
+    /// `Some` means the connector was installed; `None` makes uninstall answer that nothing is.
+    pub dropped_profiles: Option<usize>,
+    pub refuse_message: Option<String>,
+    pub unreachable: bool,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub run: Option<crate::runner::CliRun>,
 }
 
 /// Scripted state for the fake volume service plus the user's prompt answer.

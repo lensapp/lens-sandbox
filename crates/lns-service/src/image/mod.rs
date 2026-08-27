@@ -1312,10 +1312,10 @@ mod tests {
         let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
         let fetched = pull_connector_with(&registry, &pinned).await.unwrap();
         assert_eq!(fetched.digest, format!("sha256:{}", "c".repeat(64)));
+        let document = String::from_utf8_lossy(&fetched.document);
         assert!(
-            String::from_utf8_lossy(&fetched.document).contains(r#""kind":"connector""#),
-            "got: {}",
-            String::from_utf8_lossy(&fetched.document)
+            document.contains(r#""kind":"connector""#),
+            "got: {document}"
         );
         assert_eq!(
             registry.calls.lock().unwrap().as_slice(),

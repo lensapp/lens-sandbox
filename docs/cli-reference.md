@@ -299,6 +299,31 @@ lns volume prune [-f]
 
 See [Running workloads — volumes](running-workloads.md#volumes).
 
+## `lns connector`
+
+Decide what this machine offers. A connector is a mixin you install once per
+machine.
+
+```bash
+lns connector install <REF|PATH>
+lns connector uninstall <ID>
+lns connector list [--format <table|json>]
+```
+
+| Subcommand            | Meaning                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| `install <REF\|PATH>` | Make a published or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. Refused when a method carries a block a connector may not, when the document's `serves` overlaps an installed connector's, or when it claims a variable one already claims. |
+| `uninstall <ID>`      | Remove it from this machine, with every profile it held. A project that already granted a method keeps that decision, and reinstalling the same bytes resumes it. |
+| `list`                | List what is installed: what each connector serves, its methods — marking those that need no connect — and the profiles this machine holds. |
+
+`install` takes either a published reference or a path to a directory holding the
+connector's `lns.yaml`; a relative path is resolved against your working
+directory. The digest a local install records is the one publishing that
+directory would produce, so a grant survives the publish.
+
+The connector document format is specified in
+[Sandbox specification §3.2](sandbox-spec.md#32-kind-connector).
+
 ## `lns login` / `lns logout`
 
 Store credentials for a private OCI registry so `lns run` and `lns pull` can fetch

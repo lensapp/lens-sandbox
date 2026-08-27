@@ -5,6 +5,7 @@ pub mod chord;
 pub mod cli;
 pub mod command;
 pub mod config;
+pub mod connector;
 pub mod identity;
 pub mod local_future;
 pub mod log;
