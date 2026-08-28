@@ -10,20 +10,11 @@ use crate::service::client::SandboxService;
 pub mod author;
 pub mod distribute;
 pub mod fileset;
+pub mod mixin_offline;
 pub mod mixin_plan;
 pub mod real;
 #[cfg(test)]
 pub(crate) mod test_support;
-
-/// `--mixin` composes a document before it boots, and neither a sandbox that has already booted nor a file rendered offline can honour it.
-pub fn refuse_mixins_unless_published(mixins: &[String]) -> Result<()> {
-    if mixins.is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "--mixin applies to a published reference: a live sandbox has already booted with what it merged, and a local document renders offline, without resolving anything"
-    )
-}
 
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
