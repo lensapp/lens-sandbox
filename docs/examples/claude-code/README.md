@@ -63,7 +63,7 @@ lns push "ghcr.io/$(gh api user --jq .login | tr A-Z a-z)/claude-code:0.1.0"    
 
 One artifact uploads: the sandbox definition, including its inline fileset. The
 base image is referenced as written in `spec.image`, not re-uploaded — a
-consumer pulls it from its origin (`docker.io`). `lns push`
+consumer pulls it from its origin registry. `lns push`
 does not resolve the tag to a digest, so pin `spec.image` by digest yourself if
 you need a byte-reproducible base.
 
@@ -97,8 +97,8 @@ echo "https://github.com/users/$(gh api user --jq .login)/packages/container/cla
 ```
 
 The package starts **private**; make it public or grant access on the settings
-page for someone else to pull. They will also need `docker.io` reach for the
-base image.
+page for someone else to pull. They will also need reach to the base image's
+own registry.
 
 ## Notes
 

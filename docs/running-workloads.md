@@ -35,7 +35,7 @@ apiVersion: lns.run/v1
 kind: sandbox
 name: sandbox
 spec:
-  image: docker.io/library/alpine:3.20
+  image: alpine:3.20
   command: sh
   workdir: /workspace
   env: {}
@@ -157,7 +157,7 @@ its entrypoint starts inside the microVM.
 `./lns.yaml` is the sandbox — one directory is one sandbox, and every verb
 defaults to it. When a project keeps a variant of its sandbox alongside the
 default (say `lns.dev.yaml` with looser resources), select it explicitly with
-`-f`/`--file` — the same escape hatch as `docker build -f`:
+`-f`/`--file`:
 
 ```bash
 lns run -f lns.dev.yaml                  # run the variant
@@ -209,7 +209,7 @@ a run always boots a sandbox definition or a published reference.
 
 ### Setting the run user and hostname
 
-`-u`/`--user` picks the run-as user or uid (`USER[:GROUP]`, Docker-style; a numeric
+`-u`/`--user` picks the run-as user or uid (`USER[:GROUP]`; a numeric
 segment is used as the uid), and `-h`/`--hostname` sets the guest hostname:
 
 ```bash
@@ -250,7 +250,7 @@ spec:
 | `--cpus <N>`                  | `1`     | Number of vCPUs (at least 1). |
 | `-m`, `--mem`, `--memory <SIZE>` | `512` | RAM in mebibytes, or with a unit suffix. |
 
-Memory accepts Docker-style unit suffixes (`b`, `k`, `m`, `g`, plus `kb`/`kib`
+Memory accepts unit suffixes (`b`, `k`, `m`, `g`, plus `kb`/`kib`
 and friends), rounded up to a whole MiB. The flag reads the same sizes that
 `spec.resources.memory` writes, so `512Mi` and `38Gi` work in both places:
 
@@ -360,7 +360,7 @@ plain environment variables visible to the workload. Use the
 
 ### Volumes
 
-Named volumes persist data across runs, Docker-style:
+Named volumes persist data across runs:
 
 ```bash
 lns run -v build-cache:/root/.cache ghcr.io/acme/builder
@@ -615,7 +615,7 @@ something the sandbox wrote itself:
 
 ```yaml
 spec:
-  image: docker.io/library/debian:bookworm-slim
+  image: debian:bookworm-slim
   mixins:
     - ./mixins/postgres-tools
     - ghcr.io/acme/observability@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582
@@ -731,7 +731,7 @@ into the base image or reinstalling them over the network on every cold start:
 
 ```yaml
 spec:
-  image: docker.io/library/debian:bookworm-slim
+  image: debian:bookworm-slim
   tools:
     - node@22
     - python@3.12
@@ -880,7 +880,7 @@ script, so read it.
 ### Host bind mounts
 
 When the source of a `-v` is an **absolute host path** rather than a name, it's a
-host bind: the workload sees your live host files at the target, Docker-style.
+host bind: the workload sees your live host files at the target.
 
 ```bash
 lns run -v "$(pwd)":/work ghcr.io/acme/agent        # the agent edits your repo
@@ -888,8 +888,8 @@ lns run -v /etc/myapp:/config:ro ghcr.io/acme/app   # read-only
 ```
 
 The format is `/host/path:/absolute/target[:ro]`. The source must be an absolute
-path that already exists (a missing path is refused, not silently created — the one
-deliberate divergence from `docker run`) and it must be a **directory**. To give the
+path that already exists (a missing path is refused, not silently created) and it
+must be a **directory**. To give the
 workload a single host file, bind the directory that holds it. Binds default to
 read-write; append `:ro` for read-only. Disambiguation is by shape: a leading `/` is a host bind, anything
 else is a named volume, so `-v build-cache:/cache` is still a volume.
@@ -1021,8 +1021,8 @@ it stays restartable — see
 
 ### Detaching from an attached run
 
-While attached, the detach chord (default `ctrl-p,ctrl-q`) is a docker-style
-detach: `lns` returns `0` and the run keeps executing in the background — no
+While attached, the detach chord (default `ctrl-p,ctrl-q`) detaches only:
+`lns` returns `0` and the run keeps executing in the background — no
 signal is sent to the workload. Re-join it any time with
 [`lns attach`](#attaching), and detach again with the same chord. Change the chord
 with `--detach-keys`:
@@ -1116,7 +1116,7 @@ them and asks before running their installers in the disposable provisioning
 guest. A non-interactive pull must pass `--yes`; approval applies to the digest
 shown by preflight, so a tag that changes before the pull is refused.
 
-Re-reference a cached sandbox under another tag with `lns tag` (docker-tag style):
+Re-reference a cached sandbox under another tag with `lns tag`:
 
 ```bash
 lns tag ghcr.io/acme/reviewer:1.0.0 ghcr.io/acme/reviewer:stable
@@ -1124,7 +1124,7 @@ lns tag ghcr.io/acme/reviewer:1.0.0 ghcr.io/acme/reviewer:stable
 
 ## Managing running sandboxes
 
-Everything you do to a run after starting it is a top-level docker-style verb, each
+Everything you do to a run after starting it is a top-level verb, each
 an exact shortcut into `lns sandbox`:
 
 ```bash
@@ -1244,7 +1244,7 @@ captured, only the run's primary session.
 `lns attach` joins a run's output from now on (no history replay) and forwards your
 keystrokes when the run was started with stdin open. The detach chord (default
 `ctrl-p,ctrl-q`) leaves the run running and returns you to your shell —
-docker-attach style, no signal is sent — so it's safe to step away from a `-d` run
+no signal is sent — so it's safe to step away from a `-d` run
 you want to keep alive. A run started with `-d` has stdin closed, so attach is
 primarily a live view of its output.
 
