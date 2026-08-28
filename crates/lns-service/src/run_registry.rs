@@ -794,8 +794,8 @@ mod tests {
             let mut names = run_name::Generator::new(run_name::ThreadDraw, document);
             for run in 0..past_the_noun_pool {
                 let (h, _rx) = make_handle();
-                let name =
-                    register_named_in(&mut map, format!("aa{run:04}"), None, h, &mut names).unwrap();
+                let name = register_named_in(&mut map, format!("aa{run:04}"), None, h, &mut names)
+                    .unwrap();
                 validate_run_name(&name).unwrap_or_else(|e| {
                     panic!(
                         "document {document:?} auto-named a run {name:?} the registry refuses: {e}"
