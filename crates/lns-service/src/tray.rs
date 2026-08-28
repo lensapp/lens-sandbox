@@ -10,7 +10,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::PendingPrompt;
+use crate::approval_flow::session::{PendingPrompt, ProfileChoice};
 use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
@@ -204,7 +204,7 @@ struct TrayApp {
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
-    remember: HashMap<String, bool>,
+    cards: CardState,
     audit: Arc<Mutex<AuditWindow>>,
     audit_open: Arc<AtomicBool>,
 }
@@ -242,7 +242,7 @@ impl TrayApp {
             #[cfg(target_os = "macos")]
             _tray,
             placement: ViewportPlacement::new(),
-            remember: HashMap::new(),
+            cards: CardState::default(),
             audit: Arc::new(Mutex::new(AuditWindow::default())),
             audit_open: Arc::new(AtomicBool::new(false)),
         })
@@ -404,11 +404,11 @@ impl eframe::App for TrayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let snapshot = self.window_state.snapshot();
-        prune_remember(&mut self.remember, &snapshot);
+        self.cards.prune(&snapshot);
 
         let monitor_height = ui.ctx().input(|i| i.viewport().monitor_size).map(|m| m.y);
         let cap = content_cap(monitor_height);
-        let (action, content_height) = render_stack(ui, &snapshot, &mut self.remember, cap);
+        let (action, content_height) = render_stack(ui, &snapshot, &mut self.cards, cap);
         let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
         self.placement.fit_height(ui.ctx(), target);
 
@@ -431,6 +431,18 @@ impl eframe::App for TrayApp {
             }
             Some(CardAction::DismissNetwork { id }) => {
                 apply_dismissal(&self.window_state, &Dismissal::Network { id });
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::Grant {
+                id,
+                method,
+                profile,
+            }) => {
+                self.window_state.grant(&id, &method, profile);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::Decline { id }) => {
+                self.window_state.decline(&id);
                 ui.ctx().request_repaint();
             }
             None => {}
@@ -456,6 +468,16 @@ pub enum CardAction {
     },
     DismissInform {
         index: usize,
+    },
+    /// Connect this project to the offered connector, with the account the card chose.
+    Grant {
+        id: String,
+        method: String,
+        profile: ProfileChoice,
+    },
+    /// A standing no for this project (§3.2.4).
+    Decline {
+        id: String,
     },
     OpenBrowser {
         url: String,
@@ -507,7 +529,7 @@ fn target_height(items: &[StackItem], monitor_height: Option<f32>) -> f32 {
 pub fn render_stack(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    remember: &mut HashMap<String, bool>,
+    cards: &mut CardState,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
     if snapshot.order.is_empty() {
@@ -516,15 +538,15 @@ pub fn render_stack(
     if snapshot.order.len() == 1 {
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), false));
-        return render_single(ui, snapshot, remember, scroll_max);
+        return render_single(ui, snapshot, cards, scroll_max);
     }
-    render_pile(ui, snapshot, remember, scroll_max)
+    render_pile(ui, snapshot, cards, scroll_max)
 }
 
 fn render_single(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    remember: &mut HashMap<String, bool>,
+    cards: &mut CardState,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
     use egui::{Frame, Margin};
@@ -546,7 +568,7 @@ fn render_single(
                             ui.add_space(theme::CARD_GAP);
                         }
                         let (item_action, response) =
-                            render_item(ui, item, snapshot, remember, card_width);
+                            render_item(ui, item, snapshot, cards, card_width);
                         let mut fired = item_action;
                         let close_rect = egui::Rect::from_center_size(
                             response.rect.left_top() + egui::vec2(3.0, 3.0),
@@ -767,7 +789,7 @@ fn render_pile_cards(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     snapshot: &Snapshot,
-    remember: &mut HashMap<String, bool>,
+    cards: &mut CardState,
     geom: &PileGeom,
     layout: &PileLayout,
     heights: &[f32],
@@ -810,7 +832,7 @@ fn render_pile_cards(
                 ui.set_clip_rect(clip);
                 ui.set_opacity(alpha);
                 ui.set_width(w);
-                render_item(ui, &order[i], snapshot, remember, w)
+                render_item(ui, &order[i], snapshot, cards, w)
             },
         );
         let (item_action, card_resp) = res.inner;
@@ -987,7 +1009,7 @@ fn pile_expand_hit(
 fn render_pile(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    remember: &mut HashMap<String, bool>,
+    cards: &mut CardState,
     scroll_max: f32,
 ) -> (Option<CardAction>, f32) {
     use egui::{Id, vec2};
@@ -1018,7 +1040,7 @@ fn render_pile(
         ui,
         &ctx,
         snapshot,
-        remember,
+        cards,
         &geom,
         &layout,
         &mem.heights,
@@ -1073,7 +1095,7 @@ fn render_item(
     ui: &mut egui::Ui,
     item: &StackItem,
     snapshot: &Snapshot,
-    remember: &mut HashMap<String, bool>,
+    cards: &mut CardState,
     width: f32,
 ) -> (Option<CardAction>, egui::Response) {
     match *item {
@@ -1085,8 +1107,16 @@ fn render_item(
         }
         StackItem::Network(i) => {
             let prompt = &snapshot.pending[i];
-            let flag = remember.entry(prompt.id.clone()).or_default();
-            render_network_card(ui, prompt, flag, width)
+            match &prompt.offer {
+                Some(offer) => {
+                    let draft = cards.drafts.entry(prompt.id.clone()).or_default();
+                    render_connector_card(ui, prompt, offer, draft, width)
+                }
+                None => {
+                    let flag = cards.remember.entry(prompt.id.clone()).or_default();
+                    render_network_card(ui, prompt, flag, width)
+                }
+            }
         }
     }
 }
@@ -1213,6 +1243,283 @@ fn render_network_card(
     )
 }
 
+/// The card §3.2.4 requires: what applying the method will do, which account it uses, and the two answers a project can give.
+fn render_connector_card(
+    ui: &mut egui::Ui,
+    prompt: &PendingPrompt,
+    offer: &lns_ipc::ConnectorView,
+    draft: &mut OfferDraft,
+    width: f32,
+) -> (Option<CardAction>, egui::Response) {
+    use egui::RichText;
+
+    let id = prompt.id.clone();
+    let method = chosen_method(offer, draft);
+    let method_name = method.map(|method| method.name.clone()).unwrap_or_default();
+    // Shared because both closures run inside one call: the body decides readiness from what the user just did, the footer draws the button from it.
+    let ready = std::cell::Cell::new(false);
+    let out = crate::ui::card_sectioned(
+        ui,
+        width,
+        |ui| {
+            crate::ui::eyebrow(ui, egui_material_icons::icons::ICON_PUBLIC, "CONNECTOR");
+            run_identity_line(ui, prompt.run.as_ref());
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("Connect {} with {}?", prompt.host, offer.name))
+                    .size(theme::FONT_TITLE)
+                    .strong()
+                    .color(window::TEXT_ACCENT),
+            );
+            ui.add_space(8.0);
+            crate::ui::badges(ui, prompt.badges());
+            match method {
+                Some(method) => {
+                    render_account_choice(ui, offer, method, draft);
+                    render_disclosure(ui, method);
+                    ready.set(ready_to_grant(method, draft));
+                }
+                // §3.2.2: the card names what needed a newer lns, and keeps `Never here` — the hold outranks an ordinary allow, so declining is the only answer that ends it.
+                None => render_needs_a_newer_lns(ui, offer),
+            }
+        },
+        |ui| {
+            ui.add_space(BTN_GAP);
+            let mut chosen = None;
+            let ready = ready.get();
+            ui.columns(2, |cols| {
+                if enabled_primary_button(&mut cols[0], "Connect", ready).clicked() && ready {
+                    chosen = Some(ConnectorChoice::Grant);
+                }
+                if deny_button(&mut cols[1], "Never here").clicked() {
+                    chosen = Some(ConnectorChoice::Decline);
+                }
+            });
+            chosen
+        },
+    );
+    let action = out.inner.map(|choice| match choice {
+        ConnectorChoice::Grant => CardAction::Grant {
+            id: id.clone(),
+            method: method_name,
+            profile: profile_choice(draft),
+        },
+        ConnectorChoice::Decline => CardAction::Decline { id },
+    });
+    (action, out.response)
+}
+
+enum ConnectorChoice {
+    Grant,
+    Decline,
+}
+
+/// The method this card is offering: the one the draft names, else the first this version can offer.
+fn chosen_method<'a>(
+    offer: &'a lns_ipc::ConnectorView,
+    draft: &OfferDraft,
+) -> Option<&'a lns_ipc::ConnectorMethodView> {
+    let offerable = || offer.methods.iter().find(|method| method.offerable);
+    match &draft.method {
+        Some(named) => offer.methods.iter().find(|method| &method.name == named),
+        None => offerable(),
+    }
+}
+
+/// Which account the grant is made with. Every held account is listed with its own authority, because that is what the card must disclose (§3.2.4).
+fn render_account_choice(
+    ui: &mut egui::Ui,
+    offer: &lns_ipc::ConnectorView,
+    method: &lns_ipc::ConnectorMethodView,
+    draft: &mut OfferDraft,
+) {
+    use egui::RichText;
+
+    if !method.needs_connect {
+        return;
+    }
+    let held: Vec<&lns_ipc::ConnectorProfileView> = offer
+        .profiles
+        .iter()
+        .filter(|profile| profile.method == method.name)
+        .collect();
+    ui.add_space(10.0);
+    for profile in &held {
+        let selected = draft.profile.as_deref() == Some(profile.label.as_str());
+        ui.horizontal(|ui| {
+            if ui
+                .radio(selected && !draft.connecting, &profile.label)
+                .clicked()
+            {
+                draft.profile = Some(profile.label.clone());
+                draft.connecting = false;
+            }
+            if !profile.authority.is_empty() {
+                ui.label(
+                    RichText::new(profile.authority.join(", "))
+                        .size(theme::FONT_CAPTION)
+                        .color(window::TEXT_MUTED),
+                );
+            }
+        });
+    }
+    if draft.profile.is_none() && !held.is_empty() && !draft.connecting {
+        draft.profile = Some(held[0].label.clone());
+    }
+    render_new_connection(ui, method, draft, held.len());
+}
+
+/// The connect entry, expanded in place: one field per credential the method declares, plus the name this connection is kept under.
+fn render_new_connection(
+    ui: &mut egui::Ui,
+    method: &lns_ipc::ConnectorMethodView,
+    draft: &mut OfferDraft,
+    held: usize,
+) {
+    use egui::{RichText, Sense};
+
+    if !draft.connecting {
+        if held > 0 {
+            ui.add_space(4.0);
+            let link = ui.add(
+                egui::Label::new(
+                    RichText::new("Connect a new one")
+                        .size(theme::FONT_CAPTION)
+                        .underline()
+                        .color(window::TEXT_MUTED),
+                )
+                .sense(Sense::click()),
+            );
+            if link.clicked() {
+                begin_connecting(method, draft, held);
+            }
+            return;
+        }
+        begin_connecting(method, draft, held);
+    }
+    if let Some(help) = &method.help {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(help)
+                .size(theme::FONT_CAPTION)
+                .color(window::TEXT_MUTED),
+        );
+    }
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut draft.label)
+            .hint_text("Name this connection")
+            .margin(egui::Margin::symmetric(10, 9))
+            .desired_width(f32::INFINITY),
+    );
+    for credential in &method.credentials {
+        ui.add_space(6.0);
+        let value = draft.values.entry(credential.clone()).or_default();
+        secret_input(ui, value, credential);
+    }
+}
+
+/// Suggests a name that is free, because reusing one silently replaces the account already under it.
+fn begin_connecting(method: &lns_ipc::ConnectorMethodView, draft: &mut OfferDraft, held: usize) {
+    draft.connecting = true;
+    draft.profile = None;
+    if draft.label.is_empty() {
+        draft.label = match held {
+            0 => method.name.clone(),
+            n => format!("{}-{}", method.name, n + 1),
+        };
+    }
+}
+
+fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
+    ui.scope(|ui| {
+        ui.style_mut().visuals.widgets.inactive.bg_stroke =
+            egui::Stroke::new(1.0_f32, window::BORDER);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .password(true)
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(10, 9))
+                .desired_width(f32::INFINITY),
+        )
+    })
+    .inner
+}
+
+/// What applying this method will do, each line named by §3.2.4 and omitted when there is nothing to say.
+fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
+    for (label, items) in [
+        ("Opens", &method.opens),
+        ("Sets", &method.env),
+        ("Writes", &method.writes),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(format!("{label}: {}", items.join(", ")))
+                .size(theme::FONT_CAPTION)
+                .color(window::TEXT_MUTED),
+        );
+    }
+}
+
+/// Names the methods this version cannot deliver, so the card says why `Connect` is dead rather than looking broken (§3.2.2).
+fn render_needs_a_newer_lns(ui: &mut egui::Ui, offer: &lns_ipc::ConnectorView) {
+    let named: Vec<&str> = offer
+        .methods
+        .iter()
+        .filter(|method| !method.offerable)
+        .map(|method| method.name.as_str())
+        .collect();
+    // A method that writes files is unsupported rather than out of date, so "update lns" would send the user somewhere that does not help.
+    let why = if offer.methods.iter().any(|method| !method.writes.is_empty()) {
+        "writes files, which this lns cannot deliver yet"
+    } else {
+        "needs a newer lns"
+    };
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "{} {why}. Nothing here can be connected — choose Never here.",
+            named.join(", ")
+        ))
+        .size(theme::FONT_CAPTION)
+        .color(window::TEXT_MUTED),
+    );
+}
+
+/// A method that authenticates cannot be granted until there is an account behind it.
+fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
+    if !method.needs_connect {
+        return true;
+    }
+    if !draft.connecting {
+        return draft.profile.is_some();
+    }
+    !draft.label.trim().is_empty()
+        && method.credentials.iter().all(|credential| {
+            draft
+                .values
+                .get(credential)
+                .is_some_and(|v| !v.trim().is_empty())
+        })
+}
+
+fn profile_choice(draft: &OfferDraft) -> ProfileChoice {
+    if draft.connecting {
+        return ProfileChoice::New {
+            label: draft.label.trim().to_string(),
+            values: lns_ipc::SecretValues(draft.values.clone()),
+        };
+    }
+    match &draft.profile {
+        Some(label) => ProfileChoice::Held(label.clone()),
+        None => ProfileChoice::None,
+    }
+}
+
 fn allow_decision(remember: bool) -> Decision {
     if remember {
         Decision::AllowAlways
@@ -1290,10 +1597,31 @@ fn deny_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .show(ui)
 }
 
-fn prune_remember(remember: &mut HashMap<String, bool>, snapshot: &Snapshot) {
-    let still_pending: std::collections::HashSet<&str> =
-        snapshot.pending.iter().map(|p| p.id.as_str()).collect();
-    remember.retain(|id, _| still_pending.contains(id.as_str()));
+/// What the render thread keeps per card between frames: a toggle, and any half-typed connection. The draft lives here and never in shared state, so a value being typed exists only in this thread.
+#[derive(Default)]
+pub struct CardState {
+    remember: HashMap<String, bool>,
+    drafts: HashMap<String, OfferDraft>,
+}
+
+impl CardState {
+    /// Drops what belongs to cards that have left, so a draft cannot outlive the request it answers.
+    fn prune(&mut self, snapshot: &Snapshot) {
+        let live: std::collections::HashSet<&str> =
+            snapshot.pending.iter().map(|p| p.id.as_str()).collect();
+        self.remember.retain(|id, _| live.contains(id.as_str()));
+        self.drafts.retain(|id, _| live.contains(id.as_str()));
+    }
+}
+
+/// A connector card being filled in: which method and account, and any connection being made.
+#[derive(Default)]
+pub struct OfferDraft {
+    method: Option<String>,
+    profile: Option<String>,
+    connecting: bool,
+    label: String,
+    values: std::collections::BTreeMap<String, String>,
 }
 
 pub fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
@@ -1552,7 +1880,7 @@ mod tests {
 
         let fired: Arc<Mutex<Option<CardAction>>> = Arc::new(Mutex::new(None));
         let sink = fired.clone();
-        let mut remember = HashMap::new();
+        let mut cards = CardState::default();
 
         // egui applies added fonts at the next pass, so the icon font goes in on a pass that draws nothing — otherwise a card's eyebrow icon panics on an unbound family.
         let mut prepared = false;
@@ -1567,7 +1895,7 @@ mod tests {
                     prepared = true;
                     return;
                 }
-                let (action, _) = render_stack(ui, &snapshot, &mut remember, 1000.0);
+                let (action, _) = render_stack(ui, &snapshot, &mut cards, 1000.0);
                 if let Some(action) = action {
                     *sink.lock().expect("action sink poisoned") = Some(action);
                 }
@@ -1583,6 +1911,239 @@ mod tests {
         harness.run();
 
         fired.lock().expect("action sink poisoned").take()
+    }
+
+    fn offered_prompt(
+        method: &str,
+        profiles: &[(&str, &[&str])],
+        credentials: &[&str],
+    ) -> Snapshot {
+        Snapshot {
+            pending: vec![PendingPrompt {
+                id: "r1".into(),
+                host: "api.some-provider.example".into(),
+                action: "CONNECT api.some-provider.example:443".into(),
+                treatment: Treatment::Inspected,
+                run: Some("my-agent".into()),
+                offer: Some(lns_ipc::ConnectorView {
+                    name: "some-provider".into(),
+                    digest: "sha256:abc".into(),
+                    serves: vec!["api.some-provider.example".into()],
+                    methods: vec![lns_ipc::ConnectorMethodView {
+                        name: method.into(),
+                        label: method.into(),
+                        needs_connect: !credentials.is_empty(),
+                        offerable: true,
+                        opens: vec!["api.some-provider.example".into()],
+                        writes: Vec::new(),
+                        env: Vec::new(),
+                        credentials: credentials.iter().map(|c| c.to_string()).collect(),
+                        help: None,
+                    }],
+                    profiles: profiles
+                        .iter()
+                        .map(|(label, authority)| lns_ipc::ConnectorProfileView {
+                            label: label.to_string(),
+                            method: method.into(),
+                            authority: authority.iter().map(|a| a.to_string()).collect(),
+                        })
+                        .collect(),
+                }),
+            }],
+            informs: Vec::new(),
+            order: vec![StackItem::Network(0)],
+        }
+    }
+
+    #[test]
+    fn a_served_destination_offers_to_connect_rather_than_to_allow() {
+        // The whole point of the hold: the question is which connector to use, not whether to let the bytes through.
+        let fired = click_labelled_control(offered_prompt("open", &[], &[]), "Connect", false);
+        assert_eq!(
+            fired,
+            Some(CardAction::Grant {
+                id: "r1".into(),
+                method: "open".into(),
+                profile: ProfileChoice::None,
+            }),
+            "a method that does not authenticate is granted with no account behind it"
+        );
+    }
+
+    #[test]
+    fn the_card_grants_with_the_account_it_defaulted_to() {
+        let fired = click_labelled_control(
+            offered_prompt(
+                "token",
+                &[("work", &["repo"]), ("personal", &[])],
+                &["SOME_TOKEN"],
+            ),
+            "Connect",
+            false,
+        );
+        assert_eq!(
+            fired,
+            Some(CardAction::Grant {
+                id: "r1".into(),
+                method: "token".into(),
+                profile: ProfileChoice::Held("work".into()),
+            }),
+            "with several accounts held the card picks the first and says which, rather than granting nameless"
+        );
+    }
+
+    #[test]
+    fn the_account_the_card_chose_is_the_one_the_grant_names() {
+        // The user's whole reason for the radio list: two accounts held, and this run needs the second.
+        let chosen = OfferDraft {
+            profile: Some("personal".into()),
+            ..OfferDraft::default()
+        };
+        assert_eq!(
+            profile_choice(&chosen),
+            ProfileChoice::Held("personal".into())
+        );
+    }
+
+    #[test]
+    fn a_connection_being_made_carries_its_values_rather_than_a_name_that_is_not_stored_yet() {
+        // The label names an account that does not exist until the connect runs, so sending it as a held one would refuse.
+        let typing = OfferDraft {
+            connecting: true,
+            label: "  token-2  ".into(),
+            values: [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                .into_iter()
+                .collect(),
+            profile: Some("work".into()),
+            ..OfferDraft::default()
+        };
+        assert_eq!(
+            profile_choice(&typing),
+            ProfileChoice::New {
+                label: "token-2".into(),
+                values: lns_ipc::SecretValues(
+                    [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                        .into_iter()
+                        .collect()
+                ),
+            },
+            "a connection in progress wins over whatever was selected before it, and its name is trimmed"
+        );
+    }
+
+    #[test]
+    fn a_connector_this_version_cannot_offer_still_has_an_answer() {
+        // The hold outranks an ordinary allow, so falling back to the network card would leave a destination that asks on every request forever. `Never here` is the only answer that clears it.
+        let mut snapshot = offered_prompt("oauth", &[], &[]);
+        let offer = snapshot.pending[0].offer.as_mut().expect("an offer");
+        offer.methods[0].offerable = false;
+
+        assert_eq!(
+            click_labelled_control(snapshot, "Never here", false),
+            Some(CardAction::Decline { id: "r1".into() })
+        );
+    }
+
+    #[test]
+    fn a_connector_this_version_cannot_offer_cannot_be_connected() {
+        let mut snapshot = offered_prompt("oauth", &[], &[]);
+        let offer = snapshot.pending[0].offer.as_mut().expect("an offer");
+        offer.methods[0].offerable = false;
+
+        assert_eq!(
+            click_labelled_control(snapshot, "Connect", false),
+            None,
+            "there is nothing this version knows how to apply"
+        );
+    }
+
+    #[test]
+    fn never_here_answers_for_the_project_rather_than_the_request() {
+        assert_eq!(
+            click_labelled_control(offered_prompt("open", &[], &[]), "Never here", false),
+            Some(CardAction::Decline { id: "r1".into() }),
+            "§3.2.4: declining is a standing no for this project, not a deny of this one request"
+        );
+    }
+
+    #[test]
+    fn a_method_needing_an_account_cannot_be_granted_until_there_is_one() {
+        // Granting first would refuse at the store, after the user already consented.
+        let waiting = OfferDraft {
+            connecting: true,
+            label: "token".into(),
+            ..OfferDraft::default()
+        };
+        let method = lns_ipc::ConnectorMethodView {
+            name: "token".into(),
+            label: "token".into(),
+            needs_connect: true,
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: Vec::new(),
+            credentials: vec!["SOME_TOKEN".into()],
+            help: None,
+        };
+        assert!(
+            !ready_to_grant(&method, &waiting),
+            "no value typed yet, so there is nothing to connect with"
+        );
+
+        let filled = OfferDraft {
+            values: [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                .into_iter()
+                .collect(),
+            ..waiting
+        };
+        assert!(ready_to_grant(&method, &filled));
+    }
+
+    #[test]
+    fn a_new_connection_is_named_something_not_already_taken() {
+        // §7.1: a colliding label silently replaces the account already under it, which is the one outcome a second account must not produce.
+        let method = lns_ipc::ConnectorMethodView {
+            name: "token".into(),
+            label: "token".into(),
+            needs_connect: true,
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            help: None,
+        };
+        let mut first = OfferDraft::default();
+        begin_connecting(&method, &mut first, 0);
+        assert_eq!(first.label, "token");
+
+        let mut second = OfferDraft::default();
+        begin_connecting(&method, &mut second, 1);
+        assert_eq!(second.label, "token-2");
+    }
+
+    #[test]
+    fn a_draft_does_not_outlive_the_card_it_was_typed_into() {
+        // A half-typed value must not sit in memory once its request is gone.
+        let mut cards = CardState::default();
+        cards.drafts.insert(
+            "r1".into(),
+            OfferDraft {
+                values: [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..OfferDraft::default()
+            },
+        );
+        cards.remember.insert("r1".into(), true);
+
+        cards.prune(&Snapshot {
+            pending: Vec::new(),
+            informs: Vec::new(),
+            order: Vec::new(),
+        });
+
+        assert!(cards.drafts.is_empty() && cards.remember.is_empty());
     }
 
     #[test]
@@ -1603,6 +2164,7 @@ mod tests {
                 action: "CONNECT api.example.test:443".into(),
                 treatment: Treatment::Inspected,
                 run: Some("some-run".into()),
+                offer: None,
             }],
             informs: Vec::new(),
             order: vec![StackItem::Network(0)],
@@ -1626,6 +2188,7 @@ mod tests {
                 action: "CONNECT api.example.test:443".into(),
                 treatment: Treatment::Inspected,
                 run: Some("some-run".into()),
+                offer: None,
             },
             tx,
         );
@@ -1658,6 +2221,7 @@ mod tests {
             action: format!("CONNECT {host}:443"),
             treatment: Treatment::Inspected,
             run: Some("some-run".into()),
+            offer: None,
         };
         Snapshot {
             pending: vec![net("n0", "a.test"), net("n1", "b.test")],
@@ -1710,7 +2274,7 @@ mod tests {
         window::install_icon_font(&ctx);
         let snapshot = pile_seed();
         let error = ctx.global_style().visuals.error_fg_color;
-        let mut rem: HashMap<String, bool> = HashMap::new();
+        let mut rem = CardState::default();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("approval-pile-expanded"), true));
 
         let mut clash = false;

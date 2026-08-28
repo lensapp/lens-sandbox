@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use eframe::egui;
@@ -19,7 +18,7 @@ const RESHOW_DELAY: f64 = 1.5;
 
 struct Preview {
     snapshot: Snapshot,
-    remember: HashMap<String, bool>,
+    cards: lns_service::tray::CardState,
     placement: ViewportPlacement,
     reshow_at: Option<f64>,
 }
@@ -61,7 +60,7 @@ impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let monitor_height = ui.ctx().input(|i| i.viewport().monitor_size).map(|m| m.y);
         let cap = content_cap(monitor_height);
-        let (action, content_height) = render_stack(ui, &self.snapshot, &mut self.remember, cap);
+        let (action, content_height) = render_stack(ui, &self.snapshot, &mut self.cards, cap);
         let target = content_height.clamp(MIN_WINDOW_HEIGHT, cap);
         self.placement.fit_height(ui.ctx(), target);
         if let Some(action) = action {
@@ -79,13 +78,16 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
         return;
     }
     let item = match action {
-        CardAction::Decide { id, .. } | CardAction::DismissNetwork { id } => snapshot
+        CardAction::Decide { id, .. }
+        | CardAction::DismissNetwork { id }
+        | CardAction::Grant { id, .. } => snapshot
             .pending
             .iter()
             .position(|p| p.id == *id)
             .map(StackItem::Network),
         CardAction::DismissInform { index } => Some(StackItem::Inform(*index)),
-        CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
+        // A decline keeps the card: the ordinary question the hold stood in for is still unanswered.
+        CardAction::Decline { .. } | CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
     };
     if let Some(item) = item {
         snapshot.order.retain(|entry| *entry != item);
@@ -108,6 +110,7 @@ fn seed_one() -> Snapshot {
             action: "CONNECT pypi.org:443".into(),
             treatment: Treatment::Inspected,
             run: Some("brave-otter".into()),
+            offer: None,
         }],
         informs: vec![],
         order: vec![StackItem::Network(0)],
@@ -123,6 +126,7 @@ fn seed_all() -> Snapshot {
                 action: "CONNECT pypi.org:443".into(),
                 treatment: Treatment::Inspected,
                 run: Some("brave-otter".into()),
+                offer: None,
             },
             PendingPrompt {
                 id: "net-raw".into(),
@@ -130,6 +134,7 @@ fn seed_all() -> Snapshot {
                 action: "CONNECT db.internal:5432".into(),
                 treatment: Treatment::Raw,
                 run: Some("brave-otter".into()),
+                offer: None,
             },
         ],
         informs: vec!["decision applied to this request only".into()],
@@ -167,7 +172,7 @@ fn main() -> eframe::Result {
             install_icon_font(&cc.egui_ctx);
             Ok(Box::new(Preview {
                 snapshot: seed(),
-                remember: HashMap::new(),
+                cards: Default::default(),
                 placement: ViewportPlacement::new(),
                 reshow_at: None,
             }))

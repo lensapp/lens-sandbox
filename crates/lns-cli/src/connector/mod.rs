@@ -734,6 +734,7 @@ mod tests {
                 opens: Vec::new(),
                 writes: Vec::new(),
                 env: Vec::new(),
+                help: None,
                 credentials: Vec::new(),
             }],
             profiles: Vec::new(),
@@ -822,6 +823,7 @@ mod tests {
             opens: vec!["other.example".into()],
             writes: vec!["/home/agent/.netrc".into()],
             env: vec!["SOME_REGION".into()],
+            help: None,
             credentials: vec!["SOME_TOKEN".into()],
         }
     }
@@ -1286,6 +1288,7 @@ mod tests {
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
+            help: None,
             credentials: Vec::new(),
         };
         let svc = CannedService::with([Some(listing(vec![with_methods(vec![bare])]))]);
@@ -1315,6 +1318,7 @@ mod tests {
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
+            help: None,
             credentials: vec!["SOME_TOKEN".into(), "SOME_SECRET".into()],
         };
         let svc = CannedService::with([

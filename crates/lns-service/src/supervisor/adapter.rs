@@ -114,6 +114,12 @@ async fn decision_delivery_loop(
             RequestAction::Decide(decision) => {
                 session.record_decision(&delivery.id, decision);
             }
+            RequestAction::Grant { method, profile } => {
+                session.grant_offer(&delivery.id, &method, profile);
+            }
+            RequestAction::Decline => {
+                session.decline_offer(&delivery.id);
+            }
             RequestAction::Dismiss => {
                 session.dismiss_request(&delivery.id);
             }
@@ -150,22 +156,48 @@ fn running_policies(
     let own = Policy::load_or_default(policy_path)
         .with_context(|| format!("loading policy {}", policy_path.display()))?;
     let effective = match sandbox_policy {
-        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), &own),
+        Some(baseline) => crate::artifact::policy::merge_effective(Some(baseline), None, &own),
         None => own.clone(),
     };
     Ok((effective, own))
 }
 
 /// The decisions file sits in the project directory, which is the directory a grant is keyed by.
-fn held_patterns_for_project(policy_path: &Path) -> Vec<String> {
-    // An empty parent names no directory, so it would match no grant and ask about every served destination with no way to answer.
-    match policy_path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-    {
-        Some(project) => crate::connector::real::held_patterns_for(project),
+fn offers_for_project(policy_path: &Path) -> Vec<lns_ipc::ConnectorView> {
+    match project_of(policy_path) {
+        Some(project) => crate::connector::real::offers_for_project(project),
         None => Vec::new(),
     }
+}
+
+/// An empty parent names no directory, so it would match no grant and ask about every served destination with no way to answer.
+fn project_of(policy_path: &Path) -> Option<&Path> {
+    policy_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+}
+
+/// What this project has already decided about the machine's connectors, and the store a card writes its answer to (§3.2.1, §7.1).
+fn install_connectors(session: &Arc<ApprovalSession>, policy_path: &Path) {
+    session.hold_for_offers(offers_for_project(policy_path));
+    // A project that already granted a connector gets what it grants on every later run, not only on the run it answered.
+    for (connector, supply) in project_of(policy_path)
+        .map(crate::connector::real::granted_supply_for)
+        .unwrap_or_default()
+    {
+        session.apply_granted_egress(&connector, supply);
+    }
+    if let Some(project) = folded_project(policy_path) {
+        session.set_connector_port(Arc::new(crate::connector::real::RealConnectorPort::new(
+            project,
+        )));
+    }
+}
+
+/// The project as a grant keys it, so a card's answer lands where `lns connector grant` would put it.
+fn folded_project(policy_path: &Path) -> Option<String> {
+    let folded = lns_artifact::sandbox::fold_path(project_of(policy_path)?);
+    folded.to_str().map(str::to_string)
 }
 
 pub(super) async fn start(
@@ -205,7 +237,7 @@ pub(super) async fn start(
         session.set_shipped_policy(baseline.clone());
     }
 
-    session.hold_for_offers(held_patterns_for_project(policy_path));
+    install_connectors(&session, policy_path);
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -331,6 +363,48 @@ mod tests {
             other => panic!("expected RequestDecision, got {other:?}"),
         }
         assert_eq!(session.current_policy(), Policy::default());
+    }
+
+    #[tokio::test]
+    async fn decision_delivery_loop_routes_a_card_s_connector_answers_to_the_session() {
+        // Grant and Decline are answers about the connector, not about the request; routing either to record_decision would write an egress rule the user never asked for.
+        use crate::approval_flow::protocol::RequestPending;
+        use crate::approval_flow::session::ProfileChoice;
+        let (session, mut frame_rx) = fixture_session();
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        for id in ["r1", "r2"] {
+            session.submit_pending(
+                RequestPending {
+                    id: id.into(),
+                    host: "api.some-provider.example".into(),
+                    action: "CONNECT api.some-provider.example:443".into(),
+                    treatment: Default::default(),
+                    reason: "policy-ambiguous".into(),
+                },
+                std::time::Instant::now(),
+            );
+        }
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::Grant {
+                method: "token".into(),
+                profile: ProfileChoice::None,
+            },
+        })
+        .unwrap();
+        tx.send(DecisionDelivery {
+            id: "r2".into(),
+            action: RequestAction::Decline,
+        })
+        .unwrap();
+        drop(tx);
+
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "neither answer decides the held request: no connector is offered on these prompts, so nothing was granted or declined"
+        );
     }
 
     #[tokio::test]
@@ -832,14 +906,20 @@ mod tests {
         decline_in(home.path(), decided.path());
 
         assert!(
-            held_patterns_for_project(&decided.path().join("lns-local-mixin.yaml")).is_empty(),
+            offers_for_project(&decided.path().join("lns-local-mixin.yaml")).is_empty(),
             "the decisions file's own directory is what the decline was keyed by"
         );
         assert_eq!(
-            held_patterns_for_project(&undecided.path().join("lns-local-mixin.yaml")),
+            served_by(offers_for_project(
+                &undecided.path().join("lns-local-mixin.yaml")
+            )),
             ["api.some-provider.example"],
             "the control: the empty answer above must come from the decline, not from state this test failed to write"
         );
+    }
+
+    fn served_by(offers: Vec<lns_ipc::ConnectorView>) -> Vec<String> {
+        offers.into_iter().flat_map(|offer| offer.serves).collect()
     }
 
     fn install_some_provider(home: &Path) {
@@ -847,7 +927,7 @@ mod tests {
         std::fs::create_dir_all(&connector).unwrap();
         std::fs::write(
             connector.join("document.json"),
-            r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"}}]}}"#,
+            r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"egress":{"http":[{"match":"api.some-provider.example","verdict":"allow"}]}}]}}"#,
         )
         .unwrap();
         std::fs::write(connector.join("digest"), "sha256:abc").unwrap();
@@ -872,6 +952,83 @@ mod tests {
             .expect("record a decline");
     }
 
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_session_starts_knowing_what_this_project_decided() {
+        // One place wires all three: what is held, what a past grant supplies, and where a card's answer goes.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_some_provider(home.path());
+        let project = tempfile::tempdir().expect("tempdir");
+        let (session, _frame_rx) = fixture_session();
+
+        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"));
+
+        // The run allows the destination outright, so nothing would ask about it; the hold is what raises the offer.
+        let mut allowed = Policy::default();
+        allowed.add_rule(lns_policy::RouteRule::allow_host(
+            "api.some-provider.example",
+        ));
+        session.apply_external_policy(allowed);
+
+        let published = session.policy_message().network.expect("a network section");
+        assert!(
+            published.egress.http.iter().any(|rule| rule.verdict
+                == crate::approval_flow::protocol::WireVerdict::Ask
+                && rule.match_pattern == "api.some-provider.example"),
+            "an undecided connector holds what it serves: {published:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_run_starts_with_what_this_project_granted_on_an_earlier_run() {
+        // §7.1: the grant is recorded once. A boot that read only the decision would leave the destination closed and the credential absent, and the user would have to grant again every run.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_some_provider(home.path());
+        let project = tempfile::tempdir().expect("tempdir");
+        grant_in(home.path(), project.path());
+        let (session, _frame_rx) = fixture_session();
+
+        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"));
+
+        let published = session.policy_message().network.expect("a network section");
+        assert!(
+            published
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.some-provider.example"
+                    && rule.verdict == crate::approval_flow::protocol::WireVerdict::Allow),
+            "the granted method opens its destination from the first frame: {published:?}"
+        );
+    }
+
+    /// Records the grant an earlier run's card would have written.
+    fn grant_in(home: &Path, project: &Path) {
+        use lns_policy::decision_store::JsonDecisionStore;
+        let installed = crate::connector::dir::ConnectorDir::new(home.join("connectors"));
+        let values: JsonDecisionStore<crate::connector::store::Profile> =
+            JsonDecisionStore::new(home.join("connector-values.json"));
+        let grants: JsonDecisionStore<crate::connector::store::ProjectDecision> =
+            JsonDecisionStore::new(home.join("connector-grants.json"));
+        crate::connector::store::ConnectorStore::new(&installed, &values, &grants)
+            .decide(
+                lns_artifact::sandbox::fold_path(project)
+                    .to_str()
+                    .expect("a utf-8 tempdir"),
+                "some-provider",
+                crate::connector::store::ProjectDecision::Granted {
+                    digest: "sha256:abc".to_string(),
+                    method: "token".to_string(),
+                    profile: None,
+                    authority: Default::default(),
+                },
+            )
+            .expect("record a grant");
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn a_relative_decisions_file_holds_nothing_rather_than_asking_about_everything() {
@@ -879,7 +1036,7 @@ mod tests {
         let _home_guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_some_provider(home.path());
         // Its parent is "", which matches no grant, so every served destination would ask and no grant could ever silence it.
-        assert!(held_patterns_for_project(Path::new("lns-local-mixin.yaml")).is_empty());
-        assert!(held_patterns_for_project(Path::new("")).is_empty());
+        assert!(offers_for_project(Path::new("lns-local-mixin.yaml")).is_empty());
+        assert!(offers_for_project(Path::new("")).is_empty());
     }
 }

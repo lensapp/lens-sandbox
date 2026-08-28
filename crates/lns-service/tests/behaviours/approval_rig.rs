@@ -26,6 +26,7 @@ impl LedgerRecorder for RigRecorder {
 pub struct TestNotifier {
     pub presented: Mutex<Vec<PendingPrompt>>,
     pub dismissed: Mutex<Vec<String>>,
+    pub expired: Mutex<Vec<String>>,
     pub informed: Mutex<Vec<String>>,
     pub informs_cleared: Mutex<usize>,
 }
@@ -36,6 +37,9 @@ impl Notifier for TestNotifier {
     }
     fn dismiss(&self, id: &str) {
         self.dismissed.lock().unwrap().push(id.to_string());
+    }
+    fn expire(&self, id: &str) {
+        self.expired.lock().unwrap().push(id.to_string());
     }
     fn inform(&self, m: &str) {
         self.informed.lock().unwrap().push(m.to_string());

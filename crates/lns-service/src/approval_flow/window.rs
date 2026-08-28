@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, Stroke};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::PendingPrompt;
+use crate::approval_flow::session::{PendingPrompt, ProfileChoice};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
@@ -12,10 +12,17 @@ pub struct DecisionDelivery {
     pub action: RequestAction,
 }
 
-/// What the user chose on a network card: one of the wire decisions, or a closed card.
+/// What the user chose on a card: a wire decision, an answer about the connector that serves the destination, or a closed card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
+    /// Connect this project to the offered connector by the named method (§3.2.4).
+    Grant {
+        method: String,
+        profile: ProfileChoice,
+    },
+    /// A standing no for this project; the ordinary card then asks what the hold stood in for.
+    Decline,
     /// A closed card: fail the held request, but record nothing — the developer made no decision.
     Dismiss,
 }
@@ -84,7 +91,9 @@ impl WindowState {
         decision_tx: mpsc::UnboundedSender<DecisionDelivery>,
     ) {
         let mut g = self.lock();
-        if g.pending.iter().any(|e| e.prompt.id == prompt.id) {
+        // Presenting an id already on screen updates it in place: a declined offer re-presents the same request as the ordinary question, and the card must show that rather than the answer already given. The seq stays so the card keeps its place in the pile.
+        if let Some(entry) = g.pending.iter_mut().find(|e| e.prompt.id == prompt.id) {
+            entry.prompt = prompt;
             return;
         }
         let seq = g.alloc_seq();
@@ -131,6 +140,29 @@ impl WindowState {
 
     pub fn decide(&self, id: &str, decision: Decision) -> bool {
         self.deliver(id, RequestAction::Decide(decision))
+    }
+
+    pub fn grant(&self, id: &str, method: &str, profile: ProfileChoice) -> bool {
+        self.deliver(
+            id,
+            RequestAction::Grant {
+                method: method.to_string(),
+                profile,
+            },
+        )
+    }
+
+    /// Keeps the card: a decline is answered by the ordinary question the hold stood in for, on the same request.
+    pub fn decline(&self, id: &str) -> bool {
+        let g = self.lock();
+        let Some(entry) = g.pending.iter().find(|e| e.prompt.id == id) else {
+            return false;
+        };
+        let _ = entry.decision_tx.send(DecisionDelivery {
+            id: id.to_string(),
+            action: RequestAction::Decline,
+        });
+        true
     }
 
     /// Drops the card and fails its held request without recording a decision. See [`RequestAction::Dismiss`].
@@ -333,7 +365,77 @@ mod tests {
             action: format!("CONNECT {host}:443"),
             treatment: Treatment::Inspected,
             run: None,
+            offer: None,
         }
+    }
+
+    #[test]
+    fn granting_takes_the_card_and_carries_the_account_the_user_chose() {
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.grant("r1", "token", ProfileChoice::Held("work".into())));
+
+        assert_eq!(
+            rx.try_recv().expect("a delivery"),
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Grant {
+                    method: "token".into(),
+                    profile: ProfileChoice::Held("work".into()),
+                },
+            }
+        );
+        assert_eq!(s.pending_count(), 0, "the grant answers this card");
+    }
+
+    #[test]
+    fn declining_keeps_the_card_because_the_ordinary_question_is_still_unanswered() {
+        // The hold already turned this request into a question; the session re-presents it without the offer.
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.decline("r1"));
+
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::Decline
+        );
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn answering_a_card_that_is_gone_delivers_nothing() {
+        let s = WindowState::new();
+        assert!(!s.grant("gone", "token", ProfileChoice::None));
+        assert!(!s.decline("gone"));
+    }
+
+    #[test]
+    fn presenting_a_card_again_replaces_what_it_shows() {
+        // A declined offer is re-presented as the ordinary question; an early return would leave the connector card on screen with both its buttons already spent.
+        let s = WindowState::new();
+        let (tx, _rx) = unbounded_channel();
+        let mut offered = prompt("r1", "api.some-provider.example");
+        offered.offer = Some(lns_ipc::ConnectorView {
+            name: "some-provider".into(),
+            digest: "sha256:abc".into(),
+            serves: vec!["api.some-provider.example".into()],
+            methods: Vec::new(),
+            profiles: Vec::new(),
+        });
+        s.insert_pending(offered, tx.clone());
+
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        let snapshot = s.snapshot();
+        assert_eq!(snapshot.pending.len(), 1, "still one card, not two");
+        assert!(
+            snapshot.pending[0].offer.is_none(),
+            "and it is the ordinary question now"
+        );
     }
 
     #[test]

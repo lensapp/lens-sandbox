@@ -18,7 +18,11 @@ pub(crate) fn launch_resolved(
         }
     };
     rig.tools = resolved.tools.clone();
-    rig.running_policy = Some(merge_effective(resolved.policy.as_ref(), &rig.overlay));
+    rig.running_policy = Some(merge_effective(
+        resolved.policy.as_ref(),
+        None,
+        &rig.overlay,
+    ));
 }
 
 #[when("the sandbox is launched")]

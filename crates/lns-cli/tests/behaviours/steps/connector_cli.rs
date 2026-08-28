@@ -27,6 +27,7 @@ fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
                 writes: vec!["/home/agent/.some-provider".to_string()],
                 env: vec!["SOME_REGION".to_string()],
                 credentials: vec!["SOME_TOKEN".to_string()],
+                help: Some("Create one under Settings then Tokens.".to_string()),
             },
             ConnectorMethodView {
                 name: "open".to_string(),
@@ -37,6 +38,7 @@ fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
                 writes: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
+                help: None,
             },
         ],
         profiles: profiles

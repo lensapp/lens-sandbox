@@ -334,6 +334,23 @@ script cannot consent or paste a secret on your behalf. `--method` is required
 when a connector declares more than one method this version can offer — `lns`
 refuses rather than choosing for you.
 
+You do not have to grant anything ahead of time. When a run reaches a destination
+an installed connector serves, and this project has neither granted nor declined
+that connector, the run is held and a card asks. The card names the run, shows
+what the method opens, sets and writes, and lets you choose which connected
+account to use or connect a new one. Answering it applies the method to the
+running sandbox: the destination opens and the credential is injected on the
+wire. The variables the method sets reach the next `lns run`, not the workload
+already running, and the grant applies on every later run of that project.
+
+A method that writes a fileset is not offered yet, and neither the card nor
+`grant` will apply one.
+
+`Never here` on that card is the same standing no `lns connector forget` clears.
+Closing the card answers nothing, so the next run asks again. A `deny` you wrote
+in `lns-local-mixin.yaml` still decides: the connector is source 4 and your own
+file is source 5.
+
 The connector document format is specified in
 [Sandbox specification §3.2](sandbox-spec.md#32-kind-connector).
 

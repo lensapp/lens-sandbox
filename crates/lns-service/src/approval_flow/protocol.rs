@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use lns_policy::{Egress, HttpRule, NetworkPolicy, Policy, Scheme, Transport, Verdict};
@@ -185,12 +187,110 @@ pub enum WireDefaultVerdict {
     Deny,
 }
 
+/// One credential as the boundary arms it: the placeholder the workload sees, and the real value substituted per domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCredential {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub injections: Vec<WireInjection>,
+}
+
+/// `UriPlaceholder` substitutes the parent credential's placeholder inside matching outbound URLs, so unlike `Header` it carries no header of its own.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "injectionType",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WireInjection {
+    Header {
+        domain: String,
+        header: String,
+        value: String,
+    },
+    UriPlaceholder {
+        domain: String,
+        value: String,
+    },
+}
+
+impl WireInjection {
+    /// The value the boundary substitutes, for tests and for the arming check — never for display.
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Header { value, .. } | Self::UriPlaceholder { value, .. } => value,
+        }
+    }
+}
+
+/// Hand-written so no `log::debug!` of a policy frame can put a live credential on the trace stream; an unarmed injection says so, because that is the state worth seeing.
+impl std::fmt::Debug for WireInjection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, domain, armed) = match self {
+            Self::Header { domain, value, .. } => ("Header", domain, !value.is_empty()),
+            Self::UriPlaceholder { domain, value } => ("UriPlaceholder", domain, !value.is_empty()),
+        };
+        write!(
+            f,
+            "{kind} {{ domain: {domain:?}, value: {} }}",
+            if armed { "<redacted>" } else { "<unarmed>" }
+        )
+    }
+}
+
 /// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<WireNetwork>,
+    /// The guest replaces every section a frame carries, so a grant's credentials ride on every later frame or the next one retracts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<Vec<WireCredential>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
+}
+
+/// What a granted method contributes to the running policy, kept together because the guest replaces each section it receives (§3.3.2 source 4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GrantedPayload {
+    pub egress: Policy,
+    pub credentials: Vec<WireCredential>,
+    pub env: BTreeMap<String, String>,
+}
+
+impl GrantedPayload {
+    /// Every grant this project holds as one layer. A run may grant more than one connector, and the guest replaces each section it receives — so a frame carrying one grant retracts the rest.
+    ///
+    /// Ordered by connector name: install refuses two connectors that serve the same destination, so their rules cannot contradict, and a stable order keeps the published table the same between runs.
+    pub fn combined(grants: &BTreeMap<String, Self>) -> Option<Self> {
+        if grants.is_empty() {
+            return None;
+        }
+        let mut combined = Self::default();
+        for granted in grants.values() {
+            combined
+                .egress
+                .network
+                .egress
+                .http
+                .extend(granted.egress.network.egress.http.iter().cloned());
+            combined
+                .egress
+                .network
+                .egress
+                .tcp
+                .extend(granted.egress.network.egress.tcp.iter().cloned());
+            combined.credentials.extend(granted.credentials.clone());
+            combined.env.extend(granted.env.clone());
+        }
+        Some(combined)
+    }
 }
 
 impl PolicyMessage {
@@ -199,10 +299,21 @@ impl PolicyMessage {
         Self::seeded_holding(policy, &[])
     }
 
+    /// The frame a run with a granted connector sends: the same table, plus what the method supplies.
+    pub fn granting(policy: Policy, serves: &[String], granted: &GrantedPayload) -> Self {
+        Self {
+            credentials: Some(granted.credentials.clone()).filter(|c| !c.is_empty()),
+            env: Some(granted.env.clone()).filter(|e| !e.is_empty()),
+            ..Self::seeded_holding(policy, serves)
+        }
+    }
+
     /// [`Self::seeded`], plus the destinations `serves` covers held for an offer (sandbox-spec §3.2.1).
     pub fn seeded_holding(policy: Policy, serves: &[String]) -> Self {
         Self {
             network: Some(WireNetwork::seeded_holding(policy.network, serves)),
+            credentials: None,
+            env: None,
         }
     }
 }
@@ -255,6 +366,7 @@ mod tests {
     fn policy_frame_serializes_with_type_discriminator() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(NetworkPolicy::default())),
+            ..PolicyMessage::default()
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(v["type"], "policy");
@@ -288,6 +400,7 @@ mod tests {
     fn the_policy_frame_publishes_one_egress_table_and_not_the_deprecated_list() {
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(NetworkPolicy::default())),
+            ..PolicyMessage::default()
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         let network = v["network"].as_object().expect("network is an object");
@@ -315,6 +428,7 @@ mod tests {
             ));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
+            ..PolicyMessage::default()
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         let rule = v["network"]["egress"]["tcp"][0]
@@ -333,6 +447,7 @@ mod tests {
         net.egress.http.push(RouteRule::allow_host("10.0.0.0/8"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
+            ..PolicyMessage::default()
         });
         let v: serde_json::Value = serde_json::to_value(&frame).unwrap();
         assert_eq!(
@@ -349,6 +464,7 @@ mod tests {
             .push(RouteRule::allow_host("api.linear.app"));
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
+            ..PolicyMessage::default()
         });
 
         let s = serde_json::to_string(&frame).unwrap();
@@ -495,6 +611,7 @@ mod tests {
         });
         let frame = HostFrame::Policy(PolicyMessage {
             network: Some(WireNetwork::seeded(net)),
+            ..PolicyMessage::default()
         });
         let s = serde_json::to_string(&frame).unwrap();
         assert!(s.contains(r#""match":"api.linear.app""#), "got: {s}");

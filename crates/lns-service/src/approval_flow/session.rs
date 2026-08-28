@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::{
-    Decision, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
+    Decision, GrantedPayload, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
 };
+use crate::connector::offer::Offer;
 use crate::ledger::LedgerRecorder;
-use lns_ipc::{ApprovalKind, Decision as LedgerDecision, LedgerEvent};
+use lns_ipc::{ApprovalKind, ConnectorView, Decision as LedgerDecision, LedgerEvent};
 use lns_policy::matching::{split_destination, unbracketed};
 use lns_policy::{Approval, Policy, PolicyStore, RouteRule, TcpEgressRule};
 
@@ -18,6 +19,8 @@ pub type FrameSink = mpsc::UnboundedSender<HostFrame>;
 pub trait Notifier: Send + Sync {
     fn present(&self, pending: &PendingPrompt);
     fn dismiss(&self, id: &str);
+    /// The request timed out but its card stays: an expired hold does not cancel a connect the user is in the middle of (§3.2.4).
+    fn expire(&self, id: &str);
     fn inform(&self, message: &str);
     fn clear_informs(&self);
 }
@@ -31,6 +34,8 @@ pub struct PendingPrompt {
     pub treatment: Treatment,
     /// The requesting run's name, attributed by the service from the session channel — never from workload-supplied data.
     pub run: Option<String>,
+    /// The connector that serves this destination, when exactly one does: the card then asks whether to connect it rather than whether to allow the traffic (§3.2.1).
+    pub offer: Option<ConnectorView>,
 }
 
 impl PendingPrompt {
@@ -71,6 +76,9 @@ struct PendingEntry {
     treatment: Treatment,
     deadline: Instant,
     reason: String,
+    offer: Option<ConnectorView>,
+    /// True once the workload gave up waiting: the request is answered, the offer is not.
+    expired: bool,
 }
 
 impl PendingEntry {
@@ -87,6 +95,40 @@ impl PendingEntry {
     }
 }
 
+/// Which account a grant is made with: none for a method that does not authenticate, one this machine already holds, or one the card is creating.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileChoice {
+    None,
+    Held(String),
+    New {
+        label: String,
+        values: lns_ipc::SecretValues,
+    },
+}
+
+/// The connector store's side of a card decision. Every method writes to disk, so the session takes it as a port (§3.2.4).
+pub trait ConnectorPort: Send + Sync {
+    /// Stores what an authentication returned, answering with the project directories whose grant its authority no longer matches.
+    fn connect(
+        &self,
+        name: &str,
+        method: &str,
+        label: &str,
+        values: lns_ipc::SecretValues,
+    ) -> Result<Vec<String>, String>;
+
+    /// Records this project's grant against the bytes the card disclosed, answering with the egress the method opens.
+    fn grant(
+        &self,
+        name: &str,
+        digest: &str,
+        method: &str,
+        profile: Option<&str>,
+    ) -> Result<GrantedPayload, String>;
+
+    fn decline(&self, name: &str) -> Result<(), String>;
+}
+
 pub struct ApprovalSession {
     policy: Mutex<Policy>,
     /// What the developer's own file holds — never the artifact baseline the running `policy` also carries.
@@ -98,7 +140,13 @@ pub struct ApprovalSession {
     timeout: Duration,
     ledger: OnceLock<Arc<dyn LedgerRecorder>>,
     shipped: OnceLock<Policy>,
-    holding: OnceLock<Vec<String>>,
+    /// What each granted connector supplies, kept apart from both files so a reload of either cannot retract it, and per connector because a run may grant more than one (§3.3.2 source 4).
+    granted: Mutex<BTreeMap<String, GrantedPayload>>,
+    /// What has already been said once, so a misconfiguration every request trips does not fill the window.
+    said: Mutex<std::collections::HashSet<String>>,
+    connectors: OnceLock<Arc<dyn ConnectorPort>>,
+    /// The connectors this project has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
+    offers: Mutex<Vec<ConnectorView>>,
     run: Option<String>,
 }
 
@@ -127,7 +175,10 @@ impl ApprovalSession {
             timeout,
             ledger: OnceLock::new(),
             shipped: OnceLock::new(),
-            holding: OnceLock::new(),
+            granted: Mutex::new(BTreeMap::new()),
+            said: Mutex::new(std::collections::HashSet::new()),
+            connectors: OnceLock::new(),
+            offers: Mutex::new(Vec::new()),
             run: None,
         }
     }
@@ -143,6 +194,148 @@ impl ApprovalSession {
         let _ = self.shipped.set(shipped);
     }
 
+    pub fn set_connector_port(&self, port: Arc<dyn ConnectorPort>) {
+        let _ = self.connectors.set(port);
+    }
+
+    /// Connects an account if the card made one, records the grant, then publishes and releases — in that order, because each step is what makes the next one correct (§3.2.4).
+    pub fn grant_offer(&self, id: &str, method: &str, profile: ProfileChoice) -> DecisionOutcome {
+        let Some(offer) = self.offer_of(id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        let Some(port) = self.connectors.get() else {
+            self.notifier
+                .inform("no connector store is wired to this run, so nothing was granted");
+            return DecisionOutcome::Resolved;
+        };
+        let label = match self.resolve_profile(port.as_ref(), &offer.name, method, profile) {
+            Ok(label) => label,
+            Err(why) => {
+                self.notifier.inform(&why);
+                return DecisionOutcome::Resolved;
+            }
+        };
+        // Every request waiting on this connector, named before the offer is dropped from them.
+        let held = self.held_for(&offer.name);
+        match port.grant(&offer.name, &offer.digest, method, label.as_deref()) {
+            Ok(opened) => {
+                self.forget_offer(&offer.name);
+                self.apply_granted_egress(&offer.name, opened);
+                self.release(&held);
+                DecisionOutcome::Resolved
+            }
+            Err(why) => {
+                self.notifier.inform(&why);
+                DecisionOutcome::Resolved
+            }
+        }
+    }
+
+    /// Records a standing no for this project, then lets the ordinary card ask what the hold was standing in for (§3.2.4).
+    pub fn decline_offer(&self, id: &str) -> DecisionOutcome {
+        let Some(offer) = self.offer_of(id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        if let Some(port) = self.connectors.get()
+            && let Err(why) = port.decline(&offer.name)
+        {
+            self.notifier.inform(&why);
+            return DecisionOutcome::Resolved;
+        }
+        let held = self.held_for(&offer.name);
+        self.forget_offer(&offer.name);
+        self.represent(&held);
+        DecisionOutcome::Resolved
+    }
+
+    /// The label the grant names, creating the account first when the card made one — the grant reads the store, so it must already be there.
+    fn resolve_profile(
+        &self,
+        port: &dyn ConnectorPort,
+        name: &str,
+        method: &str,
+        profile: ProfileChoice,
+    ) -> Result<Option<String>, String> {
+        match profile {
+            ProfileChoice::None => Ok(None),
+            ProfileChoice::Held(label) => Ok(Some(label)),
+            ProfileChoice::New { label, values } => {
+                let invalidated = port.connect(name, method, &label, values)?;
+                if !invalidated.is_empty() {
+                    self.notifier.inform(&format!(
+                        "this connection no longer covers what {} granted, so {} must decide again",
+                        invalidated.join(", "),
+                        if invalidated.len() == 1 { "it" } else { "they" }
+                    ));
+                }
+                Ok(Some(label))
+            }
+        }
+    }
+
+    fn offer_of(&self, id: &str) -> Option<ConnectorView> {
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .get(id)
+            .and_then(|entry| entry.offer.clone())
+    }
+
+    fn forget_offer(&self, name: &str) {
+        self.offers
+            .lock()
+            .expect("offers mutex poisoned")
+            .retain(|offer| offer.name != name);
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        for entry in pending.values_mut() {
+            if entry.offer.as_ref().is_some_and(|offer| offer.name == name) {
+                entry.offer = None;
+            }
+        }
+    }
+
+    /// Lets go of every request that was waiting on this connector, because one answer decided it for all of them.
+    fn release(&self, ids: &[String]) {
+        for id in ids {
+            self.notifier.dismiss(id);
+            if let Some(entry) = self.remove_pending(id) {
+                self.answer(id, &entry, Decision::AllowOnce);
+            }
+        }
+    }
+
+    /// Asks again, now without the offer: the hold already made this request a question, and only the user can answer it.
+    fn represent(&self, ids: &[String]) {
+        for id in ids {
+            if let Some(prompt) = self.prompt_of(id) {
+                self.notifier.present(&prompt);
+            }
+        }
+    }
+
+    fn held_for(&self, name: &str) -> Vec<String> {
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .iter()
+            .filter(|(_, entry)| entry.offer.as_ref().is_some_and(|offer| offer.name == name))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn prompt_of(&self, id: &str) -> Option<PendingPrompt> {
+        let pending = self.pending.lock().expect("pending mutex poisoned");
+        let entry = pending.get(id)?;
+        Some(PendingPrompt {
+            id: id.to_string(),
+            host: entry.host.clone(),
+            action: entry.action.clone(),
+            treatment: entry.treatment,
+            run: self.run.clone(),
+            offer: entry.offer.clone(),
+        })
+    }
+
     pub fn set_ledger_recorder(&self, recorder: Arc<dyn LedgerRecorder>) {
         let _ = self.ledger.set(recorder);
     }
@@ -151,17 +344,29 @@ impl ApprovalSession {
         self.policy.lock().expect("policy mutex poisoned").clone()
     }
 
-    /// The `serves` patterns of every connector this project has not decided; a destination one covers is held so the run asks (§3.2.1). Idempotent, the first wins.
-    pub fn hold_for_offers(&self, serves: Vec<String>) {
-        let _ = self.holding.set(serves);
+    /// The connectors this project has not decided; every destination they serve is held so the run asks rather than proceeds (§3.2.1).
+    pub fn hold_for_offers(&self, offers: Vec<ConnectorView>) {
+        *self.offers.lock().expect("offers mutex poisoned") = offers;
     }
 
-    /// The policy as the guest receives it, holds and all — the one shape both the boot frame and every reload go through.
+    /// The policy as the guest receives it, holds and supplies and all — the one shape both the boot frame and every reload go through.
     pub fn policy_message(&self) -> PolicyMessage {
-        PolicyMessage::seeded_holding(
-            self.current_policy(),
-            self.holding.get().map(Vec::as_slice).unwrap_or_default(),
-        )
+        let policy = self.current_policy();
+        let held = self.held_patterns();
+        match self.granted_layer() {
+            Some(granted) => PolicyMessage::granting(policy, &held, &granted),
+            None => PolicyMessage::seeded_holding(policy, &held),
+        }
+    }
+
+    /// Derived rather than stored, so dropping a connector from `offers` lifts its holds on the very next frame.
+    fn held_patterns(&self) -> Vec<String> {
+        self.offers
+            .lock()
+            .expect("offers mutex poisoned")
+            .iter()
+            .flat_map(|offer| offer.serves.clone())
+            .collect()
     }
 
     pub fn submit_pending(&self, req: RequestPending, now: Instant) {
@@ -177,16 +382,55 @@ impl ApprovalSession {
                 treatment: req.treatment,
                 deadline: now + self.timeout,
                 reason: req.reason.clone(),
+                offer: None,
+                expired: false,
             },
         );
         drop(pending);
+        let offer = self.offer_for(&req);
+        if let Some(offer) = &offer
+            && let Some(entry) = self
+                .pending
+                .lock()
+                .expect("pending mutex poisoned")
+                .get_mut(&req.id)
+        {
+            entry.offer = Some(offer.clone());
+        }
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
             action: req.action,
             treatment: req.treatment,
             run: self.run.clone(),
+            offer,
         });
+    }
+
+    /// The connector offered for this request, or none — including when two serve it, which no card may resolve by choosing (§3.2.4).
+    fn offer_for(&self, req: &RequestPending) -> Option<ConnectorView> {
+        let destination = offered_destination(req);
+        let offers = self.offers.lock().expect("offers mutex poisoned");
+        match crate::connector::offer::offers_for(destination, &offers) {
+            Offer::One(connector) => Some(connector.clone()),
+            Offer::None => None,
+            Offer::Ambiguous(names) => {
+                let names = names.join(" and ");
+                drop(offers);
+                self.inform_once(&format!(
+                    "{names} both serve {destination}, so neither is offered; uninstall one"
+                ));
+                None
+            }
+        }
+    }
+
+    /// One message per misconfiguration, however many requests reach it.
+    fn inform_once(&self, message: &str) {
+        let mut said = self.said.lock().expect("said mutex poisoned");
+        if said.insert(message.to_string()) {
+            self.notifier.inform(message);
+        }
     }
 
     /// Publishes the rule before the decision that wakes the held connection, and writes the file only once both frames have left, so a slow disk cannot hold the request.
@@ -196,7 +440,8 @@ impl ApprovalSession {
         };
         self.notifier.dismiss(id);
         let rule_stands = self.apply_always_decision(&entry, decision);
-        self.send_decision_frame(id, decision);
+        // The rule and the audit line are the developer's standing answer either way; only the wire frame is about a request the guest still has.
+        self.answer(id, &entry, decision);
         if rule_stands {
             self.save_persisted();
         }
@@ -204,13 +449,20 @@ impl ApprovalSession {
         DecisionOutcome::Resolved
     }
 
+    /// Sends the wire decision unless the request already timed out, because the guest forgot that id when it did.
+    fn answer(&self, id: &str, entry: &PendingEntry, decision: Decision) {
+        if !entry.expired {
+            self.send_decision_frame(id, decision);
+        }
+    }
+
     /// Fails a held request because its card was closed: no rule, no audit line, and `Timeout` on the wire because a dismissal is the absence of a decision rather than a deny the developer picked.
     pub fn dismiss_request(&self, id: &str) -> DecisionOutcome {
-        if self.remove_pending(id).is_none() {
+        let Some(entry) = self.remove_pending(id) else {
             return DecisionOutcome::UnknownId;
-        }
+        };
         self.notifier.dismiss(id);
-        self.send_decision_frame(id, Decision::Timeout);
+        self.answer(id, &entry, Decision::Timeout);
         DecisionOutcome::Resolved
     }
 
@@ -276,7 +528,7 @@ impl ApprovalSession {
             let pending = self.pending.lock().expect("pending mutex poisoned");
             pending
                 .iter()
-                .filter(|(_, entry)| entry.deadline <= now)
+                .filter(|(_, entry)| !entry.expired && entry.deadline <= now)
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -284,21 +536,61 @@ impl ApprovalSession {
     }
 
     fn timeout_one(&self, id: &str) -> bool {
-        if self.remove_pending(id).is_none() {
+        let Some(entry) = self.remove_pending(id) else {
             return false;
+        };
+        // The request is gone, but the offer it raised is still the user's to answer, and the profile applies to what runs next.
+        if entry.offer.is_some() {
+            self.keep_offer(id, entry);
+            self.notifier.expire(id);
+        } else {
+            self.notifier.dismiss(id);
         }
-        self.notifier.dismiss(id);
         self.send_decision_frame(id, Decision::Timeout);
         true
     }
 
-    pub fn apply_external_policy(&self, mut new_policy: Policy) {
+    /// Puts the entry back with its deadline lifted, so the card it belongs to still has something to answer for.
+    fn keep_offer(&self, id: &str, mut entry: PendingEntry) {
+        entry.expired = true;
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .insert(id.to_string(), entry);
+    }
+
+    pub fn apply_external_policy(&self, new_policy: Policy) {
         *self.persisted.lock().expect("persisted mutex poisoned") = new_policy.clone();
-        if let Some(shipped) = self.shipped.get() {
-            new_policy = crate::artifact::policy::merge_effective(Some(shipped), &new_policy);
-        }
-        *self.policy.lock().expect("policy mutex poisoned") = new_policy;
+        *self.policy.lock().expect("policy mutex poisoned") = self.effective_over(&new_policy);
         self.send_policy_frame();
+    }
+
+    /// Installs what one granted connector supplies as part of the grant layer: behind this directory's decisions, ahead of the artifact (§3.3.2).
+    pub fn apply_granted_egress(&self, connector: &str, granted: GrantedPayload) {
+        self.granted
+            .lock()
+            .expect("granted mutex poisoned")
+            .insert(connector.to_string(), granted);
+        let own = self
+            .persisted
+            .lock()
+            .expect("persisted mutex poisoned")
+            .clone();
+        *self.policy.lock().expect("policy mutex poisoned") = self.effective_over(&own);
+        self.send_policy_frame();
+    }
+
+    fn effective_over(&self, own: &Policy) -> Policy {
+        let granted = self.granted_layer();
+        let opened = granted.as_ref().map(|granted| &granted.egress);
+        match (self.shipped.get(), opened) {
+            (None, None) => own.clone(),
+            (shipped, opened) => crate::artifact::policy::merge_effective(shipped, opened, own),
+        }
+    }
+
+    fn granted_layer(&self) -> Option<GrantedPayload> {
+        GrantedPayload::combined(&self.granted.lock().expect("granted mutex poisoned"))
     }
 
     pub fn withdraw_run(&self) {
@@ -439,6 +731,14 @@ fn earns_a_rule(decision: Decision) -> bool {
 }
 
 /// The gate's `CONNECT <destination>` taken verbatim, and `None` unless it names the frame's own host.
+/// What a `serves` pattern is matched against: a raw splice is granted per port, so the host alone would offer for a service the connector does not serve.
+fn offered_destination(req: &RequestPending) -> &str {
+    match req.treatment {
+        Treatment::Raw => raw_destination(&req.action, &req.host).unwrap_or(&req.host),
+        Treatment::Inspected => &req.host,
+    }
+}
+
 fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
     let destination = action.strip_prefix("CONNECT ")?;
     let (named, _) = split_destination(destination);
@@ -458,6 +758,7 @@ pub(crate) mod tests {
     pub(crate) struct RecordingNotifier {
         pub(crate) presented: StdMutex<Vec<PendingPrompt>>,
         pub(crate) dismissed: StdMutex<Vec<String>>,
+        pub(crate) expired: StdMutex<Vec<String>>,
         pub(crate) informed: StdMutex<Vec<String>>,
         pub(crate) informs_cleared: StdMutex<usize>,
     }
@@ -468,6 +769,9 @@ pub(crate) mod tests {
         }
         fn dismiss(&self, id: &str) {
             self.dismissed.lock().unwrap().push(id.to_string());
+        }
+        fn expire(&self, id: &str) {
+            self.expired.lock().unwrap().push(id.to_string());
         }
         fn inform(&self, m: &str) {
             self.informed.lock().unwrap().push(m.to_string());
@@ -1024,6 +1328,21 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// An offer carrying only what a hold reads: what it serves.
+    fn serving(destination: &str) -> ConnectorView {
+        named_serving("some-provider", destination)
+    }
+
+    fn named_serving(name: &str, destination: &str) -> ConnectorView {
+        ConnectorView {
+            name: name.to_string(),
+            digest: "sha256:abc".to_string(),
+            serves: vec![destination.to_string()],
+            methods: Vec::new(),
+            profiles: Vec::new(),
+        }
+    }
+
     fn allowing_one_raw_destination(destination: &str) -> Policy {
         let mut policy = Policy::default();
         policy
@@ -1040,7 +1359,7 @@ pub(crate) mod tests {
         let (s, _n, _store, _rx) = fixture_holding(allowing_one_raw_destination(
             "db.some-provider.example:5432",
         ));
-        s.hold_for_offers(vec!["db.some-provider.example".to_string()]);
+        s.hold_for_offers(vec![serving("db.some-provider.example")]);
 
         assert_eq!(
             tcp_verdicts(&s.policy_message()),
@@ -1056,6 +1375,632 @@ pub(crate) mod tests {
             ],
             "the hold must lead the allow it narrows, because the guest gate is first-match-wins"
         );
+    }
+
+    #[test]
+    fn a_served_destination_raises_a_connector_card_rather_than_a_network_card() {
+        // §3.2.1: the run reached something a connector serves, so the question is "connect it?", not "allow it?".
+        let (s, n, _store, _rx) = fixture();
+        s.hold_for_offers(vec![serving("api.some-provider.example")]);
+
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        let presented = n.presented.lock().unwrap();
+        assert_eq!(
+            presented[0].offer.as_ref().map(|offer| offer.name.as_str()),
+            Some("some-provider")
+        );
+    }
+
+    #[test]
+    fn a_destination_no_connector_serves_raises_the_ordinary_card() {
+        let (s, n, _store, _rx) = fixture();
+        s.hold_for_offers(vec![serving("api.some-provider.example")]);
+
+        s.submit_pending(pending("r1", "api.unrelated.example"), Instant::now());
+
+        assert!(n.presented.lock().unwrap()[0].offer.is_none());
+    }
+
+    #[test]
+    fn a_raw_destination_is_offered_on_its_own_host_and_port() {
+        // §3.2.1 exists so a raw-stream connector is offered; matching the bare host would miss a `serves` entry that names a port.
+        let (s, n, _store, _rx) = fixture();
+        s.hold_for_offers(vec![serving("db.some-provider.example:5432")]);
+
+        s.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "db.some-provider.example".into(),
+                action: "CONNECT db.some-provider.example:5432".into(),
+                reason: "policy-ambiguous".into(),
+                treatment: Treatment::Raw,
+            },
+            Instant::now(),
+        );
+
+        assert_eq!(
+            n.presented.lock().unwrap()[0]
+                .offer
+                .as_ref()
+                .map(|offer| offer.name.as_str()),
+            Some("some-provider")
+        );
+    }
+
+    #[test]
+    fn two_connectors_serving_one_destination_raise_the_ordinary_card_and_say_why() {
+        // Install cannot detect two mid-segment wildcards, so this is reachable; picking one would grant an authority the user never chose between.
+        let (s, n, _store, _rx) = fixture();
+        s.hold_for_offers(vec![
+            named_serving("some-provider", "api.*.example"),
+            named_serving("other-provider", "*.eu.example"),
+        ]);
+
+        s.submit_pending(pending("r1", "api.eu.example"), Instant::now());
+
+        assert!(
+            n.presented.lock().unwrap()[0].offer.is_none(),
+            "no connector card, because there is no one connector to name"
+        );
+        let informs = n.informed.lock().unwrap();
+        assert!(
+            informs
+                .iter()
+                .any(|line| line.contains("some-provider") && line.contains("other-provider")),
+            "the user is told which two to choose between: {informs:?}"
+        );
+    }
+
+    #[test]
+    fn the_ambiguity_is_said_once_however_many_requests_reach_it() {
+        let (s, n, _store, _rx) = fixture();
+        s.hold_for_offers(vec![
+            named_serving("some-provider", "api.*.example"),
+            named_serving("other-provider", "*.eu.example"),
+        ]);
+
+        s.submit_pending(pending("r1", "api.eu.example"), Instant::now());
+        s.submit_pending(pending("r2", "api.eu.example"), Instant::now());
+
+        assert_eq!(
+            n.informed.lock().unwrap().len(),
+            1,
+            "one misconfiguration is one message, however busy the workload"
+        );
+    }
+
+    /// One recorded grant: which method, under what account, and against which bytes.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Granted {
+        name: String,
+        digest: String,
+        method: String,
+        profile: Option<String>,
+    }
+
+    /// One recorded connect: which method, under what name, and which values it was given.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Connected {
+        name: String,
+        method: String,
+        label: String,
+        keys: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct FakeConnectorPort {
+        connected: StdMutex<Vec<Connected>>,
+        granted: StdMutex<Vec<Granted>>,
+        opens: Option<GrantedPayload>,
+        invalidated: Vec<String>,
+        refuse: Option<String>,
+    }
+
+    impl ConnectorPort for FakeConnectorPort {
+        fn connect(
+            &self,
+            name: &str,
+            method: &str,
+            label: &str,
+            values: lns_ipc::SecretValues,
+        ) -> Result<Vec<String>, String> {
+            if let Some(why) = &self.refuse {
+                return Err(why.clone());
+            }
+            self.connected.lock().unwrap().push(Connected {
+                name: name.to_string(),
+                method: method.to_string(),
+                label: label.to_string(),
+                keys: values.0.keys().cloned().collect(),
+            });
+            Ok(self.invalidated.clone())
+        }
+
+        fn grant(
+            &self,
+            name: &str,
+            digest: &str,
+            method: &str,
+            profile: Option<&str>,
+        ) -> Result<GrantedPayload, String> {
+            if let Some(why) = &self.refuse {
+                return Err(why.clone());
+            }
+            self.granted.lock().unwrap().push(Granted {
+                name: name.to_string(),
+                digest: digest.to_string(),
+                method: method.to_string(),
+                profile: profile.map(str::to_string),
+            });
+            Ok(self.opens.clone().unwrap_or_default())
+        }
+
+        fn decline(&self, _name: &str) -> Result<(), String> {
+            match &self.refuse {
+                Some(why) => Err(why.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn offering(method: &str, profiles: &[&str]) -> ConnectorView {
+        ConnectorView {
+            name: "some-provider".to_string(),
+            digest: "sha256:abc".to_string(),
+            serves: vec!["api.some-provider.example".to_string()],
+            methods: vec![lns_ipc::ConnectorMethodView {
+                name: method.to_string(),
+                label: method.to_string(),
+                needs_connect: !profiles.is_empty(),
+                offerable: true,
+                opens: vec!["api.some-provider.example".to_string()],
+                writes: Vec::new(),
+                env: Vec::new(),
+                credentials: Vec::new(),
+                help: None,
+            }],
+            profiles: profiles
+                .iter()
+                .map(|label| lns_ipc::ConnectorProfileView {
+                    label: label.to_string(),
+                    method: method.to_string(),
+                    authority: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn offered(port: Arc<FakeConnectorPort>) -> Fixture {
+        let f = fixture();
+        f.0.set_connector_port(port);
+        f.0.hold_for_offers(vec![offering("token", &["work", "personal"])]);
+        f.0.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+        f
+    }
+
+    #[test]
+    fn granting_records_the_profile_the_card_chose() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, _rx) = offered(port.clone());
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("personal".into()));
+
+        assert_eq!(
+            port.granted.lock().unwrap().as_slice(),
+            [Granted {
+                name: "some-provider".to_string(),
+                digest: "sha256:abc".to_string(),
+                method: "token".to_string(),
+                profile: Some("personal".to_string()),
+            }],
+            "the card is where the user names the account, and the bytes it disclosed are the bytes consented to"
+        );
+    }
+
+    #[test]
+    fn granting_publishes_the_opened_egress_before_it_releases_the_request() {
+        // The guest re-evaluates the released request against the table it holds, so a decision that arrives first is decided by the old one.
+        let port = Arc::new(FakeConnectorPort {
+            opens: Some(GrantedPayload {
+                egress: allowing("api.some-provider.example"),
+                ..GrantedPayload::default()
+            }),
+            ..FakeConnectorPort::default()
+        });
+        let (s, _n, _store, mut rx) = offered(port);
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+
+        let published = policy_frame(&mut rx);
+        assert!(
+            published
+                .network
+                .expect("a network section")
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.some-provider.example"
+                    && rule.verdict == WireVerdict::Allow),
+            "the grant's own rules must be in the table before the request is let go"
+        );
+        assert_eq!(decision_frame(&mut rx).decision, Decision::AllowOnce);
+    }
+
+    #[test]
+    fn granting_lifts_the_hold_so_the_next_frame_stops_asking() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, mut rx) = offered(port);
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+
+        let published = policy_frame(&mut rx);
+        assert!(
+            !published
+                .network
+                .expect("a network section")
+                .egress
+                .tcp
+                .iter()
+                .any(|rule| rule.verdict == WireVerdict::Ask),
+            "the connector is decided, so nothing it serves is held any more"
+        );
+    }
+
+    #[test]
+    fn granting_releases_every_request_held_for_the_same_connector() {
+        // One answer decides the connector, so a sibling request waiting on it must not sit there until it times out.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, n, _store, mut rx) = offered(port);
+        s.submit_pending(pending("r2", "api.some-provider.example"), Instant::now());
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+
+        let _ = policy_frame(&mut rx);
+        let mut released: Vec<String> = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if let HostFrame::RequestDecision(decision) = frame {
+                assert_eq!(decision.decision, Decision::AllowOnce);
+                released.push(decision.id);
+            }
+        }
+        released.sort();
+        assert_eq!(released, ["r1", "r2"]);
+        assert_eq!(n.dismissed.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_new_connection_is_made_before_the_grant_that_names_it() {
+        // The grant looks its profile up in the store, so a grant written first would refuse the label the user just typed.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, _rx) = offered(port.clone());
+
+        s.grant_offer(
+            "r1",
+            "token",
+            ProfileChoice::New {
+                label: "token-2".into(),
+                values: lns_ipc::SecretValues(
+                    [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+            },
+        );
+
+        assert_eq!(
+            port.connected.lock().unwrap()[0].label,
+            "token-2",
+            "the connect must have happened, under the name the card carried"
+        );
+        assert_eq!(
+            port.granted.lock().unwrap()[0].profile,
+            Some("token-2".to_string()),
+            "and the grant must name the profile it just created"
+        );
+    }
+
+    #[test]
+    fn a_connect_that_fails_grants_nothing_and_leaves_the_offer_standing() {
+        // §3.2.4: authentication that fails grants nothing. A card that vanished would leave the request held with no way to answer it.
+        let port = Arc::new(FakeConnectorPort {
+            refuse: Some("the token was rejected".into()),
+            ..FakeConnectorPort::default()
+        });
+        let (s, n, _store, mut rx) = offered(port.clone());
+
+        s.grant_offer(
+            "r1",
+            "token",
+            ProfileChoice::New {
+                label: "token-2".into(),
+                values: lns_ipc::SecretValues::default(),
+            },
+        );
+
+        assert!(port.granted.lock().unwrap().is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "no frame at all: the request is still held and the table did not change"
+        );
+        assert!(n.dismissed.lock().unwrap().is_empty(), "the card stays");
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("the token was rejected")),
+            "the user is told why"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_invalidates_another_projects_grant_says_so() {
+        // §3.2.4: those projects must decide again, and nothing in this run can do it for them.
+        let port = Arc::new(FakeConnectorPort {
+            invalidated: vec!["/other/project".to_string()],
+            ..FakeConnectorPort::default()
+        });
+        let (s, n, _store, _rx) = offered(port);
+
+        s.grant_offer(
+            "r1",
+            "token",
+            ProfileChoice::New {
+                label: "token-2".into(),
+                values: lns_ipc::SecretValues::default(),
+            },
+        );
+
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("/other/project")),
+            "a silent invalidation is a project that stops working with no explanation"
+        );
+    }
+
+    #[test]
+    fn granting_a_method_that_needs_no_account_names_no_profile() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, _rx) = fixture();
+        s.set_connector_port(port.clone());
+        s.hold_for_offers(vec![offering("open", &[])]);
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        s.grant_offer("r1", "open", ProfileChoice::None);
+
+        assert_eq!(port.granted.lock().unwrap()[0].profile, None);
+    }
+
+    #[test]
+    fn a_grant_the_store_refuses_leaves_the_request_held() {
+        // The bytes changed under the card, so the store refuses; the card must not vanish and the table must not move.
+        let port = Arc::new(FakeConnectorPort {
+            refuse: Some("some-provider was replaced since this card was raised".into()),
+            ..FakeConnectorPort::default()
+        });
+        let (s, n, _store, mut rx) = offered(port);
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+
+        assert!(rx.try_recv().is_err(), "nothing was published or released");
+        assert!(n.dismissed.lock().unwrap().is_empty());
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("replaced")),
+            "the user is told why"
+        );
+    }
+
+    #[test]
+    fn answering_a_card_whose_request_is_gone_is_not_an_answer() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, _rx) = fixture();
+        s.set_connector_port(port);
+        assert_eq!(
+            s.grant_offer("gone", "token", ProfileChoice::None),
+            DecisionOutcome::UnknownId
+        );
+        assert_eq!(s.decline_offer("gone"), DecisionOutcome::UnknownId);
+    }
+
+    #[test]
+    fn a_run_with_no_connector_store_wired_grants_nothing_and_says_so() {
+        // Rather than panicking on a missing port, or silently dropping the answer the user gave.
+        let (s, n, _store, mut rx) = fixture();
+        s.hold_for_offers(vec![offering("open", &[])]);
+        s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        s.grant_offer("r1", "open", ProfileChoice::None);
+
+        assert!(rx.try_recv().is_err());
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("nothing was granted"))
+        );
+    }
+
+    #[test]
+    fn a_decline_the_store_refuses_is_not_recorded_as_one() {
+        let port = Arc::new(FakeConnectorPort {
+            refuse: Some("the grants file is read-only".into()),
+            ..FakeConnectorPort::default()
+        });
+        let (s, n, _store, _rx) = offered(port);
+
+        s.decline_offer("r1");
+
+        assert!(
+            n.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("read-only"))
+        );
+        s.submit_pending(pending("r2", "api.some-provider.example"), Instant::now());
+        assert!(
+            n.presented.lock().unwrap().last().unwrap().offer.is_some(),
+            "nothing was recorded, so the next request is still offered"
+        );
+    }
+
+    #[test]
+    fn declining_keeps_the_request_and_lets_the_ordinary_card_ask() {
+        // The hold already replaced this run's allow with an ask for this request, and the host has no first-match evaluator to answer it with.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, n, _store, mut rx) = offered(port);
+
+        s.decline_offer("r1");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no decision frame: the request is still the user's to answer"
+        );
+        let presented = n.presented.lock().unwrap();
+        assert!(
+            presented
+                .last()
+                .expect("a re-presented card")
+                .offer
+                .is_none(),
+            "the connector is decided, so what is left is the ordinary question"
+        );
+    }
+
+    #[test]
+    fn declining_stops_the_next_request_being_offered() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, n, _store, _rx) = offered(port);
+
+        s.decline_offer("r1");
+        s.submit_pending(pending("r2", "api.some-provider.example"), Instant::now());
+
+        assert!(
+            n.presented.lock().unwrap().last().unwrap().offer.is_none(),
+            "a decline is a standing no for this project (§3.2.4)"
+        );
+    }
+
+    #[test]
+    fn a_hold_that_expires_keeps_the_card_so_the_connect_can_finish() {
+        // §3.2.4: "An expired hold does not cancel the connect: the user finishes, the profile applies, and the next request succeeds." Dismissing here would take the card away mid-token.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, n, _store, mut rx) = offered(port.clone());
+
+        s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
+
+        assert_eq!(
+            decision_frame(&mut rx).decision,
+            Decision::Timeout,
+            "the workload's request fails as any refused request does"
+        );
+        assert!(
+            n.dismissed.lock().unwrap().is_empty(),
+            "but the card is still there to answer"
+        );
+        assert_eq!(
+            s.grant_offer("r1", "token", ProfileChoice::Held("work".into())),
+            DecisionOutcome::Resolved,
+            "and the grant still applies, for whatever runs next"
+        );
+        assert_eq!(port.granted.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_expired_request_is_not_decided_twice() {
+        // The guesthas forgotten this id when it timed out; a second frame would decide a request that no longer exists.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, mut rx) = offered(port);
+        s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
+        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
+
+        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+
+        let _ = policy_frame(&mut rx);
+        assert!(
+            rx.try_recv().is_err(),
+            "the policy frame is the only thing left to send"
+        );
+    }
+
+    #[test]
+    fn closing_an_expired_card_does_not_answer_its_request_again() {
+        // The guest forgot this id when it timed out; a second Timeout would decide a request that no longer exists.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, mut rx) = offered(port);
+        s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
+        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
+
+        assert_eq!(s.dismiss_request("r1"), DecisionOutcome::Resolved);
+
+        assert!(rx.try_recv().is_err(), "no second frame for the same id");
+    }
+
+    #[test]
+    fn answering_an_expired_card_writes_the_rule_without_answering_the_wire() {
+        // The rule is the developer's standing answer and outlives the request; the frame is about a request the guest no longer has.
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, store, mut rx) = offered(port);
+        s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
+        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
+
+        s.decline_offer("r1");
+        assert_eq!(
+            s.record_decision("r1", Decision::AllowAlways),
+            DecisionOutcome::Resolved
+        );
+
+        assert!(
+            s.current_policy()
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.some-provider.example"),
+            "the developer's always-allow still stands for what runs next"
+        );
+        assert!(!store.saves.lock().unwrap().is_empty(), "and is written");
+        let frames: Vec<HostFrame> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            frames
+                .iter()
+                .all(|frame| matches!(frame, HostFrame::Policy(_))),
+            "but no decision frame for a request that timed out: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn an_expired_hold_is_not_swept_a_second_time() {
+        let port = Arc::new(FakeConnectorPort::default());
+        let (s, _n, _store, _rx) = offered(port);
+        let past = Instant::now() + TEST_TIMEOUT + Duration::from_millis(1);
+
+        assert_eq!(s.tick_timeouts(past), 1);
+        assert_eq!(
+            s.tick_timeouts(past),
+            0,
+            "the entry stays only to carry the offer, so it must not look like a fresh timeout every tick"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_card_still_goes_away_when_its_request_times_out() {
+        let (s, n, _store, mut rx) = fixture();
+        s.submit_pending(pending("r1", "api.example.test"), Instant::now());
+
+        s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
+
+        assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
+        assert_eq!(n.dismissed.lock().unwrap().as_slice(), &["r1".to_string()]);
     }
 
     #[test]
@@ -1079,7 +2024,7 @@ pub(crate) mod tests {
         let (s, _n, _store, mut rx) = fixture_holding(allowing_one_raw_destination(
             "db.some-provider.example:5432",
         ));
-        s.hold_for_offers(vec!["db.some-provider.example".to_string()]);
+        s.hold_for_offers(vec![serving("db.some-provider.example")]);
 
         s.apply_external_policy(allowing_one_raw_destination(
             "db.some-provider.example:5432",
@@ -1629,6 +2574,223 @@ pub(crate) mod tests {
             "the developer's decisions file is the last source, so an approval they just made must decide rather than be dropped by the document under it: {routes:?}"
         );
         let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
+    fn a_reload_keeps_what_a_grant_opened() {
+        // The developer edits the decisions file mid-run; the grant is not in that file, so re-reading it must not retract what a connector opened.
+        let (s, _n, _store, mut rx) = fixture();
+        let mut document = Policy::default();
+        document.add_rule(RouteRule::deny_host("*"));
+        s.set_shipped_policy(document);
+        s.apply_granted_egress(
+            "some-provider",
+            GrantedPayload {
+                egress: allowing("api.some-provider.example"),
+                ..GrantedPayload::default()
+            },
+        );
+        let _ = policy_frame(&mut rx);
+
+        s.apply_external_policy(allowing("unrelated.example"));
+
+        let routes = s.current_policy().network.egress.http;
+        assert!(
+            routes
+                .iter()
+                .any(|rule| rule.match_pattern == "api.some-provider.example"),
+            "the grant is a source of its own: {routes:?}"
+        );
+        let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
+    fn what_a_grant_supplies_rides_on_every_later_frame() {
+        // The guest replaces each section a frame carries, so a reload that omitted them would retract the credential mid-run.
+        let (s, _n, _store, mut rx) = fixture();
+        s.apply_granted_egress(
+            "some-provider",
+            GrantedPayload {
+                egress: allowing("api.some-provider.example"),
+                credentials: vec![crate::approval_flow::protocol::WireCredential {
+                    id: "SOME_TOKEN".into(),
+                    env_var: Some("SOME_TOKEN".into()),
+                    placeholder: Some("some-provider-LNSPLACEHOLDER00".into()),
+                    injections: Vec::new(),
+                }],
+                env: [("SOME_REGION".to_string(), "eu".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let _ = policy_frame(&mut rx);
+
+        s.apply_external_policy(allowing("unrelated.example"));
+
+        let republished = policy_frame(&mut rx);
+        assert_eq!(
+            republished.credentials.map(|c| c.len()),
+            Some(1),
+            "the credential must still be armed after an unrelated reload"
+        );
+        assert_eq!(
+            republished
+                .env
+                .and_then(|env| env.get("SOME_REGION").cloned()),
+            Some("eu".to_string())
+        );
+    }
+
+    #[test]
+    fn a_second_grant_does_not_retract_the_first() {
+        // The guest replaces each section it receives, so a frame carrying only the newest grant takes the older one's egress and credential away mid-run.
+        let (s, _n, _store, mut rx) = fixture();
+        s.apply_granted_egress(
+            "alpha",
+            GrantedPayload {
+                egress: allowing("api.alpha.example"),
+                credentials: vec![credential("ALPHA_TOKEN")],
+                env: [("ALPHA_REGION".to_string(), "eu".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let _ = policy_frame(&mut rx);
+
+        s.apply_granted_egress(
+            "beta",
+            GrantedPayload {
+                egress: allowing("api.beta.example"),
+                credentials: vec![credential("BETA_TOKEN")],
+                env: [("BETA_REGION".to_string(), "us".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+
+        let published = policy_frame(&mut rx);
+        let allowed: Vec<String> = published
+            .network
+            .expect("a network section")
+            .egress
+            .http
+            .iter()
+            .map(|rule| rule.match_pattern.clone())
+            .collect();
+        assert!(
+            allowed.contains(&"api.alpha.example".to_string())
+                && allowed.contains(&"api.beta.example".to_string()),
+            "both grants are the project's; neither answer undid the other: {allowed:?}"
+        );
+        let armed: Vec<String> = published
+            .credentials
+            .expect("credentials")
+            .into_iter()
+            .map(|credential| credential.id)
+            .collect();
+        assert_eq!(armed, ["ALPHA_TOKEN", "BETA_TOKEN"]);
+        let env = published.env.expect("env");
+        assert_eq!(env.len(), 2, "{env:?}");
+    }
+
+    fn credential(id: &str) -> crate::approval_flow::protocol::WireCredential {
+        crate::approval_flow::protocol::WireCredential {
+            id: id.to_string(),
+            env_var: Some(id.to_string()),
+            placeholder: Some(format!("{id}-LNSPLACEHOLDER00")),
+            injections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_run_that_granted_nothing_sends_no_supply_sections_at_all() {
+        // An empty list is not the same as no section: the guest would read one as "replace what you have with nothing".
+        let (s, _n, _store, mut rx) = fixture();
+        s.apply_external_policy(allowing("api.example.test"));
+
+        let published = policy_frame(&mut rx);
+        assert_eq!((published.credentials, published.env), (None, None));
+    }
+
+    #[test]
+    fn a_live_grant_leaves_the_policy_a_recorded_grant_produces() {
+        // The design rests on this: a grant taken mid-run must leave the run in the state the recorded grant produces. That the boot path installs that same payload is pinned in supervisor::adapter, against the store rather than this fake.
+        let opened = allowing("api.some-provider.example");
+        let mut shipped = Policy::default();
+        shipped.add_rule(RouteRule::deny_host("*"));
+        let mut own = Policy::default();
+        own.add_rule(RouteRule::allow_host("docs.some-vendor.example"));
+
+        let live = {
+            let port = Arc::new(FakeConnectorPort {
+                opens: Some(GrantedPayload {
+                    egress: opened.clone(),
+                    ..GrantedPayload::default()
+                }),
+                ..FakeConnectorPort::default()
+            });
+            let (s, _n, _store, _rx) = fixture();
+            s.set_connector_port(port);
+            s.set_shipped_policy(shipped.clone());
+            s.apply_external_policy(own.clone());
+            s.hold_for_offers(vec![offering("token", &["work"])]);
+            s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+            s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+            s.policy_message()
+        };
+
+        let relaunched = {
+            // A fresh run of the same project: the grant is already recorded, so nothing is held and the opened egress is in place from the first frame.
+            let (s, _n, _store, _rx) = fixture();
+            s.set_shipped_policy(shipped);
+            s.apply_external_policy(own);
+            s.apply_granted_egress(
+                "some-provider",
+                GrantedPayload {
+                    egress: opened,
+                    ..GrantedPayload::default()
+                },
+            );
+            s.policy_message()
+        };
+
+        assert_eq!(
+            live, relaunched,
+            "a grant applied live must leave exactly the table a relaunch would boot with"
+        );
+    }
+
+    #[test]
+    fn a_grant_is_decided_by_this_directorys_own_deny() {
+        // §3.3.2: the connector is source 4 and the decisions file source 5, so a `deny` the developer typed still wins.
+        let (s, _n, _store, mut rx) = fixture();
+        s.set_shipped_policy(Policy::default());
+        let mut typed = Policy::default();
+        typed.add_rule(RouteRule::deny_host("api.some-provider.example"));
+        s.apply_external_policy(typed);
+        let _ = policy_frame(&mut rx);
+
+        s.apply_granted_egress(
+            "some-provider",
+            GrantedPayload {
+                egress: allowing("api.some-provider.example"),
+                ..GrantedPayload::default()
+            },
+        );
+
+        let routes = s.current_policy().network.egress.http;
+        assert_eq!(
+            routes.first().map(|rule| rule.verdict),
+            Some(Verdict::Deny),
+            "a first-match gate must reach the developer's own deny first: {routes:?}"
+        );
+        let _ = policy_frame(&mut rx);
+    }
+
+    fn allowing(host: &str) -> Policy {
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::allow_host(host));
+        policy
     }
 
     #[test]
