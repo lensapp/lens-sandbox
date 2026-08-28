@@ -226,6 +226,7 @@ async fn run_connector(world: &mut BehaviourWorld, tail: String) {
                 &svc,
                 &mut terminal,
                 &PathBuf::from(CWD),
+                None,
                 &mut out,
                 &mut prompt,
             )

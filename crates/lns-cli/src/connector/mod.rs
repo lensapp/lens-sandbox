@@ -93,7 +93,7 @@ pub struct ForgetArgs {
 #[derive(clap::Args)]
 pub struct InstallArgs {
     #[arg(
-        help = "A published connector reference, or a path to a directory holding its lns.yaml."
+        help = "A published connector reference, or a path to a directory or the document itself. A bare reference is qualified by run.registry, else the Lens hub."
     )]
     pub source: String,
 }
@@ -137,11 +137,14 @@ pub async fn run(
     svc: &dyn ConnectorService,
     terminal: &mut dyn Terminal,
     cwd: &Path,
+    registry: Option<&str>,
     writer: &mut impl Write,
     prompt: &mut impl Write,
 ) -> Result<i32> {
     match cmd {
-        ConnectorCommand::Install(args) => install(svc, &args.source, cwd, writer).await,
+        ConnectorCommand::Install(args) => {
+            install(svc, &qualified_source(&args.source, registry), cwd, writer).await
+        }
         ConnectorCommand::Uninstall(args) => uninstall(svc, &args.name, writer).await,
         ConnectorCommand::List(args) => list(svc, args.output.format, writer).await,
         ConnectorCommand::Connect(args) => connect(svc, args, terminal, writer, prompt).await,
@@ -500,6 +503,14 @@ async fn send(svc: &dyn ConnectorService, req: Request) -> Result<Response> {
     Ok(response)
 }
 
+/// A local path names this machine, so it gains no registry; anything else is a reference and is qualified.
+fn qualified_source(source: &str, registry: Option<&str>) -> String {
+    if lns_artifact::sandbox::names_a_local_path(source) {
+        return source.to_string();
+    }
+    crate::config::resolve_default_registry(source, registry)
+}
+
 async fn install(
     svc: &dyn ConnectorService,
     source: &str,
@@ -693,6 +704,7 @@ mod tests {
             &svc,
             &mut crate::terminal::NoTerminal,
             &odd,
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -734,6 +746,7 @@ mod tests {
                 &svc,
                 &mut crate::terminal::NoTerminal,
                 &cwd(),
+                None,
                 &mut out,
                 &mut Vec::new(),
             )
@@ -775,6 +788,7 @@ mod tests {
             &svc,
             &mut crate::terminal::NoTerminal,
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -825,7 +839,16 @@ mod tests {
     ) -> Result<(i32, String)> {
         let mut out = Vec::new();
         let mut prompt = Vec::new();
-        let code = run(&cmd, svc, &mut asking(answers), cwd, &mut out, &mut prompt).await?;
+        let code = run(
+            &cmd,
+            svc,
+            &mut asking(answers),
+            cwd,
+            None,
+            &mut out,
+            &mut prompt,
+        )
+        .await?;
         let seen =
             String::from_utf8(prompt).expect("utf-8") + &String::from_utf8(out).expect("utf-8");
         Ok((code, seen))
@@ -875,6 +898,7 @@ mod tests {
             &svc,
             &mut asking(&["", "sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -899,6 +923,7 @@ mod tests {
             &svc,
             &mut asking(&["sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -927,6 +952,7 @@ mod tests {
             &svc,
             &mut asking(&["sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -948,6 +974,7 @@ mod tests {
             &svc,
             &mut asking(&["sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -1076,6 +1103,7 @@ mod tests {
             &svc,
             &mut asking(&["y"]),
             &odd,
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -1109,6 +1137,7 @@ mod tests {
                 &svc,
                 &mut asking(&["y"]),
                 &cwd(),
+                None,
                 &mut out,
                 &mut Vec::new(),
             )
@@ -1139,6 +1168,7 @@ mod tests {
                 &svc,
                 &mut asking(&["y"]),
                 &cwd(),
+                None,
                 &mut out,
                 &mut Vec::new(),
             )
@@ -1163,6 +1193,7 @@ mod tests {
             &svc,
             &mut asking(&["sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -1192,6 +1223,7 @@ mod tests {
             &svc,
             &mut asking(&["y"]),
             &cwd(),
+            None,
             &mut out,
             &mut Vec::new(),
         )
@@ -1331,6 +1363,7 @@ mod tests {
             &svc,
             &mut asking(&["", "sk-live"]),
             &cwd(),
+            None,
             &mut out,
             &mut prompt,
         )
@@ -1343,6 +1376,41 @@ mod tests {
             !asked.contains("name this connection"),
             "a connection that cannot be made is refused before the user is asked to name it: {asked}"
         );
+    }
+
+    #[test]
+    fn a_bare_reference_addresses_the_lens_hub_rather_than_docker_hub() {
+        // §2.3: a bare REF is qualified, never guessed — and the guess the registry parser makes on its own is Docker Hub, which is someone else's registry.
+        assert_eq!(qualified_source("acme/docs", None), "hub.lns.run/acme/docs");
+    }
+
+    #[test]
+    fn a_configured_registry_is_the_one_a_bare_reference_addresses() {
+        assert_eq!(
+            qualified_source("acme/docs", Some("registry.example")),
+            "registry.example/acme/docs"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_already_names_a_registry_is_left_as_written() {
+        assert_eq!(
+            qualified_source("ghcr.io/acme/docs:1", None),
+            "ghcr.io/acme/docs:1"
+        );
+    }
+
+    #[test]
+    fn a_local_path_is_not_a_reference_and_gains_no_registry() {
+        for path in [
+            ".",
+            "..",
+            "./connectors/docs",
+            "./connectors/docs/lns.yaml",
+            "/abs/docs",
+        ] {
+            assert_eq!(qualified_source(path, None), path, "{path}");
+        }
     }
 
     #[tokio::test]

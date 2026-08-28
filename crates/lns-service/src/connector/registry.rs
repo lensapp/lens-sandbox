@@ -17,7 +17,9 @@ impl ConnectorSource for RegistryConnectors {
                 let registry = crate::image::caching_registry_for(reference)?;
                 crate::image::pull_connector_with(&registry, reference).await
             }
-            Source::Local(dir) => super::source::read_local(&RealSnapshotFs, read_document, dir),
+            Source::Local(document) => {
+                super::source::read_local(&RealSnapshotFs, read_document, document)
+            }
         }
     }
 }

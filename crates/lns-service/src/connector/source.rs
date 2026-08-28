@@ -14,7 +14,7 @@ pub struct FetchedConnector {
     pub document: Vec<u8>,
 }
 
-/// Which of the two forms `<REF|PATH>` named. A path is absolute by the time it reaches the service, because the service's working directory is not the user's.
+/// Which of the two forms `<REF|PATH>` named. `Local` is the connector's document, absolute by the time it reaches the service, because the service's working directory is not the user's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Reference(String),
@@ -32,7 +32,17 @@ impl Source {
                 "connector {operand} reached the service as a relative path; the service's working directory is not yours, so `lns` sends the absolute one"
             );
         }
-        Ok(Self::Local(lns_artifact::sandbox::fold_path(path)))
+        Ok(Self::Local(document_at(&lns_artifact::sandbox::fold_path(
+            path,
+        ))))
+    }
+}
+
+/// The document a path names: itself when it is one, else the `lns.yaml` in the directory it names (cli-spec §2.4). Syntactic, because the service decides this and only the user's filesystem could answer it otherwise.
+fn document_at(path: &Path) -> PathBuf {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("yaml" | "yml") => path.to_path_buf(),
+        _ => path.join(LNS_YAML),
     }
 }
 
@@ -47,13 +57,16 @@ pub trait ConnectorSource: Send + Sync {
 const LNS_YAML: &str = "lns.yaml";
 const README: &str = "README.md";
 
-/// Read a connector directory the way `lns push` would, so a local install carries the digest publishing it would produce and a grant survives that publish (§7.1).
+/// Read a connector the way `lns push` would, so a local install carries the digest publishing it would produce and a grant survives that publish (§7.1).
+///
+/// Takes the document, and roots the filesets and the README at the directory holding it — a push does the same for a document under any name, so the digest matches either way.
 pub fn read_local<F: lns_artifact::walk::SnapshotFs + ?Sized>(
     fs: &F,
     read_document: impl FnOnce(&Path) -> Result<Vec<u8>>,
-    dir: &Path,
+    document_path: &Path,
 ) -> Result<FetchedConnector> {
-    let document = read_document(&dir.join(LNS_YAML))?;
+    let dir = document_path.parent().unwrap_or(Path::new(""));
+    let document = read_document(document_path)?;
     let connector = lns_artifact::connector::parse(&document)?;
     let mut filesets = Vec::new();
     for (method, path) in lns_artifact::connector::path_filesets(&connector.spec) {
@@ -143,7 +156,32 @@ mod tests {
         );
         assert_eq!(
             Source::of("/work/some-provider").unwrap(),
-            Source::Local(PathBuf::from("/work/some-provider"))
+            Source::Local(PathBuf::from("/work/some-provider/lns.yaml"))
+        );
+    }
+
+    #[test]
+    fn the_three_spellings_a_user_may_type_each_resolve_to_what_they_named() {
+        // A document, a directory, and a registry reference. A bare `path/to/file.yaml` is deliberately not a fourth: it is a reference, because a repository name may contain dots and slashes.
+        assert_eq!(
+            Source::of("/work/docs/lns.yaml").unwrap(),
+            Source::Local(PathBuf::from("/work/docs/lns.yaml")),
+            "a document is taken as itself"
+        );
+        assert_eq!(
+            Source::of("/work/docs").unwrap(),
+            Source::Local(PathBuf::from("/work/docs/lns.yaml")),
+            "a directory is taken as the document inside it"
+        );
+        assert_eq!(
+            Source::of("acme/docs:1").unwrap(),
+            Source::Reference("acme/docs:1".to_string()),
+            "anything the user did not spell as a path is a reference"
+        );
+        assert_eq!(
+            Source::of("/work/docs/lns.dev.yaml").unwrap(),
+            Source::Local(PathBuf::from("/work/docs/lns.dev.yaml")),
+            "the document's name is not what makes it one"
         );
     }
 
@@ -159,7 +197,7 @@ mod tests {
     fn a_path_is_folded_so_two_spellings_of_one_directory_are_one_source() {
         assert_eq!(
             Source::of("/work/./mixins/../some-provider").unwrap(),
-            Source::Local(PathBuf::from("/work/some-provider"))
+            Source::Local(PathBuf::from("/work/some-provider/lns.yaml"))
         );
     }
 
@@ -167,11 +205,85 @@ mod tests {
     fn a_local_connector_carries_the_digest_publishing_it_would_produce() {
         // A grant binds to the digest, so `install ./dir` then `install <ref>` of those same bytes must resume the grant rather than ask again (§7.1).
         let doc = document("");
-        let fetched = read_local(&MapFs::default(), reading(doc.clone()), Path::new("/work"))
-            .expect("a connector with no path fileset reads");
+        let fetched = read_local(
+            &MapFs::default(),
+            reading(doc.clone()),
+            Path::new("/work/lns.yaml"),
+        )
+        .expect("a connector with no path fileset reads");
         let published = lns_artifact::build::build_artifact(&doc, &[], None).expect("build");
         assert_eq!(fetched.digest, published.manifest_digest);
         assert_eq!(fetched.document, doc);
+    }
+
+    /// Records which path the caller asked to read, so a test can pin *which* document was taken.
+    fn reading_from(
+        doc: Vec<u8>,
+        seen: std::rc::Rc<std::cell::RefCell<Option<PathBuf>>>,
+    ) -> impl FnOnce(&Path) -> Result<Vec<u8>> {
+        move |path| {
+            *seen.borrow_mut() = Some(path.to_path_buf());
+            Ok(doc)
+        }
+    }
+
+    #[test]
+    fn a_path_naming_the_document_itself_reads_that_document() {
+        // cli-spec §2.4 makes a PATH "a path to a local document", so naming the file is one of the spellings a user may type.
+        let doc = document("");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let fetched = read_local(
+            &MapFs::default(),
+            reading_from(doc.clone(), seen.clone()),
+            Path::new("/work/lns.yaml"),
+        )
+        .expect("a document path reads");
+
+        assert_eq!(seen.borrow().as_deref(), Some(Path::new("/work/lns.yaml")));
+        assert_eq!(fetched.document, doc);
+    }
+
+    #[test]
+    fn a_document_named_something_else_is_still_a_document() {
+        // The spec's own example is `lns.dev.yaml`, so the name is not the thing that makes it one.
+        let doc = document("");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        read_local(
+            &MapFs::default(),
+            reading_from(doc, seen.clone()),
+            Path::new("/work/lns.dev.yaml"),
+        )
+        .expect("reads");
+
+        assert_eq!(
+            seen.borrow().as_deref(),
+            Some(Path::new("/work/lns.dev.yaml"))
+        );
+    }
+
+    #[test]
+    fn a_document_under_any_name_digests_the_directory_it_sits_in() {
+        // §7.1: the digest must be what a push of that directory publishes, and `lns push -f ./x/lns.dev.yaml` roots both the filesets and the README at `./x`. Rooting anywhere else here would make the grant stop surviving a publish.
+        let doc =
+            document(r#","filesets":[{"path":"./seed","guestPath":"/home/agent/.some-provider"}]"#);
+        let readme = b"# some-provider\n";
+        let fs = MapFs::with(&[
+            ("/work/README.md", readme),
+            ("/work/seed/config", b"token: some_LNSPLACEHOLDER0000000000"),
+        ]);
+
+        let fetched = read_local(&fs, reading(doc.clone()), Path::new("/work/lns.dev.yaml"))
+            .expect("a document under another name reads");
+
+        let seeded = lns_artifact::walk::walk(
+            &fs,
+            Path::new("/work/seed"),
+            lns_artifact::spec::Kind::Connector,
+        )
+        .expect("the directory a push would pack");
+        let published = lns_artifact::build::build_artifact(&doc, &[seeded], Some(readme))
+            .expect("what a push of that directory publishes");
+        assert_eq!(fetched.digest, published.manifest_digest);
     }
 
     #[test]
@@ -180,7 +292,8 @@ mod tests {
         let doc = document("");
         let readme = b"# some-provider\n";
         let fs = MapFs::with(&[("/work/README.md", readme)]);
-        let fetched = read_local(&fs, reading(doc.clone()), Path::new("/work")).expect("reads");
+        let fetched =
+            read_local(&fs, reading(doc.clone()), Path::new("/work/lns.yaml")).expect("reads");
         let published = lns_artifact::build::build_artifact(&doc, &[], Some(readme))
             .expect("what a push of this directory publishes");
         assert_eq!(fetched.digest, published.manifest_digest);
@@ -189,8 +302,12 @@ mod tests {
     #[test]
     fn a_directory_with_no_readme_publishes_the_digest_that_has_none() {
         let doc = document("");
-        let fetched =
-            read_local(&MapFs::default(), reading(doc.clone()), Path::new("/work")).expect("reads");
+        let fetched = read_local(
+            &MapFs::default(),
+            reading(doc.clone()),
+            Path::new("/work/lns.yaml"),
+        )
+        .expect("reads");
         let published = lns_artifact::build::build_artifact(&doc, &[], None).expect("build");
         assert_eq!(fetched.digest, published.manifest_digest);
     }
@@ -202,7 +319,7 @@ mod tests {
             deny_reads: true,
             ..MapFs::default()
         };
-        let err = read_local(&denied, reading(document("")), Path::new("/work"))
+        let err = read_local(&denied, reading(document("")), Path::new("/work/lns.yaml"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("README.md"), "{err}");
@@ -223,8 +340,18 @@ mod tests {
             br#"{"token":"some_LNSPLACEHOLDER0000000000","extra":1}"#,
         )]);
 
-        let one = read_local(&with_file, reading(doc.clone()), Path::new("/work")).expect("one");
-        let two = read_local(&other_file, reading(doc.clone()), Path::new("/work")).expect("two");
+        let one = read_local(
+            &with_file,
+            reading(doc.clone()),
+            Path::new("/work/lns.yaml"),
+        )
+        .expect("one");
+        let two = read_local(
+            &other_file,
+            reading(doc.clone()),
+            Path::new("/work/lns.yaml"),
+        )
+        .expect("two");
 
         assert_ne!(
             one.digest, two.digest,
@@ -235,7 +362,7 @@ mod tests {
     #[test]
     fn a_missing_path_fileset_names_the_method_and_the_path() {
         let doc = document(r#","filesets":[{"path":"./absent","guestPath":"/home/agent/.x"}]"#);
-        let err = read_local(&MapFs::default(), reading(doc), Path::new("/work"))
+        let err = read_local(&MapFs::default(), reading(doc), Path::new("/work/lns.yaml"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("token"), "{err}");
@@ -250,7 +377,7 @@ mod tests {
             read_local(
                 &MapFs::default(),
                 reading(sandbox.to_vec()),
-                Path::new("/work")
+                Path::new("/work/lns.yaml")
             )
             .is_err()
         );
@@ -261,7 +388,7 @@ mod tests {
         let err = read_local(
             &MapFs::default(),
             |path| anyhow::bail!("reading {}", path.display()),
-            Path::new("/work"),
+            Path::new("/work/lns.yaml"),
         )
         .unwrap_err()
         .to_string();

@@ -22,6 +22,51 @@ fn badge(ui: &mut egui::Ui, label: &str) {
         });
 }
 
+/// A badge the user picks between: the same chip the card already speaks in, filled when it is the chosen one so the selection reads at a glance rather than from a control.
+pub fn chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let (fill, text) = if selected {
+        (window::TEXT_ACCENT, window::BG_PRIMARY)
+    } else {
+        (badge_fill(), window::TEXT_MUTED)
+    };
+    // The frame's own response, not the label's: the padding is on the frame, so a click on a chip's edge must count.
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, window::BORDER))
+        .corner_radius(CornerRadius::same(theme::BADGE_CORNER_RADIUS))
+        .inner_margin(Margin::symmetric(theme::BADGE_PAD_X, theme::BADGE_PAD_Y))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(label)
+                        .size(theme::FONT_BADGE)
+                        .color(text),
+                )
+                .selectable(false),
+            );
+        })
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Every chip on one wrapping line, so a card with several accounts grows down rather than off the edge.
+pub fn chips<'a>(
+    ui: &mut egui::Ui,
+    labels: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Option<String> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::BADGE_GAP;
+        for (label, selected) in labels {
+            if chip(ui, label, selected).clicked() {
+                picked = Some(label.to_string());
+            }
+        }
+    });
+    picked
+}
+
 pub fn badges<I, S>(ui: &mut egui::Ui, labels: I)
 where
     I: IntoIterator<Item = S>,
