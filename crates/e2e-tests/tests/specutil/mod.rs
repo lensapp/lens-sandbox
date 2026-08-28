@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -54,6 +55,21 @@ pub fn service_binary() -> PathBuf {
     );
 }
 
+/// Every `lns` the harness spawns gets a session of its own, so `/dev/tty` never opens and a scenario that asserts "no terminal" holds even when the suite runs from an interactive shell.
+pub fn lns_command() -> Command {
+    let mut cmd = Command::new(lns_binary());
+    // SAFETY: setsid() is async-signal-safe and touches only the forked child's session.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd
+}
+
 #[derive(Debug)]
 pub struct CliResult {
     pub stdout: String,
@@ -78,7 +94,7 @@ where
     V: AsRef<OsStr>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let mut cmd = Command::new(lns_binary());
+    let mut cmd = lns_command();
     cmd.args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -100,7 +116,7 @@ where
     V: AsRef<OsStr>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let mut cmd = Command::new(lns_binary());
+    let mut cmd = lns_command();
     cmd.current_dir(dir).args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -122,7 +138,7 @@ where
     V: AsRef<OsStr>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let mut cmd = Command::new(lns_binary());
+    let mut cmd = lns_command();
     cmd.args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -149,7 +165,7 @@ where
     V: AsRef<OsStr>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let mut cmd = Command::new(lns_binary());
+    let mut cmd = lns_command();
     cmd.args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -171,7 +187,7 @@ where
     V: AsRef<OsStr>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let mut cmd = Command::new(lns_binary());
+    let mut cmd = lns_command();
     cmd.current_dir(dir).args(&args);
     for (k, v) in envs {
         cmd.env(k, v);
