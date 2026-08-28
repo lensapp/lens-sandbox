@@ -67,7 +67,7 @@ fn view_of(
                 name: method.name.clone(),
                 label: method.label().to_string(),
                 needs_connect: method.auth.is_some(),
-                offerable: method.is_offerable(),
+                offerable: can_apply(method),
                 opens: opened_by(method),
                 writes: method
                     .filesets
@@ -80,6 +80,7 @@ fn view_of(
                     .iter()
                     .map(|credential| credential.owner().to_string())
                     .collect(),
+                help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
             })
             .collect(),
         profiles: profile_views(profiles),
@@ -220,16 +221,88 @@ pub fn forget(store: &ConnectorStore<'_>, name: &str, project_dir: &str) -> Resu
     Ok(store.forget(project_dir, name)?)
 }
 
-/// Every destination an installed connector serves that this project has not decided, so a run holds them for an offer (§3.2.1).
-pub fn held_patterns(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<String>> {
-    let mut patterns = Vec::new();
+/// Grants a method from the card, refusing bytes other than the ones the card disclosed, and answers with what the guest is to be given (§3.2.4).
+pub fn grant_disclosed(
+    store: &ConnectorStore<'_>,
+    name: &str,
+    disclosed_digest: &str,
+    project_dir: &str,
+    method: &str,
+    profile: Option<&str>,
+) -> Result<crate::approval_flow::protocol::GrantedPayload> {
+    let entry = installed_entry(store, name)?;
+    if entry.digest != disclosed_digest {
+        anyhow::bail!(
+            "{name} was replaced since this card was raised, so it now opens something you were not shown; the next run offers the new version"
+        );
+    }
+    // The profile `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
+    let settled = grant(store, name, project_dir, method, profile)?;
+    supplied_by(store, &entry, method, settled.profile.as_deref())
+}
+
+/// What every recorded grant gives this run, by connector, so a project that granted yesterday is not asked again and is not left empty-handed (§7.1).
+pub fn granted_supply(
+    store: &ConnectorStore<'_>,
+    project_dir: &str,
+) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
+    let mut supplied = BTreeMap::new();
+    for entry in store.installed()? {
+        let Some(super::store::ProjectDecision::Granted {
+            digest,
+            method,
+            profile,
+            ..
+        }) = store.decision(project_dir, &entry.name)?
+        else {
+            continue;
+        };
+        // A grant bound to other bytes is not one, so an update supplies nothing and offers again.
+        if digest != entry.digest {
+            continue;
+        }
+        supplied.insert(
+            entry.name.clone(),
+            supplied_by(store, &entry, &method, profile.as_deref())?,
+        );
+    }
+    Ok(supplied)
+}
+
+/// The egress, credentials, `env` and files one granted method contributes, armed with the values the named profile holds.
+fn supplied_by(
+    store: &ConnectorStore<'_>,
+    entry: &Installed,
+    method: &str,
+    profile: Option<&str>,
+) -> Result<crate::approval_flow::protocol::GrantedPayload> {
+    let definition = lns_artifact::connector::parse(&entry.document)?;
+    let method = offerable_method(&definition, method)?;
+    let values = match profile {
+        Some(label) => store
+            .profiles_of(&entry.name)?
+            .remove(label)
+            .map(|held| lns_ipc::SecretValues(held.values))
+            .unwrap_or_default(),
+        None => lns_ipc::SecretValues::default(),
+    };
+    Ok(super::payload::granted_payload(method, &values))
+}
+
+/// Every connector this project has not decided, as the card and `lns connector grant` both disclose it, so a run holds what they serve and can offer them (§3.2.1).
+pub fn offerable(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<ConnectorView>> {
+    let mut offers = Vec::new();
     let mut unreadable = Vec::new();
     for entry in store.installed()? {
         if decided_here(store, project_dir, &entry) {
             continue;
         }
         match lns_artifact::connector::parse(&entry.document) {
-            Ok(definition) => patterns.extend(definition.spec.serves),
+            Ok(definition) => offers.push(view_of(
+                &definition,
+                &entry.digest,
+                &store.profiles_of(&entry.name)?,
+            )),
             Err(_) => unreadable.push(entry.name),
         }
     }
@@ -239,7 +312,7 @@ pub fn held_patterns(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Ve
             "cannot read the installed connector(s) {names}, so this run is not offered what they serve"
         );
     }
-    Ok(patterns)
+    Ok(offers)
 }
 
 /// A decision this run cannot read is not one: holding asks, which a grant then answers, where letting the destination through cannot be taken back (§3.2.1).
@@ -321,7 +394,12 @@ fn definition_of(
     lns_artifact::connector::parse(&entry.document)
 }
 
-/// The named method, refused when this version cannot offer it — the card could not either (§3.2.2).
+/// What this version can deliver, which is narrower than what a document may declare: a fileset's bytes are not kept at install, so a method writing one cannot be applied yet (§3.2.2).
+fn can_apply(method: &lns_artifact::connector::Method) -> bool {
+    method.is_offerable() && method.filesets.is_empty()
+}
+
+/// The named method, refused when this version cannot deliver it — the card could not either (§3.2.2).
 fn offerable_method<'a>(
     definition: &'a lns_artifact::connector::ConnectorDefinition,
     method: &str,
@@ -332,7 +410,7 @@ fn offerable_method<'a>(
         .iter()
         .find(|m| m.name == method)
         .ok_or_else(|| anyhow::anyhow!("{} declares no method named {method}", definition.name))?;
-    if !found.is_offerable() {
+    if !can_apply(found) {
         anyhow::bail!("method {method} of {} needs a newer lns", definition.name);
     }
     Ok(found)
@@ -1051,6 +1129,10 @@ mod tests {
         assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
     }
 
+    fn served_by(offers: Vec<ConnectorView>) -> Vec<String> {
+        offers.into_iter().flat_map(|offer| offer.serves).collect()
+    }
+
     fn installed_as(rig: &Rig, name: &str, host: &str, digest: &str) {
         rig.set.put(name, digest, &document(name, host)).unwrap();
     }
@@ -1065,7 +1147,7 @@ mod tests {
             "sha256:abc",
         );
         assert_eq!(
-            held_patterns(&rig.store(), "/work").unwrap(),
+            served_by(offerable(&rig.store(), "/work").unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1091,7 +1173,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
     }
 
     #[test]
@@ -1106,7 +1188,7 @@ mod tests {
         rig.store()
             .decide("/work", "some-provider", ProjectDecision::Declined)
             .unwrap();
-        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
     }
 
     #[test]
@@ -1132,7 +1214,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            held_patterns(&rig.store(), "/work").unwrap(),
+            served_by(offerable(&rig.store(), "/work").unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1150,7 +1232,7 @@ mod tests {
             .decide("/work", "some-provider", ProjectDecision::Declined)
             .unwrap();
         assert_eq!(
-            held_patterns(&rig.store(), "/elsewhere").unwrap(),
+            served_by(offerable(&rig.store(), "/elsewhere").unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1170,7 +1252,7 @@ mod tests {
         );
         let messages = crate::test_env::captured_messages(|| {
             assert_eq!(
-                held_patterns(&rig.store(), "/work").unwrap(),
+                served_by(offerable(&rig.store(), "/work").unwrap()),
                 ["api.some-provider.example"],
                 "the readable connector still holds what it serves"
             );
@@ -1195,7 +1277,7 @@ mod tests {
 
         let messages = crate::test_env::captured_messages(|| {
             assert_eq!(
-                held_patterns(&rig.store(), "/work").unwrap(),
+                served_by(offerable(&rig.store(), "/work").unwrap()),
                 ["api.some-provider.example"]
             );
         });
@@ -1217,7 +1299,7 @@ mod tests {
             .unwrap();
 
         let messages = crate::test_env::captured_messages(|| {
-            assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+            assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
         });
         assert!(
             messages.is_empty(),
@@ -1226,8 +1308,171 @@ mod tests {
     }
 
     #[test]
+    fn granting_from_a_card_answers_with_what_the_guest_is_given() {
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "open",
+                    "egress": { "http": [{ "match": "api.some-provider.example", "verdict": "allow" }] },
+                    "env": { "SOME_REGION": "eu" },
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+
+        let payload = grant_disclosed(
+            &rig.store(),
+            "some-provider",
+            "sha256:abc",
+            "/work",
+            "open",
+            None,
+        )
+        .expect("grant");
+
+        assert_eq!(
+            payload.egress.network.egress.http[0].match_pattern,
+            "api.some-provider.example"
+        );
+        assert_eq!(payload.env.get("SOME_REGION"), Some(&"eu".to_string()));
+        let recorded = rig.store().decision("/work", "some-provider").unwrap();
+        assert!(
+            matches!(recorded, Some(ProjectDecision::Granted { .. })),
+            "the project's answer is recorded, not just returned: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn a_method_writing_a_fileset_is_not_offered_because_its_bytes_are_not_kept() {
+        // Install stores the document alone, so the file's content is not on this machine. Offering it would disclose a write that never happens.
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "token",
+                    "auth": { "kind": "token" },
+                    "filesets": [{ "guestPath": "/home/agent/.some-provider", "path": "./seed" }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+
+        let offered = offerable(&rig.store(), "/work").expect("offerable");
+        assert!(
+            !offered[0].methods[0].offerable,
+            "the card must not promise a file it cannot write"
+        );
+
+        let err = grant_disclosed(
+            &rig.store(),
+            "some-provider",
+            "sha256:abc",
+            "/work",
+            "token",
+            None,
+        )
+        .expect_err("and granting it is refused for the same reason");
+        assert!(format!("{err:#}").contains("newer lns"), "{err:#}");
+    }
+
+    #[test]
+    fn granting_bytes_other_than_the_ones_disclosed_is_refused() {
+        // §3.2.4: a grant must not be silently widened. A reinstall between the card and the click changes what the method opens.
+        let rig = Rig::new();
+        installed_as(
+            &rig,
+            "some-provider",
+            "api.some-provider.example",
+            "sha256:new",
+        );
+
+        let err = grant_disclosed(
+            &rig.store(),
+            "some-provider",
+            "sha256:the-one-the-card-showed",
+            "/work",
+            "open",
+            None,
+        )
+        .expect_err("the bytes changed under the card");
+
+        assert!(format!("{err:#}").contains("replaced"), "{err:#}");
+        assert!(
+            rig.store()
+                .decision("/work", "some-provider")
+                .unwrap()
+                .is_none(),
+            "nothing was recorded for bytes the user never saw"
+        );
+    }
+
+    #[test]
+    fn granting_a_connected_method_arms_it_with_the_value_that_profile_holds() {
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "token",
+                    "auth": { "kind": "token" },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some-provider-LNSPLACEHOLDER00",
+                        "injections": [{ "kind": "bearer_header", "domain": "api.some-provider.example" }],
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        connect(
+            &rig.store(),
+            "some-provider",
+            "token",
+            "work",
+            [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("connect");
+
+        let payload = grant_disclosed(
+            &rig.store(),
+            "some-provider",
+            "sha256:abc",
+            "/work",
+            "token",
+            Some("work"),
+        )
+        .expect("grant");
+
+        assert_eq!(
+            payload.credentials[0].injections[0].value(),
+            "Bearer sk-live",
+            "the value the user connected with is what the boundary substitutes"
+        );
+    }
+
+    #[test]
     fn nothing_installed_holds_nothing() {
         let rig = Rig::new();
-        assert!(held_patterns(&rig.store(), "/work").unwrap().is_empty());
+        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
     }
 }

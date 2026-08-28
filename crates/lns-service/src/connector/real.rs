@@ -1,6 +1,7 @@
 //! Production wiring: the three connector stores at the paths cli-spec §9 names,
 //! and the registry-or-machine resolver behind them.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,6 +11,7 @@ use lns_policy::decision_store::JsonDecisionStore;
 use super::handler;
 use super::registry::RegistryConnectors;
 use super::store::{ConnectorStore, Profile, ProjectDecision};
+use crate::approval_flow::protocol::GrantedPayload;
 
 /// One machine verb, named without the wire type so the dispatcher hands over no store of its own.
 pub enum Call {
@@ -56,9 +58,9 @@ impl Paths {
     }
 }
 
-/// The destinations a run in this directory holds for a connector offer (§3.2.1). Unreadable connector state holds nothing, because a run must still launch beside it.
-pub fn held_patterns_for(project_dir: &Path) -> Vec<String> {
-    match read_held_patterns(project_dir) {
+/// The connectors a run in this directory can be offered (§3.2.1). Unreadable connector state offers none, because a run must still launch beside it.
+pub fn offers_for_project(project_dir: &Path) -> Vec<lns_ipc::ConnectorView> {
+    match read_offers(project_dir) {
         Ok(patterns) => patterns,
         Err(e) => {
             crate::log::warn!(
@@ -69,8 +71,86 @@ pub fn held_patterns_for(project_dir: &Path) -> Vec<String> {
     }
 }
 
-fn read_held_patterns(project_dir: &Path) -> Result<Vec<String>> {
-    // The same folded path `lns connector grant` keys a decision by; an unfolded one would read every grant as absent.
+fn read_offers(project_dir: &Path) -> Result<Vec<lns_ipc::ConnectorView>> {
+    with_project_store(project_dir, handler::offerable)
+}
+
+/// The connector store as the approval session reaches it: every method opens the three stores itself, because a card outlives no lock.
+pub struct RealConnectorPort {
+    project_dir: String,
+}
+
+impl RealConnectorPort {
+    pub fn new(project_dir: String) -> Self {
+        Self { project_dir }
+    }
+
+    fn with_store<T>(&self, f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T, String> {
+        let paths = Paths::resolve().map_err(|e| format!("{e:#}"))?;
+        let installed = super::dir::ConnectorDir::new(paths.connectors);
+        let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
+        let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
+        f(&ConnectorStore::new(&installed, &values, &grants)).map_err(|e| format!("{e:#}"))
+    }
+}
+
+impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
+    fn connect(
+        &self,
+        name: &str,
+        method: &str,
+        label: &str,
+        values: lns_ipc::SecretValues,
+    ) -> Result<Vec<String>, String> {
+        self.with_store(|store| {
+            Ok(handler::connect(store, name, method, label, values.0)?.invalidated)
+        })
+    }
+
+    fn grant(
+        &self,
+        name: &str,
+        digest: &str,
+        method: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
+        self.with_store(|store| {
+            handler::grant_disclosed(store, name, digest, &self.project_dir, method, profile)
+        })
+    }
+
+    fn decline(&self, name: &str) -> Result<(), String> {
+        self.with_store(|store| {
+            store.decide(&self.project_dir, name, ProjectDecision::Declined)?;
+            Ok(())
+        })
+    }
+}
+
+/// What the grants this project already made supply to a starting run, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
+pub fn granted_supply_for(project_dir: &Path) -> BTreeMap<String, GrantedPayload> {
+    match read_granted_supply(project_dir) {
+        Ok(supply) => supply,
+        Err(e) => {
+            crate::log::warn!(
+                "cannot read what this project granted, so this run starts without it: {e:#}"
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
+fn read_granted_supply(project_dir: &Path) -> Result<BTreeMap<String, GrantedPayload>> {
+    with_project_store(project_dir, |store, dir| {
+        handler::granted_supply(store, dir)
+    })
+}
+
+/// Opens the three stores against the folded project directory a grant is keyed by.
+fn with_project_store<T>(
+    project_dir: &Path,
+    f: impl FnOnce(&ConnectorStore<'_>, &str) -> Result<T>,
+) -> Result<T> {
     let folded = lns_artifact::sandbox::fold_path(project_dir);
     let dir = folded
         .to_str()
@@ -79,7 +159,7 @@ fn read_held_patterns(project_dir: &Path) -> Result<Vec<String>> {
     let installed = super::dir::ConnectorDir::new(paths.connectors);
     let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
     let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
-    handler::held_patterns(&ConnectorStore::new(&installed, &values, &grants), dir)
+    f(&ConnectorStore::new(&installed, &values, &grants), dir)
 }
 
 pub async fn answer(call: Call) -> Result<Response> {
@@ -227,15 +307,23 @@ mod tests {
         assert!(format!("{err:#}").contains("parsing"), "{err:#}");
     }
 
+    fn served_by(offers: Vec<lns_ipc::ConnectorView>) -> Vec<String> {
+        offers.into_iter().flat_map(|offer| offer.serves).collect()
+    }
+
     fn install_one(home: &Path, serves: &str) {
-        let dir = home.join("connectors").join("some-provider");
+        install_named(home, "some-provider", serves);
+    }
+
+    fn install_named(home: &Path, name: &str, serves: &str) {
+        let dir = home.join("connectors").join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("document.json"),
             serde_json::json!({
                 "apiVersion": "lns.run/v1",
                 "kind": "connector",
-                "name": "some-provider",
+                "name": name,
                 "spec": {
                     "serves": [serves],
                     "methods": [{ "name": "token", "auth": { "kind": "token" } }],
@@ -266,7 +354,7 @@ mod tests {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_one(home.path(), "api.some-provider.example");
         assert_eq!(
-            held_patterns_for(Path::new("/work")),
+            served_by(offers_for_project(Path::new("/work"))),
             ["api.some-provider.example"]
         );
     }
@@ -280,11 +368,11 @@ mod tests {
         install_one(home.path(), "api.some-provider.example");
         decline(home.path(), "/work");
         assert!(
-            held_patterns_for(Path::new("/work/sub/..")).is_empty(),
+            offers_for_project(Path::new("/work/sub/..")).is_empty(),
             "/work/sub/.. is /work, so this project has already declined"
         );
         assert_eq!(
-            held_patterns_for(Path::new("/elsewhere")),
+            served_by(offers_for_project(Path::new("/elsewhere"))),
             ["api.some-provider.example"],
             "the control: an empty answer above must come from the decline, not from state this test failed to write"
         );
@@ -294,7 +382,267 @@ mod tests {
     #[serial(env)]
     fn connector_state_this_build_cannot_reach_holds_nothing_rather_than_failing_the_run() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
-        assert!(held_patterns_for(Path::new("/work")).is_empty());
+        assert!(offers_for_project(Path::new("/work")).is_empty());
+    }
+
+    fn install_connectable(home: &Path) {
+        let dir = home.join("connectors").join("some-provider");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": "some-provider",
+                "spec": {
+                    "serves": ["api.some-provider.example"],
+                    "methods": [{
+                        "name": "token",
+                        "auth": { "kind": "token" },
+                        "egress": { "http": [{ "match": "api.some-provider.example", "verdict": "allow" }] },
+                        "credentials": [{
+                            "envVar": "SOME_TOKEN",
+                            "placeholder": "some-provider-LNSPLACEHOLDER00",
+                            "injections": [{ "kind": "bearer_header", "domain": "api.some-provider.example" }],
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_card_connects_then_grants_and_the_guest_is_given_what_the_method_supplies() {
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let port = RealConnectorPort::new("/work".to_string());
+
+        let invalidated = port
+            .connect(
+                "some-provider",
+                "token",
+                "work",
+                lns_ipc::SecretValues(
+                    [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .expect("connect");
+        assert!(invalidated.is_empty(), "no project granted anything yet");
+
+        let payload = port
+            .grant("some-provider", "sha256:abc", "token", Some("work"))
+            .expect("grant");
+
+        assert_eq!(
+            payload.egress.network.egress.http[0].match_pattern,
+            "api.some-provider.example"
+        );
+        assert_eq!(
+            payload.credentials[0].injections[0].value(),
+            "Bearer sk-live",
+            "the value typed into the card is what the boundary substitutes"
+        );
+        assert!(
+            offers_for_project(Path::new("/work")).is_empty(),
+            "the project decided, so nothing it serves is offered again"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_project_that_granted_yesterday_gets_what_it_granted_today() {
+        // §7.1: the grant is recorded once and supplies every later run. Reading only the decision would leave the run with the destination closed and the credential absent.
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let port = RealConnectorPort::new("/work".to_string());
+        port.connect(
+            "some-provider",
+            "token",
+            "work",
+            lns_ipc::SecretValues(
+                [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .expect("connect");
+        port.grant("some-provider", "sha256:abc", "token", Some("work"))
+            .expect("grant");
+
+        let supplied = granted_supply_for(Path::new("/work"));
+        let supply = supplied
+            .get("some-provider")
+            .expect("the recorded grant supplies");
+
+        assert_eq!(
+            supply.egress.network.egress.http[0].match_pattern,
+            "api.some-provider.example"
+        );
+        assert_eq!(
+            supply.credentials[0].injections[0].value(),
+            "Bearer sk-live",
+            "the profile the grant named is the one that arms it"
+        );
+        assert!(
+            granted_supply_for(Path::new("/elsewhere")).is_empty(),
+            "another project granted nothing, so it gets nothing"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_project_that_granted_two_connectors_is_supplied_both() {
+        // Stopping at the first recorded grant would leave the second connector's destination closed, chosen by whichever the store listed first.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        install_named(home.path(), "other-provider", "api.other-provider.example");
+        with_project_store(Path::new("/work"), |store, dir| {
+            for name in ["some-provider", "other-provider"] {
+                store.decide(
+                    dir,
+                    name,
+                    ProjectDecision::Granted {
+                        digest: "sha256:abc".to_string(),
+                        method: "token".to_string(),
+                        profile: None,
+                        authority: Default::default(),
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .expect("record both grants");
+
+        let supplied = granted_supply_for(Path::new("/work"));
+
+        assert_eq!(
+            supplied.keys().collect::<Vec<_>>(),
+            ["other-provider", "some-provider"],
+            "both grants are this project's"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_grant_made_against_bytes_that_have_since_changed_supplies_nothing() {
+        // The connector was updated after the grant, so what it now opens is not what the project consented to.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        with_project_store(Path::new("/work"), |store, dir| {
+            store.decide(
+                dir,
+                "some-provider",
+                ProjectDecision::Granted {
+                    digest: "sha256:the-version-they-agreed-to".to_string(),
+                    method: "token".to_string(),
+                    profile: None,
+                    authority: Default::default(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("record a grant against older bytes");
+
+        assert!(granted_supply_for(Path::new("/work")).is_empty());
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_project_that_declined_is_supplied_nothing() {
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        RealConnectorPort::new("/work".to_string())
+            .decline("some-provider")
+            .expect("decline");
+
+        assert!(granted_supply_for(Path::new("/work")).is_empty());
+    }
+
+    #[test]
+    #[serial(env)]
+    fn connector_state_that_cannot_be_read_supplies_nothing_rather_than_failing_the_run() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        assert!(granted_supply_for(Path::new("/work")).is_empty());
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_card_grant_against_bytes_that_changed_is_refused() {
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+
+        let refused = RealConnectorPort::new("/work".to_string())
+            .grant(
+                "some-provider",
+                "sha256:what-the-card-showed",
+                "token",
+                None,
+            )
+            .expect_err("the installed bytes are not the ones disclosed");
+
+        assert!(refused.contains("replaced"), "{refused}");
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_card_decline_is_the_standing_no_the_next_run_reads() {
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_one(home.path(), "api.some-provider.example");
+
+        RealConnectorPort::new("/work".to_string())
+            .decline("some-provider")
+            .expect("decline");
+
+        assert!(offers_for_project(Path::new("/work")).is_empty());
+        assert!(
+            !offers_for_project(Path::new("/elsewhere")).is_empty(),
+            "the no is this project's, not the machine's"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_card_answer_that_cannot_reach_the_store_says_so_rather_than_panicking() {
+        use crate::approval_flow::session::ConnectorPort;
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        let port = RealConnectorPort::new("/work".to_string());
+
+        assert!(
+            port.decline("some-provider")
+                .expect_err("no home resolves")
+                .contains("locating the connector store")
+        );
+        assert!(
+            port.grant("some-provider", "sha256:abc", "token", None)
+                .is_err()
+        );
+        assert!(
+            port.connect(
+                "some-provider",
+                "token",
+                "work",
+                lns_ipc::SecretValues::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

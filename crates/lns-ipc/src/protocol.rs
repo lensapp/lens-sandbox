@@ -379,6 +379,9 @@ pub struct ConnectorMethodView {
     pub env: Vec<String>,
     /// Each credential it needs a value for, named by its `envVar` or, absent one, its placeholder.
     pub credentials: Vec<String>,
+    /// The connector author's own words about where to get the value (§3.2.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

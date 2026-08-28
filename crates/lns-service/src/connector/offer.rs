@@ -1,25 +1,20 @@
 //! Which connector a destination offers, per `docs/sandbox-spec.md` §3.2.1.
 
-use lns_artifact::connector::ConnectorDefinition;
+use lns_ipc::ConnectorView;
 use lns_policy::matching::destination_covers;
 
 /// What a held destination offers. `Ambiguous` is reachable: install refuses an overlap it can see, and two mid-segment wildcards sharing hosts are one it cannot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Offer<'a> {
     None,
-    One(&'a ConnectorDefinition),
+    One(&'a ConnectorView),
     Ambiguous(Vec<&'a str>),
 }
 
 /// The connector a destination is offered for, among those this project has neither granted nor declined. A `serves` entry with no port matches any port; one with a port narrows to it (§3.2.1).
-pub fn offers_for<'a>(
-    destination: &str,
-    installed: &'a [ConnectorDefinition],
-    decided: &[String],
-) -> Offer<'a> {
-    let mut serving: Vec<&'a ConnectorDefinition> = installed
+pub fn offers_for<'a>(destination: &str, offers: &'a [ConnectorView]) -> Offer<'a> {
+    let mut serving: Vec<&'a ConnectorView> = offers
         .iter()
-        .filter(|connector| !decided.contains(&connector.name))
         .filter(|connector| serves(connector, destination))
         .collect();
     match serving.len() {
@@ -29,9 +24,8 @@ pub fn offers_for<'a>(
     }
 }
 
-fn serves(connector: &ConnectorDefinition, destination: &str) -> bool {
+fn serves(connector: &ConnectorView, destination: &str) -> bool {
     connector
-        .spec
         .serves
         .iter()
         .any(|pattern| destination_covers(pattern, destination))
@@ -41,17 +35,14 @@ fn serves(connector: &ConnectorDefinition, destination: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn connector(name: &str, serves: &[&str]) -> ConnectorDefinition {
-        let json = serde_json::json!({
-            "apiVersion": "lns.run/v1",
-            "kind": "connector",
-            "name": name,
-            "spec": {
-                "serves": serves,
-                "methods": [{ "name": "token", "auth": { "kind": "token" } }],
-            },
-        });
-        lns_artifact::connector::parse(json.to_string().as_bytes()).expect("a valid connector")
+    fn connector(name: &str, serves: &[&str]) -> ConnectorView {
+        ConnectorView {
+            name: name.to_string(),
+            digest: "sha256:abc".to_string(),
+            serves: serves.iter().map(|s| s.to_string()).collect(),
+            methods: Vec::new(),
+            profiles: Vec::new(),
+        }
     }
 
     fn name_of<'a>(offer: &Offer<'a>) -> Option<&'a str> {
@@ -65,7 +56,7 @@ mod tests {
     fn a_served_host_offers_its_connector() {
         let installed = [connector("some-provider", &["api.some-provider.example"])];
         assert_eq!(
-            name_of(&offers_for("api.some-provider.example", &installed, &[])),
+            name_of(&offers_for("api.some-provider.example", &installed)),
             Some("some-provider")
         );
     }
@@ -80,7 +71,7 @@ mod tests {
             "db.some-provider.example:5432",
         ] {
             assert_eq!(
-                name_of(&offers_for(destination, &installed, &[])),
+                name_of(&offers_for(destination, &installed)),
                 Some("some-provider"),
                 "{destination}"
             );
@@ -94,15 +85,11 @@ mod tests {
             &["db.some-provider.example:5432"],
         )];
         assert_eq!(
-            name_of(&offers_for(
-                "db.some-provider.example:5432",
-                &installed,
-                &[]
-            )),
+            name_of(&offers_for("db.some-provider.example:5432", &installed)),
             Some("some-provider")
         );
         assert_eq!(
-            offers_for("db.some-provider.example:6432", &installed, &[]),
+            offers_for("db.some-provider.example:6432", &installed),
             Offer::None,
             "another port is not the service this connector serves"
         );
@@ -113,13 +100,13 @@ mod tests {
         let installed = [connector("some-provider", &["*.some-provider.example"])];
         for host in ["api.some-provider.example", "eu.api.some-provider.example"] {
             assert_eq!(
-                name_of(&offers_for(host, &installed, &[])),
+                name_of(&offers_for(host, &installed)),
                 Some("some-provider"),
                 "{host}"
             );
         }
         assert_eq!(
-            offers_for("some-provider.example.test", &installed, &[]),
+            offers_for("some-provider.example.test", &installed),
             Offer::None
         );
     }
@@ -127,7 +114,7 @@ mod tests {
     #[test]
     fn a_destination_nothing_serves_offers_nothing() {
         let installed = [connector("some-provider", &["api.some-provider.example"])];
-        let offer = offers_for("api.other-provider.example", &installed, &[]);
+        let offer = offers_for("api.other-provider.example", &installed);
         assert_eq!(offer, Offer::None);
         assert_eq!(
             name_of(&offer),
@@ -138,40 +125,7 @@ mod tests {
 
     #[test]
     fn a_machine_with_nothing_installed_offers_nothing() {
-        assert_eq!(
-            offers_for("api.some-provider.example", &[], &[]),
-            Offer::None
-        );
-    }
-
-    #[test]
-    fn a_connector_this_project_already_decided_is_not_offered_again() {
-        // §3.2.1: a destination asks only while the project has neither granted nor declined it.
-        let installed = [connector("some-provider", &["api.some-provider.example"])];
-        assert_eq!(
-            offers_for(
-                "api.some-provider.example",
-                &installed,
-                &["some-provider".to_string()]
-            ),
-            Offer::None
-        );
-    }
-
-    #[test]
-    fn one_project_s_decision_does_not_silence_another_connector() {
-        let installed = [
-            connector("some-provider", &["api.some-provider.example"]),
-            connector("other-provider", &["api.other-provider.example"]),
-        ];
-        assert_eq!(
-            name_of(&offers_for(
-                "api.other-provider.example",
-                &installed,
-                &["some-provider".to_string()]
-            )),
-            Some("other-provider")
-        );
+        assert_eq!(offers_for("api.some-provider.example", &[]), Offer::None);
     }
 
     #[test]
@@ -181,7 +135,7 @@ mod tests {
             connector("some-provider", &["api.*.example"]),
             connector("other-provider", &["*.eu.example"]),
         ];
-        let mut offer = offers_for("api.eu.example", &installed, &[]);
+        let mut offer = offers_for("api.eu.example", &installed);
         if let Offer::Ambiguous(names) = &mut offer {
             names.sort();
         }
@@ -193,23 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn a_decided_connector_cannot_make_the_rest_ambiguous() {
-        let installed = [
-            connector("some-provider", &["api.*.example"]),
-            connector("other-provider", &["*.eu.example"]),
-        ];
-        assert_eq!(
-            name_of(&offers_for(
-                "api.eu.example",
-                &installed,
-                &["some-provider".to_string()]
-            )),
-            Some("other-provider"),
-            "one of an overlapping pair having been decided leaves the other unambiguous"
-        );
-    }
-
-    #[test]
     fn a_connector_serving_several_destinations_is_offered_for_each() {
         let installed = [connector(
             "some-provider",
@@ -217,7 +154,7 @@ mod tests {
         )];
         for host in ["api.some-provider.example", "auth.some-provider.example"] {
             assert_eq!(
-                name_of(&offers_for(host, &installed, &[])),
+                name_of(&offers_for(host, &installed)),
                 Some("some-provider"),
                 "{host}"
             );

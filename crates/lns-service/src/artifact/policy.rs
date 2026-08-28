@@ -105,9 +105,16 @@ pub fn is_closed(policy: &Policy) -> bool {
     policy.network.is_closed()
 }
 
-/// Merge a sandbox's shipped `baseline` policy under a local `overlay` into one effective policy for the guest gate: the overlay is the later source, so its entries decide every destination both name.
-pub fn merge_effective(baseline: Option<&Policy>, overlay: &Policy) -> Policy {
-    let layers: Vec<&Policy> = std::iter::once(overlay).chain(baseline).collect();
+/// Merge the three sources the gate installs, latest first: this directory's `overlay`, what a connector grant `connectors` opened, then the sandbox's shipped `baseline` (`docs/sandbox-spec.md` §3.3.2 sources 3-5).
+pub fn merge_effective(
+    baseline: Option<&Policy>,
+    connectors: Option<&Policy>,
+    overlay: &Policy,
+) -> Policy {
+    let layers: Vec<&Policy> = std::iter::once(overlay)
+        .chain(connectors)
+        .chain(baseline)
+        .collect();
     Policy {
         network: NetworkPolicy {
             egress: lns_policy::Egress {
@@ -249,7 +256,7 @@ mod tests {
         baseline.add_rule(RouteRule::deny_host("*"));
         baseline.add_rule(RouteRule::allow_host("attacker.example"));
 
-        let merged = merge_effective(Some(&baseline), &Policy::default());
+        let merged = merge_effective(Some(&baseline), None, &Policy::default());
 
         let decided = merged
             .network
@@ -274,7 +281,7 @@ mod tests {
         overlay.add_rule(RouteRule::allow_host("attacker.example"));
         let baseline = allow("attacker.example");
 
-        let merged = merge_effective(Some(&baseline), &overlay);
+        let merged = merge_effective(Some(&baseline), None, &overlay);
 
         let decided = merged
             .network
@@ -297,7 +304,7 @@ mod tests {
         let mut local = Policy::default();
         local.add_rule(RouteRule::allow_host("*"));
 
-        let merged = merge_effective(Some(&allow("api.example.test")), &local);
+        let merged = merge_effective(Some(&allow("api.example.test")), None, &local);
 
         assert_eq!(
             table(&merged).first().copied(),
@@ -315,7 +322,7 @@ mod tests {
         overlay.add_rule(RouteRule::allow_host("*"));
         overlay.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(None, &overlay);
+        let merged = merge_effective(None, None, &overlay);
 
         let first_catch_all = merged
             .network
@@ -336,7 +343,7 @@ mod tests {
     fn a_later_sources_entries_precede_an_earlier_sources() {
         let baseline = allow("api.example.test");
         let overlay = deny("api.example.test");
-        let merged = merge_effective(Some(&baseline), &overlay);
+        let merged = merge_effective(Some(&baseline), None, &overlay);
         let routes = &merged.network.egress.http;
         let deny_idx = routes
             .iter()
@@ -354,6 +361,45 @@ mod tests {
             !is_closed(&merged),
             "nothing closed either layer: {:?}",
             merged.network.egress.http
+        );
+    }
+
+    #[test]
+    fn a_granted_connector_sits_behind_the_developers_own_file_and_ahead_of_the_artifact() {
+        // §3.3.2: the connector is source 4 and this directory's decisions are source 5, so a `deny` the developer typed still decides a destination the grant opened.
+        let baseline = allow("api.some-provider.example");
+        let granted = allow("api.some-provider.example");
+        let overlay = deny("api.some-provider.example");
+        let effective = merge_effective(Some(&baseline), Some(&granted), &overlay);
+        let merged = table(&effective);
+        assert_eq!(
+            merged.first().map(|(_, verdict)| *verdict),
+            Some(Verdict::Deny),
+            "the developer's own deny must be the rule a first-match gate reaches first: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn a_granted_connector_decides_a_destination_the_artifact_denies() {
+        let baseline = deny("api.some-provider.example");
+        let granted = allow("api.some-provider.example");
+        let effective = merge_effective(Some(&baseline), Some(&granted), &Policy::default());
+        let merged = table(&effective);
+        assert_eq!(
+            merged.first().map(|(_, verdict)| *verdict),
+            Some(Verdict::Allow),
+            "a grant is a later source than the artifact, so it opens what the artifact closed: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn granting_nothing_leaves_the_two_layer_merge_exactly_as_it_was() {
+        let baseline = allow("api.example.test");
+        let overlay = deny("other.example.test");
+        assert_eq!(
+            merge_effective(Some(&baseline), None, &overlay),
+            merge_effective(Some(&baseline), Some(&Policy::default()), &overlay),
+            "an empty grant layer contributes no rule, so a project that granted nothing is unaffected"
         );
     }
 
@@ -379,7 +425,7 @@ mod tests {
     fn the_raw_table_carries_both_sources_in_precedence_order() {
         let baseline = tcp_allow("db.internal:5432");
         let overlay = tcp_deny("db.internal:5432");
-        let merged = merge_effective(Some(&baseline), &overlay);
+        let merged = merge_effective(Some(&baseline), None, &overlay);
         assert_eq!(
             merged
                 .network
@@ -398,7 +444,7 @@ mod tests {
         let mut artifact = Policy::default();
         artifact.add_rule(RouteRule::deny_host("docs.vendor.example"));
 
-        let merged = merge_effective(Some(&artifact), &allow("docs.vendor.example"));
+        let merged = merge_effective(Some(&artifact), None, &allow("docs.vendor.example"));
 
         let decided = merged
             .network
@@ -419,7 +465,7 @@ mod tests {
         let mut local = Policy::default();
         local.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&allow("api.vendor.example")), &local);
+        let merged = merge_effective(Some(&allow("api.vendor.example")), None, &local);
 
         assert_eq!(
             merged
@@ -438,7 +484,7 @@ mod tests {
         let mut artifact = allow("*.example.test");
         artifact.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&artifact), &allow("api.other.test"));
+        let merged = merge_effective(Some(&artifact), None, &allow("api.other.test"));
 
         assert_eq!(
             table(&merged).first().copied(),
@@ -456,7 +502,7 @@ mod tests {
         });
         artifact.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&artifact), &allow("api.example.test"));
+        let merged = merge_effective(Some(&artifact), None, &allow("api.example.test"));
 
         assert_eq!(
             table(&merged).first().copied(),
@@ -474,7 +520,11 @@ mod tests {
             .tcp
             .push(TcpEgressRule::allow_destination("db.vendor.example:5432"));
 
-        let merged = merge_effective(Some(&artifact), &closed_allowing("api.trusted.example"));
+        let merged = merge_effective(
+            Some(&artifact),
+            None,
+            &closed_allowing("api.trusted.example"),
+        );
 
         assert_eq!(
             merged.network.egress.tcp.len(),
@@ -488,7 +538,7 @@ mod tests {
         let mut artifact = Policy::default();
         artifact.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&artifact), &tcp_allow("db.internal:5432"));
+        let merged = merge_effective(Some(&artifact), None, &tcp_allow("db.internal:5432"));
 
         assert_eq!(
             merged.network.egress.tcp.len(),
@@ -502,7 +552,7 @@ mod tests {
         let mut artifact = allow("db.internal");
         artifact.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&artifact), &tcp_allow("db.internal:5432"));
+        let merged = merge_effective(Some(&artifact), None, &tcp_allow("db.internal:5432"));
 
         assert!(
             merged
@@ -520,7 +570,7 @@ mod tests {
         let mut artifact = allow("api.allowed.example");
         artifact.add_rule(RouteRule::deny_host("*"));
 
-        let merged = merge_effective(Some(&artifact), &allow("api.overlay-only.example"));
+        let merged = merge_effective(Some(&artifact), None, &allow("api.overlay-only.example"));
 
         assert_eq!(
             table(&merged),
@@ -545,6 +595,7 @@ mod tests {
     fn a_developers_lockdown_still_decides_a_destination_the_artifact_allows() {
         let merged = merge_effective(
             Some(&allow("attacker.example")),
+            None,
             &closed_allowing("api.trusted.example"),
         );
 
@@ -563,6 +614,7 @@ mod tests {
     fn two_lockdowns_leave_only_what_the_developer_named() {
         let merged = merge_effective(
             Some(&closed_allowing("api.artifact-only.example")),
+            None,
             &closed_allowing("api.user-only.example"),
         );
 
@@ -580,7 +632,7 @@ mod tests {
     #[test]
     fn merge_of_a_plain_overlay_with_no_baseline_keeps_the_overlay_rules() {
         let overlay = allow("api.example.test");
-        let merged = merge_effective(None, &overlay);
+        let merged = merge_effective(None, None, &overlay);
         assert!(
             merged
                 .network
