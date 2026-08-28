@@ -67,7 +67,15 @@ pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
         &cwd,
     )?;
     require_running().await?;
-    run_image(args, target, cwd, debug).await
+    // Every question is asked before anything boots, so a detached run can still ask at the controlling terminal: detaching decides who holds the terminal after boot, not whether one exists.
+    run_image(
+        args,
+        target,
+        cwd,
+        debug,
+        &mut crate::terminal::RealTerminal::open(),
+    )
+    .await
 }
 
 pub fn exec_command<'a>(matches: &'a clap::ArgMatches, _ctx: RunCtx<'a>) -> RunFuture<'a> {
@@ -330,6 +338,7 @@ pub async fn run_image(
     mut target: crate::run::target::RunTarget,
     cwd: std::path::PathBuf,
     debug: bool,
+    terminal: &mut dyn crate::terminal::Terminal,
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
@@ -450,8 +459,6 @@ pub async fn run_image(
     };
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
-    // Every question is asked before anything boots, so a detached run can still ask at the controlling terminal: detaching decides who holds the terminal after boot, not whether one exists.
-    let mut terminal = crate::terminal::RealTerminal::open();
     let reference = target.image();
     let declared_mounts = published.is_some().then(|| {
         crate::run::pull_confirm::artifact_declared_mounts(&args.mounts, &consumer_mount_targets)
@@ -487,7 +494,7 @@ pub async fn run_image(
             ),
             assume_yes: args.assume_yes,
         },
-        &mut terminal,
+        terminal,
     )?;
     if !quiet {
         let dispositions = crate::run::summary::format_bind_dispositions(&resolved_binds);
@@ -2396,6 +2403,64 @@ mod tests {
             binds[0].dropped,
             vec![".env".to_string()],
             "an unanswerable question defaults to dropping the secret, never to piped data"
+        );
+    }
+
+    /// The terminal is the caller's to give, so `-d` cannot reach in and take it away: the answer is read even though the run detaches.
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_detached_run_reads_its_answer_from_the_terminal_it_was_given() {
+        let home = tempfile::tempdir().expect("a temp lns home");
+        let _home = crate::test_env::EnvScope::set("LNS_HOME", home.path());
+        let _socket =
+            crate::test_env::EnvScope::set("LNS_SOCKET_PATH", home.path().join("absent.sock"));
+        let project = tempfile::tempdir().expect("a temp project dir");
+        let definition = project.path().join("lns.yaml");
+        std::fs::write(
+            &definition,
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n",
+        )
+        .expect("a local definition");
+        let source = project.path().join("secrets");
+        std::fs::create_dir(&source).expect("a bind source");
+        std::fs::write(source.join(".env"), b"TOKEN=1").expect("a secret-shaped file");
+
+        let args: crate::cli::RunArgs = crate::command::parse_args([
+            "lns".to_string(),
+            "run".to_string(),
+            "-d".to_string(),
+            "-q".to_string(),
+            "-v".to_string(),
+            format!("{}:/work", source.display()),
+            definition.display().to_string(),
+        ])
+        .expect("argv must parse against the CLI grammar");
+        let target = crate::run::target::resolve(
+            args.image.as_deref(),
+            None,
+            &crate::artifact::real::RealFs,
+            project.path(),
+        )
+        .expect("the local definition resolves");
+
+        let mut terminal = crate::terminal::ScriptedTerminal::answering(&["k\n"]);
+        let err = run_image(
+            args,
+            target,
+            project.path().to_path_buf(),
+            false,
+            &mut terminal,
+        )
+        .await
+        .expect_err("no service listens on the socket, so the run stops there");
+        assert_eq!(
+            terminal.answers_left(),
+            0,
+            "a detached run must still be asked the KEEP/DROP question at the terminal"
+        );
+        assert!(
+            err.to_string().contains("connecting to"),
+            "the run must get past consent and stop only at the service socket: {err:#}"
         );
     }
 
