@@ -14,6 +14,10 @@ pub const BADGE_CORNER_RADIUS: u8 = 6;
 pub const BADGE_PAD_X: i8 = 7;
 pub const BADGE_PAD_Y: i8 = 2;
 pub const BADGE_GAP: f32 = 6.0;
+
+/// A chip is a control, so it takes a button's touch target rather than a badge's tight label box.
+pub const CHIP_PAD_X: i8 = 10;
+pub const CHIP_PAD_Y: i8 = 5;
 pub const FONT_TITLE: f32 = 16.0;
 pub const FONT_BODY: f32 = 13.0;
 pub const FONT_CAPTION: f32 = 12.0;

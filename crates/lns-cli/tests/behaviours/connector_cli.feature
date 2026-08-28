@@ -108,7 +108,7 @@ Feature: lns connector, on this machine
     And there is no terminal
     When the user runs connector command "connect some-provider --method token"
     Then the connector command fails
-    And the connector error says "no flag answers it"
+    And the connector error says "No flag answers it"
 
   Scenario: an empty token connects nothing
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
@@ -158,7 +158,8 @@ Feature: lns connector, on this machine
     And there is no terminal
     When the user runs connector command "grant some-provider --method token"
     Then the connector command fails
-    And the connector error says "no flag answers a connector grant"
+    And the connector error says "granting"
+    And the connector error says "No flag answers it"
 
   Scenario: granting again names the method it replaced
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
