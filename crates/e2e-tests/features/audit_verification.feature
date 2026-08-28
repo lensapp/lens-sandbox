@@ -68,10 +68,10 @@ Feature: lns audit shows one unified timeline across all sandboxes
     And the output does not contain "some-provider"
     And the output shows "some-oauth" before "api.example.test"
 
-  Scenario: --json emits raw events and suppresses the table
+  Scenario: --format jsonl emits raw events and suppresses the table
     Given a clean lns cache home
     And a connection ledger with sample events
-    When I run "lns audit --json"
+    When I run "lns audit --format jsonl"
     Then the exit code is 0
     And the output contains "some-oauth"
     And the output contains "class_uid"
