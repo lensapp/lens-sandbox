@@ -42,6 +42,10 @@ impl ScriptedTerminal {
         }
     }
 
+    pub(crate) fn answers_left(&self) -> usize {
+        self.answers.len()
+    }
+
     pub(crate) fn absent() -> Self {
         Self {
             answers: std::collections::VecDeque::new(),
