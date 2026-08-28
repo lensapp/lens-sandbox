@@ -302,7 +302,7 @@ fn says_method_needs_connect(world: &mut BehaviourWorld, label: String) {
         .lines()
         .find(|l| l.contains(&label))
         .unwrap_or_else(|| panic!("no line names {label}: {}", run.output));
-    assert!(line.contains("connect to use"), "got: {line}");
+    assert!(line.contains("connect first"), "got: {line}");
 }
 
 #[then(expr = "the service was asked to install an absolute path")]
@@ -373,7 +373,7 @@ fn says_none_installed(world: &mut BehaviourWorld) {
 fn says_grants_outlive(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
-        run.output.contains("keep that decision"),
+        run.output.contains("keeps that decision"),
         "uninstalling stops the offer; it does not retract a grant: {}",
         run.output
     );
@@ -475,7 +475,7 @@ fn output_omits(world: &mut BehaviourWorld, secret: String) {
 fn says_connect_is_not_grant(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
-        run.output.contains("connecting is not granting"),
+        run.output.contains("this grants nothing"),
         "got: {}",
         run.output
     );
@@ -535,7 +535,7 @@ fn says_stays_installed(world: &mut BehaviourWorld) {
 fn says_forgot(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
-        run.output.contains("forgot what this project"),
+        run.output.contains("cleared this project's decision"),
         "got: {}",
         run.output
     );
@@ -586,11 +586,7 @@ fn discloses_nothing(world: &mut BehaviourWorld) {
 #[then(expr = "the output says it was already granted")]
 fn says_already_granted(world: &mut BehaviourWorld) {
     let run = run_of(world);
-    assert!(
-        run.output.contains("already granted"),
-        "got: {}",
-        run.output
-    );
+    assert!(run.output.contains("already grants"), "got: {}", run.output);
 }
 
 #[then(expr = "the prompt suggests the name {string}")]

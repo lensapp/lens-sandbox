@@ -22,24 +22,28 @@ fn badge(ui: &mut egui::Ui, label: &str) {
         });
 }
 
-/// A badge the user picks between: the same chip the card already speaks in, filled when it is the chosen one so the selection reads at a glance rather than from a control.
+/// One profile the user can pick. Badge-shaped but painted from the button palette, because a chip is a control and the badges above it are not — a solid surface and brighter text where a badge is translucent and muted, and the card's action colour when it is the chosen one.
 pub fn chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let (fill, text) = if selected {
-        (window::TEXT_ACCENT, window::BG_PRIMARY)
+    let (fill, stroke, text) = if selected {
+        (
+            super::button::tint(window::CATEGORY, 40),
+            super::button::tint(window::CATEGORY, 140),
+            window::CATEGORY,
+        )
     } else {
-        (badge_fill(), window::TEXT_MUTED)
+        (window::BG_TERTIARY, window::BORDER, window::TEXT_PRIMARY)
     };
     // The frame's own response, not the label's: the padding is on the frame, so a click on a chip's edge must count.
     egui::Frame::new()
         .fill(fill)
-        .stroke(Stroke::new(1.0_f32, window::BORDER))
+        .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(CornerRadius::same(theme::BADGE_CORNER_RADIUS))
-        .inner_margin(Margin::symmetric(theme::BADGE_PAD_X, theme::BADGE_PAD_Y))
+        .inner_margin(Margin::symmetric(theme::CHIP_PAD_X, theme::CHIP_PAD_Y))
         .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(label)
-                        .size(theme::FONT_BADGE)
+                        .size(theme::FONT_BODY)
                         .color(text),
                 )
                 .selectable(false),

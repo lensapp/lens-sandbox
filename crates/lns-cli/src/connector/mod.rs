@@ -205,7 +205,7 @@ async fn connect(
 ) -> Result<i32> {
     if !terminal.is_available() {
         bail!(
-            "connecting {} needs the value its authentication asks for, and there is no terminal to ask at; no flag answers it, so run `lns connector connect {}` from a terminal",
+            "connecting {} asks for a secret, and there is no terminal to ask at. No flag answers it: run `lns connector connect {}` from a terminal.",
             args.name,
             args.name
         );
@@ -233,7 +233,7 @@ async fn connect(
             report_invalidated(&invalidated, writer)?;
             writeln!(
                 writer,
-                "  connecting is not granting; a project still decides whether to use it"
+                "  this grants nothing: a project still decides whether to use it"
             )?;
             Ok(0)
         }
@@ -277,7 +277,11 @@ async fn method_to_connect(
         None => single_offerable(&connector.methods, name, "connect")?,
     };
     if !method.offerable {
-        bail!("method {} of {name} needs a newer lns", method.name);
+        bail!(
+            "method {} of {name} {}",
+            method.name,
+            why_unofferable(&method)
+        );
     }
     if method.credentials.is_empty() && method.needs_connect {
         bail!(
@@ -341,10 +345,14 @@ async fn disconnect(
             Ok(1)
         }
         Response::ConnectorDisconnected { name, dropped } => {
-            writeln!(writer, "disconnected {name}, dropping {dropped} profile(s)")?;
             writeln!(
                 writer,
-                "  it stays installed, and projects that granted a dropped profile keep their grants"
+                "disconnected {name}, dropping {}",
+                profiles(dropped)
+            )?;
+            writeln!(
+                writer,
+                "  {name} stays installed, and a project that granted a dropped profile keeps its grant"
             )?;
             Ok(0)
         }
@@ -363,7 +371,7 @@ async fn grant(
     // cli-spec §3.3: `grant` is the card in a terminal, and no flag answers it, so a script cannot consent on a person's behalf.
     if !terminal.is_available() {
         bail!(
-            "granting {} discloses what it opens and then asks; there is no terminal to ask at, and no flag answers a connector grant — run `lns connector grant {}` from a terminal",
+            "granting {} shows what it opens and asks you to confirm, and there is no terminal to ask at. No flag answers it: run `lns connector grant {}` from a terminal.",
             args.name,
             args.name
         );
@@ -379,7 +387,12 @@ async fn grant(
         None => single_offerable(&connector.methods, &args.name, "grant")?,
     };
     if !method.offerable {
-        bail!("method {} of {} needs a newer lns", method.name, args.name);
+        bail!(
+            "method {} of {} {}",
+            method.name,
+            args.name,
+            why_unofferable(&method)
+        );
     }
     let dir = project_dir(args.project.as_deref(), cwd)?;
     disclose(&connector, &method, &dir, prompt)?;
@@ -404,7 +417,7 @@ async fn grant(
             unchanged: true,
             ..
         } => {
-            writeln!(writer, "this project already granted {name}: {method}")?;
+            writeln!(writer, "this project already grants {name} with {method}")?;
             Ok(1)
         }
         Response::ConnectorGranted {
@@ -415,11 +428,14 @@ async fn grant(
             ..
         } => {
             match profile {
-                Some(profile) => writeln!(writer, "granted {name}: {method} as {profile}")?,
-                None => writeln!(writer, "granted {name}: {method}")?,
+                Some(profile) => writeln!(writer, "granted {name} with {method} as {profile}")?,
+                None => writeln!(writer, "granted {name} with {method}")?,
             }
             if let Some(displaced) = displaced {
-                writeln!(writer, "  replaced {displaced}, whose payload is retracted")?;
+                writeln!(
+                    writer,
+                    "  replaced {displaced}, which this project no longer applies"
+                )?;
             }
             Ok(0)
         }
@@ -434,8 +450,12 @@ fn disclose(
     dir: &str,
     prompt: &mut impl Write,
 ) -> Result<()> {
-    writeln!(prompt, "{} would be granted to {dir}", connector.name)?;
-    writeln!(prompt, "  method:  {}", method.label)?;
+    writeln!(
+        prompt,
+        "granting {} to {dir} would give it:",
+        connector.name
+    )?;
+    labelled(prompt, "method", &method.label)?;
     disclose_list(prompt, "opens", &method.opens)?;
     disclose_list(prompt, "writes", &method.writes)?;
     let sets: Vec<String> = method
@@ -451,7 +471,11 @@ fn disclose(
         } else {
             profile.authority.join(", ")
         };
-        writeln!(prompt, "  profile: {} ({authority})", profile.label)?;
+        labelled(
+            prompt,
+            "profile",
+            &format!("{} ({authority})", profile.label),
+        )?;
     }
     Ok(())
 }
@@ -463,7 +487,12 @@ fn disclose_list(prompt: &mut impl Write, noun: &str, items: &[String]) -> std::
     } else {
         items.join(", ")
     };
-    writeln!(prompt, "  {noun:8} {rendered}")
+    labelled(prompt, noun, &rendered)
+}
+
+/// One labelled line, in the one column width the whole `lns connector` family lines up on.
+fn labelled(writer: &mut impl Write, noun: &str, value: &str) -> std::io::Result<()> {
+    writeln!(writer, "  {noun:8} {value}")
 }
 
 async fn forget(
@@ -481,11 +510,11 @@ async fn forget(
             name,
             had_decision: false,
         } => {
-            writeln!(writer, "this project decided nothing about {name}")?;
+            writeln!(writer, "this project has decided nothing about {name}")?;
             Ok(1)
         }
         Response::ConnectorForgotten { name, .. } => {
-            writeln!(writer, "forgot what this project decided about {name}")?;
+            writeln!(writer, "cleared this project's decision about {name}")?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -501,6 +530,14 @@ async fn send(svc: &dyn ConnectorService, req: Request) -> Result<Response> {
         bail!("{message}");
     }
     Ok(response)
+}
+
+/// `1 profile` rather than `1 profile(s)`, because a count the user reads out loud should be a sentence.
+fn profiles(count: usize) -> String {
+    match count {
+        1 => "1 profile".to_string(),
+        n => format!("{n} profiles"),
+    }
 }
 
 /// A local path names this machine, so it gains no registry; anything else is a reference and is qualified.
@@ -536,21 +573,34 @@ fn report_installed(connector: &ConnectorView, writer: &mut impl Write) -> std::
         "installed {} ({})",
         connector.name, connector.digest
     )?;
-    writeln!(writer, "  serves: {}", connector.serves.join(", "))?;
+    labelled(writer, "serves", &connector.serves.join(", "))?;
     for method in &connector.methods {
-        let needs = if method.needs_connect {
-            "connect to use"
-        } else {
-            "no connect needed"
-        };
-        let unsupported = if method.offerable {
-            ""
-        } else {
-            " — needs a newer lns"
-        };
-        writeln!(writer, "  method {}: {needs}{unsupported}", method.label)?;
+        labelled(writer, "method", &method_summary(method))?;
     }
-    writeln!(writer, "nothing is granted yet")
+    writeln!(
+        writer,
+        "nothing is granted yet; a run that reaches {} asks whether to use it",
+        connector.serves.join(" or ")
+    )
+}
+
+/// What a method needs before a project can use it, so both `install` and `list` answer "what do I do next" rather than only naming it.
+fn method_summary(method: &lns_ipc::ConnectorMethodView) -> String {
+    let state = match (method.offerable, method.needs_connect) {
+        (false, _) => why_unofferable(method),
+        (true, true) => "connect first",
+        (true, false) => "ready to grant",
+    };
+    format!("{} — {state}", method.label)
+}
+
+/// Why this version will not apply a method. A fileset is a mechanism lns does not deliver yet, not an old build — telling that user to update would send them nowhere.
+fn why_unofferable(method: &lns_ipc::ConnectorMethodView) -> &'static str {
+    if method.writes.is_empty() {
+        "needs a newer lns"
+    } else {
+        "writes files, which this lns cannot deliver yet"
+    }
 }
 
 async fn uninstall(svc: &dyn ConnectorService, name: &str, writer: &mut impl Write) -> Result<i32> {
@@ -564,11 +614,11 @@ async fn uninstall(svc: &dyn ConnectorService, name: &str, writer: &mut impl Wri
         } => {
             writeln!(writer, "uninstalled {name}")?;
             if dropped_profiles > 0 {
-                writeln!(writer, "  dropped {dropped_profiles} profile(s)")?;
+                writeln!(writer, "  dropped {}", profiles(dropped_profiles))?;
             }
             writeln!(
                 writer,
-                "  projects that granted it keep that decision; reinstalling the same bytes resumes it"
+                "  a project that granted it keeps that decision, and reinstalling the same bytes resumes it"
             )?;
             Ok(0)
         }
@@ -601,7 +651,10 @@ struct ConnectorRow {
     name: String,
     digest: String,
     serves: Vec<String>,
+    /// Bare labels, because `--format json` is read by programs: the table decorates them, the field does not.
     methods: Vec<String>,
+    #[serde(skip)]
+    method_summaries: Vec<String>,
     profiles: Vec<String>,
 }
 
@@ -614,14 +667,10 @@ impl ConnectorRow {
             methods: connector
                 .methods
                 .iter()
-                .map(|m| {
-                    if m.needs_connect {
-                        m.label.clone()
-                    } else {
-                        format!("{} (no connect)", m.label)
-                    }
-                })
+                .map(|method| method.label.clone())
                 .collect(),
+            // The same three states `install` reports, so a method reads the same whichever verb shows it.
+            method_summaries: connector.methods.iter().map(method_summary).collect(),
             profiles: connector.profiles.iter().map(|p| p.label.clone()).collect(),
         }
     }
@@ -634,7 +683,7 @@ impl crate::output::TableRow for ConnectorRow {
         vec![
             self.name.clone(),
             self.serves.join(", "),
-            self.methods.join(", "),
+            self.method_summaries.join(", "),
             none_when_empty(&self.profiles),
         ]
     }
@@ -796,7 +845,10 @@ mod tests {
         .expect("the install itself succeeds");
         assert_eq!(code, 0);
         let text = String::from_utf8(out).expect("utf-8");
-        assert!(text.contains("needs a newer lns"), "got: {text}");
+        assert!(
+            text.contains("needs a newer lns"),
+            "this one declares no fileset, so the version is the only thing in its way: {text}"
+        );
     }
 
     #[test]
@@ -1297,14 +1349,45 @@ mod tests {
                 project: None,
             }),
         ] {
-            let svc = CannedService::with([Some(listing(vec![with_methods(vec![method(
-                "future", false,
-            )])]))]);
+            // No fileset on this one, so the only thing this version cannot honour is its auth kind.
+            let unknown_auth = lns_ipc::ConnectorMethodView {
+                writes: Vec::new(),
+                ..method("future", false)
+            };
+            let svc = CannedService::with([Some(listing(vec![with_methods(vec![unknown_auth])]))]);
             let err = drive(cmd, &svc, &["sk-live"], &cwd())
                 .await
                 .expect_err("an unofferable method must be refused");
             assert!(format!("{err:#}").contains("needs a newer lns"), "{err:#}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_method_that_writes_files_says_so_rather_than_blaming_the_version() {
+        // Updating lns would not help: no version of it delivers a fileset yet, because install keeps the document alone.
+        let svc = CannedService::with([Some(listing(vec![with_methods(vec![method(
+            "seeded", false,
+        )])]))]);
+        let err = drive(
+            ConnectorCommand::Grant(GrantArgs {
+                name: "some-provider".into(),
+                method: Some("seeded".into()),
+                profile: None,
+                project: None,
+            }),
+            &svc,
+            &["y"],
+            &cwd(),
+        )
+        .await
+        .expect_err("a method that writes files cannot be granted yet");
+
+        let said = format!("{err:#}");
+        assert!(said.contains("writes files"), "{said}");
+        assert!(
+            !said.contains("newer lns"),
+            "no version of lns delivers it, so pointing at an update is a dead end: {said}"
+        );
     }
 
     #[tokio::test]
@@ -1375,6 +1458,27 @@ mod tests {
         assert!(
             !asked.contains("name this connection"),
             "a connection that cannot be made is refused before the user is asked to name it: {asked}"
+        );
+    }
+
+    #[test]
+    fn a_count_the_user_reads_is_a_sentence_rather_than_a_form_field() {
+        // `1 profile(s)` is the shape this helper exists to avoid.
+        assert_eq!(profiles(1), "1 profile");
+        assert_eq!(profiles(2), "2 profiles");
+    }
+
+    #[test]
+    fn the_json_field_carries_the_method_and_the_table_carries_the_advice() {
+        // `--format json` is read by programs: decorating the field would make every reader strip an em-dash back off.
+        use crate::output::TableRow;
+        let row = ConnectorRow::new(&with_methods(vec![method("token", true)]));
+
+        let cells = row.cells();
+        assert_eq!(row.methods, ["token"]);
+        assert!(
+            cells[2].contains("connect first"),
+            "the table still says what to do next: {cells:?}"
         );
     }
 

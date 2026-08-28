@@ -469,7 +469,7 @@ pub enum CardAction {
     DismissInform {
         index: usize,
     },
-    /// Connect this project to the offered connector, with the account the card chose.
+    /// Connect this project to the offered connector, with the profile the card chose.
     Grant {
         id: String,
         method: String,
@@ -1243,7 +1243,7 @@ fn render_network_card(
     )
 }
 
-/// The card §3.2.4 requires: what applying the method will do, which account it uses, and the two answers a project can give.
+/// The card §3.2.4 requires: what applying the method will do, which profile it uses, and the two answers a project can give.
 fn render_connector_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
@@ -1275,7 +1275,7 @@ fn render_connector_card(
             crate::ui::badges(ui, prompt.badges());
             match method {
                 Some(method) => {
-                    render_account_choice(ui, offer, method, draft);
+                    render_profile_choice(ui, offer, method, draft);
                     render_disclosure(ui, method);
                     ready.set(ready_to_grant(method, draft));
                 }
@@ -1326,8 +1326,8 @@ fn chosen_method<'a>(
     }
 }
 
-/// Which account the grant is made with. Every held account is listed with its own authority, because that is what the card must disclose (§3.2.4).
-fn render_account_choice(
+/// Which profile the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
+fn render_profile_choice(
     ui: &mut egui::Ui,
     offer: &lns_ipc::ConnectorView,
     method: &lns_ipc::ConnectorMethodView,
@@ -1353,7 +1353,9 @@ fn render_account_choice(
     if draft.profile.is_none() && !draft.connecting {
         draft.profile = Some(held[0].label.clone());
     }
-    ui.add_space(10.0);
+    ui.add_space(14.0);
+    section_label(ui, "PROFILE");
+    ui.add_space(6.0);
     let picked = crate::ui::chips(
         ui,
         held.iter()
@@ -1363,10 +1365,10 @@ fn render_account_choice(
                     !draft.connecting && draft.profile.as_deref() == Some(profile.label.as_str()),
                 )
             })
-            .chain(std::iter::once((NEW_ACCOUNT, draft.connecting))),
+            .chain(std::iter::once((NEW_PROFILE, draft.connecting))),
     );
     match picked.as_deref() {
-        Some(NEW_ACCOUNT) => begin_connecting(method, draft, offer),
+        Some(NEW_PROFILE) => begin_connecting(method, draft, offer),
         Some(label) => {
             draft.profile = Some(label.to_string());
             draft.connecting = false;
@@ -1377,10 +1379,19 @@ fn render_account_choice(
     render_new_connection(ui, method, draft);
 }
 
-/// The chip that starts a connection instead of picking one already made.
-const NEW_ACCOUNT: &str = "+ new";
+/// Introduces a group so its controls are not read as more of the badges above them.
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(theme::FONT_EYEBROW)
+            .color(window::TEXT_MUTED),
+    );
+}
 
-/// What the chosen account can reach, which §3.2.4 makes part of the disclosure — under the chips, because only the chosen one is being granted.
+/// The chip that connects a new profile instead of picking one already held. "profile" throughout, because that is the word `lns connector` and the spec both use.
+const NEW_PROFILE: &str = "+ new";
+
+/// What the chosen profile can reach, which §3.2.4 makes part of the disclosure — under the chips, because only the chosen one is being granted.
 fn render_chosen_authority(
     ui: &mut egui::Ui,
     held: &[&lns_ipc::ConnectorProfileView],
@@ -1437,7 +1448,7 @@ fn render_new_connection(
     }
 }
 
-/// Suggests a name nothing already holds, because reusing one silently replaces the account under it — counting the accounts is not enough, since disconnecting one leaves its successor's name taken.
+/// Suggests a name nothing already holds, because reusing one silently replaces the profile under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
 fn begin_connecting(
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
@@ -1509,7 +1520,7 @@ fn render_needs_a_newer_lns(ui: &mut egui::Ui, offer: &lns_ipc::ConnectorView) {
     );
 }
 
-/// A method that authenticates cannot be granted until there is an account behind it.
+/// A method that authenticates cannot be granted until there is a profile behind it.
 fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
     if !method.needs_connect {
         return true;
@@ -1633,7 +1644,7 @@ impl CardState {
     }
 }
 
-/// A connector card being filled in: which method and account, and any connection being made.
+/// A connector card being filled in: which method and profile, and any connection being made.
 #[derive(Default)]
 pub struct OfferDraft {
     method: Option<String>,
@@ -1985,12 +1996,12 @@ mod tests {
                 method: "open".into(),
                 profile: ProfileChoice::None,
             }),
-            "a method that does not authenticate is granted with no account behind it"
+            "a method that does not authenticate is granted with no profile behind it"
         );
     }
 
     #[test]
-    fn the_card_grants_with_the_account_it_defaulted_to() {
+    fn the_card_grants_with_the_profile_it_defaulted_to() {
         let fired = click_labelled_control(
             offered_prompt(
                 "token",
@@ -2007,13 +2018,13 @@ mod tests {
                 method: "token".into(),
                 profile: ProfileChoice::Held("work".into()),
             }),
-            "with several accounts held the card picks the first and says which, rather than granting nameless"
+            "with several profiles held the card picks the first and says which, rather than granting nameless"
         );
     }
 
     #[test]
-    fn the_account_the_card_chose_is_the_one_the_grant_names() {
-        // The user's whole reason for the radio list: two accounts held, and this run needs the second.
+    fn the_profile_the_card_chose_is_the_one_the_grant_names() {
+        // The user's whole reason for the radio list: two profiles held, and this run needs the second.
         let chosen = OfferDraft {
             profile: Some("personal".into()),
             ..OfferDraft::default()
@@ -2026,7 +2037,7 @@ mod tests {
 
     #[test]
     fn a_connection_being_made_carries_its_values_rather_than_a_name_that_is_not_stored_yet() {
-        // The label names an account that does not exist until the connect runs, so sending it as a held one would refuse.
+        // The label names a profile that does not exist until the connect runs, so sending it as a held one would refuse.
         let typing = OfferDraft {
             connecting: true,
             label: "  token-2  ".into(),
@@ -2071,8 +2082,8 @@ mod tests {
     }
 
     #[test]
-    fn a_method_with_no_account_of_its_own_goes_straight_to_the_connect_form() {
-        // The connector holds an account, but not for this method: offering "Connect a new one" would be a link to swap an old account the user does not have.
+    fn a_method_with_no_profile_of_its_own_goes_straight_to_the_connect_form() {
+        // The connector holds a profile, but not for this method: offering "Connect a new one" would be a link to swap a profile the user does not have.
         let mut snapshot = offered_prompt("session", &[], &["SESSION_TOKEN"]);
         let offer = snapshot.pending[0].offer.as_mut().expect("an offer");
         // Held under the *other* method, and named after this one: the store keys a profile by connector and label alone, so the suggestion must step past it.
@@ -2085,11 +2096,11 @@ mod tests {
         assert_eq!(
             form_state(snapshot, "session-2"),
             (false, true),
-            "no chip to swap an account the user does not have, and the form open with a free name already in it"
+            "no chip to swap a profile the user does not have, and the form open with a free name already in it"
         );
     }
 
-    /// Whether the card offers another account to switch to, and whether the connect form is open with the suggested name in its field.
+    /// Whether the card offers another profile to switch to, and whether the connect form is open with the suggested name in its field.
     fn form_state(snapshot: Snapshot, suggested: &str) -> (bool, bool) {
         use egui_kittest::kittest::Queryable;
         let mut cards = CardState::default();
@@ -2107,21 +2118,21 @@ mod tests {
         harness.run();
         harness.run();
         (
-            harness.query_all_by_label(NEW_ACCOUNT).next().is_some(),
+            harness.query_all_by_label(NEW_PROFILE).next().is_some(),
             // by_all rather than by_one: a text input exposes its value on the field and again on its inner text node.
             harness.query_all_by_value(suggested).next().is_some(),
         )
     }
 
     #[test]
-    fn a_method_that_already_has_an_account_offers_the_choice_first() {
-        // Every account is a chip, so the one being granted is visible without opening anything.
+    fn a_method_that_already_holds_a_profile_offers_the_choice_first() {
+        // Every profile is a chip, so the one being granted is visible without opening anything.
         let snapshot = offered_prompt(
             "token",
             &[("work", &[]), ("personal", &[])],
             &["SOME_TOKEN"],
         );
-        for chip in ["work", "personal", NEW_ACCOUNT] {
+        for chip in ["work", "personal", NEW_PROFILE] {
             assert!(control_exists(snapshot.clone(), chip), "{chip}");
         }
     }
@@ -2157,8 +2168,8 @@ mod tests {
     }
 
     #[test]
-    fn granting_carries_the_account_whose_chip_was_clicked() {
-        // The whole reason for a selector: two accounts held, and this run needs the second.
+    fn granting_carries_the_profile_whose_chip_was_clicked() {
+        // The whole reason for a selector: two profiles held, and this run needs the second.
         let snapshot = offered_prompt(
             "token",
             &[("work", &["repo"]), ("personal", &[])],
@@ -2176,8 +2187,8 @@ mod tests {
     }
 
     #[test]
-    fn the_chosen_accounts_scopes_are_disclosed_beside_its_chips() {
-        // §3.2.4 makes the profile's authority part of what the card discloses, and the chosen one is the profile the grant applies — so it must follow the choice, not sit on whichever account happens to be first.
+    fn the_chosen_profiles_authority_is_disclosed_under_its_chip() {
+        // §3.2.4 makes the profile's authority part of what the card discloses, and the chosen one is the profile the grant applies — so it must follow the choice, not sit on whichever profile happens to be first.
         let held: &[(&str, &[&str])] = &[("work", &["repo", "issues"]), ("personal", &[])];
         assert!(control_exists(
             offered_prompt("token", held, &["SOME_TOKEN"]),
@@ -2189,11 +2200,11 @@ mod tests {
 
         assert!(
             !after_choosing_the_other,
-            "the other account grants nothing named, so nothing is disclosed"
+            "the other profile grants nothing named, so nothing is disclosed"
         );
     }
 
-    /// Whether `repo, issues` is still on the card once `chip` is the chosen account.
+    /// Whether `repo, issues` is still on the card once `chip` is the chosen profile.
     fn scopes_after_picking(snapshot: Snapshot, chip: &str) -> bool {
         use egui_kittest::kittest::Queryable;
         let mut cards = CardState::default();
@@ -2287,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn a_method_needing_an_account_cannot_be_granted_until_there_is_one() {
+    fn a_method_needing_a_profile_cannot_be_granted_until_there_is_one() {
         // Granting first would refuse at the store, after the user already consented.
         let waiting = OfferDraft {
             connecting: true,
@@ -2321,7 +2332,7 @@ mod tests {
 
     #[test]
     fn a_new_connection_is_named_something_not_already_taken() {
-        // §7.1: a colliding label silently replaces the account already under it, which is the one outcome a second account must not produce.
+        // §7.1: a colliding label silently replaces the profile already under it, which is the one outcome a second profile must not produce.
         let method = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),

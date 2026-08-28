@@ -56,7 +56,7 @@ struct StateColors {
     fg: Color32,
 }
 
-fn tint(c: Color32, alpha: u8) -> Color32 {
+pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 
