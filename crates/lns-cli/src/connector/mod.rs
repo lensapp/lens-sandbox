@@ -207,10 +207,13 @@ async fn connect(
             args.name
         );
     }
-    let method = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
+    let (connector, method) = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
     writeln!(prompt, "connecting {} with {}", args.name, method.label)?;
+    let profile = match args.label.clone() {
+        Some(named) => named,
+        None => confirm_name(&connector, &method, terminal, prompt)?,
+    };
     let values = ask_for_each(&method, terminal, prompt)?;
-    let profile = args.label.clone().unwrap_or_else(|| method.name.clone());
     let req = Request::ConnectConnector {
         name: args.name.clone(),
         method: method.name.clone(),
@@ -235,23 +238,49 @@ async fn connect(
     }
 }
 
-/// The method to connect, refused before a secret is typed when it cannot be connected at all.
+/// Names a connection: the mechanism suggests the first free name and the user confirms or replaces it (cli-spec §3.3).
+fn confirm_name(
+    connector: &ConnectorView,
+    method: &lns_ipc::ConnectorMethodView,
+    terminal: &mut dyn Terminal,
+    prompt: &mut impl Write,
+) -> Result<String> {
+    let suggested = connector.free_profile_name(&method.name);
+    write!(prompt, "name this connection [{suggested}]: ")?;
+    prompt.flush()?;
+    let typed = terminal.read_answer()?;
+    let typed = typed.trim();
+    Ok(if typed.is_empty() {
+        suggested
+    } else {
+        typed.to_string()
+    })
+}
+
+/// The connector and the method to connect, refused before a secret is typed when it cannot be connected at all.
 async fn method_to_connect(
     svc: &dyn ConnectorService,
     name: &str,
     named: Option<&str>,
-) -> Result<lns_ipc::ConnectorMethodView> {
+) -> Result<(ConnectorView, lns_ipc::ConnectorMethodView)> {
     let connector = installed_view(svc, name).await?;
     let method = match named {
         Some(named) => connector
             .methods
-            .into_iter()
+            .iter()
             .find(|m| m.name == named)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("{name} declares no method named {named}"))?,
         None => single_offerable(&connector.methods, name, "connect")?,
     };
     if !method.offerable {
         bail!("method {} of {name} needs a newer lns", method.name);
+    }
+    if method.credentials.is_empty() && method.needs_connect {
+        bail!(
+            "method {} declares no credential, so there is no value to ask for",
+            method.name
+        );
     }
     if !method.needs_connect {
         bail!(
@@ -259,7 +288,7 @@ async fn method_to_connect(
             method.name
         );
     }
-    Ok(method)
+    Ok((connector, method))
 }
 
 /// Ask once per credential the method declares, naming the variable the value is for, so a method needing two is not answered with one.
@@ -268,12 +297,6 @@ fn ask_for_each(
     terminal: &mut dyn Terminal,
     prompt: &mut impl Write,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    if method.credentials.is_empty() {
-        bail!(
-            "method {} declares no credential, so there is no value to ask for",
-            method.name
-        );
-    }
     let mut values = std::collections::BTreeMap::new();
     for credential in &method.credentials {
         write!(prompt, "{credential} (not shown): ")?;
@@ -633,6 +656,10 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
             }
         }
+
+        fn sent(&self) -> Vec<Request> {
+            self.sent.lock().unwrap().clone()
+        }
     }
 
     impl ConnectorService for CannedService {
@@ -846,7 +873,7 @@ mod tests {
                 label: None,
             }),
             &svc,
-            &mut asking(&["sk-live"]),
+            &mut asking(&["", "sk-live"]),
             &cwd(),
             &mut out,
             &mut Vec::new(),
@@ -1189,7 +1216,7 @@ mod tests {
                 label: None,
             }),
             &svc,
-            &["sk-live"],
+            &["", "sk-live"],
             &cwd(),
         )
         .await
@@ -1292,19 +1319,114 @@ mod tests {
             credentials: Vec::new(),
         };
         let svc = CannedService::with([Some(listing(vec![with_methods(vec![bare])]))]);
-        let err = drive(
-            ConnectorCommand::Connect(ConnectArgs {
+        // Driven through `run` rather than `drive`, because what the user was asked before the refusal is the point and `drive` drops the prompt on an error.
+        let mut out = Vec::new();
+        let mut prompt = Vec::new();
+        let err = run(
+            &ConnectorCommand::Connect(ConnectArgs {
                 name: "some-provider".into(),
                 method: Some("token".into()),
                 label: None,
             }),
             &svc,
-            &["sk-live"],
+            &mut asking(&["", "sk-live"]),
             &cwd(),
+            &mut out,
+            &mut prompt,
         )
         .await
         .expect_err("there is no value to ask for");
+
         assert!(format!("{err:#}").contains("no credential"), "{err:#}");
+        let asked = String::from_utf8(prompt).expect("utf-8");
+        assert!(
+            !asked.contains("name this connection"),
+            "a connection that cannot be made is refused before the user is asked to name it: {asked}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connecting_twice_keeps_both_accounts_rather_than_replacing_the_first() {
+        // The store keys a profile by its label, so reusing one overwrites the account already under it — silently, and taking every grant that named it.
+        let held = ConnectorView {
+            profiles: vec![lns_ipc::ConnectorProfileView {
+                label: "token".into(),
+                method: "token".into(),
+                authority: Vec::new(),
+            }],
+            ..with_methods(vec![method("token", true)])
+        };
+        let svc = CannedService::with([
+            Some(listing(vec![held])),
+            Some(Response::ConnectorConnected {
+                name: "some-provider".into(),
+                profile: "token-2".into(),
+                invalidated: Vec::new(),
+            }),
+        ]);
+
+        let (code, seen) = drive(
+            ConnectorCommand::Connect(ConnectArgs {
+                name: "some-provider".into(),
+                method: None,
+                label: None,
+            }),
+            &svc,
+            &["", "sk-live"],
+            &cwd(),
+        )
+        .await
+        .expect("connect");
+
+        assert_eq!(code, 0);
+        assert!(
+            seen.contains("token-2"),
+            "the suggested name is free, and the user is shown it: {seen}"
+        );
+        let sent = svc.sent();
+        assert!(
+            matches!(&sent[1], Request::ConnectConnector { profile, .. } if profile == "token-2"),
+            "{sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_the_user_types_is_the_one_the_connection_is_kept_under() {
+        let held = ConnectorView {
+            profiles: vec![lns_ipc::ConnectorProfileView {
+                label: "token".into(),
+                method: "token".into(),
+                authority: Vec::new(),
+            }],
+            ..with_methods(vec![method("token", true)])
+        };
+        let svc = CannedService::with([
+            Some(listing(vec![held])),
+            Some(Response::ConnectorConnected {
+                name: "some-provider".into(),
+                profile: "personal".into(),
+                invalidated: Vec::new(),
+            }),
+        ]);
+
+        drive(
+            ConnectorCommand::Connect(ConnectArgs {
+                name: "some-provider".into(),
+                method: None,
+                label: None,
+            }),
+            &svc,
+            &["personal", "sk-live"],
+            &cwd(),
+        )
+        .await
+        .expect("connect");
+
+        let sent = svc.sent();
+        assert!(
+            matches!(&sent[1], Request::ConnectConnector { profile, .. } if profile == "personal"),
+            "{sent:?}"
+        );
     }
 
     #[tokio::test]
@@ -1336,7 +1458,7 @@ mod tests {
                 label: None,
             }),
             &svc,
-            &["first", "second"],
+            &["", "first", "second"],
             &cwd(),
         )
         .await
