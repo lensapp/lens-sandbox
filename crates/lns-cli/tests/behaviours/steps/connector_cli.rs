@@ -164,6 +164,26 @@ fn service_holds(world: &mut BehaviourWorld, name: String, serves: String) {
     world.connector.held.push(view(&name, &serves, Vec::new()));
 }
 
+#[given(expr = "the machine holds the profile {string} of {string} for method {string}")]
+fn machine_holds_profile(
+    world: &mut BehaviourWorld,
+    label: String,
+    connector: String,
+    method: String,
+) {
+    let held = world
+        .connector
+        .held
+        .iter_mut()
+        .find(|view| view.name == connector)
+        .expect("the connector must be installed before it holds a profile");
+    held.profiles.push(lns_ipc::ConnectorProfileView {
+        label,
+        method,
+        authority: Vec::new(),
+    });
+}
+
 #[given(expr = "the service holds no connectors")]
 fn service_holds_none(world: &mut BehaviourWorld) {
     world.connector.held.clear();
@@ -568,6 +588,16 @@ fn says_already_granted(world: &mut BehaviourWorld) {
     assert!(
         run.output.contains("already granted"),
         "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the prompt suggests the name {string}")]
+fn prompt_suggests_the_name(world: &mut BehaviourWorld, suggested: String) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains(&format!("[{suggested}]")),
+        "the mechanism suggests a name and the user confirms it (cli-spec §3.3): {}",
         run.output
     );
 }

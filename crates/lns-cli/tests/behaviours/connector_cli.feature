@@ -71,6 +71,7 @@ Feature: lns connector, on this machine
   Scenario: connecting asks for each credential by the variable it fills
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service connects "some-provider" as "token"
+    And the user types ""
     And the user types "sk-live-real"
     When the user runs connector command "connect some-provider --method token"
     Then the connector command succeeds
@@ -78,6 +79,16 @@ Feature: lns connector, on this machine
     And the prompt says the value is not shown
     And the connector output does not contain "sk-live-real"
     And the output says connecting is not granting
+
+  Scenario: connecting suggests a name the machine does not already hold
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the machine holds the profile "token" of "some-provider" for method "token"
+    And the service connects "some-provider" as "token-2"
+    And the user types ""
+    And the user types "sk-live-real"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt suggests the name "token-2"
 
   Scenario: connecting a method that does not authenticate is refused before a value is typed
     Given the service holds the connector "some-provider" serving "api.some-provider.example"

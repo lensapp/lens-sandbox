@@ -384,6 +384,19 @@ pub struct ConnectorMethodView {
     pub help: Option<String>,
 }
 
+impl ConnectorView {
+    /// A name for a new connection that this connector does not already hold: the method's own name, then `-2`, `-3`. A label it holds would replace that account rather than add one, and the store keys a profile by connector and label alone — so a name another method made still collides. Both the CLI and the approval card name connections by this rule, and they must agree.
+    pub fn free_profile_name(&self, method: &str) -> String {
+        let mut candidate = method.to_string();
+        let mut nth = 1;
+        while self.profiles.iter().any(|held| held.label == candidate) {
+            nth += 1;
+            candidate = format!("{method}-{nth}");
+        }
+        candidate
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorProfileView {
     pub label: String,
@@ -1068,6 +1081,52 @@ mod secret_tests {
 
 #[cfg(test)]
 mod tests {
+
+    fn holding(labels: &[&str]) -> ConnectorView {
+        ConnectorView {
+            name: "some-provider".into(),
+            digest: "sha256:abc".into(),
+            serves: vec!["api.some-provider.example".into()],
+            methods: Vec::new(),
+            profiles: labels
+                .iter()
+                .map(|label| ConnectorProfileView {
+                    label: label.to_string(),
+                    method: "token".into(),
+                    authority: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_new_connection_is_named_after_its_method_when_nothing_holds_that_name() {
+        assert_eq!(holding(&[]).free_profile_name("token"), "token");
+    }
+
+    #[test]
+    fn a_name_already_held_is_stepped_past_rather_than_replaced() {
+        // Replacing is what a colliding label does in the store, silently, taking every grant that named it.
+        assert_eq!(holding(&["token"]).free_profile_name("token"), "token-2");
+        assert_eq!(
+            holding(&["token", "token-2"]).free_profile_name("token"),
+            "token-3"
+        );
+    }
+
+    #[test]
+    fn a_gap_left_by_a_disconnect_is_filled_rather_than_counted_past() {
+        // Counting the accounts would suggest `token-2` here and replace the one account this machine still holds.
+        assert_eq!(holding(&["token-2"]).free_profile_name("token"), "token");
+    }
+
+    #[test]
+    fn a_label_another_method_holds_still_collides() {
+        // The store's key is the connector and the label; the method is recorded in the value, so reusing the name rewrites that too.
+        let mut view = holding(&["token"]);
+        view.profiles[0].method = "session".into();
+        assert_eq!(view.free_profile_name("token"), "token-2");
+    }
     use super::*;
 
     #[test]

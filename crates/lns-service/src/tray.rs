@@ -1366,7 +1366,7 @@ fn render_account_choice(
     if draft.profile.is_none() && !held.is_empty() && !draft.connecting {
         draft.profile = Some(held[0].label.clone());
     }
-    render_new_connection(ui, method, draft, held.len());
+    render_new_connection(ui, method, draft, held.len(), offer);
 }
 
 /// The connect entry, expanded in place: one field per credential the method declares, plus the name this connection is kept under.
@@ -1374,12 +1374,14 @@ fn render_new_connection(
     ui: &mut egui::Ui,
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
-    held: usize,
+    // The count decides whether there is a choice to offer at all; the offer names a new account after every account the whole connector holds, not just this method's.
+    accounts_of_this_method: usize,
+    offer: &lns_ipc::ConnectorView,
 ) {
     use egui::{RichText, Sense};
 
     if !draft.connecting {
-        if held > 0 {
+        if accounts_of_this_method > 0 {
             ui.add_space(4.0);
             let link = ui.add(
                 egui::Label::new(
@@ -1391,11 +1393,11 @@ fn render_new_connection(
                 .sense(Sense::click()),
             );
             if link.clicked() {
-                begin_connecting(method, draft, held);
+                begin_connecting(method, draft, offer);
             }
             return;
         }
-        begin_connecting(method, draft, held);
+        begin_connecting(method, draft, offer);
     }
     if let Some(help) = &method.help {
         ui.add_space(6.0);
@@ -1419,15 +1421,16 @@ fn render_new_connection(
     }
 }
 
-/// Suggests a name that is free, because reusing one silently replaces the account already under it.
-fn begin_connecting(method: &lns_ipc::ConnectorMethodView, draft: &mut OfferDraft, held: usize) {
+/// Suggests a name nothing already holds, because reusing one silently replaces the account under it — counting the accounts is not enough, since disconnecting one leaves its successor's name taken.
+fn begin_connecting(
+    method: &lns_ipc::ConnectorMethodView,
+    draft: &mut OfferDraft,
+    offer: &lns_ipc::ConnectorView,
+) {
     draft.connecting = true;
     draft.profile = None;
     if draft.label.is_empty() {
-        draft.label = match held {
-            0 => method.name.clone(),
-            n => format!("{}-{}", method.name, n + 1),
-        };
+        draft.label = offer.free_profile_name(&method.name);
     }
 }
 
@@ -2031,6 +2034,78 @@ mod tests {
         );
     }
 
+    /// True when a control with this label is on screen, driven through the same headless harness as `click_labelled_control`.
+    fn control_exists(snapshot: Snapshot, label: &str) -> bool {
+        use egui_kittest::kittest::Queryable;
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                render_stack(ui, &snapshot, &mut cards, 1000.0);
+            });
+        harness.run();
+        harness.run();
+        harness.query_by_label(label).is_some()
+    }
+
+    #[test]
+    fn a_method_with_no_account_of_its_own_goes_straight_to_the_connect_form() {
+        // The connector holds an account, but not for this method: offering "Connect a new one" would be a link to swap an old account the user does not have.
+        let mut snapshot = offered_prompt("session", &[], &["SESSION_TOKEN"]);
+        let offer = snapshot.pending[0].offer.as_mut().expect("an offer");
+        // Held under the *other* method, and named after this one: the store keys a profile by connector and label alone, so the suggestion must step past it.
+        offer.profiles.push(lns_ipc::ConnectorProfileView {
+            label: "session".into(),
+            method: "token".into(),
+            authority: Vec::new(),
+        });
+
+        assert_eq!(
+            form_state(snapshot, "session-2"),
+            (false, true),
+            "no link to swap an account the user does not have, and the form open with a free name already in it"
+        );
+    }
+
+    /// Whether the card offers to connect another account, and whether the connect form is open with the suggested name in its field.
+    fn form_state(snapshot: Snapshot, suggested: &str) -> (bool, bool) {
+        use egui_kittest::kittest::Queryable;
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                render_stack(ui, &snapshot, &mut cards, 1000.0);
+            });
+        harness.run();
+        harness.run();
+        (
+            harness
+                .query_all_by_label("Connect a new one")
+                .next()
+                .is_some(),
+            // by_all rather than by_one: a text input exposes its value on the field and again on its inner text node.
+            harness.query_all_by_value(suggested).next().is_some(),
+        )
+    }
+
+    #[test]
+    fn a_method_that_already_has_an_account_offers_the_choice_first() {
+        let snapshot = offered_prompt("token", &[("work", &[])], &["SOME_TOKEN"]);
+        assert!(control_exists(snapshot, "Connect a new one"));
+    }
+
     #[test]
     fn a_connector_this_version_cannot_offer_still_has_an_answer() {
         // The hold outranks an ordinary allow, so falling back to the network card would leave a destination that asks on every request forever. `Never here` is the only answer that clears it.
@@ -2114,12 +2189,42 @@ mod tests {
             help: None,
         };
         let mut first = OfferDraft::default();
-        begin_connecting(&method, &mut first, 0);
+        begin_connecting(&method, &mut first, &holding(&[]));
         assert_eq!(first.label, "token");
 
         let mut second = OfferDraft::default();
-        begin_connecting(&method, &mut second, 1);
-        assert_eq!(second.label, "token-2");
+        begin_connecting(&method, &mut second, &holding(&["token"]));
+        assert_eq!(
+            second.label, "token-2",
+            "the rule itself is pinned in lns-ipc; this is the card asking for it"
+        );
+
+        let mut typed = OfferDraft {
+            label: "personal".into(),
+            ..OfferDraft::default()
+        };
+        begin_connecting(&method, &mut typed, &holding(&["token"]));
+        assert_eq!(
+            typed.label, "personal",
+            "a name the user already typed is not overwritten by the suggestion"
+        );
+    }
+
+    fn holding(labels: &[&str]) -> lns_ipc::ConnectorView {
+        lns_ipc::ConnectorView {
+            name: "some-provider".into(),
+            digest: "sha256:abc".into(),
+            serves: Vec::new(),
+            methods: Vec::new(),
+            profiles: labels
+                .iter()
+                .map(|label| lns_ipc::ConnectorProfileView {
+                    label: label.to_string(),
+                    method: "token".into(),
+                    authority: Vec::new(),
+                })
+                .collect(),
+        }
     }
 
     #[test]
