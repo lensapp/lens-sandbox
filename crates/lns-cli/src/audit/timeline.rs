@@ -282,7 +282,6 @@ mod tests {
             connector: None,
             kind: None,
             format: None,
-            json: false,
         }
     }
 
@@ -565,15 +564,15 @@ mod tests {
     }
 
     #[test]
-    fn json_emits_one_ocsf_object_per_event_in_sorted_order() {
+    fn jsonl_emits_one_ocsf_object_per_event_in_sorted_order() {
         let fix = Fixture::new();
         fix.write_run(RUN, &[run_env(RUN, "2026-06-29T13:00:00Z", &["FOO"])]);
         fix.write_ledger(&[connection(RUN, "2026-06-29T14:00:00Z")]);
-        let json = AuditArgs {
-            json: true,
+        let jsonl = AuditArgs {
+            format: Some(AuditFormat::Jsonl),
             ..args()
         };
-        let text = fix.render(&json);
+        let text = fix.render(&jsonl);
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2);
         let newest: Value = serde_json::from_str(lines[0]).unwrap();

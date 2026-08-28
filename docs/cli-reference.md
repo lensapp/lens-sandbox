@@ -79,8 +79,7 @@ takes it, passes it through when the target settles as a sandbox, and refuses it
 saying why — when the target is a document or a cached artifact.
 
 `lns audit` takes `--format <table|jsonl>` instead — a timeline is an event stream, so
-its machine-readable form is one JSON event per line. The older `--json` spelling still
-works as an alias for `--format jsonl`.
+its machine-readable form is one JSON event per line.
 
 What the JSON gives you:
 
@@ -360,8 +359,7 @@ Filters compose:
   events carry no connector, so this narrows the stream to ledger events.
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`, `approval`,
   `connection`, `credential`, `tool`.
-- `--format jsonl` — one raw JSON event per line instead of the table. (`--json` is the
-  older spelling of the same thing and still works.)
+- `--format jsonl` — one raw JSON event per line instead of the table.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline

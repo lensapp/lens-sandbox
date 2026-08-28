@@ -184,7 +184,7 @@ lns stop scraper
 
 ```bash
 lns logs claude-code --follow
-lns audit claude-code --follow --json | jq '.event'
+lns audit claude-code --follow --format jsonl | jq '.event'
 lns audit claude-code --denied        # just the blocks
 ```
 

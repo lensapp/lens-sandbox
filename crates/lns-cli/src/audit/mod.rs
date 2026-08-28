@@ -17,12 +17,9 @@ pub struct AuditArgs {
     #[arg(
         long,
         value_enum,
-        conflicts_with = "json",
         help = "Output format. jsonl emits one raw JSON event per line; its shape may change before v1.0."
     )]
     pub format: Option<AuditFormat>,
-    #[arg(long, hide = true)]
-    pub json: bool,
 }
 
 /// An audit timeline is an event stream, so its machine-readable form is JSONL rather than a document.
@@ -35,11 +32,7 @@ pub enum AuditFormat {
 
 impl AuditArgs {
     pub(super) fn format(&self) -> AuditFormat {
-        self.format.unwrap_or(if self.json {
-            AuditFormat::Jsonl
-        } else {
-            AuditFormat::Table
-        })
+        self.format.unwrap_or(AuditFormat::Table)
     }
 }
 
@@ -248,12 +241,12 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn the_json_flag_emits_one_raw_event_per_line() {
+    async fn the_jsonl_format_emits_one_raw_event_per_line() {
         let home = tempfile::TempDir::new().unwrap();
         write_ledger(home.path());
         let _env = home_env(home.path());
         let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "--json"], &mut out)
+        let code = dispatch_argv(&["lns", "audit", "--format", "jsonl"], &mut out)
             .await
             .unwrap();
         assert_eq!(code, 0);
@@ -315,40 +308,26 @@ mod tests {
         assert_eq!(text.trim(), "No audit events for sandbox nope.");
     }
 
-    #[tokio::test]
-    #[serial_test::serial(env)]
-    async fn the_jsonl_format_emits_exactly_what_the_deprecated_json_flag_emitted() {
-        let home = tempfile::TempDir::new().unwrap();
-        write_ledger(home.path());
-        let _env = home_env(home.path());
-        let mut legacy = Vec::new();
-        dispatch_argv(&["lns", "audit", "--json"], &mut legacy)
-            .await
-            .unwrap();
-        let mut current = Vec::new();
-        dispatch_argv(&["lns", "audit", "--format", "jsonl"], &mut current)
-            .await
-            .unwrap();
-        assert_eq!(
-            String::from_utf8(current).unwrap(),
-            String::from_utf8(legacy).unwrap(),
-            "the alias must not change a single byte for existing scripts"
-        );
+    #[test]
+    fn omitting_the_format_flag_selects_the_table() {
+        let matches = crate::command::build_cli()
+            .try_get_matches_from(["lns", "audit"])
+            .expect("audit takes no required argument");
+        let (_, sub) = matches.subcommand().expect("audit is the subcommand");
+        let args = AuditArgs::from_arg_matches(sub).expect("audit args parse");
+        assert_eq!(args.format(), AuditFormat::Table);
     }
 
     #[test]
-    fn asking_for_both_the_alias_and_a_conflicting_format_is_rejected() {
+    fn there_is_no_separate_json_switch() {
         let err = crate::command::build_cli()
-            .try_get_matches_from(["lns", "audit", "--json", "--format", "table"])
-            .expect_err("--json means jsonl, so --format table contradicts it");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+            .try_get_matches_from(["lns", "audit", "--json"])
+            .expect_err("--format jsonl is the only machine output spelling");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn the_deprecated_json_flag_still_parses_but_is_hidden_from_help() {
-        crate::command::build_cli()
-            .try_get_matches_from(["lns", "audit", "--json"])
-            .expect("existing scripts keep working");
+    fn the_format_flag_is_the_advertised_output_switch() {
         let help = crate::command::build_cli()
             .find_subcommand_mut("audit")
             .expect("audit is registered")
@@ -360,18 +339,18 @@ mod tests {
         );
         assert!(
             !help.contains("--json"),
-            "the deprecated alias is not advertised: {help}"
+            "no separate json switch is advertised: {help}"
         );
     }
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn the_json_flag_labels_a_sandbox_run() {
+    async fn the_jsonl_format_labels_a_sandbox_run() {
         let home = tempfile::TempDir::new().unwrap();
         write_sandbox_run_chain(home.path(), "5a5a5a");
         let _env = home_env(home.path());
         let mut out = Vec::new();
-        let code = dispatch_argv(&["lns", "audit", "--json"], &mut out)
+        let code = dispatch_argv(&["lns", "audit", "--format", "jsonl"], &mut out)
             .await
             .unwrap();
         assert_eq!(code, 0);
