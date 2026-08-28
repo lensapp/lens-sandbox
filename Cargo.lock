@@ -1452,7 +1452,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e-tests"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "cucumber",
  "dirs 5.0.1",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "lns-cli"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "lns-service"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anstyle",
  "anyhow",

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.22.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.21.0...lns-v0.22.0) (2026-08-28)
+
+
+### Features
+
+* approval cards name the run that is asking ([cecc6f1](https://github.com/lensapp/lens-sandbox/commit/cecc6f1503383ef3f776eba2ed316ea0b969f504)), closes [#331](https://github.com/lensapp/lens-sandbox/issues/331)
+
+
+### Bug Fixes
+
+* a config default no longer outranks the resources a document declares ([d30aa84](https://github.com/lensapp/lens-sandbox/commit/d30aa8430d4ed7c73d92ce2e686a5e76beb7f707))
+* a hostile platform field cannot break the identity header ([d9c8793](https://github.com/lensapp/lens-sandbox/commit/d9c879381f4f262edc87abc19987f8655987f384))
+* answer lns login --list as a table with a header row and a --format flag ([2f2f65e](https://github.com/lensapp/lens-sandbox/commit/2f2f65e08bac14a24513cf7074f26f662452d4b3))
+* config get emits a single JSON object, null when unset ([1027786](https://github.com/lensapp/lens-sandbox/commit/102778624ed21041eb8e1a76370a45b3a83c8b88))
+* every outbound request identifies itself as lns ([8c304fa](https://github.com/lensapp/lens-sandbox/commit/8c304fa58a6e3947716329e4ce71fdcad2e9857e))
+* exec sessions get the workload's proxy environment ([6acd4ba](https://github.com/lensapp/lens-sandbox/commit/6acd4bace0245e64fcb6b1b8c57e0e88e2f7bf28))
+* land a fileset a volume mount would otherwise hide ([d1b9b2a](https://github.com/lensapp/lens-sandbox/commit/d1b9b2a18555fdc4186e573255ee6ddc1afad01d)), closes [#341](https://github.com/lensapp/lens-sandbox/issues/341)
+* **lns-init:** unlink a symlink in the way only inside a volume ([85c9f8e](https://github.com/lensapp/lens-sandbox/commit/85c9f8e3f5ad9033769ca2336d5a057ccfa4a120))
+* print a sentence instead of an empty table on empty list output ([83d0855](https://github.com/lensapp/lens-sandbox/commit/83d0855a4bbc8d6c7a8580cde6c05197ff21803c))
+* prompts read the terminal, never stdin ([81c6aa9](https://github.com/lensapp/lens-sandbox/commit/81c6aa9ce4bcaea5ab45e0c64ed83208be59e1ba))
+* qualify a bare --mixin reference with the default registry ([91d0f74](https://github.com/lensapp/lens-sandbox/commit/91d0f748f11a2f37f7c61b46141467b5b9aa9f57))
+* refuse prompts without a terminal and route prompts and status lines to stderr ([9a8e103](https://github.com/lensapp/lens-sandbox/commit/9a8e103b33552e3e31f890efbb349537c9bab115))
+* wrong-kind operands get a clean error that names the other namespace ([b0250a7](https://github.com/lensapp/lens-sandbox/commit/b0250a72e7989f1ef563b1e1cf1a6a4eaccc41af))
+
 ## [0.21.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.20.0...lns-v0.21.0) (2026-08-26)
 
 
