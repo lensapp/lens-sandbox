@@ -324,10 +324,14 @@ lns connector forget <ID> [--project <PATH>]
 | `grant <ID>`          | Let this project use one method. Prints what that method opens, writes and sets, and the authority of each profile held, then asks. Exits `1` when you decline, and `1` when this project already granted that method and profile. `--project <PATH>` acts on another directory. |
 | `forget <ID>`         | Clear this project's decision about one connector, granted or declined. Exits `1` when there was nothing to forget. `--project <PATH>` acts on another directory. |
 
-`install` takes either a published reference or a path to a directory holding the
-connector's `lns.yaml`; a relative path is resolved against your working
-directory. The digest a local install records is the one publishing that
-directory would produce, so a grant survives the publish.
+`install` takes either a published reference or a local path — a directory
+holding the connector's `lns.yaml`, or the document itself under any name. A path
+is `.` or `..`, or starts with `./`, `../` or `/`; anything else is a reference,
+so `acme/docs:1` reaches a registry rather than your disk, qualified by
+`run.registry`, else the Lens hub (`hub.lns.run`). A relative path is resolved
+against your working directory. The digest a local install records is the one
+publishing that directory would produce, so a grant survives the publish, and
+naming the document records the same digest as naming its directory.
 
 `connect` and `grant` need a terminal by design: no flag answers either, so a
 script cannot consent or paste a secret on your behalf. `--method` is required

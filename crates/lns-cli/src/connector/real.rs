@@ -10,6 +10,7 @@ use crate::local_future::LocalBoxFuture;
 pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> {
     Box::pin(async move {
         let args = super::ConnectorArgs::from_arg_matches(matches)?;
+        let registry = crate::artifact::real::configured_registry()?;
         let cwd = ctx.cwd()?;
         crate::service::require_running().await?;
         let svc = RealConnectorService::new(crate::service::socket_path()?);
@@ -20,6 +21,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             &svc,
             &mut terminal,
             &cwd,
+            registry.as_deref(),
             &mut out,
             &mut std::io::stderr(),
         )

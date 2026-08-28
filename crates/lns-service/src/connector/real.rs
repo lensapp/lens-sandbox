@@ -281,8 +281,12 @@ mod tests {
         std::fs::create_dir(dir.path().join("seed")).unwrap();
         std::fs::write(dir.path().join("seed").join("notes.md"), b"hello").unwrap();
 
-        let fetched = super::super::source::read_local(&RealSnapshotFs, read_document, dir.path())
-            .expect("a real connector directory resolves");
+        let fetched = super::super::source::read_local(
+            &RealSnapshotFs,
+            read_document,
+            &dir.path().join("lns.yaml"),
+        )
+        .expect("a real connector directory resolves");
 
         assert!(fetched.digest.starts_with("sha256:"), "{}", fetched.digest);
         assert!(

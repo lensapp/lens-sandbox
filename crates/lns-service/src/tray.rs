@@ -1333,8 +1333,6 @@ fn render_account_choice(
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
 ) {
-    use egui::RichText;
-
     if !method.needs_connect {
         return;
     }
@@ -1343,30 +1341,67 @@ fn render_account_choice(
         .iter()
         .filter(|profile| profile.method == method.name)
         .collect();
-    ui.add_space(10.0);
-    for profile in &held {
-        let selected = draft.profile.as_deref() == Some(profile.label.as_str());
-        ui.horizontal(|ui| {
-            if ui
-                .radio(selected && !draft.connecting, &profile.label)
-                .clicked()
-            {
-                draft.profile = Some(profile.label.clone());
-                draft.connecting = false;
-            }
-            if !profile.authority.is_empty() {
-                ui.label(
-                    RichText::new(profile.authority.join(", "))
-                        .size(theme::FONT_CAPTION)
-                        .color(window::TEXT_MUTED),
-                );
-            }
-        });
+    // Nothing to choose between, so the card asks for the one thing it needs instead of offering a choice of one.
+    if held.is_empty() {
+        // Once, not every frame: refilling would type the suggestion back under the cursor of a user clearing the name.
+        if !draft.connecting {
+            begin_connecting(method, draft, offer);
+        }
+        render_new_connection(ui, method, draft);
+        return;
     }
-    if draft.profile.is_none() && !held.is_empty() && !draft.connecting {
+    if draft.profile.is_none() && !draft.connecting {
         draft.profile = Some(held[0].label.clone());
     }
-    render_new_connection(ui, method, draft, held.len(), offer);
+    ui.add_space(10.0);
+    let picked = crate::ui::chips(
+        ui,
+        held.iter()
+            .map(|profile| {
+                (
+                    profile.label.as_str(),
+                    !draft.connecting && draft.profile.as_deref() == Some(profile.label.as_str()),
+                )
+            })
+            .chain(std::iter::once((NEW_ACCOUNT, draft.connecting))),
+    );
+    match picked.as_deref() {
+        Some(NEW_ACCOUNT) => begin_connecting(method, draft, offer),
+        Some(label) => {
+            draft.profile = Some(label.to_string());
+            draft.connecting = false;
+        }
+        None => {}
+    }
+    render_chosen_authority(ui, &held, draft);
+    render_new_connection(ui, method, draft);
+}
+
+/// The chip that starts a connection instead of picking one already made.
+const NEW_ACCOUNT: &str = "+ new";
+
+/// What the chosen account can reach, which §3.2.4 makes part of the disclosure — under the chips, because only the chosen one is being granted.
+fn render_chosen_authority(
+    ui: &mut egui::Ui,
+    held: &[&lns_ipc::ConnectorProfileView],
+    draft: &OfferDraft,
+) {
+    if draft.connecting {
+        return;
+    }
+    let Some(chosen) = held
+        .iter()
+        .find(|profile| draft.profile.as_deref() == Some(profile.label.as_str()))
+        .filter(|profile| !profile.authority.is_empty())
+    else {
+        return;
+    };
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(chosen.authority.join(", "))
+            .size(theme::FONT_CAPTION)
+            .color(window::TEXT_MUTED),
+    );
 }
 
 /// The connect entry, expanded in place: one field per credential the method declares, plus the name this connection is kept under.
@@ -1374,30 +1409,11 @@ fn render_new_connection(
     ui: &mut egui::Ui,
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
-    // The count decides whether there is a choice to offer at all; the offer names a new account after every account the whole connector holds, not just this method's.
-    accounts_of_this_method: usize,
-    offer: &lns_ipc::ConnectorView,
 ) {
-    use egui::{RichText, Sense};
+    use egui::RichText;
 
     if !draft.connecting {
-        if accounts_of_this_method > 0 {
-            ui.add_space(4.0);
-            let link = ui.add(
-                egui::Label::new(
-                    RichText::new("Connect a new one")
-                        .size(theme::FONT_CAPTION)
-                        .underline()
-                        .color(window::TEXT_MUTED),
-                )
-                .sense(Sense::click()),
-            );
-            if link.clicked() {
-                begin_connecting(method, draft, offer);
-            }
-            return;
-        }
-        begin_connecting(method, draft, offer);
+        return;
     }
     if let Some(help) = &method.help {
         ui.add_space(6.0);
@@ -2069,11 +2085,11 @@ mod tests {
         assert_eq!(
             form_state(snapshot, "session-2"),
             (false, true),
-            "no link to swap an account the user does not have, and the form open with a free name already in it"
+            "no chip to swap an account the user does not have, and the form open with a free name already in it"
         );
     }
 
-    /// Whether the card offers to connect another account, and whether the connect form is open with the suggested name in its field.
+    /// Whether the card offers another account to switch to, and whether the connect form is open with the suggested name in its field.
     fn form_state(snapshot: Snapshot, suggested: &str) -> (bool, bool) {
         use egui_kittest::kittest::Queryable;
         let mut cards = CardState::default();
@@ -2091,10 +2107,7 @@ mod tests {
         harness.run();
         harness.run();
         (
-            harness
-                .query_all_by_label("Connect a new one")
-                .next()
-                .is_some(),
+            harness.query_all_by_label(NEW_ACCOUNT).next().is_some(),
             // by_all rather than by_one: a text input exposes its value on the field and again on its inner text node.
             harness.query_all_by_value(suggested).next().is_some(),
         )
@@ -2102,8 +2115,140 @@ mod tests {
 
     #[test]
     fn a_method_that_already_has_an_account_offers_the_choice_first() {
-        let snapshot = offered_prompt("token", &[("work", &[])], &["SOME_TOKEN"]);
-        assert!(control_exists(snapshot, "Connect a new one"));
+        // Every account is a chip, so the one being granted is visible without opening anything.
+        let snapshot = offered_prompt(
+            "token",
+            &[("work", &[]), ("personal", &[])],
+            &["SOME_TOKEN"],
+        );
+        for chip in ["work", "personal", NEW_ACCOUNT] {
+            assert!(control_exists(snapshot.clone(), chip), "{chip}");
+        }
+    }
+
+    /// Clicks `chip`, then `Connect`, in one card — so the second click sees what the first chose.
+    fn pick_then_connect(snapshot: Snapshot, chip: &str) -> Option<CardAction> {
+        use egui_kittest::kittest::Queryable;
+        let fired: Arc<Mutex<Option<CardAction>>> = Arc::new(Mutex::new(None));
+        let sink = fired.clone();
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                if let (action, _) = render_stack(ui, &snapshot, &mut cards, 1000.0)
+                    && let Some(action) = action
+                {
+                    *sink.lock().expect("sink poisoned") = Some(action);
+                }
+            });
+        harness.run();
+        harness.run();
+        harness.get_by_label(chip).click();
+        harness.run();
+        harness.get_by_label("Connect").click();
+        harness.run();
+        fired.lock().expect("sink poisoned").take()
+    }
+
+    #[test]
+    fn granting_carries_the_account_whose_chip_was_clicked() {
+        // The whole reason for a selector: two accounts held, and this run needs the second.
+        let snapshot = offered_prompt(
+            "token",
+            &[("work", &["repo"]), ("personal", &[])],
+            &["SOME_TOKEN"],
+        );
+
+        assert_eq!(
+            pick_then_connect(snapshot, "personal"),
+            Some(CardAction::Grant {
+                id: "r1".into(),
+                method: "token".into(),
+                profile: ProfileChoice::Held("personal".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn the_chosen_accounts_scopes_are_disclosed_beside_its_chips() {
+        // §3.2.4 makes the profile's authority part of what the card discloses, and the chosen one is the profile the grant applies — so it must follow the choice, not sit on whichever account happens to be first.
+        let held: &[(&str, &[&str])] = &[("work", &["repo", "issues"]), ("personal", &[])];
+        assert!(control_exists(
+            offered_prompt("token", held, &["SOME_TOKEN"]),
+            "repo, issues"
+        ));
+
+        let after_choosing_the_other =
+            scopes_after_picking(offered_prompt("token", held, &["SOME_TOKEN"]), "personal");
+
+        assert!(
+            !after_choosing_the_other,
+            "the other account grants nothing named, so nothing is disclosed"
+        );
+    }
+
+    /// Whether `repo, issues` is still on the card once `chip` is the chosen account.
+    fn scopes_after_picking(snapshot: Snapshot, chip: &str) -> bool {
+        use egui_kittest::kittest::Queryable;
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                render_stack(ui, &snapshot, &mut cards, 1000.0);
+            });
+        harness.run();
+        harness.run();
+        harness.get_by_label(chip).click();
+        harness.run();
+        harness.query_all_by_label("repo, issues").next().is_some()
+    }
+
+    #[test]
+    fn a_name_the_user_clears_stays_cleared() {
+        // The suggestion is offered once. Refilling it every frame types it back under the cursor of a user who is replacing it.
+        let snapshot = offered_prompt("token", &[], &["SOME_TOKEN"]);
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                render_stack(ui, &snapshot, &mut cards, 1000.0);
+            });
+        harness.run();
+        harness.run();
+
+        use egui_kittest::kittest::Queryable;
+        harness
+            .query_all_by_value("token")
+            .next()
+            .expect("the suggested name")
+            .focus();
+        for _ in 0.."token".len() {
+            harness.key_press(egui::Key::Backspace);
+            harness.run();
+        }
+
+        assert!(
+            harness.query_all_by_value("token").next().is_none(),
+            "the field the user emptied is still empty"
+        );
     }
 
     #[test]

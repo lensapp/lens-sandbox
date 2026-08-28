@@ -26,6 +26,11 @@ Feature: lns connector, on this machine
     When the user runs connector command "install ghcr.io/acme/some-provider:1"
     Then the service was asked to install "ghcr.io/acme/some-provider:1"
 
+  Scenario: a bare reference addresses the Lens hub rather than Docker Hub
+    Given the service installs "docs" serving "docs.rs"
+    When the user runs connector command "install acme/docs"
+    Then the service was asked to install "hub.lns.run/acme/docs"
+
   Scenario: a method that authenticates is marked as needing a connect
     Given the service installs "some-provider" serving "api.some-provider.example"
     When the user runs connector command "install ghcr.io/acme/some-provider:1"

@@ -602,7 +602,7 @@ mod tests {
             *src.asked.lock().unwrap(),
             [
                 Source::Reference("ghcr.io/acme/some-provider:1".to_string()),
-                Source::Local("/work/some-provider".into()),
+                Source::Local("/work/some-provider/lns.yaml".into()),
             ]
         );
     }
