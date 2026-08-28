@@ -362,6 +362,25 @@ mod document_name_tests {
     fn a_definition_that_cannot_be_parsed_names_nothing() {
         assert_eq!(document_name(Some("not json")), None);
     }
+
+    #[test]
+    fn a_name_no_document_may_carry_never_reaches_the_run_name() {
+        for illegal in [
+            "",
+            "Reviewer",
+            "some sandbox",
+            "-leading",
+            "trailing-",
+            "under_score",
+            &"a".repeat(64),
+        ] {
+            assert_eq!(
+                document_name(Some(&document(illegal))),
+                None,
+                "{illegal:?} is not a name a document may carry"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

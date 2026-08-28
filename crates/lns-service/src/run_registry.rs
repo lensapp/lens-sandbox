@@ -787,6 +787,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_auto_name_the_registry_hands_out_is_one_it_would_refuse() {
+        let past_the_noun_pool = 52;
+        for document in [None, Some("cafe"), Some("some-sandbox"), Some("0-0")] {
+            let mut map = HashMap::new();
+            let mut names = run_name::Generator::new(run_name::ThreadDraw, document);
+            for run in 0..past_the_noun_pool {
+                let (h, _rx) = make_handle();
+                let name =
+                    register_named_in(&mut map, format!("aa{run:04}"), None, h, &mut names).unwrap();
+                validate_run_name(&name).unwrap_or_else(|e| {
+                    panic!(
+                        "document {document:?} auto-named a run {name:?} the registry refuses: {e}"
+                    )
+                });
+            }
+        }
+    }
+
+    #[tokio::test]
     #[serial_test::serial(global_runs)]
     async fn ensure_name_available_rejects_taken_or_invalid_names_and_accepts_free_ones() {
         let id = allocate_run_id();

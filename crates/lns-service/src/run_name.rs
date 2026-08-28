@@ -113,13 +113,84 @@ mod tests {
         assert_eq!(generator_for("some-sandbox", &[]).pool_size(), 50);
     }
 
+    fn document_json(name: &str) -> String {
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"{name}","spec":{{"image":"x:1"}}}}"#
+        )
+    }
+
+    fn document_grammar_boundaries() -> Vec<String> {
+        vec![
+            "a".to_string(),
+            "0".to_string(),
+            "9a".to_string(),
+            "a9".to_string(),
+            "007".to_string(),
+            "cafe".to_string(),
+            "abcdef".to_string(),
+            "abc123".to_string(),
+            "0-0".to_string(),
+            "some-sandbox".to_string(),
+            "a".repeat(63),
+            format!("0{}9", "-a".repeat(30)),
+        ]
+    }
+
+    #[test]
+    fn every_boundary_case_is_a_name_a_document_may_carry() {
+        for document in document_grammar_boundaries() {
+            assert_eq!(
+                crate::run::document_name(Some(&document_json(&document))),
+                Some(document.clone()),
+                "the document grammar refuses {document:?}, so it is no boundary of it"
+            );
+        }
+    }
+
     #[test]
     fn every_name_a_document_generates_is_a_legal_run_name() {
-        for noun in 0..NOUNS.len() {
-            let name = generator_for("some-sandbox", &[noun]).draw();
+        for document in document_grammar_boundaries() {
+            for noun in 0..NOUNS.len() {
+                let name = generator_for(&document, &[noun]).draw();
+                lns_ipc::validate_run_name(&name)
+                    .unwrap_or_else(|e| panic!("generated name {name:?} is illegal: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn every_exhaustion_suffix_a_document_generates_is_a_legal_run_name() {
+        for document in document_grammar_boundaries() {
+            for noun in 0..NOUNS.len() {
+                let base = generator_for(&document, &[noun]).draw();
+                for n in [0u32, 9, 10, 4096] {
+                    let name = format!("{base}-{n}");
+                    lns_ipc::validate_run_name(&name)
+                        .unwrap_or_else(|e| panic!("suffixed name {name:?} is illegal: {e}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_document_named_in_hex_still_names_a_run() {
+        for hex in ["0", "007", "cafe", "abcdef"] {
+            assert!(
+                lns_ipc::validate_run_name(hex).is_err(),
+                "{hex:?} is a name no run may carry on its own"
+            );
+            let name = generator_for(hex, &[0]).draw();
             lns_ipc::validate_run_name(&name)
                 .unwrap_or_else(|e| panic!("generated name {name:?} is illegal: {e}"));
         }
+    }
+
+    #[test]
+    fn the_longest_document_name_still_names_a_run() {
+        let name = generator_for(&"a".repeat(63), &[0]).draw();
+        assert_eq!(name.len(), 63 + 1 + "otter".len());
+        lns_ipc::validate_run_name(&name)
+            .unwrap_or_else(|e| panic!("generated name {name:?} is illegal: {e}"));
     }
 
     #[test]
