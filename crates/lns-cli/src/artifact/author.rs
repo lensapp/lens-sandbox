@@ -234,7 +234,6 @@ pub fn inspect_local<F: Fs, W: Write>(
     mixins: &[String],
     out: &mut W,
 ) -> Result<i32> {
-    super::refuse_mixins_unless_published(mixins)?;
     let path = match (target, file) {
         (Some(_), Some(_)) => bail!("pass an inspect target or --file, not both"),
         (Some(target), None) => crate::run::target::definition_file(target, cwd),
@@ -246,38 +245,59 @@ pub fn inspect_local<F: Fs, W: Write>(
     let def = lns_artifact::sandbox::parse_document(&json).map_err(|e| {
         anyhow::anyhow!("{} is not a valid {}: {e:#}", path.display(), kind.as_str())
     })?;
-    render_effective(kind, &def, out)?;
+    let spec = compose(fs, path.parent().unwrap_or(cwd), &def, mixins)?;
+    render_effective(kind, &def.name, &spec, out)?;
     Ok(0)
+}
+
+/// `--mixin` merges by §3.3.2 against a local document too, since the mixins it names are read from this machine and the render still resolves nothing.
+fn compose<F: Fs + ?Sized>(
+    fs: &F,
+    project_dir: &Path,
+    def: &lns_artifact::sandbox::Definition,
+    mixins: &[String],
+) -> Result<lns_artifact::sandbox::SandboxSpec> {
+    if mixins.is_empty() {
+        return Ok(def.spec.clone());
+    }
+    let local = super::mixin_offline::resolve(fs, project_dir, mixins)?;
+    let mut base = def.spec.clone();
+    let declared = std::mem::take(&mut base.mixins);
+    let sources = lns_artifact::merge::flatten(&base, &local.keys, None, &local.graph)?;
+    let mut merged = lns_artifact::merge::merge(&sources)?.spec;
+    merged.mixins = declared.into_iter().chain(local.keys).collect();
+    Ok(merged)
 }
 
 fn render_effective<W: Write>(
     kind: lns_artifact::spec::Kind,
-    def: &lns_artifact::sandbox::Definition,
+    name: &str,
+    spec: &lns_artifact::sandbox::SandboxSpec,
     out: &mut W,
 ) -> Result<()> {
     match kind {
         lns_artifact::spec::Kind::Sandbox => {
-            writeln!(out, "Sandbox: {}", def.name)?;
-            writeln!(out, "  image:        {}", def.spec.image)?;
+            writeln!(out, "Sandbox: {name}")?;
+            writeln!(out, "  image:        {}", spec.image)?;
         }
-        lns_artifact::spec::Kind::Mixin => writeln!(out, "Mixin: {}", def.name)?,
+        lns_artifact::spec::Kind::Mixin => writeln!(out, "Mixin: {name}")?,
     }
-    for mixin in &def.spec.mixins {
+    for mixin in &spec.mixins {
         writeln!(out, "  mixin: {mixin}")?;
     }
-    if let Some(command) = &def.spec.command {
+    if let Some(command) = &spec.command {
         writeln!(out, "  command:      {command}")?;
     }
-    if let Some(user) = &def.spec.user {
+    if let Some(user) = &spec.user {
         writeln!(out, "  user:         {user}")?;
     }
-    if let Some(workdir) = &def.spec.workdir {
+    if let Some(workdir) = &spec.workdir {
         writeln!(out, "  workdir:      {workdir}")?;
     }
-    for (key, value) in &def.spec.env {
+    for (key, value) in &spec.env {
         writeln!(out, "  env:          {key}={value}")?;
     }
-    for volume in &def.spec.volumes {
+    for volume in &spec.volumes {
         let kind = if volume.is_bind() { "bind" } else { "volume" };
         let mode = if volume.read_only() {
             "read-only"
@@ -291,7 +311,7 @@ fn render_effective<W: Write>(
             volume.target
         )?;
     }
-    for fileset in &def.spec.filesets {
+    for fileset in &spec.filesets {
         let source = crate::run::summary::fileset_source_display(fileset);
         let owner = crate::run::summary::fileset_owner_display(fileset.owner);
         writeln!(
@@ -303,20 +323,20 @@ fn render_effective<W: Write>(
     writeln!(
         out,
         "  egress:       {} route(s){}",
-        def.spec.egress.http.len(),
-        raw_rule_note(def.spec.egress.tcp.len())
+        spec.egress.http.len(),
+        raw_rule_note(spec.egress.tcp.len())
     )?;
-    if !def.spec.connectors.is_empty() {
-        writeln!(out, "  connectors: {}", def.spec.connectors.join(", "))?;
+    if !spec.connectors.is_empty() {
+        writeln!(out, "  connectors: {}", spec.connectors.join(", "))?;
     }
-    for credential in &def.spec.credentials {
+    for credential in &spec.credentials {
         writeln!(
             out,
             "  credential: {}",
             super::credential_disclosure(credential)
         )?;
     }
-    for tool in &def.spec.tools {
+    for tool in &spec.tools {
         writeln!(out, "  tool: {tool}")?;
     }
     Ok(())
@@ -494,12 +514,12 @@ mod tests {
     }
 
     #[test]
-    fn inspect_local_refuses_a_mixin_rather_than_rendering_without_it() {
+    fn inspect_local_refuses_a_published_mixin_it_cannot_resolve() {
         let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
         let err = inspect_local(
             &fs,
-            Path::new("/work"),
+            cwd(),
             None,
             None,
             &["ghcr.io/acme/obs:2".to_string()],
@@ -507,9 +527,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("--mixin applies to a published reference"),
-            "this render never resolves anything, so honouring the flag silently would show a composition the file does not describe; got: {err:#}"
+            format!("{err:#}").contains("an offline render resolves nothing"),
+            "rendering without it would show a composition the file does not describe, and fetching it would make an offline render reach the network; got: {err:#}"
         );
+    }
+
+    #[test]
+    fn inspect_local_merges_a_mixin_the_user_names_by_path() {
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", valid_yaml()),
+            (
+                "/work/obs/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n",
+            ),
+        ]);
+        let mut out = Vec::new();
+        let code = inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("tool: node@22"),
+            "the mixin is on this machine, so the composition it makes is renderable without resolving anything; got: {text}"
+        );
+        assert!(text.contains("mixin: /work/obs/lns.yaml"), "got: {text}");
+    }
+
+    #[test]
+    fn a_mixin_that_names_itself_is_refused_by_the_merge() {
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", valid_yaml()),
+            (
+                "/work/obs/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  mixins:\n    - ./\n",
+            ),
+        ]);
+        let mut out = Vec::new();
+        let err =
+            inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reachable from itself"),
+            "a cycle has no composition to render; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_that_is_a_sandbox_is_named_as_the_wrong_kind() {
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", valid_yaml()),
+            ("/work/obs/lns.yaml", valid_yaml()),
+        ]);
+        let mut out = Vec::new();
+        let err =
+            inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("/work/obs/lns.yaml is not a mixin"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_path_that_holds_no_document_names_the_path() {
+        let fs = fake("/work/lns.yaml", valid_yaml());
+        let mut out = Vec::new();
+        let err =
+            inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap_err();
+        assert!(format!("{err:#}").contains("/work/obs"), "got: {err:#}");
     }
 
     #[test]
