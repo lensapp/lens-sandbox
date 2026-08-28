@@ -21,6 +21,13 @@ Feature: authoring a document
     And the file "lns.yaml" contains "ports:"
     And the file "lns.yaml" contains "tools: []"
 
+  Scenario: the scaffolded image reads in the product's own words
+    Given the current directory has no lns.yaml
+    When the user runs artifact command "init"
+    Then the exit code is 0
+    And the file "lns.yaml" contains "image: alpine:3.20"
+    And the file "lns.yaml" does not contain "docker"
+
   Scenario: the created-file line lands on stderr, so a piped stdout stays the answer
     Given the current directory has no lns.yaml
     When the user runs artifact command "init"

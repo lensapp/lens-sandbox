@@ -77,7 +77,7 @@ fn parse_volume_name(s: &str) -> Result<String, String> {
 pub fn augment(app: clap::Command) -> clap::Command {
     app.subcommand(
         subcommand::<VolumeArgs>("volume")
-            .about("Manage the named volumes used with `lns run -v` (`docker volume`-style)."),
+            .about("Manage the named volumes used with `lns run -v`."),
     )
 }
 

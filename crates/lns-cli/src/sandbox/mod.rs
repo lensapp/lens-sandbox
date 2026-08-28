@@ -24,7 +24,7 @@ pub enum SandboxCommand {
     Run(Box<RunArgs>),
     #[command(about = "Run another command inside a running sandbox.")]
     Exec(ExecArgs),
-    #[command(about = "Send a signal to a running sandbox (`docker kill`-style).")]
+    #[command(about = "Send a signal to a running sandbox.")]
     Kill(KillArgs),
     #[command(about = "Stop a sandbox gracefully: SIGTERM, then SIGKILL once the timeout passes.")]
     Stop(SandboxStopArgs),
@@ -145,7 +145,7 @@ pub struct SandboxAttachArgs {
         long,
         default_value = "ctrl-p,ctrl-q",
         value_parser = parse_detach_keys_arg,
-        help = "Detach chord; on match the CLI detaches and returns, leaving the run running (docker-attach style — no signal is sent)."
+        help = "Detach chord; on match the CLI detaches and returns, leaving the run running — no signal is sent."
     )]
     pub detach_keys: DetachChord,
 }
