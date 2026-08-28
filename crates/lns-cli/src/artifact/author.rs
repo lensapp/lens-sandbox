@@ -23,7 +23,7 @@ const SANDBOX_SCAFFOLD: &str = "apiVersion: lns.run/v1
 kind: sandbox
 name: sandbox
 spec:
-  image: docker.io/library/alpine:3.20
+  image: alpine:3.20
   command: sh
   workdir: /workspace
   env: {}

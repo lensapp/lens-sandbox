@@ -12,6 +12,7 @@ Feature: managing named volumes from the CLI
     And the output contains "inspect"
     And the output contains "rm"
     And the output contains "prune"
+    And the output does not contain "docker"
 
   Scenario: a bare volume invocation surfaces usage
     When I run "lns volume"
