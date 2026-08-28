@@ -245,36 +245,69 @@ pub fn inspect_local<F: Fs, W: Write>(
     let def = lns_artifact::sandbox::parse_document(&json).map_err(|e| {
         anyhow::anyhow!("{} is not a valid {}: {e:#}", path.display(), kind.as_str())
     })?;
-    let spec = compose(fs, path.parent().unwrap_or(cwd), &def, mixins)?;
-    render_effective(kind, &def.name, &spec, out)?;
+    let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
+    render_effective(kind, &def.name, &composed, out)?;
     Ok(0)
 }
 
-/// `--mixin` merges by §3.3.2 against a local document too, since the mixins it names are read from this machine and the render still resolves nothing.
+/// A composed document and the mixin line each source earned, since a published reference has no resolved document to name.
+struct Composition {
+    spec: lns_artifact::sandbox::SandboxSpec,
+    mixins: Vec<String>,
+}
+
+/// Every mixin this machine holds merges by §3.3.2 — the document, then what it declares, then each flag — because an offline render can read them all without resolving anything.
 fn compose<F: Fs + ?Sized>(
     fs: &F,
-    project_dir: &Path,
+    document_dir: &Path,
+    invocation_dir: &Path,
     def: &lns_artifact::sandbox::Definition,
-    mixins: &[String],
-) -> Result<lns_artifact::sandbox::SandboxSpec> {
-    if mixins.is_empty() {
-        return Ok(def.spec.clone());
+    flags: &[String],
+) -> Result<Composition> {
+    if def.spec.mixins.is_empty() && flags.is_empty() {
+        return Ok(Composition {
+            spec: def.spec.clone(),
+            mixins: Vec::new(),
+        });
     }
-    let local = super::mixin_offline::resolve(fs, project_dir, mixins)?;
+    let local = super::mixin_offline::resolve(
+        fs,
+        &super::mixin_offline::Wanted {
+            declared: &def.spec.mixins,
+            document_dir,
+            flags,
+            invocation_dir,
+        },
+    )?;
     let mut base = def.spec.clone();
-    let declared = std::mem::take(&mut base.mixins);
-    let sources = lns_artifact::merge::flatten(&base, &local.keys, None, &local.graph)?;
-    let mut merged = lns_artifact::merge::merge(&sources)?.spec;
-    merged.mixins = declared.into_iter().chain(local.keys).collect();
-    Ok(merged)
+    base.mixins = local.declared_keys.clone();
+    let sources = lns_artifact::merge::flatten(&base, &local.flag_keys, None, &local.graph)?;
+    Ok(Composition {
+        spec: lns_artifact::merge::merge(&sources)?.spec,
+        mixins: mixin_lines(&local),
+    })
+}
+
+/// §3.3.1 makes the resolved document's path a mixin's identity, so that is what a merged one is named by; a published one has none, and the line says why it is only listed.
+fn mixin_lines(local: &super::mixin_offline::LocalMixins) -> Vec<String> {
+    local
+        .declared_keys
+        .iter()
+        .chain(&local.flag_keys)
+        .cloned()
+        .chain(local.unresolved.iter().map(|reference| {
+            format!("{reference} (published; not merged, because this render is offline)")
+        }))
+        .collect()
 }
 
 fn render_effective<W: Write>(
     kind: lns_artifact::spec::Kind,
     name: &str,
-    spec: &lns_artifact::sandbox::SandboxSpec,
+    composed: &Composition,
     out: &mut W,
 ) -> Result<()> {
+    let spec = &composed.spec;
     match kind {
         lns_artifact::spec::Kind::Sandbox => {
             writeln!(out, "Sandbox: {name}")?;
@@ -282,7 +315,7 @@ fn render_effective<W: Write>(
         }
         lns_artifact::spec::Kind::Mixin => writeln!(out, "Mixin: {name}")?,
     }
-    for mixin in &spec.mixins {
+    for mixin in &composed.mixins {
         writeln!(out, "  mixin: {mixin}")?;
     }
     if let Some(command) = &spec.command {
@@ -614,15 +647,73 @@ mod tests {
     }
 
     #[test]
-    fn inspect_local_lists_the_mixins_the_definition_layers_on() {
+    fn inspect_local_merges_the_mixins_the_definition_layers_on() {
         let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  mixins:\n    - ./mixins/postgres-tools/\n";
-        let fs = fake("/work/lns.yaml", yaml);
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", yaml),
+            (
+                "/work/mixins/postgres-tools/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  tools:\n    - node@22\n",
+            ),
+        ]);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains("mixin: ./mixins/postgres-tools/"),
-            "a run refuses this definition over its mixins, so the local view has to name them rather than read as though it declared none: {text}"
+            text.contains("tool: node@22"),
+            "a run merges what the document declares, so a render that only listed it would preview a sandbox nobody boots: {text}"
+        );
+        assert!(
+            text.contains("mixin: /work/mixins/postgres-tools/lns.yaml"),
+            "§3.3.1 makes the resolved document the mixin's identity, and that is what the disclosure names: {text}"
+        );
+    }
+
+    #[test]
+    fn a_published_mixin_the_document_declares_is_listed_rather_than_refused() {
+        let yaml = format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  mixins:\n    - ghcr.io/acme/obs@sha256:{}\n",
+            "a".repeat(64)
+        );
+        let fs = fake("/work/lns.yaml", &yaml);
+        let mut out = Vec::new();
+        let code = inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("(published; not merged, because this render is offline)"),
+            "every document written to publish pins its mixins by digest, so refusing the render over one would refuse them all — but a reader must not read the rest as the whole composition: {text}"
+        );
+    }
+
+    #[test]
+    fn a_flag_roots_where_the_user_typed_it_and_a_declared_entry_at_its_own_document() {
+        let variant = "apiVersion: lns.run/v1\nkind: sandbox\nname: dev\nspec:\n  image: x:1\n  mixins:\n    - ./obs\n";
+        let mixin = |tool: &str| {
+            format!(
+                "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - {tool}\n"
+            )
+        };
+        let fs = MapFs::with(&[
+            ("/other/lns.dev.yaml", variant),
+            ("/other/obs/lns.yaml", &mixin("node@22")),
+            ("/work/obs/lns.yaml", &mixin("python@3.12")),
+        ]);
+        let mut out = Vec::new();
+        inspect_local(
+            &fs,
+            cwd(),
+            None,
+            Some(Path::new("../other/lns.dev.yaml")),
+            &["./obs".to_string()],
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("mixin: /other/obs/lns.yaml")
+                && text.contains("mixin: /work/obs/lns.yaml"),
+            "§3.3.1 roots a declared entry at the document that named it and a flag where the user typed it, so one spelling reaches two different mixins: {text}"
         );
     }
 
