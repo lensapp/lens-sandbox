@@ -379,9 +379,11 @@ fn chown_fileset_owned(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, 
 fn land_writes_the_mounts_would_have_hidden(
     sys: &dyn Syscalls,
     newroot: &str,
+    volumes: &[crate::cmdline::VolumeParam],
     run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
-    crate::staged::land(newroot).map_err(|err| MountError::Syscall {
+    let targets: Vec<String> = volumes.iter().map(|vol| vol.target.clone()).collect();
+    crate::staged::land(newroot, &targets).map_err(|err| MountError::Syscall {
         op: format!(
             "landing the writes staged under {}",
             crate::staged::STAGED_ROOT
@@ -909,7 +911,7 @@ fn mount_composefs_and_exec_broker_inner(
 
     mount_binds(sys, &params.binds, newroot)?;
 
-    land_writes_the_mounts_would_have_hidden(sys, newroot, run_ids)?;
+    land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, run_ids)?;
 
     mount_run_tmpfs(sys, newroot, run_ids)?;
 
@@ -2273,7 +2275,7 @@ mod tests {
         std::fs::write(format!("{staged}/tool.md"), b"read me").unwrap();
         let sys = FakeSyscalls::new();
 
-        land_writes_the_mounts_would_have_hidden(&sys, &newroot, Some((1000, 1000))).unwrap();
+        land_writes_the_mounts_would_have_hidden(&sys, &newroot, &[], Some((1000, 1000))).unwrap();
 
         assert_eq!(
             std::fs::read(format!("{newroot}/home/node/tool.md")).unwrap(),
@@ -2300,8 +2302,9 @@ mod tests {
         std::fs::create_dir_all(format!("{newroot}/home")).unwrap();
         std::fs::write(format!("{newroot}/home/node"), b"in the way").unwrap();
 
-        let err = land_writes_the_mounts_would_have_hidden(&FakeSyscalls::new(), &newroot, None)
-            .unwrap_err();
+        let err =
+            land_writes_the_mounts_would_have_hidden(&FakeSyscalls::new(), &newroot, &[], None)
+                .unwrap_err();
 
         let refusal = format!("{err}");
         assert!(
