@@ -372,6 +372,14 @@ fn render_effective<W: Write>(
         spec.egress.http.len(),
         raw_rule_note(spec.egress.tcp.len())
     )?;
+    for credential in &spec.credentials {
+        writeln!(
+            out,
+            "  credential: {}{}",
+            super::credential_disclosure(credential),
+            composed.attribution(lns_artifact::merge::Block::Credential, credential.owner())
+        )?;
+    }
     for tool in &spec.tools {
         writeln!(
             out,
@@ -865,13 +873,14 @@ mod tests {
     #[test]
     fn each_merged_entry_names_the_source_that_decided_it() {
         let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  tools:\n    - node@20\n";
-        let mixin = "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n  filesets:\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  volumes:\n    - type: volume\n      source: obs-cache\n      target: /cache\n";
+        let mixin = "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: some_LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n  filesets:\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  volumes:\n    - type: volume\n      source: obs-cache\n      target: /cache\n";
         let fs = MapFs::with(&[("/work/lns.yaml", yaml), ("/work/obs/lns.yaml", mixin)]);
         let mut out = Vec::new();
         inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         for line in [
             "tool: node@22  [from /work/obs/lns.yaml, replaced node@20 from the sandbox]",
+            "credential: SOME_TOKEN -> api.some-provider.example  [from /work/obs/lns.yaml]",
             "fileset:      inline -> /root/.agent/settings (owner: workload)  [from /work/obs/lns.yaml]",
             "mount:        volume obs-cache -> /cache (read-write)  [from /work/obs/lns.yaml]",
         ] {
@@ -880,6 +889,26 @@ mod tests {
                 "a reader of a composition must not have to open each source to learn which one put an entry there; missing {line:?} in: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_declared_credential_is_disclosed_where_it_travels() {
+        // §1.5 and §3.1.7: a sandbox may declare credentials, and a secret path nothing discloses is one nobody approved.
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: some_LNSPLACEHOLDER0000000000\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n        - kind: bearer_header\n          domain: eu.some-provider.example\n    - envVar: NOWHERE_TOKEN\n      placeholder: nowhere_LNSPLACEHOLDER00000\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(
+                "credential: SOME_TOKEN -> api.some-provider.example, eu.some-provider.example"
+            ),
+            "every domain, not the first: showing fewer than it travels to understates what the reader is approving: {text}"
+        );
+        assert!(
+            text.contains("credential: NOWHERE_TOKEN (travels nowhere)"),
+            "a credential with no injection is declared and goes nowhere, which is what the reader needs told: {text}"
+        );
     }
 
     #[test]

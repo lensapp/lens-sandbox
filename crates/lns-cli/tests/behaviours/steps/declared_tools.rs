@@ -76,6 +76,7 @@ fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
         mounts: Vec::new(),
         ports: Vec::new(),
         filesets: Vec::new(),
+        credentials: Vec::new(),
         env: Vec::new(),
         tools: PINNED_TOOLS.iter().map(ToString::to_string).collect(),
         scripts: Vec::new(),

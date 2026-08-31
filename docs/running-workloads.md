@@ -693,8 +693,8 @@ before it reports it, so the summary names the exact bytes you approved:
 ```
 
 A composed run is a document you did not write in full, so the summary says
-where each line came from — and lists the rules the merge produced, which an
-uncomposed run has no second author to attribute:
+where each line came from — and lists the rules and credentials the merge
+produced, which an uncomposed run has no second author to attribute:
 
 ```
   Mixins:    /work/mixins/debug-tools, lns-local-mixin.yaml
@@ -703,6 +703,7 @@ uncomposed run has no second author to attribute:
   Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]  approved during a run
              allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
              deny docs.vendor.example  [from the sandbox]
+  Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
 ```
 
 A directory that has decided something is one of those sources, so its file is
