@@ -1916,7 +1916,9 @@ Offline validation (`lns artifact validate`, and every load path including
 - **Sandbox**: `image` present and non-empty; `workdir` absolute with no `..`;
   `user` has at most one `:`, no empty segment, and no `=`, whitespace, control
   character, or quote.
-- **env**: every key is a legal environment-variable name.
+- **env**: every key is a legal environment-variable name; within one source, no
+  key is also a credential's `envVar` — one variable holds one value, and
+  nothing downstream decides between a plain value and a placeholder.
 - **resources**: an absolute `cpu` is a positive count and an absolute `memory`
   a parsable byte size; a share is a whole 1–100 with a `%` suffix; `disk` is a
   parsable byte size, at least `20Mi` and less than `16Ti`, and is not a share.
@@ -2172,7 +2174,12 @@ Three rules follow from a connector arriving over the network:
   placeholder, and a second claim would make injection ambiguous — and a plain
   `env` key. The check is across connectors only: two **methods** of one
   connector may claim the same variable, because they are alternatives and only
-  one is ever applied ([§3.2.2](#322-methods)).
+  one is ever applied ([§3.2.2](#322-methods)). Within **one** source the rule
+  holds again and is not an install-time check at all: a source that sets a
+  variable through `env` and also fills it from a credential claims one variable
+  twice, and is refused wherever the document is parsed
+  ([§5](#5-validation-summary)) — only its author can say which of the two
+  the workload was meant to read.
 
 **Uninstalling stops the offer; it does not retract a grant.** A run that
 already granted a method keeps that decision, and reinstalling the same digest
