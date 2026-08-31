@@ -1227,6 +1227,34 @@ a connector must not declare tools: a connector is applied to a guest that is
 already running, and tools are installed before the guest boots
 ```
 
+**A connector fileset's `guestPath` MUST be `~/`-anchored.** A
+[sandbox](#3111-filesets) fileset is built into the image layer before boot and
+may land anywhere. A method is applied on a policy change, and that reaches only
+the home of the guest that is already running. An absolute path is refused
+wherever the document is parsed, so a document that installs is a document that
+can be delivered — the rule holds offline what would otherwise be discovered at
+grant.
+
+One consequence, and it is the intended one: a run whose
+[`user`](#313-user) is a `uid:gid` the image's passwd does not name has no home,
+so it cannot take a method that writes a fileset. It refuses the same way
+[§3.1.11](#3111-filesets) refuses a `~/`-anchored sandbox fileset.
+
+**A method's filesets MUST NOT exceed 1 MiB in total**, the same ceiling
+[§3.1.11](#3111-filesets) sets on one inline fileset. The limit is per method,
+not per document, because methods are alternatives and only one is ever granted.
+It is a running cost rather than a one-time one: the files are re-sent on every
+policy change, and all granted connectors share one budget.
+
+`inline` bytes are counted offline. A `path` a validator cannot read — a pulled
+artifact's packed layer — is counted at push, where the layer is built, and at
+install, where the layer is kept.
+
+**An `inline` file lands mode `0600`**, which suits the credentials file
+[§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value) exists to write.
+A `path` file keeps the mode it had when the directory was packed. A connector
+fileset entry declares no mode of its own.
+
 #### 3.2.4 Installing, connecting, and applying
 
 **Installing grants nothing**, and an installed connector appears nowhere in a
@@ -1391,8 +1419,8 @@ The client reads the file and sends the placeholder. On a request to
 `api.some-provider.example` the proxy **sets** the `Authorization` header to the
 real value, replacing whatever the client sent — the header-family behaviour in
 [§4.1](#41-the-credential-definition), reached by a file instead of a variable.
-The real value stays on the host, which is what makes a fileset at an arbitrary
-guest path safe to allow.
+The real value stays on the host, which is what makes a fileset at a
+secret-shaped name in the guest's home safe to allow.
 
 Two rules govern it, and only the second is checkable:
 
@@ -1890,7 +1918,9 @@ Offline validation (`lns artifact validate`, and every load path including
   non-empty; every method `name` matches the name pattern and is unique in the
   document; no method declares a block
   [§3.2.3](#323-what-a-method-may-carry) refuses, and no block a method may carry
-  appears under `spec`; no `filesets[].hostPath`; an `auth`, where present, sets
+  appears under `spec`; no `filesets[].hostPath`; every fileset `guestPath` is
+  `~/`-anchored and a method's `inline` bytes total no more than 1 MiB
+  ([§3.2.3](#323-what-a-method-may-carry)); an `auth`, where present, sets
   a `kind`; a method declaring `credentials` declares an `auth`; every placeholder self-identifies as fake and
   is at least 16 characters; and every fileset file with a secret-shaped name
   declares a placeholder **its own method** also declares
