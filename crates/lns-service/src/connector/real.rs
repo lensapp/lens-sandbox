@@ -231,6 +231,25 @@ pub fn reserved_names() -> std::collections::BTreeSet<String> {
     })
 }
 
+/// Records a grant the way a card would, so another module's test can stand up the state an exec reads without reaching into the store's shape.
+#[cfg(test)]
+pub fn record_a_grant_for_a_test(run_id: &str, name: &str, digest: &str) {
+    with_run_store(&GrantHolder::Run(run_id.to_string()), |store, holder| {
+        store.decide(
+            holder,
+            name,
+            RunDecision::Granted {
+                digest: digest.to_string(),
+                method: "token".to_string(),
+                connection: None,
+                authority: Default::default(),
+            },
+        )?;
+        Ok(())
+    })
+    .expect("record a grant");
+}
+
 fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T> {
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
@@ -248,6 +267,19 @@ pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
             BTreeMap::new()
         }
     }
+}
+
+/// Each variable a granted method fills for this run, by the connector that fills it: the workload reads a placeholder there and the boundary substitutes the real value, so no other source may set it (§3.2.4).
+pub fn variables_a_grant_fills(run_id: &str) -> BTreeMap<String, String> {
+    granted_supply_for(run_id)
+        .into_iter()
+        .flat_map(|(connector, supply)| {
+            supply
+                .credentials
+                .into_iter()
+                .filter_map(move |credential| Some((credential.env_var?, connector.clone())))
+        })
+        .collect()
 }
 
 fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
@@ -446,6 +478,67 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
+    }
+
+    fn install_filling(home: &Path, name: &str, env_var: &str) {
+        install_with_credential(
+            home,
+            name,
+            serde_json::json!({
+                "envVar": env_var,
+                "placeholder": format!("{name}-LNSPLACEHOLDER000"),
+            }),
+        );
+    }
+
+    /// A method §4.1 allows: a credential that exists only to be injected on the wire, so it sets no variable and narrows no environment.
+    fn install_filling_nothing(home: &Path, name: &str) {
+        install_with_credential(
+            home,
+            name,
+            serde_json::json!({ "placeholder": format!("{name}-LNSPLACEHOLDER000") }),
+        );
+    }
+
+    fn install_with_credential(home: &Path, name: &str, credential: serde_json::Value) {
+        let dir = home.join("connectors").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": name,
+                "spec": {
+                    "serves": [format!("api.{name}.example")],
+                    "methods": [{
+                        "name": "token",
+                        "auth": { "kind": "token" },
+                        "credentials": [credential],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
+    }
+
+    fn grant_recorded(run_id: &str, name: &str) {
+        with_run_store(&GrantHolder::Run(run_id.to_string()), |store, holder| {
+            store.decide(
+                holder,
+                name,
+                RunDecision::Granted {
+                    digest: "sha256:abc".to_string(),
+                    method: "token".to_string(),
+                    connection: None,
+                    authority: Default::default(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("record a grant");
     }
 
     /// Through the store rather than hand-written json, so the file this reads back is the shape a real decline writes.
@@ -878,6 +971,34 @@ mod tests {
         assert!(
             granted_supply_for(OTHER_RUN).is_empty(),
             "another run granted nothing, so it gets nothing"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn the_variables_a_grant_fills_are_the_ones_no_other_source_may_set() {
+        // A variable missing from this map is one a `-e` can shadow, putting a real secret where the boundary substitutes a placeholder.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        install_filling(home.path(), "other-provider", "OTHER_TOKEN");
+        install_filling_nothing(home.path(), "wire-only");
+        for name in ["some-provider", "other-provider", "wire-only"] {
+            grant_recorded(RUN, name);
+        }
+
+        assert_eq!(
+            variables_a_grant_fills(RUN),
+            [
+                ("OTHER_TOKEN".to_string(), "other-provider".to_string()),
+                ("SOME_TOKEN".to_string(), "some-provider".to_string()),
+            ]
+            .into(),
+            "every granted connector contributes, and a credential with no envVar sets no variable"
+        );
+        assert!(
+            variables_a_grant_fills(OTHER_RUN).is_empty(),
+            "a grant belongs to one run, so another run's environment is not narrowed by it"
         );
     }
 

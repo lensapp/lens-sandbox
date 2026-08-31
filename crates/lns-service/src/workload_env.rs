@@ -3,6 +3,60 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkloadEnv {
     pub env: Vec<String>,
+    /// The variables dropped because a grant fills them; the caller names each one on the run's own log.
+    pub refused: Vec<Refused>,
+}
+
+/// Where the value a grant displaced came from, because each has its own remedy and naming the wrong one sends the user to a file that does not set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EnvSource {
+    /// The command line — `-e`, or an env file the CLI folded into it.
+    Flag,
+    /// The sandbox definition's own `spec.env`.
+    Definition,
+    /// The image's `ENV`.
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub key: String,
+    pub source: EnvSource,
+    /// The connector whose grant fills the variable, carried here because it is the only thing the remedy can name and nothing else knows it by the time the refusal is read.
+    pub connector: String,
+}
+
+/// Names the grant that claimed the variable and the one remedy that fits where the value came from.
+pub fn refusal_warning(refused: &Refused) -> String {
+    let Refused { key, connector, .. } = refused;
+    // `lns connector forget`, not `disconnect`: disconnect drops a connection and leaves the grant, so it would leave the variable filled and the message would repeat on the next start.
+    let retract = format!("`lns connector forget {connector} --run <run>`");
+    match refused.source {
+        EnvSource::Flag => format!(
+            "{key} not set: {connector} fills it for this run — run {retract}, or drop the -e"
+        ),
+        EnvSource::Definition => format!(
+            "{key} not set: {connector} fills it for this run — run {retract}, or drop {key} from spec.env"
+        ),
+        EnvSource::Image => format!(
+            "{key} not set from the image: {connector} fills it for this run — run {retract} to use the image's value"
+        ),
+    }
+}
+
+/// One refusal per variable, against the source the user can most directly act on: a flag they typed outranks their definition, which outranks the image they did not write. Every source is collected before this decides, so no two of them warn about one variable.
+pub fn one_refusal_per_variable(refusals: impl IntoIterator<Item = Refused>) -> Vec<Refused> {
+    let mut best: std::collections::BTreeMap<String, Refused> = Default::default();
+    for refused in refusals {
+        match best.get_mut(&refused.key) {
+            Some(held) if held.source <= refused.source => {}
+            Some(held) => *held = refused,
+            None => {
+                best.insert(refused.key.clone(), refused);
+            }
+        }
+    }
+    best.into_values().collect()
 }
 
 pub const REDACTED_ENV_VALUE: &str = "<redacted>";
@@ -19,11 +73,69 @@ pub fn injected_env(user_env: &[String]) -> Option<Map<String, Value>> {
     if env.is_empty() { None } else { Some(env) }
 }
 
-pub fn compose_workload_env(image_env: Option<&[String]>, user_env: &[String]) -> WorkloadEnv {
+/// The run's own environment entries a grant does not fill, beside the ones it does. Applied before the environment travels anywhere, so what the supervisor and the audit chain see is what actually entered the sandbox.
+///
+/// `source_of` says where each key came from, because a run's environment is its definition's `spec.env` and the command line in one vector by the time it reaches here, and the two have different remedies.
+pub fn without_what_a_grant_fills(
+    run_env: &[String],
+    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+    source_of: impl Fn(&str) -> EnvSource,
+) -> (Vec<String>, Vec<Refused>) {
+    let mut kept = Vec::new();
+    let mut refused = Vec::new();
+    for kv in run_env {
+        let key = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv);
+        let Some(connector) = filled_by_a_grant.get(key) else {
+            kept.push(kv.clone());
+            continue;
+        };
+        refused.push(Refused {
+            key: key.to_string(),
+            source: source_of(key),
+            connector: connector.clone(),
+        });
+    }
+    (kept, refused)
+}
+
+/// Whether a key came from the command line, which is what tells a refusal to say "drop the -e" rather than "drop it from spec.env".
+pub fn source_among(command_line: &[String]) -> impl Fn(&str) -> EnvSource + '_ {
+    move |key| {
+        let typed = command_line
+            .iter()
+            .any(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key));
+        if typed {
+            EnvSource::Flag
+        } else {
+            EnvSource::Definition
+        }
+    }
+}
+
+/// `filled_by_a_grant` maps a variable to the connector whose granted method supplies it: the workload reads a placeholder there and the boundary substitutes the real value, so a value from any other source is dropped rather than allowed to shadow it.
+pub fn compose_workload_env(
+    image_env: Option<&[String]>,
+    user_env: &[String],
+    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+) -> WorkloadEnv {
     let mut entries: Vec<(String, String)> = Vec::new();
+    let mut refused: Vec<Refused> = Vec::new();
+    let mut refuse = |key: &str, source: EnvSource| {
+        let Some(connector) = filled_by_a_grant.get(key) else {
+            return false;
+        };
+        refused.push(Refused {
+            key: key.to_string(),
+            source,
+            connector: connector.clone(),
+        });
+        true
+    };
     if let Some(image) = image_env {
         for kv in image {
-            if let Some((k, v)) = kv.split_once('=').filter(|(k, _)| !is_internal(k)) {
+            if let Some((k, v)) = kv.split_once('=').filter(|(k, _)| !is_internal(k))
+                && !refuse(k, EnvSource::Image)
+            {
                 upsert(&mut entries, k, v);
             }
         }
@@ -32,7 +144,7 @@ pub fn compose_workload_env(image_env: Option<&[String]>, user_env: &[String]) -
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
-        if is_internal(k) {
+        if is_internal(k) || refuse(k, EnvSource::Flag) {
             continue;
         }
         upsert(&mut entries, k, v);
@@ -42,6 +154,7 @@ pub fn compose_workload_env(image_env: Option<&[String]>, user_env: &[String]) -
             .into_iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect(),
+        refused,
     }
 }
 
@@ -94,7 +207,8 @@ fn proxy_env() -> [(&'static str, &'static str); 4] {
 pub fn exec_session_env(
     exec_environment: &crate::run_registry::ExecEnvironment,
     exec_env: &[String],
-) -> Vec<String> {
+    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+) -> WorkloadEnv {
     let joined: Vec<String> = exec_environment
         .session_env
         .iter()
@@ -107,12 +221,12 @@ pub fn exec_session_env(
         .filter(|entry| !is_session_only(entry))
         .cloned()
         .collect();
-    let mut env = compose_workload_env(Some(&joined), &caller).env;
-    compose_guest_tool_env(&mut env, &exec_environment.tools);
+    let mut composed = compose_workload_env(Some(&joined), &caller, filled_by_a_grant);
+    compose_guest_tool_env(&mut composed.env, &exec_environment.tools);
     for (key, value) in proxy_env().into_iter().chain(ca_bundle_env()) {
-        overwrite(&mut env, key, value);
+        overwrite(&mut composed.env, key, value);
     }
-    env
+    composed
 }
 
 pub const IDENTITY_ENV_KEYS: [&str; 2] = ["HOME", "USER"];
@@ -194,8 +308,9 @@ pub fn run_workload_env(
     agent_command: Option<&str>,
     workdir: Option<&str>,
     tools: &ToolRuntime,
+    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
 ) -> WorkloadEnv {
-    let mut composed = compose_workload_env(image_env, user_env);
+    let mut composed = compose_workload_env(image_env, user_env, filled_by_a_grant);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
     compose_guest_tool_env(&mut composed.env, tools);
     if let Some(agent_command) = agent_command {
@@ -248,6 +363,18 @@ mod tests {
         &c.env
     }
 
+    fn flag(key: &str) -> Refused {
+        refused_from(key, EnvSource::Flag)
+    }
+
+    fn refused_from(key: &str, source: EnvSource) -> Refused {
+        Refused {
+            key: key.to_string(),
+            source,
+            connector: "some-provider".to_string(),
+        }
+    }
+
     fn tools(bin_paths: &[&str]) -> ToolRuntime {
         ToolRuntime {
             bin_paths: bin_paths.iter().map(|p| p.to_string()).collect(),
@@ -256,64 +383,198 @@ mod tests {
     }
 
     #[test]
+    fn a_user_override_of_a_variable_a_grant_fills_is_dropped_and_named() {
+        // The workload reads a placeholder for that variable and the boundary substitutes the real value; a -e would put the real secret inside the sandbox, which is the one thing the design does not do.
+        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
+        let c = compose_workload_env(
+            None,
+            &["SOME_TOKEN=sk-live-real".into(), "SAFE=1".into()],
+            &filled,
+        );
+        assert_eq!(env(&c), ["SAFE=1"], "the real secret must not reach it");
+        assert_eq!(c.refused, [flag("SOME_TOKEN")]);
+        assert_eq!(
+            refusal_warning(&flag("SOME_TOKEN")),
+            "SOME_TOKEN not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>`, or drop the -e"
+        );
+    }
+
+    #[test]
+    fn a_variable_no_grant_fills_is_carried_as_it_always_was() {
+        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
+        let c = compose_workload_env(None, &["SAFE=1".into()], &filled);
+        assert_eq!(env(&c), ["SAFE=1"]);
+        assert!(c.refused.is_empty());
+    }
+
+    #[test]
+    fn an_image_env_var_a_grant_fills_is_dropped_too() {
+        // The image is not the user, but a value it ships under that name shadows the placeholder exactly the same way.
+        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
+        let c = compose_workload_env(Some(&["SOME_TOKEN=from-image".into()]), &[], &filled);
+        assert!(env(&c).is_empty());
+        assert_eq!(c.refused, [refused_from("SOME_TOKEN", EnvSource::Image)]);
+        assert_eq!(
+            refusal_warning(&c.refused[0]),
+            "SOME_TOKEN not set from the image: some-provider fills it for this run — run `lns connector forget some-provider --run <run>` to use the image's value",
+            "there is no -e here, so telling the user to drop one sends them nowhere"
+        );
+    }
+
+    #[test]
+    fn a_variable_more_than_one_source_set_is_named_once_against_the_one_to_act_on() {
+        // Two warnings for one variable is two remedies, and the reader cannot tell which of them is theirs to take.
+        let both = one_refusal_per_variable([
+            refused_from("SOME_TOKEN", EnvSource::Image),
+            flag("SOME_TOKEN"),
+            refused_from("OTHER_TOKEN", EnvSource::Image),
+        ]);
+        assert_eq!(
+            both,
+            [
+                refused_from("OTHER_TOKEN", EnvSource::Image),
+                flag("SOME_TOKEN"),
+            ],
+            "the flag the user typed outranks the image they did not write"
+        );
+    }
+
+    #[test]
+    fn a_definition_outranks_the_image_and_yields_to_a_flag() {
+        let definition = refused_from("SOME_TOKEN", EnvSource::Definition);
+        let image = refused_from("SOME_TOKEN", EnvSource::Image);
+        assert_eq!(
+            one_refusal_per_variable([image.clone(), definition.clone()]),
+            vec![definition.clone()]
+        );
+        assert_eq!(
+            one_refusal_per_variable([definition, flag("SOME_TOKEN"), image]),
+            vec![flag("SOME_TOKEN")]
+        );
+    }
+
+    #[test]
+    fn what_a_grant_fills_is_dropped_before_the_environment_travels_and_named_by_its_source() {
+        // The audit chain records what entered the sandbox, so a variable dropped here must not reach it as an injection — and a run's environment is its definition and its flags in one vector, only one of which is a flag to drop.
+        let typed: Vec<String> = vec!["SOME_TOKEN=sk-live-real".into()];
+        let (kept, refused) = without_what_a_grant_fills(
+            &[
+                "SOME_TOKEN=sk-live-real".into(),
+                "SAFE=1".into(),
+                "FROM_SPEC=1".into(),
+                "NOTANASSIGNMENT".into(),
+            ],
+            &[
+                ("SOME_TOKEN".to_string(), "some-provider".to_string()),
+                ("FROM_SPEC".to_string(), "some-provider".to_string()),
+            ]
+            .into(),
+            source_among(&typed),
+        );
+        assert_eq!(kept, ["SAFE=1", "NOTANASSIGNMENT"]);
+        assert_eq!(
+            refused,
+            [
+                flag("SOME_TOKEN"),
+                refused_from("FROM_SPEC", EnvSource::Definition),
+            ]
+        );
+        assert_eq!(
+            refusal_warning(&refused[1]),
+            "FROM_SPEC not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>`, or drop FROM_SPEC from spec.env",
+            "no -e set this one, so telling the user to drop one sends them nowhere"
+        );
+        assert_eq!(
+            injected_env(&kept).and_then(|e| e.get("SOME_TOKEN").cloned()),
+            None
+        );
+    }
+
+    #[test]
     fn a_single_user_var_is_carried() {
-        let c = compose_workload_env(None, &["CLAUDE_CODE_USE_BEDROCK=1".into()]);
+        let c = compose_workload_env(
+            None,
+            &["CLAUDE_CODE_USE_BEDROCK=1".into()],
+            &Default::default(),
+        );
         assert_eq!(env(&c), ["CLAUDE_CODE_USE_BEDROCK=1"]);
     }
 
     #[test]
     fn multiple_user_vars_are_all_carried() {
-        let c = compose_workload_env(None, &["A=1".into(), "B=2".into()]);
+        let c = compose_workload_env(None, &["A=1".into(), "B=2".into()], &Default::default());
         assert!(c.env.contains(&"A=1".to_string()));
         assert!(c.env.contains(&"B=2".to_string()));
     }
 
     #[test]
     fn value_is_split_on_the_first_equals_only() {
-        let c = compose_workload_env(None, &["DSN=user=admin;pw=x".into()]);
+        let c = compose_workload_env(None, &["DSN=user=admin;pw=x".into()], &Default::default());
         assert_eq!(env(&c), ["DSN=user=admin;pw=x"]);
     }
 
     #[test]
     fn an_empty_value_is_preserved() {
-        let c = compose_workload_env(None, &["FEATURE_X=".into()]);
+        let c = compose_workload_env(None, &["FEATURE_X=".into()], &Default::default());
         assert_eq!(env(&c), ["FEATURE_X="]);
     }
 
     #[test]
     fn user_value_overrides_the_image_env() {
-        let c = compose_workload_env(Some(&["PORT=3003".into()]), &["PORT=4000".into()]);
+        let c = compose_workload_env(
+            Some(&["PORT=3003".into()]),
+            &["PORT=4000".into()],
+            &Default::default(),
+        );
         assert_eq!(env(&c), ["PORT=4000"]);
     }
 
     #[test]
     fn image_vars_not_overridden_are_kept() {
-        let c = compose_workload_env(Some(&["FOO=bar".into()]), &["BAZ=1".into()]);
+        let c = compose_workload_env(
+            Some(&["FOO=bar".into()]),
+            &["BAZ=1".into()],
+            &Default::default(),
+        );
         assert!(c.env.contains(&"FOO=bar".to_string()));
         assert!(c.env.contains(&"BAZ=1".to_string()));
     }
 
     #[test]
     fn a_malformed_user_entry_without_equals_is_ignored() {
-        let c = compose_workload_env(None, &["NOTANASSIGNMENT".into()]);
+        let c = compose_workload_env(None, &["NOTANASSIGNMENT".into()], &Default::default());
         assert!(c.env.is_empty());
     }
 
     #[test]
     fn a_malformed_image_entry_without_equals_is_ignored() {
-        let c = compose_workload_env(Some(&["JUSTAKEY".into()]), &[]);
+        let c = compose_workload_env(Some(&["JUSTAKEY".into()]), &[], &Default::default());
         assert!(c.env.is_empty());
     }
 
     #[test]
     fn run_workload_env_carries_user_env_for_an_unsupervised_run() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &Default::default());
+        let c = run_workload_env(
+            None,
+            &["FOO=bar".into()],
+            None,
+            None,
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(c.env, ["FOO=bar"], "user -e must reach a policy-less run");
     }
 
     #[test]
     fn run_workload_env_adds_no_supervisor_vars_when_unsupervised() {
-        let c = run_workload_env(None, &["FOO=bar".into()], None, None, &Default::default());
+        let c = run_workload_env(
+            None,
+            &["FOO=bar".into()],
+            None,
+            None,
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             !c.env
                 .iter()
@@ -331,6 +592,7 @@ mod tests {
             Some("echo hi"),
             None,
             &Default::default(),
+            &Default::default(),
         );
         assert!(c.env.contains(&"FOO=bar".to_string()), "got: {:?}", c.env);
         assert!(c.env.contains(&"AGENT_COMMAND=echo hi".to_string()));
@@ -345,6 +607,7 @@ mod tests {
             Some("sh"),
             None,
             &Default::default(),
+            &Default::default(),
         );
         let last_term = c.env.iter().rposition(|e| e.starts_with("TERM=")).unwrap();
         assert_eq!(c.env[last_term], "TERM=xterm-256color");
@@ -352,7 +615,14 @@ mod tests {
 
     #[test]
     fn run_workload_env_pins_workspace_path_for_a_supervised_run() {
-        let c = run_workload_env(None, &[], Some("sh"), Some("/app"), &Default::default());
+        let c = run_workload_env(
+            None,
+            &[],
+            Some("sh"),
+            Some("/app"),
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             c.env.contains(&"WORKSPACE_PATH=/app".to_string()),
             "got: {:?}",
@@ -362,7 +632,14 @@ mod tests {
 
     #[test]
     fn run_workload_env_omits_workspace_path_without_a_workdir() {
-        let c = run_workload_env(None, &[], Some("sh"), None, &Default::default());
+        let c = run_workload_env(
+            None,
+            &[],
+            Some("sh"),
+            None,
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             !c.env.iter().any(|e| e.starts_with("WORKSPACE_PATH=")),
             "got: {:?}",
@@ -377,6 +654,7 @@ mod tests {
             &["WORKSPACE_PATH=/evil".into()],
             Some("sh"),
             Some("/app"),
+            &Default::default(),
             &Default::default(),
         );
         let last = c
@@ -393,11 +671,42 @@ mod tests {
 
     #[test]
     fn run_workload_env_adds_no_workspace_path_when_unsupervised() {
-        let c = run_workload_env(None, &[], None, Some("/app"), &Default::default());
+        let c = run_workload_env(
+            None,
+            &[],
+            None,
+            Some("/app"),
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             c.env.is_empty(),
             "an unsupervised run's cwd travels via the session, not env: {:?}",
             c.env
+        );
+    }
+
+    #[test]
+    fn an_exec_cannot_set_from_outside_what_the_run_itself_refused() {
+        // `lns exec` joins a live run; letting its caller set a variable the run dropped would put the real secret in beside the placeholder the boundary substitutes.
+        let run = crate::run_registry::ExecEnvironment::default();
+
+        let joining = exec_session_env(
+            &run,
+            &["SOME_TOKEN=sk-live-real".into(), "SAFE=1".into()],
+            &[("SOME_TOKEN".to_string(), "some-provider".to_string())].into(),
+        );
+
+        let env = &joining.env;
+        assert!(
+            !env.iter().any(|kv| kv.starts_with("SOME_TOKEN=")),
+            "the run refused this variable, and an exec is not a way around that: {env:?}"
+        );
+        assert!(env.contains(&"SAFE=1".to_string()));
+        assert_eq!(
+            joining.refused,
+            [flag("SOME_TOKEN")],
+            "and it says so, or the caller reads it as their own typo"
         );
     }
 
@@ -409,7 +718,7 @@ mod tests {
             ..Default::default()
         };
 
-        let env = exec_session_env(&run, &[]);
+        let env = exec_session_env(&run, &[], &Default::default()).env;
 
         let seen: Vec<&String> = env
             .iter()
@@ -447,7 +756,7 @@ mod tests {
             ..Default::default()
         };
 
-        let env = exec_session_env(&run, &[]);
+        let env = exec_session_env(&run, &[], &Default::default()).env;
 
         assert!(env.contains(&"HOME=/workspace".to_string()), "got: {env:?}");
         assert!(
@@ -479,7 +788,7 @@ mod tests {
             ..Default::default()
         };
 
-        let env = exec_session_env(&run, &[]);
+        let env = exec_session_env(&run, &[], &Default::default()).env;
 
         assert!(
             !env.iter()
@@ -497,7 +806,7 @@ mod tests {
             ..Default::default()
         };
 
-        let env = exec_session_env(&run, &[]);
+        let env = exec_session_env(&run, &[], &Default::default()).env;
 
         assert!(
             env.contains(&"HOME=/srv".to_string()),
@@ -511,7 +820,12 @@ mod tests {
 
     #[test]
     fn the_exec_callers_own_env_declares_identity_like_any_dash_e() {
-        let env = exec_session_env(&Default::default(), &["HOME=/x".to_string()]);
+        let env = exec_session_env(
+            &Default::default(),
+            &["HOME=/x".to_string()],
+            &Default::default(),
+        )
+        .env;
         assert!(env.contains(&"HOME=/x".to_string()), "got: {env:?}");
     }
 
@@ -539,7 +853,7 @@ mod tests {
             ..Default::default()
         };
 
-        let env = exec_session_env(&run, &[]);
+        let env = exec_session_env(&run, &[], &Default::default()).env;
 
         for leaked in [
             "AGENT_COMMAND=",
@@ -561,7 +875,9 @@ mod tests {
         let env = exec_session_env(
             &Default::default(),
             &["LENS_SANDBOX_TOKEN=a-forged-token".to_string()],
-        );
+            &Default::default(),
+        )
+        .env;
 
         assert!(
             !env.iter().any(|kv| kv.starts_with("LENS_SANDBOX_")),
@@ -577,14 +893,16 @@ mod tests {
         };
 
         assert!(
-            exec_session_env(&run, &[]).contains(&"TERM=dumb".to_string()),
+            exec_session_env(&run, &[], &Default::default())
+                .env
+                .contains(&"TERM=dumb".to_string()),
             "only the value the supervisor injected is internal"
         );
     }
 
     #[test]
     fn an_exec_session_trusts_the_same_ca_bundle_the_workload_does() {
-        let env = exec_session_env(&Default::default(), &[]);
+        let env = exec_session_env(&Default::default(), &[], &Default::default()).env;
 
         for key in [
             "SSL_CERT_FILE",
@@ -602,7 +920,7 @@ mod tests {
 
     #[test]
     fn an_exec_session_reaches_the_network_through_the_same_proxy_the_workload_does() {
-        let env = exec_session_env(&Default::default(), &[]);
+        let env = exec_session_env(&Default::default(), &[], &Default::default()).env;
 
         for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             assert!(
@@ -622,7 +940,9 @@ mod tests {
         let env = exec_session_env(
             &run,
             &["http_proxy=http://a-caller-named-proxy".to_string()],
-        );
+            &Default::default(),
+        )
+        .env;
 
         assert!(
             env.contains(&format!("HTTPS_PROXY={}", lns_session::GUEST_PROXY_URL))
@@ -642,6 +962,7 @@ mod tests {
                 bin_paths: vec!["/.lens/tools/some-tool/1.2.3/bin".into()],
                 env: Vec::new(),
             },
+            &Default::default(),
         );
         assert_eq!(c.env, ["PATH=/.lens/tools/some-tool/1.2.3/bin:/usr/bin"]);
     }
@@ -657,6 +978,7 @@ mod tests {
                 bin_paths: vec!["/t/bin".into()],
                 env: Vec::new(),
             },
+            &Default::default(),
         );
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
     }
@@ -670,6 +992,7 @@ mod tests {
             None,
             None,
             &tools(&["/t/bin"]),
+            &Default::default(),
         );
         assert_eq!(c.env, [format!("PATH=/t/bin:{GUEST_DEFAULT_PATH}")]);
     }
@@ -682,6 +1005,7 @@ mod tests {
             None,
             None,
             &tools(&["/t/bin"]),
+            &Default::default(),
         );
         assert_eq!(c.env, ["PATH=/t/bin:/usr/bin"]);
     }
@@ -695,6 +1019,7 @@ mod tests {
             None,
             None,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(c.env, ["PATH=/usr/bin"]);
     }
@@ -702,7 +1027,14 @@ mod tests {
     #[test]
     fn a_run_with_no_tools_and_no_image_path_is_left_to_the_kernel_default() {
         // Composing one here would put a second copy of the same value in the env for no reason; lns-init already exports it.
-        let c = run_workload_env(None, &[], None, None, &Default::default());
+        let c = run_workload_env(
+            None,
+            &[],
+            None,
+            None,
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             !c.env.iter().any(|kv| kv.starts_with("PATH=")),
             "got: {:?}",
@@ -723,13 +1055,21 @@ mod tests {
                 bin_paths: vec!["/t/bin".into()],
                 env: Vec::new(),
             },
+            &Default::default(),
         );
         assert!(c.env[0].contains("/.lens/bin"), "got: {:?}", c.env[0]);
     }
 
     #[test]
     fn tool_bin_paths_keep_declaration_order_and_precede_the_supervisor_appends() {
-        let c = run_workload_env(None, &[], Some("sh"), None, &tools(&["/t/a/bin", "/t/b"]));
+        let c = run_workload_env(
+            None,
+            &[],
+            Some("sh"),
+            None,
+            &tools(&["/t/a/bin", "/t/b"]),
+            &Default::default(),
+        );
         let path = c.env.iter().position(|e| e.starts_with("PATH=")).unwrap();
         assert!(
             c.env[path].starts_with("PATH=/t/a/bin:/t/b:"),

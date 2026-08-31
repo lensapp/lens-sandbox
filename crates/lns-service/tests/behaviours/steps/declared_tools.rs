@@ -162,6 +162,7 @@ fn composed_workload_env(w: &BehaviourWorld) -> Result<Vec<String>, String> {
             bin_paths: ensured.bin_paths.clone(),
             env: ensured.env.clone(),
         },
+        &Default::default(),
     )
     .env)
 }
