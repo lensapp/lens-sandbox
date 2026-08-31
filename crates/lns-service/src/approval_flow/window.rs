@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, Stroke};
 use tokio::sync::mpsc;
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::{PendingPrompt, ProfileChoice};
+use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionDelivery {
@@ -19,7 +19,7 @@ pub enum RequestAction {
     /// Connect this project to the offered connector by the named method (§3.2.4).
     Grant {
         method: String,
-        profile: ProfileChoice,
+        connection: ConnectionChoice,
     },
     /// A standing no for this project; the ordinary card then asks what the hold stood in for.
     Decline,
@@ -142,12 +142,12 @@ impl WindowState {
         self.deliver(id, RequestAction::Decide(decision))
     }
 
-    pub fn grant(&self, id: &str, method: &str, profile: ProfileChoice) -> bool {
+    pub fn grant(&self, id: &str, method: &str, connection: ConnectionChoice) -> bool {
         self.deliver(
             id,
             RequestAction::Grant {
                 method: method.to_string(),
-                profile,
+                connection,
             },
         )
     }
@@ -375,7 +375,7 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
 
-        assert!(s.grant("r1", "token", ProfileChoice::Held("work".into())));
+        assert!(s.grant("r1", "token", ConnectionChoice::Held("work".into())));
 
         assert_eq!(
             rx.try_recv().expect("a delivery"),
@@ -383,7 +383,7 @@ mod tests {
                 id: "r1".into(),
                 action: RequestAction::Grant {
                     method: "token".into(),
-                    profile: ProfileChoice::Held("work".into()),
+                    connection: ConnectionChoice::Held("work".into()),
                 },
             }
         );
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn answering_a_card_that_is_gone_delivers_nothing() {
         let s = WindowState::new();
-        assert!(!s.grant("gone", "token", ProfileChoice::None));
+        assert!(!s.grant("gone", "token", ConnectionChoice::None));
         assert!(!s.decline("gone"));
     }
 
@@ -424,7 +424,7 @@ mod tests {
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods: Vec::new(),
-            profiles: Vec::new(),
+            connections: Vec::new(),
         });
         s.insert_pending(offered, tx.clone());
 

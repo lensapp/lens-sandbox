@@ -41,7 +41,7 @@ mod tests {
             digest: "sha256:abc".to_string(),
             serves: serves.iter().map(|s| s.to_string()).collect(),
             methods: Vec::new(),
-            profiles: Vec::new(),
+            connections: Vec::new(),
         }
     }
 

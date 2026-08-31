@@ -22,13 +22,13 @@ pub use paths::{
     lns_home, registry_auth_path, short_run_id,
 };
 pub use protocol::{
-    ArtifactInspection, BindMount, BindSpec, CachedKind, ConnectorMethodView, ConnectorProfileView,
-    ConnectorView, ContributionBlock, DisplacedEntry, ExecImageArgs, ImageInfo, ImageView,
-    LogLevel, MixinView, MountSpec, PackedFilesetSource, PortPublish, Protocol,
-    RegistryLoginSummary, Request, Response, RunConfig, RunDetails, RunImageArgs, RunStatsInfo,
-    RunStatus, RunSummary, SandboxFileset, SandboxFilesetOwner, SandboxMount, SandboxMountKind,
-    SandboxPort, SandboxScript, SandboxView, SecretValues, SessionTarget, SignalKind,
-    SourceContribution, StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure,
+    ArtifactInspection, BindMount, BindSpec, CachedKind, ConnectorConnectionView,
+    ConnectorMethodView, ConnectorView, ContributionBlock, DisplacedEntry, ExecImageArgs,
+    ImageInfo, ImageView, LogLevel, MixinView, MountSpec, PackedFilesetSource, PortPublish,
+    Protocol, RegistryLoginSummary, Request, Response, RunConfig, RunDetails, RunImageArgs,
+    RunStatsInfo, RunStatus, RunSummary, SandboxFileset, SandboxFilesetOwner, SandboxMount,
+    SandboxMountKind, SandboxPort, SandboxScript, SandboxView, SecretValues, SessionTarget,
+    SignalKind, SourceContribution, StatusInfo, VolumeInfo, VolumeMount, VolumePruneFailure,
     cmdline_unsafe_char, validate_bind_source, validate_run_name, validate_volume_name,
     validate_volume_target,
 };

@@ -185,7 +185,7 @@ pub struct ConnectorCliRig {
     pub installed_name: Option<String>,
     pub held: Vec<lns_ipc::ConnectorView>,
     /// `Some` means the connector was installed; `None` makes uninstall answer that nothing is.
-    pub dropped_profiles: Option<usize>,
+    pub dropped_connections: Option<usize>,
     pub refuse_message: Option<String>,
     pub unreachable: bool,
     pub connected: Option<String>,

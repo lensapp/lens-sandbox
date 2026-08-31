@@ -114,8 +114,8 @@ async fn decision_delivery_loop(
             RequestAction::Decide(decision) => {
                 session.record_decision(&delivery.id, decision);
             }
-            RequestAction::Grant { method, profile } => {
-                session.grant_offer(&delivery.id, &method, profile);
+            RequestAction::Grant { method, connection } => {
+                session.grant_offer(&delivery.id, &method, connection);
             }
             RequestAction::Decline => {
                 session.decline_offer(&delivery.id);
@@ -377,7 +377,7 @@ mod tests {
     async fn decision_delivery_loop_routes_a_card_s_connector_answers_to_the_session() {
         // Grant and Decline are answers about the connector, not about the request; routing either to record_decision would write an egress rule the user never asked for.
         use crate::approval_flow::protocol::RequestPending;
-        use crate::approval_flow::session::ProfileChoice;
+        use crate::approval_flow::session::ConnectionChoice;
         let (session, mut frame_rx) = fixture_session();
         let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
         for id in ["r1", "r2"] {
@@ -396,7 +396,7 @@ mod tests {
             id: "r1".into(),
             action: RequestAction::Grant {
                 method: "token".into(),
-                profile: ProfileChoice::None,
+                connection: ConnectionChoice::None,
             },
         })
         .unwrap();
@@ -945,7 +945,7 @@ mod tests {
     fn decline_in(home: &Path, project: &Path) {
         use lns_policy::decision_store::JsonDecisionStore;
         let installed = crate::connector::dir::ConnectorDir::new(home.join("connectors"));
-        let values: JsonDecisionStore<crate::connector::store::Profile> =
+        let values: JsonDecisionStore<crate::connector::store::Connection> =
             JsonDecisionStore::new(home.join("connector-values.json"));
         let grants: JsonDecisionStore<crate::connector::store::ProjectDecision> =
             JsonDecisionStore::new(home.join("connector-grants.json"));
@@ -1021,7 +1021,7 @@ mod tests {
     fn grant_in(home: &Path, project: &Path) {
         use lns_policy::decision_store::JsonDecisionStore;
         let installed = crate::connector::dir::ConnectorDir::new(home.join("connectors"));
-        let values: JsonDecisionStore<crate::connector::store::Profile> =
+        let values: JsonDecisionStore<crate::connector::store::Connection> =
             JsonDecisionStore::new(home.join("connector-values.json"));
         let grants: JsonDecisionStore<crate::connector::store::ProjectDecision> =
             JsonDecisionStore::new(home.join("connector-grants.json"));
@@ -1034,7 +1034,7 @@ mod tests {
                 crate::connector::store::ProjectDecision::Granted {
                     digest: "sha256:abc".to_string(),
                     method: "token".to_string(),
-                    profile: None,
+                    connection: None,
                     authority: Default::default(),
                 },
             )

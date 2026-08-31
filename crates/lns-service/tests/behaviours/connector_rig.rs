@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 
 use lns_policy::decision_store::JsonDecisionStore;
 use lns_service::connector::dir::ConnectorDir;
-use lns_service::connector::store::{ConnectorStore, Installed, Profile, ProjectDecision};
+use lns_service::connector::store::{Connection, ConnectorStore, Installed, ProjectDecision};
 
 /// The machine a connector scenario installs onto, plus the document it is building up.
 pub struct ConnectorRig {
     _tmp: tempfile::TempDir,
     dir: ConnectorDir,
-    values: JsonDecisionStore<Profile>,
+    values: JsonDecisionStore<Connection>,
     grants: JsonDecisionStore<ProjectDecision>,
 
     name: String,
@@ -127,7 +127,7 @@ impl ConnectorRig {
                 ProjectDecision::Granted {
                     digest: self.digest(),
                     method: method.to_string(),
-                    profile: None,
+                    connection: None,
                     authority: Default::default(),
                 },
             )
@@ -141,8 +141,10 @@ impl ConnectorRig {
         }
     }
 
-    pub fn profiles_of(&self, name: &str) -> BTreeMap<String, Profile> {
-        self.store().profiles_of(name).expect("read the profiles")
+    pub fn connections_of(&self, name: &str) -> BTreeMap<String, Connection> {
+        self.store()
+            .connections_of(name)
+            .expect("read the connections")
     }
 }
 

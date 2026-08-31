@@ -25,16 +25,18 @@ pub enum ConnectorCommand {
     )]
     Install(InstallArgs),
     #[command(
-        about = "Remove a connector from this machine, with every profile it held. Grants stay."
+        about = "Remove a connector from this machine, with every connection it held. Grants stay."
     )]
     Uninstall(NameArg),
-    #[command(about = "List what is installed: what each connector serves, and the profiles held.")]
+    #[command(
+        about = "List what is installed: what each connector serves, and the connections held."
+    )]
     List(ListArgs),
     #[command(
-        about = "Sign this machine in to a connector and keep the result as a profile. Connecting is not granting."
+        about = "Sign this machine in to a connector and keep the result as a connection. Connecting is not granting."
     )]
     Connect(ConnectArgs),
-    #[command(about = "Drop one profile, or every profile of a connector. Grants stay.")]
+    #[command(about = "Drop one connection, or every connection of a connector. Grants stay.")]
     Disconnect(DisconnectArgs),
     #[command(
         about = "Let this project use one of a connector's methods. Discloses what it applies, then asks."
@@ -52,7 +54,7 @@ pub struct ConnectArgs {
     pub name: String,
     #[arg(long, help = "Which method to connect. Omitted, you choose.")]
     pub method: Option<String>,
-    #[arg(long = "as", help = "What to call the profile this stores.")]
+    #[arg(long = "as", help = "What to call the connection this stores.")]
     pub label: Option<String>,
 }
 
@@ -62,9 +64,9 @@ pub struct DisconnectArgs {
     pub name: String,
     #[arg(
         long,
-        help = "Which profile to drop. Omitted, every profile is dropped."
+        help = "Which connection to drop. Omitted, every connection is dropped."
     )]
-    pub profile: Option<String>,
+    pub connection: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -75,9 +77,9 @@ pub struct GrantArgs {
     pub method: Option<String>,
     #[arg(
         long,
-        help = "Which profile stands behind it, where the method authenticates."
+        help = "Which connection stands behind it, where the method authenticates."
     )]
-    pub profile: Option<String>,
+    pub connection: Option<String>,
     #[arg(long, help = "Act on another directory instead of this one.")]
     pub project: Option<std::path::PathBuf>,
 }
@@ -212,7 +214,7 @@ async fn connect(
     }
     let (connector, method) = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
     writeln!(prompt, "connecting {} with {}", args.name, method.label)?;
-    let profile = match args.label.clone() {
+    let connection = match args.label.clone() {
         Some(named) => named,
         None => confirm_name(&connector, &method, terminal, prompt)?,
     };
@@ -220,16 +222,16 @@ async fn connect(
     let req = Request::ConnectConnector {
         name: args.name.clone(),
         method: method.name.clone(),
-        profile,
+        connection,
         values: lns_ipc::SecretValues(values),
     };
     match send(svc, req).await? {
         Response::ConnectorConnected {
             name,
-            profile,
+            connection,
             invalidated,
         } => {
-            writeln!(writer, "connected {name} as {profile}")?;
+            writeln!(writer, "connected {name} as {connection}")?;
             report_invalidated(&invalidated, writer)?;
             writeln!(
                 writer,
@@ -248,7 +250,7 @@ fn confirm_name(
     terminal: &mut dyn Terminal,
     prompt: &mut impl Write,
 ) -> Result<String> {
-    let suggested = connector.free_profile_name(&method.name);
+    let suggested = connector.free_connection_name(&method.name);
     write!(prompt, "name this connection [{suggested}]: ")?;
     prompt.flush()?;
     let typed = terminal.read_answer()?;
@@ -318,7 +320,7 @@ fn ask_for_each(
     Ok(values)
 }
 
-/// A re-authentication that reports different authority invalidates the grants naming that profile, so the projects that must decide again are named (§3.2.4).
+/// A re-authentication that reports different authority invalidates the grants naming that connection, so the projects that must decide again are named (§3.2.4).
 fn report_invalidated(invalidated: &[String], writer: &mut impl Write) -> std::io::Result<()> {
     if invalidated.is_empty() {
         return Ok(());
@@ -337,22 +339,22 @@ async fn disconnect(
 ) -> Result<i32> {
     let req = Request::DisconnectConnector {
         name: args.name.clone(),
-        profile: args.profile.clone(),
+        connection: args.connection.clone(),
     };
     match send(svc, req).await? {
         Response::ConnectorDisconnected { name, dropped: 0 } => {
-            writeln!(writer, "{name} holds no profile to disconnect")?;
+            writeln!(writer, "{name} holds no connection to disconnect")?;
             Ok(1)
         }
         Response::ConnectorDisconnected { name, dropped } => {
             writeln!(
                 writer,
                 "disconnected {name}, dropping {}",
-                profiles(dropped)
+                connections(dropped)
             )?;
             writeln!(
                 writer,
-                "  {name} stays installed, and a project that granted a dropped profile keeps its grant"
+                "  {name} stays installed, and a project that granted a dropped connection keeps its grant"
             )?;
             Ok(0)
         }
@@ -408,7 +410,7 @@ async fn grant(
         name: args.name.clone(),
         project_dir: dir,
         method: method.name.clone(),
-        profile: args.profile.clone(),
+        connection: args.connection.clone(),
     };
     match send(svc, req).await? {
         Response::ConnectorGranted {
@@ -423,12 +425,14 @@ async fn grant(
         Response::ConnectorGranted {
             name,
             method,
-            profile,
+            connection,
             displaced,
             ..
         } => {
-            match profile {
-                Some(profile) => writeln!(writer, "granted {name} with {method} as {profile}")?,
+            match connection {
+                Some(connection) => {
+                    writeln!(writer, "granted {name} with {method} as {connection}")?
+                }
                 None => writeln!(writer, "granted {name} with {method}")?,
             }
             if let Some(displaced) = displaced {
@@ -465,16 +469,16 @@ fn disclose(
         .cloned()
         .collect();
     disclose_list(prompt, "sets", &sets)?;
-    for profile in &connector.profiles {
-        let authority = if profile.authority.is_empty() {
+    for connection in &connector.connections {
+        let authority = if connection.authority.is_empty() {
             "no authority reported".to_string()
         } else {
-            profile.authority.join(", ")
+            connection.authority.join(", ")
         };
         labelled(
             prompt,
-            "profile",
-            &format!("{} ({authority})", profile.label),
+            "connection",
+            &format!("{} ({authority})", connection.label),
         )?;
     }
     Ok(())
@@ -532,11 +536,11 @@ async fn send(svc: &dyn ConnectorService, req: Request) -> Result<Response> {
     Ok(response)
 }
 
-/// `1 profile` rather than `1 profile(s)`, because a count the user reads out loud should be a sentence.
-fn profiles(count: usize) -> String {
+/// `1 connection` rather than `1 connection(s)`, because a count the user reads out loud should be a sentence.
+fn connections(count: usize) -> String {
     match count {
-        1 => "1 profile".to_string(),
-        n => format!("{n} profiles"),
+        1 => "1 connection".to_string(),
+        n => format!("{n} connections"),
     }
 }
 
@@ -610,11 +614,11 @@ async fn uninstall(svc: &dyn ConnectorService, name: &str, writer: &mut impl Wri
     match send(svc, req).await? {
         Response::ConnectorUninstalled {
             name,
-            dropped_profiles,
+            dropped_connections,
         } => {
             writeln!(writer, "uninstalled {name}")?;
-            if dropped_profiles > 0 {
-                writeln!(writer, "  dropped {}", profiles(dropped_profiles))?;
+            if dropped_connections > 0 {
+                writeln!(writer, "  dropped {}", connections(dropped_connections))?;
             }
             writeln!(
                 writer,
@@ -655,7 +659,7 @@ struct ConnectorRow {
     methods: Vec<String>,
     #[serde(skip)]
     method_summaries: Vec<String>,
-    profiles: Vec<String>,
+    connections: Vec<String>,
 }
 
 impl ConnectorRow {
@@ -671,30 +675,34 @@ impl ConnectorRow {
                 .collect(),
             // The same three states `install` reports, so a method reads the same whichever verb shows it.
             method_summaries: connector.methods.iter().map(method_summary).collect(),
-            profiles: connector.profiles.iter().map(|p| p.label.clone()).collect(),
+            connections: connector
+                .connections
+                .iter()
+                .map(|held| held.label.clone())
+                .collect(),
         }
     }
 }
 
 impl crate::output::TableRow for ConnectorRow {
-    const HEADERS: &'static [&'static str] = &["NAME", "SERVES", "METHODS", "PROFILES"];
+    const HEADERS: &'static [&'static str] = &["NAME", "SERVES", "METHODS", "CONNECTIONS"];
 
     fn cells(&self) -> Vec<String> {
         vec![
             self.name.clone(),
             self.serves.join(", "),
             self.method_summaries.join(", "),
-            none_when_empty(&self.profiles),
+            none_when_empty(&self.connections),
         ]
     }
 }
 
-/// A connector with no profile is the normal state after an install, so the column says so rather than sitting blank.
-fn none_when_empty(profiles: &[String]) -> String {
-    if profiles.is_empty() {
+/// A connector with no connection is the normal state after an install, so the column says so rather than sitting blank.
+fn none_when_empty(connections: &[String]) -> String {
+    if connections.is_empty() {
         return "none".to_string();
     }
-    profiles.join(", ")
+    connections.join(", ")
 }
 
 #[cfg(test)]
@@ -826,7 +834,7 @@ mod tests {
                 help: None,
                 credentials: Vec::new(),
             }],
-            profiles: Vec::new(),
+            connections: Vec::new(),
         };
         let svc = CannedService::with([Some(Response::ConnectorInstalled { connector })]);
         let mut out = Vec::new();
@@ -852,19 +860,19 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_column_lists_what_the_machine_holds() {
+    fn the_connections_column_lists_what_the_machine_holds() {
         let row = ConnectorRow::new(&ConnectorView {
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods: Vec::new(),
-            profiles: vec![
-                lns_ipc::ConnectorProfileView {
+            connections: vec![
+                lns_ipc::ConnectorConnectionView {
                     label: "work".into(),
                     method: "token".into(),
                     authority: Vec::new(),
                 },
-                lns_ipc::ConnectorProfileView {
+                lns_ipc::ConnectorConnectionView {
                     label: "personal".into(),
                     method: "token".into(),
                     authority: Vec::new(),
@@ -912,7 +920,7 @@ mod tests {
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods,
-            profiles: Vec::new(),
+            connections: Vec::new(),
         }
     }
 
@@ -936,7 +944,7 @@ mod tests {
             Some(listing(vec![with_methods(vec![method("token", true)])])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
-                profile: "token".into(),
+                connection: "token".into(),
                 invalidated: Vec::new(),
             }),
         ]);
@@ -1038,12 +1046,12 @@ mod tests {
     #[tokio::test]
     async fn a_reauthentication_that_invalidates_grants_names_the_projects_that_must_decide_again()
     {
-        // §3.2.4: where a re-authentication reports different authority, every grant naming that profile is invalidated.
+        // §3.2.4: where a re-authentication reports different authority, every grant naming that connection is invalidated.
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![method("token", true)])])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
-                profile: "work".into(),
+                connection: "work".into(),
                 invalidated: vec!["/work".into(), "/other".into()],
             }),
         ]);
@@ -1066,13 +1074,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_disclosure_names_a_profiles_authority_and_says_when_it_reported_none() {
+    async fn the_disclosure_names_a_connections_authority_and_says_when_it_reported_none() {
         let held = |authority: Vec<String>| ConnectorView {
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods: vec![method("token", true)],
-            profiles: vec![lns_ipc::ConnectorProfileView {
+            connections: vec![lns_ipc::ConnectorConnectionView {
                 label: "work".into(),
                 method: "token".into(),
                 authority,
@@ -1087,7 +1095,7 @@ mod tests {
                 Some(Response::ConnectorGranted {
                     name: "some-provider".into(),
                     method: "token".into(),
-                    profile: Some("work".into()),
+                    connection: Some("work".into()),
                     displaced: None,
                     unchanged: false,
                 }),
@@ -1096,7 +1104,7 @@ mod tests {
                 ConnectorCommand::Grant(GrantArgs {
                     name: "some-provider".into(),
                     method: Some("token".into()),
-                    profile: None,
+                    connection: None,
                     project: None,
                 }),
                 &svc,
@@ -1108,7 +1116,7 @@ mod tests {
             assert!(seen.contains(expected), "want {expected:?}, got: {seen}");
             assert!(
                 seen.contains("as work"),
-                "the profile behind it is named: {seen}"
+                "the connection behind it is named: {seen}"
             );
         }
     }
@@ -1120,7 +1128,7 @@ mod tests {
             Some(Response::ConnectorGranted {
                 name: "some-provider".into(),
                 method: "token".into(),
-                profile: None,
+                connection: None,
                 displaced: None,
                 unchanged: false,
             }),
@@ -1129,7 +1137,7 @@ mod tests {
             ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: Some("token".into()),
-                profile: None,
+                connection: None,
                 project: Some(std::path::PathBuf::from("../elsewhere")),
             }),
             &svc,
@@ -1174,7 +1182,7 @@ mod tests {
             }),
             ConnectorCommand::Disconnect(DisconnectArgs {
                 name: "some-provider".into(),
-                profile: None,
+                connection: None,
             }),
             ConnectorCommand::Forget(ForgetArgs {
                 name: "some-provider".into(),
@@ -1214,7 +1222,7 @@ mod tests {
                 &ConnectorCommand::Grant(GrantArgs {
                     name: "some-provider".into(),
                     method: Some("token".into()),
-                    profile: None,
+                    connection: None,
                     project: None,
                 }),
                 &svc,
@@ -1269,7 +1277,7 @@ mod tests {
             &ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: Some("token".into()),
-                profile: None,
+                connection: None,
                 project: None,
             }),
             &svc,
@@ -1318,7 +1326,7 @@ mod tests {
             ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: Some("token".into()),
-                profile: None,
+                connection: None,
                 project: None,
             }),
             &svc,
@@ -1345,7 +1353,7 @@ mod tests {
             ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: Some("future".into()),
-                profile: None,
+                connection: None,
                 project: None,
             }),
         ] {
@@ -1372,7 +1380,7 @@ mod tests {
             ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: Some("seeded".into()),
-                profile: None,
+                connection: None,
                 project: None,
             }),
             &svc,
@@ -1397,7 +1405,7 @@ mod tests {
             Some(Response::ConnectorGranted {
                 name: "some-provider".into(),
                 method: "token".into(),
-                profile: None,
+                connection: None,
                 displaced: None,
                 unchanged: false,
             }),
@@ -1406,7 +1414,7 @@ mod tests {
             ConnectorCommand::Grant(GrantArgs {
                 name: "some-provider".into(),
                 method: None,
-                profile: None,
+                connection: None,
                 project: None,
             }),
             &svc,
@@ -1463,9 +1471,9 @@ mod tests {
 
     #[test]
     fn a_count_the_user_reads_is_a_sentence_rather_than_a_form_field() {
-        // `1 profile(s)` is the shape this helper exists to avoid.
-        assert_eq!(profiles(1), "1 profile");
-        assert_eq!(profiles(2), "2 profiles");
+        // `1 connection(s)` is the shape this helper exists to avoid.
+        assert_eq!(connections(1), "1 connection");
+        assert_eq!(connections(2), "2 connections");
     }
 
     #[test]
@@ -1519,9 +1527,9 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_twice_keeps_both_accounts_rather_than_replacing_the_first() {
-        // The store keys a profile by its label, so reusing one overwrites the account already under it — silently, and taking every grant that named it.
+        // The store keys a connection by its label, so reusing one overwrites the account already under it — silently, and taking every grant that named it.
         let held = ConnectorView {
-            profiles: vec![lns_ipc::ConnectorProfileView {
+            connections: vec![lns_ipc::ConnectorConnectionView {
                 label: "token".into(),
                 method: "token".into(),
                 authority: Vec::new(),
@@ -1532,7 +1540,7 @@ mod tests {
             Some(listing(vec![held])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
-                profile: "token-2".into(),
+                connection: "token-2".into(),
                 invalidated: Vec::new(),
             }),
         ]);
@@ -1557,7 +1565,7 @@ mod tests {
         );
         let sent = svc.sent();
         assert!(
-            matches!(&sent[1], Request::ConnectConnector { profile, .. } if profile == "token-2"),
+            matches!(&sent[1], Request::ConnectConnector { connection, .. } if connection == "token-2"),
             "{sent:?}"
         );
     }
@@ -1565,7 +1573,7 @@ mod tests {
     #[tokio::test]
     async fn a_name_the_user_types_is_the_one_the_connection_is_kept_under() {
         let held = ConnectorView {
-            profiles: vec![lns_ipc::ConnectorProfileView {
+            connections: vec![lns_ipc::ConnectorConnectionView {
                 label: "token".into(),
                 method: "token".into(),
                 authority: Vec::new(),
@@ -1576,7 +1584,7 @@ mod tests {
             Some(listing(vec![held])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
-                profile: "personal".into(),
+                connection: "personal".into(),
                 invalidated: Vec::new(),
             }),
         ]);
@@ -1596,7 +1604,7 @@ mod tests {
 
         let sent = svc.sent();
         assert!(
-            matches!(&sent[1], Request::ConnectConnector { profile, .. } if profile == "personal"),
+            matches!(&sent[1], Request::ConnectConnector { connection, .. } if connection == "personal"),
             "{sent:?}"
         );
     }
@@ -1619,7 +1627,7 @@ mod tests {
             Some(listing(vec![with_methods(vec![two])])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
-                profile: "token".into(),
+                connection: "token".into(),
                 invalidated: Vec::new(),
             }),
         ]);

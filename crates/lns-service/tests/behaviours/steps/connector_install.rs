@@ -94,10 +94,10 @@ fn the_machine_holds_no_connector(w: &mut BehaviourWorld, name: String) {
     );
 }
 
-#[then(regex = r#"^the machine holds no profile for "([^"]+)"$"#)]
-fn the_machine_holds_no_profile_for(w: &mut BehaviourWorld, name: String) {
+#[then(regex = r#"^the machine holds no connection for "([^"]+)"$"#)]
+fn the_machine_holds_no_connection_for(w: &mut BehaviourWorld, name: String) {
     assert!(
-        rig(w).profiles_of(&name).is_empty(),
+        rig(w).connections_of(&name).is_empty(),
         "installing grants nothing, so it connects nothing"
     );
 }

@@ -97,7 +97,7 @@ impl PendingEntry {
 
 /// Which account a grant is made with: none for a method that does not authenticate, one this machine already holds, or one the card is creating.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileChoice {
+pub enum ConnectionChoice {
     None,
     Held(String),
     New {
@@ -123,7 +123,7 @@ pub trait ConnectorPort: Send + Sync {
         name: &str,
         digest: &str,
         method: &str,
-        profile: Option<&str>,
+        connection: Option<&str>,
     ) -> Result<GrantedPayload, String>;
 
     fn decline(&self, name: &str) -> Result<(), String>;
@@ -199,7 +199,12 @@ impl ApprovalSession {
     }
 
     /// Connects an account if the card made one, records the grant, then publishes and releases — in that order, because each step is what makes the next one correct (§3.2.4).
-    pub fn grant_offer(&self, id: &str, method: &str, profile: ProfileChoice) -> DecisionOutcome {
+    pub fn grant_offer(
+        &self,
+        id: &str,
+        method: &str,
+        connection: ConnectionChoice,
+    ) -> DecisionOutcome {
         let Some(offer) = self.offer_of(id) else {
             return DecisionOutcome::UnknownId;
         };
@@ -208,7 +213,7 @@ impl ApprovalSession {
                 .inform("no connector store is wired to this run, so nothing was granted");
             return DecisionOutcome::Resolved;
         };
-        let label = match self.resolve_profile(port.as_ref(), &offer.name, method, profile) {
+        let label = match self.resolve_connection(port.as_ref(), &offer.name, method, connection) {
             Ok(label) => label,
             Err(why) => {
                 self.notifier.inform(&why);
@@ -249,17 +254,17 @@ impl ApprovalSession {
     }
 
     /// The label the grant names, creating the account first when the card made one — the grant reads the store, so it must already be there.
-    fn resolve_profile(
+    fn resolve_connection(
         &self,
         port: &dyn ConnectorPort,
         name: &str,
         method: &str,
-        profile: ProfileChoice,
+        connection: ConnectionChoice,
     ) -> Result<Option<String>, String> {
-        match profile {
-            ProfileChoice::None => Ok(None),
-            ProfileChoice::Held(label) => Ok(Some(label)),
-            ProfileChoice::New { label, values } => {
+        match connection {
+            ConnectionChoice::None => Ok(None),
+            ConnectionChoice::Held(label) => Ok(Some(label)),
+            ConnectionChoice::New { label, values } => {
                 let invalidated = port.connect(name, method, &label, values)?;
                 if !invalidated.is_empty() {
                     self.notifier.inform(&format!(
@@ -539,7 +544,7 @@ impl ApprovalSession {
         let Some(entry) = self.remove_pending(id) else {
             return false;
         };
-        // The request is gone, but the offer it raised is still the user's to answer, and the profile applies to what runs next.
+        // The request is gone, but the offer it raised is still the user's to answer, and the connection applies to what runs next.
         if entry.offer.is_some() {
             self.keep_offer(id, entry);
             self.notifier.expire(id);
@@ -1339,7 +1344,7 @@ pub(crate) mod tests {
             digest: "sha256:abc".to_string(),
             serves: vec![destination.to_string()],
             methods: Vec::new(),
-            profiles: Vec::new(),
+            connections: Vec::new(),
         }
     }
 
@@ -1476,7 +1481,7 @@ pub(crate) mod tests {
         name: String,
         digest: String,
         method: String,
-        profile: Option<String>,
+        connection: Option<String>,
     }
 
     /// One recorded connect: which method, under what name, and which values it was given.
@@ -1522,7 +1527,7 @@ pub(crate) mod tests {
             name: &str,
             digest: &str,
             method: &str,
-            profile: Option<&str>,
+            connection: Option<&str>,
         ) -> Result<GrantedPayload, String> {
             if let Some(why) = &self.refuse {
                 return Err(why.clone());
@@ -1531,7 +1536,7 @@ pub(crate) mod tests {
                 name: name.to_string(),
                 digest: digest.to_string(),
                 method: method.to_string(),
-                profile: profile.map(str::to_string),
+                connection: connection.map(str::to_string),
             });
             Ok(self.opens.clone().unwrap_or_default())
         }
@@ -1544,7 +1549,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn offering(method: &str, profiles: &[&str]) -> ConnectorView {
+    fn offering(method: &str, connections: &[&str]) -> ConnectorView {
         ConnectorView {
             name: "some-provider".to_string(),
             digest: "sha256:abc".to_string(),
@@ -1552,7 +1557,7 @@ pub(crate) mod tests {
             methods: vec![lns_ipc::ConnectorMethodView {
                 name: method.to_string(),
                 label: method.to_string(),
-                needs_connect: !profiles.is_empty(),
+                needs_connect: !connections.is_empty(),
                 offerable: true,
                 opens: vec!["api.some-provider.example".to_string()],
                 writes: Vec::new(),
@@ -1560,9 +1565,9 @@ pub(crate) mod tests {
                 credentials: Vec::new(),
                 help: None,
             }],
-            profiles: profiles
+            connections: connections
                 .iter()
-                .map(|label| lns_ipc::ConnectorProfileView {
+                .map(|label| lns_ipc::ConnectorConnectionView {
                     label: label.to_string(),
                     method: method.to_string(),
                     authority: Vec::new(),
@@ -1580,11 +1585,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn granting_records_the_profile_the_card_chose() {
+    fn granting_records_the_connection_the_card_chose() {
         let port = Arc::new(FakeConnectorPort::default());
         let (s, _n, _store, _rx) = offered(port.clone());
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("personal".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("personal".into()));
 
         assert_eq!(
             port.granted.lock().unwrap().as_slice(),
@@ -1592,7 +1597,7 @@ pub(crate) mod tests {
                 name: "some-provider".to_string(),
                 digest: "sha256:abc".to_string(),
                 method: "token".to_string(),
-                profile: Some("personal".to_string()),
+                connection: Some("personal".to_string()),
             }],
             "the card is where the user names the account, and the bytes it disclosed are the bytes consented to"
         );
@@ -1610,7 +1615,7 @@ pub(crate) mod tests {
         });
         let (s, _n, _store, mut rx) = offered(port);
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
 
         let published = policy_frame(&mut rx);
         assert!(
@@ -1632,7 +1637,7 @@ pub(crate) mod tests {
         let port = Arc::new(FakeConnectorPort::default());
         let (s, _n, _store, mut rx) = offered(port);
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
 
         let published = policy_frame(&mut rx);
         assert!(
@@ -1654,7 +1659,7 @@ pub(crate) mod tests {
         let (s, n, _store, mut rx) = offered(port);
         s.submit_pending(pending("r2", "api.some-provider.example"), Instant::now());
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
 
         let _ = policy_frame(&mut rx);
         let mut released: Vec<String> = Vec::new();
@@ -1671,14 +1676,14 @@ pub(crate) mod tests {
 
     #[test]
     fn a_new_connection_is_made_before_the_grant_that_names_it() {
-        // The grant looks its profile up in the store, so a grant written first would refuse the label the user just typed.
+        // The grant looks its connection up in the store, so a grant written first would refuse the label the user just typed.
         let port = Arc::new(FakeConnectorPort::default());
         let (s, _n, _store, _rx) = offered(port.clone());
 
         s.grant_offer(
             "r1",
             "token",
-            ProfileChoice::New {
+            ConnectionChoice::New {
                 label: "token-2".into(),
                 values: lns_ipc::SecretValues(
                     [("SOME_TOKEN".to_string(), "sk-live".to_string())]
@@ -1694,9 +1699,9 @@ pub(crate) mod tests {
             "the connect must have happened, under the name the card carried"
         );
         assert_eq!(
-            port.granted.lock().unwrap()[0].profile,
+            port.granted.lock().unwrap()[0].connection,
             Some("token-2".to_string()),
-            "and the grant must name the profile it just created"
+            "and the grant must name the connection it just created"
         );
     }
 
@@ -1712,7 +1717,7 @@ pub(crate) mod tests {
         s.grant_offer(
             "r1",
             "token",
-            ProfileChoice::New {
+            ConnectionChoice::New {
                 label: "token-2".into(),
                 values: lns_ipc::SecretValues::default(),
             },
@@ -1746,7 +1751,7 @@ pub(crate) mod tests {
         s.grant_offer(
             "r1",
             "token",
-            ProfileChoice::New {
+            ConnectionChoice::New {
                 label: "token-2".into(),
                 values: lns_ipc::SecretValues::default(),
             },
@@ -1763,16 +1768,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn granting_a_method_that_needs_no_account_names_no_profile() {
+    fn granting_a_method_that_needs_no_account_names_no_connection() {
         let port = Arc::new(FakeConnectorPort::default());
         let (s, _n, _store, _rx) = fixture();
         s.set_connector_port(port.clone());
         s.hold_for_offers(vec![offering("open", &[])]);
         s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
 
-        s.grant_offer("r1", "open", ProfileChoice::None);
+        s.grant_offer("r1", "open", ConnectionChoice::None);
 
-        assert_eq!(port.granted.lock().unwrap()[0].profile, None);
+        assert_eq!(port.granted.lock().unwrap()[0].connection, None);
     }
 
     #[test]
@@ -1784,7 +1789,7 @@ pub(crate) mod tests {
         });
         let (s, n, _store, mut rx) = offered(port);
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
 
         assert!(rx.try_recv().is_err(), "nothing was published or released");
         assert!(n.dismissed.lock().unwrap().is_empty());
@@ -1804,7 +1809,7 @@ pub(crate) mod tests {
         let (s, _n, _store, _rx) = fixture();
         s.set_connector_port(port);
         assert_eq!(
-            s.grant_offer("gone", "token", ProfileChoice::None),
+            s.grant_offer("gone", "token", ConnectionChoice::None),
             DecisionOutcome::UnknownId
         );
         assert_eq!(s.decline_offer("gone"), DecisionOutcome::UnknownId);
@@ -1817,7 +1822,7 @@ pub(crate) mod tests {
         s.hold_for_offers(vec![offering("open", &[])]);
         s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
 
-        s.grant_offer("r1", "open", ProfileChoice::None);
+        s.grant_offer("r1", "open", ConnectionChoice::None);
 
         assert!(rx.try_recv().is_err());
         assert!(
@@ -1892,7 +1897,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_hold_that_expires_keeps_the_card_so_the_connect_can_finish() {
-        // §3.2.4: "An expired hold does not cancel the connect: the user finishes, the profile applies, and the next request succeeds." Dismissing here would take the card away mid-token.
+        // §3.2.4: "An expired hold does not cancel the connect: the user finishes, the connection applies, and the next request succeeds." Dismissing here would take the card away mid-token.
         let port = Arc::new(FakeConnectorPort::default());
         let (s, n, _store, mut rx) = offered(port.clone());
 
@@ -1908,7 +1913,7 @@ pub(crate) mod tests {
             "but the card is still there to answer"
         );
         assert_eq!(
-            s.grant_offer("r1", "token", ProfileChoice::Held("work".into())),
+            s.grant_offer("r1", "token", ConnectionChoice::Held("work".into())),
             DecisionOutcome::Resolved,
             "and the grant still applies, for whatever runs next"
         );
@@ -1923,7 +1928,7 @@ pub(crate) mod tests {
         s.tick_timeouts(Instant::now() + TEST_TIMEOUT + Duration::from_millis(1));
         assert_eq!(decision_frame(&mut rx).decision, Decision::Timeout);
 
-        s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
 
         let _ = policy_frame(&mut rx);
         assert!(
@@ -2750,7 +2755,7 @@ pub(crate) mod tests {
             s.apply_external_policy(own.clone());
             s.hold_for_offers(vec![offering("token", &["work"])]);
             s.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
-            s.grant_offer("r1", "token", ProfileChoice::Held("work".into()));
+            s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
             s.policy_message()
         };
 

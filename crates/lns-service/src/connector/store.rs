@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::conflicts::refuse_a_conflict;
 
-/// The separator in a composite key: no path, OCI reference, or profile label may contain one, so no composed key is ambiguous.
+/// The separator in a composite key: no path, OCI reference, or connection label may contain one, so no composed key is ambiguous.
 const SEP: char = '\0';
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ impl Authority {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Profile {
+pub struct Connection {
     pub method: String,
     #[serde(default)]
     pub authority: Authority,
@@ -61,10 +61,10 @@ pub struct Profile {
     pub values: BTreeMap<String, String>,
 }
 
-impl std::fmt::Debug for Profile {
-    /// Hand-written so a `log::debug!` of a profile cannot print the token it holds.
+impl std::fmt::Debug for Connection {
+    /// Hand-written so a `log::debug!` of a connection cannot print the token it holds.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Profile")
+        f.debug_struct("Connection")
             .field("method", &self.method)
             .field("authority", &self.authority)
             .field("values", &format_args!("<{} redacted>", self.values.len()))
@@ -81,7 +81,7 @@ pub enum ProjectDecision {
         digest: String,
         method: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile: Option<String>,
+        connection: Option<String>,
         #[serde(default)]
         authority: Authority,
     },
@@ -157,7 +157,7 @@ fn read_with_its_filesets(document: &[u8], filesets: &[Vec<u8>]) -> Result<Conne
     lns_artifact::connector::parse_with_path_files(document, &read)
 }
 
-fn profile_key(name: &str, label: &str) -> String {
+fn connection_key(name: &str, label: &str) -> String {
     format!("{name}{SEP}{label}")
 }
 
@@ -169,18 +169,18 @@ fn splits(key: &str) -> Option<(&str, &str)> {
     key.split_once(SEP)
 }
 
-/// The grant keys a re-authentication of `name`'s `profile` invalidates: every grant naming that profile whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
+/// The grant keys a re-authentication of `name`'s `connection` invalidates: every grant naming that connection whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
 pub fn grants_invalidated_by(
     grants: &DecisionFile<ProjectDecision>,
     name: &str,
-    profile: &str,
+    connection: &str,
     reported: &Authority,
 ) -> Vec<String> {
     let mut invalidated: Vec<String> = grants
         .iter()
         .filter(|(key, decision)| {
             splits(key).is_some_and(|(_, keyed)| keyed == name)
-                && names_profile_with_other_authority(decision, profile, reported)
+                && names_connection_with_other_authority(decision, connection, reported)
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -188,24 +188,24 @@ pub fn grants_invalidated_by(
     invalidated
 }
 
-fn names_profile_with_other_authority(
+fn names_connection_with_other_authority(
     decision: &ProjectDecision,
-    profile: &str,
+    connection: &str,
     reported: &Authority,
 ) -> bool {
     match decision {
         ProjectDecision::Granted {
-            profile: Some(named),
+            connection: Some(named),
             authority,
             ..
-        } => named == profile && authority != reported,
+        } => named == connection && authority != reported,
         _ => false,
     }
 }
 
 pub struct ConnectorStore<'a> {
     installed: &'a dyn InstalledSet,
-    values: &'a dyn DecisionStore<Profile>,
+    values: &'a dyn DecisionStore<Connection>,
     grants: &'a dyn DecisionStore<ProjectDecision>,
     write: Mutex<()>,
 }
@@ -213,7 +213,7 @@ pub struct ConnectorStore<'a> {
 impl<'a> ConnectorStore<'a> {
     pub fn new(
         installed: &'a dyn InstalledSet,
-        values: &'a dyn DecisionStore<Profile>,
+        values: &'a dyn DecisionStore<Connection>,
         grants: &'a dyn DecisionStore<ProjectDecision>,
     ) -> Self {
         Self {
@@ -273,22 +273,22 @@ impl<'a> ConnectorStore<'a> {
         self.installed.fileset_layer(name, index)
     }
 
-    /// Removes every profile the connector held, then the connector, and leaves what projects granted untouched (§7.1).
+    /// Removes every connection the connector held, then the connector, and leaves what projects granted untouched (§7.1).
     ///
-    /// Profiles go first so a failed write cannot leave real values behind under a name nothing installed.
+    /// Connections go first so a failed write cannot leave real values behind under a name nothing installed.
     pub fn uninstall(&self, name: &str) -> io::Result<bool> {
         let _guard = self.lock();
-        self.retain_profiles(|key| splits(key).is_some_and(|(keyed, _)| keyed != name))?;
+        self.retain_connections(|key| splits(key).is_some_and(|(keyed, _)| keyed != name))?;
         self.installed.remove(name)
     }
 
-    pub fn profiles_of(&self, name: &str) -> io::Result<BTreeMap<String, Profile>> {
+    pub fn connections_of(&self, name: &str) -> io::Result<BTreeMap<String, Connection>> {
         Ok(self
             .values
             .load()?
             .into_iter()
-            .filter_map(|(key, profile)| match splits(&key) {
-                Some((keyed, label)) if keyed == name => Some((label.to_string(), profile)),
+            .filter_map(|(key, connection)| match splits(&key) {
+                Some((keyed, label)) if keyed == name => Some((label.to_string(), connection)),
                 _ => None,
             })
             .collect())
@@ -296,32 +296,32 @@ impl<'a> ConnectorStore<'a> {
 
     /// Drops every grant whose consented authority this authentication no longer matches, then stores what it returned. The returned keys are the grants to ask about again (§3.2.4).
     ///
-    /// The grants go first so a failed write cannot leave a grant standing beside a profile whose authority the project never consented to — a grant silently widened.
+    /// The grants go first so a failed write cannot leave a grant standing beside a connection whose authority the project never consented to — a grant silently widened.
     pub fn record_authentication(
         &self,
         name: &str,
         label: &str,
-        profile: Profile,
+        connection: Connection,
     ) -> io::Result<Vec<String>> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
-        let invalidated = grants_invalidated_by(&grants, name, label, &profile.authority);
+        let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
         if !invalidated.is_empty() {
             grants.retain(|key, _| !invalidated.contains(key));
             self.grants.save(&grants)?;
         }
 
         let mut values = self.values.load()?;
-        values.insert(profile_key(name, label), profile);
+        values.insert(connection_key(name, label), connection);
         self.values.save(&values)?;
         Ok(invalidated)
     }
 
-    /// Drops one profile, or every profile of a connector when `label` is absent. The connector stays installed and grants naming it stay (§3.3 `disconnect`).
-    pub fn drop_profiles(&self, name: &str, label: Option<&str>) -> io::Result<usize> {
+    /// Drops one connection, or every connection of a connector when `label` is absent. The connector stays installed and grants naming it stay (§3.3 `disconnect`).
+    pub fn drop_connections(&self, name: &str, label: Option<&str>) -> io::Result<usize> {
         let _guard = self.lock();
         let before = self.values.load()?.len();
-        self.retain_profiles(|key| match splits(key) {
+        self.retain_connections(|key| match splits(key) {
             Some((keyed, keyed_label)) => {
                 keyed != name || label.is_some_and(|wanted| keyed_label != wanted)
             }
@@ -372,7 +372,7 @@ impl<'a> ConnectorStore<'a> {
         Ok(removed)
     }
 
-    fn retain_profiles(&self, keep: impl Fn(&str) -> bool) -> io::Result<()> {
+    fn retain_connections(&self, keep: impl Fn(&str) -> bool) -> io::Result<()> {
         let mut values = self.values.load()?;
         let before = values.len();
         values.retain(|key, _| keep(key));
@@ -480,7 +480,7 @@ mod tests {
 
     struct Rig {
         set: FakeSet,
-        values: FakeMap<Profile>,
+        values: FakeMap<Connection>,
         grants: FakeMap<ProjectDecision>,
     }
 
@@ -742,19 +742,19 @@ mod tests {
         .into_bytes()
     }
 
-    fn profile(authority: Authority) -> Profile {
-        Profile {
+    fn connection(authority: Authority) -> Connection {
+        Connection {
             method: "token".to_string(),
             authority,
             values: [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
         }
     }
 
-    fn granted(digest: &str, profile: Option<&str>, authority: Authority) -> ProjectDecision {
+    fn granted(digest: &str, connection: Option<&str>, authority: Authority) -> ProjectDecision {
         ProjectDecision::Granted {
             digest: digest.to_string(),
             method: "token".to_string(),
-            profile: profile.map(str::to_string),
+            connection: connection.map(str::to_string),
             authority,
         }
     }
@@ -772,7 +772,7 @@ mod tests {
             .unwrap();
         assert_eq!(installed.name, "some-provider");
         assert_eq!(store.installed().unwrap().len(), 1);
-        assert!(store.profiles_of("some-provider").unwrap().is_empty());
+        assert!(store.connections_of("some-provider").unwrap().is_empty());
         assert_eq!(store.decision("/work", "some-provider").unwrap(), None);
     }
 
@@ -876,8 +876,8 @@ mod tests {
     }
 
     #[test]
-    fn uninstalling_drops_every_profile_and_keeps_what_projects_granted() {
-        // The pair most easily got backwards: profiles are machine state, a grant is a project's decision.
+    fn uninstalling_drops_every_connection_and_keeps_what_projects_granted() {
+        // The pair most easily got backwards: connections are machine state, a grant is a project's decision.
         let rig = Rig::new();
         let store = rig.store();
         store
@@ -888,7 +888,7 @@ mod tests {
             )
             .unwrap();
         store
-            .record_authentication("some-provider", "work", profile(Authority::default()))
+            .record_authentication("some-provider", "work", connection(Authority::default()))
             .unwrap();
         store
             .decide(
@@ -901,7 +901,7 @@ mod tests {
         assert!(store.uninstall("some-provider").unwrap());
 
         assert!(store.installed().unwrap().is_empty());
-        assert!(store.profiles_of("some-provider").unwrap().is_empty());
+        assert!(store.connections_of("some-provider").unwrap().is_empty());
         assert_eq!(
             store.decision("/work", "some-provider").unwrap(),
             Some(granted("sha256:abc", Some("work"), Authority::default())),
@@ -910,17 +910,17 @@ mod tests {
     }
 
     #[test]
-    fn uninstalling_leaves_another_connectors_profiles_alone() {
+    fn uninstalling_leaves_another_connectors_connections_alone() {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .record_authentication("some-provider", "work", profile(Authority::default()))
+            .record_authentication("some-provider", "work", connection(Authority::default()))
             .unwrap();
         store
-            .record_authentication("other-provider", "work", profile(Authority::default()))
+            .record_authentication("other-provider", "work", connection(Authority::default()))
             .unwrap();
         store.uninstall("some-provider").unwrap();
-        assert_eq!(store.profiles_of("other-provider").unwrap().len(), 1);
+        assert_eq!(store.connections_of("other-provider").unwrap().len(), 1);
     }
 
     #[test]
@@ -929,16 +929,20 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_may_hold_several_profiles_of_one_connector() {
+    fn a_machine_may_hold_several_connections_of_one_connector() {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .record_authentication("some-provider", "work", profile(Authority::default()))
+            .record_authentication("some-provider", "work", connection(Authority::default()))
             .unwrap();
         store
-            .record_authentication("some-provider", "personal", profile(Authority::default()))
+            .record_authentication(
+                "some-provider",
+                "personal",
+                connection(Authority::default()),
+            )
             .unwrap();
-        let held = store.profiles_of("some-provider").unwrap();
+        let held = store.connections_of("some-provider").unwrap();
         assert_eq!(
             held.keys().collect::<Vec<_>>(),
             ["personal", "work"],
@@ -947,21 +951,23 @@ mod tests {
     }
 
     #[test]
-    fn dropping_one_profile_leaves_the_others() {
+    fn dropping_one_connection_leaves_the_others() {
         let rig = Rig::new();
         let store = rig.store();
         for label in ["work", "personal"] {
             store
-                .record_authentication("some-provider", label, profile(Authority::default()))
+                .record_authentication("some-provider", label, connection(Authority::default()))
                 .unwrap();
         }
         assert_eq!(
-            store.drop_profiles("some-provider", Some("work")).unwrap(),
+            store
+                .drop_connections("some-provider", Some("work"))
+                .unwrap(),
             1
         );
         assert_eq!(
             store
-                .profiles_of("some-provider")
+                .connections_of("some-provider")
                 .unwrap()
                 .keys()
                 .collect::<Vec<_>>(),
@@ -970,27 +976,27 @@ mod tests {
     }
 
     #[test]
-    fn dropping_with_no_label_drops_every_profile_of_that_connector() {
+    fn dropping_with_no_label_drops_every_connection_of_that_connector() {
         let rig = Rig::new();
         let store = rig.store();
         for label in ["work", "personal"] {
             store
-                .record_authentication("some-provider", label, profile(Authority::default()))
+                .record_authentication("some-provider", label, connection(Authority::default()))
                 .unwrap();
         }
         store
-            .record_authentication("other-provider", "work", profile(Authority::default()))
+            .record_authentication("other-provider", "work", connection(Authority::default()))
             .unwrap();
-        assert_eq!(store.drop_profiles("some-provider", None).unwrap(), 2);
-        assert_eq!(store.profiles_of("other-provider").unwrap().len(), 1);
+        assert_eq!(store.drop_connections("some-provider", None).unwrap(), 2);
+        assert_eq!(store.connections_of("other-provider").unwrap().len(), 1);
     }
 
     #[test]
-    fn dropping_a_profile_a_connector_never_held_drops_nothing() {
+    fn dropping_a_connection_a_connector_never_held_drops_nothing() {
         assert_eq!(
             Rig::new()
                 .store()
-                .drop_profiles("some-provider", Some("work"))
+                .drop_connections("some-provider", Some("work"))
                 .unwrap(),
             0
         );
@@ -1134,7 +1140,7 @@ mod tests {
             )
             .unwrap();
         let invalidated = store
-            .record_authentication("some-provider", "work", profile(authority))
+            .record_authentication("some-provider", "work", connection(authority))
             .unwrap();
         assert!(invalidated.is_empty());
         assert!(store.decision("/work", "some-provider").unwrap().is_some());
@@ -1155,7 +1161,7 @@ mod tests {
             .record_authentication(
                 "some-provider",
                 "work",
-                profile(Authority::of(["repo:read", "repo:write"])),
+                connection(Authority::of(["repo:read", "repo:write"])),
             )
             .unwrap();
         assert_eq!(invalidated.len(), 1);
@@ -1186,7 +1192,7 @@ mod tests {
                 .record_authentication(
                     "some-provider",
                     "work",
-                    profile(Authority::of(["repo:read"]))
+                    connection(Authority::of(["repo:read"]))
                 )
                 .unwrap()
                 .len(),
@@ -1195,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_reaches_only_the_grants_naming_that_profile() {
+    fn invalidation_reaches_only_the_grants_naming_that_connection() {
         let rig = Rig::new();
         let store = rig.store();
         store
@@ -1221,7 +1227,11 @@ mod tests {
             .unwrap();
 
         let invalidated = store
-            .record_authentication("some-provider", "work", profile(Authority::of(["admin"])))
+            .record_authentication(
+                "some-provider",
+                "work",
+                connection(Authority::of(["admin"])),
+            )
             .unwrap();
 
         assert_eq!(invalidated.len(), 1);
@@ -1230,8 +1240,8 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_naming_no_profile_is_never_invalidated_by_an_authentication() {
-        // A method with no `auth` has no profile, so nothing an authentication reports can concern it.
+    fn a_grant_naming_no_connection_is_never_invalidated_by_an_authentication() {
+        // A method with no `auth` has no connection, so nothing an authentication reports can concern it.
         let rig = Rig::new();
         let store = rig.store();
         store
@@ -1243,7 +1253,11 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .record_authentication("some-provider", "work", profile(Authority::of(["admin"])))
+                .record_authentication(
+                    "some-provider",
+                    "work",
+                    connection(Authority::of(["admin"]))
+                )
                 .unwrap()
                 .is_empty()
         );
@@ -1258,7 +1272,11 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .record_authentication("some-provider", "work", profile(Authority::of(["admin"])))
+                .record_authentication(
+                    "some-provider",
+                    "work",
+                    connection(Authority::of(["admin"]))
+                )
                 .unwrap()
                 .is_empty()
         );
@@ -1269,12 +1287,12 @@ mod tests {
     }
 
     #[test]
-    fn a_values_write_that_fails_surfaces_rather_than_reporting_a_stored_profile() {
+    fn a_values_write_that_fails_surfaces_rather_than_reporting_a_stored_connection() {
         let rig = Rig::new();
         *rig.values.fail_save.lock().unwrap() = true;
         assert!(
             rig.store()
-                .record_authentication("some-provider", "work", profile(Authority::default()))
+                .record_authentication("some-provider", "work", connection(Authority::default()))
                 .is_err()
         );
     }
@@ -1282,7 +1300,7 @@ mod tests {
     #[test]
     fn a_grants_write_that_fails_during_invalidation_never_leaves_a_grant_backed_by_wider_authority()
      {
-        // A grant that survives beside a re-authenticated profile is a grant silently widened: the run would apply the method backed by authority the project never consented to.
+        // A grant that survives beside a re-authenticated connection is a grant silently widened: the run would apply the method backed by authority the project never consented to.
         let rig = Rig::new();
         rig.grants.state.lock().unwrap().insert(
             project_key("/work", "some-provider"),
@@ -1292,7 +1310,11 @@ mod tests {
 
         assert!(
             rig.store()
-                .record_authentication("some-provider", "work", profile(Authority::of(["admin"])))
+                .record_authentication(
+                    "some-provider",
+                    "work",
+                    connection(Authority::of(["admin"]))
+                )
                 .is_err()
         );
 
@@ -1301,14 +1323,14 @@ mod tests {
             .grant_for("/work", "some-provider", "sha256:abc")
             .unwrap()
             .is_some();
-        let profile_widened = store
-            .profiles_of("some-provider")
+        let connection_widened = store
+            .connections_of("some-provider")
             .unwrap()
             .get("work")
             .is_some_and(|held| held.authority == Authority::of(["admin"]));
         assert!(
-            !(grant_applies && profile_widened),
-            "the grant still applies while the profile reports different authority"
+            !(grant_applies && connection_widened),
+            "the grant still applies while the connection reports different authority"
         );
     }
 
@@ -1345,8 +1367,8 @@ mod tests {
             )
             .unwrap();
         rig.values.state.lock().unwrap().insert(
-            profile_key("some-provider", "work"),
-            profile(Authority::default()),
+            connection_key("some-provider", "work"),
+            connection(Authority::default()),
         );
         *rig.values.fail_save.lock().unwrap() = true;
 
@@ -1359,15 +1381,15 @@ mod tests {
             .iter()
             .any(|entry| entry.name == "some-provider");
         assert!(
-            still_installed || store.profiles_of("some-provider").unwrap().is_empty(),
+            still_installed || store.connections_of("some-provider").unwrap().is_empty(),
             "the connector is gone and its values are not"
         );
     }
 
     #[test]
-    fn a_profile_debug_does_not_print_the_value_it_holds() {
-        // A derived Debug would put a real token into every log line that mentions a profile.
-        let rendered = format!("{:?}", profile(Authority::of(["repo:read"])));
+    fn a_connection_debug_does_not_print_the_value_it_holds() {
+        // A derived Debug would put a real token into every log line that mentions a connection.
+        let rendered = format!("{:?}", connection(Authority::of(["repo:read"])));
         assert!(!rendered.contains("real-secret"), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
         assert!(rendered.contains("repo:read"), "{rendered}");
@@ -1397,15 +1419,15 @@ mod tests {
             .state
             .lock()
             .unwrap()
-            .insert("handwritten".to_string(), profile(Authority::default()));
+            .insert("handwritten".to_string(), connection(Authority::default()));
         rig.grants
             .state
             .lock()
             .unwrap()
             .insert("handwritten".to_string(), ProjectDecision::Declined);
         let store = rig.store();
-        assert!(store.profiles_of("handwritten").unwrap().is_empty());
-        assert_eq!(store.drop_profiles("handwritten", None).unwrap(), 0);
+        assert!(store.connections_of("handwritten").unwrap().is_empty());
+        assert_eq!(store.drop_connections("handwritten", None).unwrap(), 0);
         assert!(
             grants_invalidated_by(
                 &rig.grants.load().unwrap(),

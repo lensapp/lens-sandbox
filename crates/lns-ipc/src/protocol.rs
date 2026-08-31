@@ -137,18 +137,18 @@ pub enum Request {
     ConnectConnector {
         name: String,
         method: String,
-        profile: String,
+        connection: String,
         values: SecretValues,
     },
     DisconnectConnector {
         name: String,
-        profile: Option<String>,
+        connection: Option<String>,
     },
     GrantConnector {
         name: String,
         project_dir: String,
         method: String,
-        profile: Option<String>,
+        connection: Option<String>,
     },
     ForgetConnector {
         name: String,
@@ -305,10 +305,10 @@ pub enum Response {
     ConnectorInstalled {
         connector: ConnectorView,
     },
-    /// Uninstalling drops profiles and keeps grants, so it reports both rather than a bare acknowledgement.
+    /// Uninstalling drops connections and keeps grants, so it reports both rather than a bare acknowledgement.
     ConnectorUninstalled {
         name: String,
-        dropped_profiles: usize,
+        dropped_connections: usize,
     },
     ConnectorList {
         connectors: Vec<ConnectorView>,
@@ -320,7 +320,7 @@ pub enum Response {
     /// `invalidated` names the project directories whose grant the returned authority no longer matches, so each is asked again.
     ConnectorConnected {
         name: String,
-        profile: String,
+        connection: String,
         invalidated: Vec<String>,
     },
     ConnectorDisconnected {
@@ -331,7 +331,7 @@ pub enum Response {
     ConnectorGranted {
         name: String,
         method: String,
-        profile: Option<String>,
+        connection: Option<String>,
         displaced: Option<String>,
         unchanged: bool,
     },
@@ -352,14 +352,14 @@ impl std::fmt::Debug for SecretValues {
     }
 }
 
-/// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the profiles this machine holds.
+/// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the connections this machine holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorView {
     pub name: String,
     pub digest: String,
     pub serves: Vec<String>,
     pub methods: Vec<ConnectorMethodView>,
-    pub profiles: Vec<ConnectorProfileView>,
+    pub connections: Vec<ConnectorConnectionView>,
 }
 
 /// One method, with the whole payload a grant applies — a card that showed less would take consent for what it did not disclose (sandbox-spec §1.5).
@@ -385,11 +385,11 @@ pub struct ConnectorMethodView {
 }
 
 impl ConnectorView {
-    /// A name for a new connection that this connector does not already hold: the method's own name, then `-2`, `-3`. A label it holds would replace that account rather than add one, and the store keys a profile by connector and label alone — so a name another method made still collides. Both the CLI and the approval card name connections by this rule, and they must agree.
-    pub fn free_profile_name(&self, method: &str) -> String {
+    /// A name for a new connection that this connector does not already hold: the method's own name, then `-2`, `-3`. A label it holds would replace that account rather than add one, and the store keys a connection by connector and label alone — so a name another method made still collides. Both the CLI and the approval card name connections by this rule, and they must agree.
+    pub fn free_connection_name(&self, method: &str) -> String {
         let mut candidate = method.to_string();
         let mut nth = 1;
-        while self.profiles.iter().any(|held| held.label == candidate) {
+        while self.connections.iter().any(|held| held.label == candidate) {
             nth += 1;
             candidate = format!("{method}-{nth}");
         }
@@ -398,7 +398,7 @@ impl ConnectorView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConnectorProfileView {
+pub struct ConnectorConnectionView {
     pub label: String,
     pub method: String,
     pub authority: Vec<String>,
@@ -1056,7 +1056,7 @@ mod secret_tests {
         let request = Request::ConnectConnector {
             name: "some-provider".into(),
             method: "token".into(),
-            profile: "work".into(),
+            connection: "work".into(),
             values: SecretValues([("SOME_TOKEN".to_string(), "sk-live-real".to_string())].into()),
         };
         let rendered = format!("{request:?}");
@@ -1088,9 +1088,9 @@ mod tests {
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods: Vec::new(),
-            profiles: labels
+            connections: labels
                 .iter()
-                .map(|label| ConnectorProfileView {
+                .map(|label| ConnectorConnectionView {
                     label: label.to_string(),
                     method: "token".into(),
                     authority: Vec::new(),
@@ -1101,15 +1101,15 @@ mod tests {
 
     #[test]
     fn a_new_connection_is_named_after_its_method_when_nothing_holds_that_name() {
-        assert_eq!(holding(&[]).free_profile_name("token"), "token");
+        assert_eq!(holding(&[]).free_connection_name("token"), "token");
     }
 
     #[test]
     fn a_name_already_held_is_stepped_past_rather_than_replaced() {
         // Replacing is what a colliding label does in the store, silently, taking every grant that named it.
-        assert_eq!(holding(&["token"]).free_profile_name("token"), "token-2");
+        assert_eq!(holding(&["token"]).free_connection_name("token"), "token-2");
         assert_eq!(
-            holding(&["token", "token-2"]).free_profile_name("token"),
+            holding(&["token", "token-2"]).free_connection_name("token"),
             "token-3"
         );
     }
@@ -1117,15 +1117,15 @@ mod tests {
     #[test]
     fn a_gap_left_by_a_disconnect_is_filled_rather_than_counted_past() {
         // Counting the accounts would suggest `token-2` here and replace the one account this machine still holds.
-        assert_eq!(holding(&["token-2"]).free_profile_name("token"), "token");
+        assert_eq!(holding(&["token-2"]).free_connection_name("token"), "token");
     }
 
     #[test]
     fn a_label_another_method_holds_still_collides() {
         // The store's key is the connector and the label; the method is recorded in the value, so reusing the name rewrites that too.
         let mut view = holding(&["token"]);
-        view.profiles[0].method = "session".into();
-        assert_eq!(view.free_profile_name("token"), "token-2");
+        view.connections[0].method = "session".into();
+        assert_eq!(view.free_connection_name("token"), "token-2");
     }
     use super::*;
 

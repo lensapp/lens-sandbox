@@ -396,28 +396,28 @@ fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
         Request::ConnectConnector {
             name,
             method,
-            profile,
+            connection,
             values,
         } => Call::Connect {
             name: name.clone(),
             method: method.clone(),
-            profile: profile.clone(),
+            connection: connection.clone(),
             values: values.0.clone(),
         },
-        Request::DisconnectConnector { name, profile } => Call::Disconnect {
+        Request::DisconnectConnector { name, connection } => Call::Disconnect {
             name: name.clone(),
-            profile: profile.clone(),
+            connection: connection.clone(),
         },
         Request::GrantConnector {
             name,
             project_dir,
             method,
-            profile,
+            connection,
         } => Call::Grant {
             name: name.clone(),
             project_dir: project_dir.clone(),
             method: method.clone(),
-            profile: profile.clone(),
+            connection: connection.clone(),
         },
         Request::ForgetConnector { name, project_dir } => Call::Forget {
             name: name.clone(),
@@ -1866,7 +1866,7 @@ mod tests {
             .await,
         );
         assert_eq!(removed["type"], "ConnectorUninstalled", "got {removed}");
-        assert_eq!(removed["dropped_profiles"], 0);
+        assert_eq!(removed["dropped_connections"], 0);
 
         let after = as_json(handle_request(&Request::ListConnectors, now).await);
         assert!(
@@ -1900,7 +1900,7 @@ mod tests {
                 &Request::ConnectConnector {
                     name: "some-provider".into(),
                     method: "token".into(),
-                    profile: "work".into(),
+                    connection: "work".into(),
                     values: lns_ipc::SecretValues(
                         [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
                     ),
@@ -1910,7 +1910,7 @@ mod tests {
             .await,
         );
         assert_eq!(connected["type"], "ConnectorConnected", "got {connected}");
-        assert_eq!(connected["profile"], "work");
+        assert_eq!(connected["connection"], "work");
 
         let granted = as_json(
             handle_request(
@@ -1918,7 +1918,7 @@ mod tests {
                     name: "some-provider".into(),
                     project_dir: "/work".into(),
                     method: "token".into(),
-                    profile: None,
+                    connection: None,
                 },
                 now,
             )
@@ -1926,8 +1926,8 @@ mod tests {
         );
         assert_eq!(granted["type"], "ConnectorGranted", "got {granted}");
         assert_eq!(
-            granted["profile"], "work",
-            "the only profile held stands behind it"
+            granted["connection"], "work",
+            "the only connection held stands behind it"
         );
 
         let forgotten = as_json(
@@ -1947,7 +1947,7 @@ mod tests {
             handle_request(
                 &Request::DisconnectConnector {
                     name: "some-provider".into(),
-                    profile: None,
+                    connection: None,
                 },
                 now,
             )
