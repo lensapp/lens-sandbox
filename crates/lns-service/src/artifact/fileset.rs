@@ -383,6 +383,38 @@ pub(crate) fn packed_layers(manifest: &OciImageManifest) -> Vec<crate::artifact:
         .collect()
 }
 
+/// Pull one packed fileset layer, verified against the digest its artifact's manifest declared, so what materializes is what the approved artifact carries; a layer already in the content store is not fetched again, and a stream failure leaves no partial content staged.
+pub(crate) async fn pull_packed_layer_with<R: crate::image::Registry>(
+    registry: &R,
+    parsed: &oci_client::Reference,
+    layer: &crate::artifact::PackedLayer,
+    content_store: &ContentStore,
+    max_bytes: u64,
+) -> Result<PathBuf> {
+    validate_packed_layer_size(layer, max_bytes)?;
+    if content_store.contains(&layer.digest)? {
+        return content_store.path_for(&layer.digest);
+    }
+    let descriptor = oci_client::manifest::OciDescriptor {
+        media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+        digest: layer.digest.clone(),
+        size: i64::try_from(layer.size).unwrap_or(i64::MAX),
+        ..Default::default()
+    };
+    let staged = content_store.staging_path()?;
+    if let Err(error) = registry
+        .pull_blob_to_path(parsed, &descriptor, layer.size, &staged, &|_| {})
+        .await
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    let installed = content_store
+        .commit_verified(staged, &layer.digest, layer.size)
+        .with_context(|| format!("verifying fileset layer {}", layer.digest))?;
+    Ok(installed.path)
+}
+
 /// Refuse a declared layer bigger than the byte ceiling before it is downloaded.
 pub(crate) fn validate_packed_layer_size(
     layer: &crate::artifact::PackedLayer,
@@ -402,6 +434,7 @@ mod tests {
     use super::*;
     use oci_client::manifest::OciDescriptor;
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn spec_at(guest_path: &str) -> RuntimeFileSpec {
         RuntimeFileSpec {
@@ -1230,5 +1263,198 @@ mod tests {
         let err = validate_packed_layer_size(&layer, 5).unwrap_err();
         assert!(format!("{err:#}").contains("5-byte limit"), "got: {err:#}");
         validate_packed_layer_size(&layer, 6).expect("a layer at the ceiling still pulls");
+    }
+
+    struct StreamingRegistry {
+        blob: Vec<u8>,
+        fail: bool,
+        streamed: AtomicBool,
+    }
+
+    impl StreamingRegistry {
+        fn layer(blob: Vec<u8>, fail: bool) -> Self {
+            Self {
+                blob,
+                fail,
+                streamed: AtomicBool::new(false),
+            }
+        }
+
+        fn packed(&self) -> crate::artifact::PackedLayer {
+            crate::artifact::PackedLayer {
+                digest: format!("sha256:{}", hex::encode(Sha256::digest(&self.blob))),
+                size: self.blob.len() as u64,
+            }
+        }
+    }
+
+    impl crate::image::Registry for StreamingRegistry {
+        async fn pull_manifest_and_config(
+            &self,
+            _reference: &oci_client::Reference,
+        ) -> Result<(oci_client::manifest::OciImageManifest, String, String)> {
+            anyhow::bail!(
+                "a packed fileset layer is addressed by the manifest its own artifact was peeked from, so materializing one must not fetch a second manifest"
+            )
+        }
+
+        async fn pull_blob(
+            &self,
+            _reference: &oci_client::Reference,
+            _descriptor: &oci_client::manifest::OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<Vec<u8>> {
+            anyhow::bail!("fileset pulls must stream, never materialize a blob Vec")
+        }
+
+        async fn pull_blob_to_path(
+            &self,
+            _reference: &oci_client::Reference,
+            _descriptor: &oci_client::manifest::OciDescriptor,
+            max_bytes: u64,
+            path: &std::path::Path,
+            on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            self.streamed.store(true, Ordering::Relaxed);
+            if self.blob.len() as u64 > max_bytes {
+                anyhow::bail!("blob exceeds the {max_bytes}-byte limit");
+            }
+            let split = self.blob.len() / 2;
+            tokio::fs::write(path, &self.blob[..split]).await?;
+            on_chunk(split as u64);
+            if self.fail {
+                anyhow::bail!("registry stream failed")
+            }
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .await?;
+            file.write_all(&self.blob[split..]).await?;
+            on_chunk((self.blob.len() - split) as u64);
+            Ok(())
+        }
+    }
+
+    fn pinned_reference() -> oci_client::Reference {
+        "registry.example.test/team/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_packed_layer_streams_to_verified_content_without_buffering_a_blob_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 512 * 1024], false);
+
+        let path = pull_packed_layer_with(
+            &registry,
+            &pinned_reference(),
+            &registry.packed(),
+            &store,
+            lns_artifact::build::MAX_FILESET_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert!(registry.streamed.load(Ordering::Relaxed));
+        assert_eq!(std::fs::read(&path).unwrap(), registry.blob);
+    }
+
+    #[tokio::test]
+    async fn a_layer_already_in_the_content_store_is_not_fetched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+        let installed = store.install_from_bytes(&registry.blob).unwrap();
+
+        let path = pull_packed_layer_with(
+            &registry,
+            &pinned_reference(),
+            &registry.packed(),
+            &store,
+            lns_artifact::build::MAX_FILESET_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(path, installed.path);
+        assert!(
+            !registry.streamed.load(Ordering::Relaxed),
+            "one directory packs to one digest however many artifacts carry it, which is the whole point of content-addressing the layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_layer_beyond_the_ceiling_its_caller_named_is_refused_before_it_is_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+
+        let err = pull_packed_layer_with(
+            &registry,
+            &pinned_reference(),
+            &registry.packed(),
+            &store,
+            512,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("512-byte limit"),
+            "got: {err:#}"
+        );
+        assert!(!registry.streamed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_layer_whose_bytes_do_not_hash_to_the_declared_digest_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 1024], false);
+        let tampered = crate::artifact::PackedLayer {
+            digest: format!("sha256:{}", "b".repeat(64)),
+            ..registry.packed()
+        };
+
+        let err = pull_packed_layer_with(
+            &registry,
+            &pinned_reference(),
+            &tampered,
+            &store,
+            lns_artifact::build::MAX_FILESET_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("verifying fileset layer"),
+            "the layer digest is what ties the files to the artifact the user approved; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_layer_stream_leaves_no_partial_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::content_store::ContentStore::new(dir.path());
+        let registry = StreamingRegistry::layer(vec![7; 128 * 1024], true);
+
+        let err = pull_packed_layer_with(
+            &registry,
+            &pinned_reference(),
+            &registry.packed(),
+            &store,
+            lns_artifact::build::MAX_FILESET_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("registry stream failed"));
+        let entries = std::fs::read_dir(dir.path().join("sha256"))
+            .unwrap()
+            .count();
+        assert_eq!(entries, 0);
     }
 }
