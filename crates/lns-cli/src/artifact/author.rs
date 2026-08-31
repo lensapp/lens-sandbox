@@ -213,10 +213,16 @@ pub fn inspect_local<F: Fs, W: Write>(
     let def = lns_artifact::sandbox::parse_document(&json).map_err(|e| {
         anyhow::anyhow!("{} is not a valid {}: {e:#}", path.display(), kind.as_str())
     })?;
-    let mixin = matches!(def, lns_artifact::sandbox::Document::Mixin(_));
+    let as_mixin = matches!(def, lns_artifact::sandbox::Document::Mixin(_));
     let def = match def {
-        // A connector declares no mixins, so there is nothing to compose and nothing to attribute.
         lns_artifact::sandbox::Document::Connector(def) => {
+            // A connector declares no mixins (§3.2.3), so there is nothing to merge into and a flag the user typed must not be dropped.
+            if !mixins.is_empty() {
+                bail!(
+                    "{} is a connector, which declares no mixins, so --mixin has nothing to merge into",
+                    path.display()
+                );
+            }
             render_connector(&def, out)?;
             return Ok(0);
         }
@@ -224,7 +230,7 @@ pub fn inspect_local<F: Fs, W: Write>(
         | lns_artifact::sandbox::Document::Mixin(def) => def,
     };
     let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
-    render_effective(mixin, &def.name, &composed, out)?;
+    render_effective(as_mixin, &def.name, &composed, out)?;
     Ok(0)
 }
 
@@ -305,15 +311,15 @@ fn mixin_lines(
         .collect()
 }
 
-/// A connector never reaches here — it renders on its own path — so the kind this takes is the one bit that is left.
+/// Sandbox or mixin: a connector renders on its own path and never reaches here.
 fn render_effective<W: Write>(
-    mixin: bool,
+    as_mixin: bool,
     name: &str,
     composed: &Composition,
     out: &mut W,
 ) -> Result<()> {
     let spec = &composed.spec;
-    if mixin {
+    if as_mixin {
         writeln!(out, "Mixin: {name}")?;
     } else {
         writeln!(out, "Sandbox: {name}")?;
@@ -442,7 +448,7 @@ mod tests {
     }
 
     fn valid_yaml() -> &'static str {
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools: [node@22]\n"
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/base:1\n  tools: [node@20]\n"
     }
 
     fn inspect_cmd(target: Option<&str>) -> ArtifactCommand {
@@ -607,6 +613,24 @@ mod tests {
     }
 
     #[test]
+    fn a_connector_refuses_a_mixin_flag_rather_than_dropping_it() {
+        // §3.2.3: a connector declares no mixins, so there is nothing to merge into — and a flag the user typed is never accepted and ignored.
+        let yaml = "apiVersion: lns.run/v1\nkind: connector\nname: stripe\nspec:\n  serves:\n    - api.stripe.com\n  methods:\n    - name: open\n";
+        for named in ["ghcr.io/acme/obs:2", "./obs"] {
+            let fs = fake("/work/lns.yaml", yaml);
+            let mut out = Vec::new();
+            let err =
+                inspect_local(&fs, cwd(), None, None, &[named.to_string()], &mut out).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("is a connector") && text.contains("--mixin"),
+                "got: {text}"
+            );
+            assert!(out.is_empty(), "nothing is rendered for a refused flag");
+        }
+    }
+
+    #[test]
     fn inspect_local_refuses_a_published_mixin_it_cannot_resolve() {
         let fs = fake("/work/lns.yaml", valid_yaml());
         let mut out = Vec::new();
@@ -748,7 +772,7 @@ mod tests {
             text.contains("egress:") && text.contains("route(s)"),
             "got: {text}"
         );
-        assert!(text.contains("tool: node@22"), "got: {text}");
+        assert!(text.contains("tool: node@20"), "got: {text}");
     }
 
     #[test]

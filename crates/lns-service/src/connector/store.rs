@@ -513,12 +513,15 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    const RUN_ID: &str = "1a2b3c4d0000000000000000000000aa";
+    const OTHER_RUN_ID: &str = "9f8e7d6c0000000000000000000000bb";
+
     fn a_run() -> GrantHolder {
-        GrantHolder::Run("1a2b3c4d0000000000000000000000aa".to_string())
+        GrantHolder::Run(RUN_ID.to_string())
     }
 
     fn another_run() -> GrantHolder {
-        GrantHolder::Run("9f8e7d6c0000000000000000000000bb".to_string())
+        GrantHolder::Run(OTHER_RUN_ID.to_string())
     }
 
     struct FakeMap<T> {
@@ -1648,10 +1651,11 @@ mod tests {
             }
         }
 
-        let GrantHolder::Run(id) = a_run() else {
-            unreachable!("a_run is a run")
-        };
-        assert_eq!(store.forget_run(&id).unwrap(), 2, "both of its connectors");
+        assert_eq!(
+            store.forget_run(RUN_ID).unwrap(),
+            2,
+            "both of its connectors"
+        );
 
         assert_eq!(store.decision(&a_run(), "some-provider").unwrap(), None);
         assert!(
@@ -1668,7 +1672,7 @@ mod tests {
                 .is_some(),
             "a reservation belongs to a name, not to the run that just went"
         );
-        assert_eq!(store.forget_run(&id).unwrap(), 0, "and it is idempotent");
+        assert_eq!(store.forget_run(RUN_ID).unwrap(), 0, "and it is idempotent");
     }
 
     #[test]
@@ -1686,12 +1690,10 @@ mod tests {
                 )
                 .unwrap();
         }
-        let GrantHolder::Run(kept) = a_run() else {
-            unreachable!("a_run is a run")
-        };
-
         assert_eq!(
-            store.forget_runs_except(&[kept.clone()].into()).unwrap(),
+            store
+                .forget_runs_except(&[RUN_ID.to_string()].into())
+                .unwrap(),
             1,
             "only the run no record names"
         );
