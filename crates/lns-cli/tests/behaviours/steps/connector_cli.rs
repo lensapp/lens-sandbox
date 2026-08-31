@@ -61,6 +61,7 @@ struct FakeConnectorService {
     disconnected: Option<usize>,
     forgot: Option<bool>,
     grant_unchanged: bool,
+    run_is_unknown: bool,
     held: Vec<ConnectorView>,
     dropped_connections: Option<usize>,
     refuse_message: Option<String>,
@@ -79,6 +80,7 @@ impl FakeConnectorService {
             disconnected: rig.disconnected,
             forgot: rig.forgot,
             grant_unchanged: rig.grant_unchanged,
+            run_is_unknown: rig.run_is_unknown,
             held: rig.held.clone(),
             dropped_connections: rig.dropped_connections,
             refuse_message: rig.refuse_message.clone(),
@@ -126,6 +128,22 @@ impl FakeConnectorService {
                 name: name.clone(),
                 dropped: self.disconnected.unwrap_or(0),
             },
+            Request::InspectRun { run } if self.run_is_unknown => {
+                Response::RunUnknown { run: run.clone() }
+            }
+            Request::InspectRun { run } => Response::RunInspect {
+                details: Box::new(lns_ipc::RunDetails {
+                    summary: lns_ipc::RunSummary {
+                        id: "1a2b3c4d0000000000000000000000aa".into(),
+                        name: run.clone(),
+                        image: "someimage".into(),
+                        command: "sh".into(),
+                        status: lns_ipc::RunStatus::Running,
+                        started: "2026-08-31T00:00:00Z".into(),
+                    },
+                    config: lns_ipc::RunConfig::default(),
+                }),
+            },
             Request::GrantConnector { name, method, .. } => {
                 let (granted, displaced) = self
                     .granted
@@ -137,11 +155,13 @@ impl FakeConnectorService {
                     connection: None,
                     displaced,
                     unchanged: self.grant_unchanged,
+                    reserved: self.run_is_unknown,
                 }
             }
             Request::ForgetConnector { name, .. } => Response::ConnectorForgotten {
                 name: name.clone(),
                 had_decision: self.forgot.unwrap_or(false),
+                reserved: self.run_is_unknown,
             },
             other => panic!("unexpected connector request {other:?}"),
         })
@@ -574,6 +594,41 @@ fn discloses_sets(world: &mut BehaviourWorld) {
             run.output
         );
     }
+}
+
+#[given(expr = "no run answers to that name")]
+fn no_run_answers(world: &mut BehaviourWorld) {
+    world.connector.run_is_unknown = true;
+}
+
+#[then(expr = "the disclosure says no run is named {string}")]
+fn discloses_no_such_run(world: &mut BehaviourWorld, run_name: String) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains(&format!("no run is named {run_name}")),
+        "the user learns it is a reservation before consenting, not after: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it reserved the decision")]
+fn says_reserved(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("reserved some-provider"),
+        "the service decides whether it reserved, and the output reports what it wrote: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the output says it forgot the reservation")]
+fn says_forgot_reservation(world: &mut BehaviourWorld) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains("reservation about some-provider"),
+        "got: {}",
+        run.output
+    );
 }
 
 #[then(expr = "the disclosure names the run {string}")]

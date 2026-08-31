@@ -2,7 +2,14 @@ use std::collections::BTreeMap;
 
 use lns_policy::decision_store::JsonDecisionStore;
 use lns_service::connector::dir::ConnectorDir;
-use lns_service::connector::store::{Connection, ConnectorStore, Installed, RunDecision};
+use lns_service::connector::store::{
+    Connection, ConnectorStore, GrantHolder, Installed, RunDecision,
+};
+
+/// Every scenario names a run by a short id, so the rig speaks the one holder kind it needs.
+fn holder(run: &str) -> GrantHolder {
+    GrantHolder::Run(run.to_string())
+}
 
 /// The machine a connector scenario installs onto, plus the document it is building up.
 pub struct ConnectorRig {
@@ -120,9 +127,10 @@ impl ConnectorRig {
     }
 
     pub fn grant(&self, run: &str, name: &str, method: &str) {
+        let holder = holder(run);
         self.store()
             .decide(
-                run,
+                &holder,
                 name,
                 RunDecision::Granted {
                     digest: self.digest(),
@@ -136,7 +144,7 @@ impl ConnectorRig {
 
     /// What one run is still offered, through the same path the card reads (§3.2.1).
     pub fn offered_to(&self, run: &str) -> Vec<String> {
-        lns_service::connector::handler::offerable(&self.store(), run)
+        lns_service::connector::handler::offerable(&self.store(), &holder(run))
             .expect("read what this run is offered")
             .into_iter()
             .map(|offer| offer.name)
@@ -144,7 +152,11 @@ impl ConnectorRig {
     }
 
     pub fn granted_method(&self, run: &str, name: &str) -> Option<String> {
-        match self.store().decision(run, name).expect("read the decision") {
+        match self
+            .store()
+            .decision(&holder(run), name)
+            .expect("read the decision")
+        {
             Some(RunDecision::Granted { method, .. }) => Some(method),
             _ => None,
         }

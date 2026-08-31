@@ -161,33 +161,62 @@ fn connection_key(name: &str, label: &str) -> String {
     format!("{name}{SEP}{label}")
 }
 
-fn run_key(run: &str, name: &str) -> String {
-    format!("{run}{SEP}{name}")
-}
-
 fn splits(key: &str) -> Option<(&str, &str)> {
     key.split_once(SEP)
 }
 
-/// The runs a re-authentication of `name`'s `connection` invalidates the grant of: every grant naming that connection whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
+/// Whose decision a grant row is: a run, or a name a run may later take (§7.1).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GrantHolder {
+    Run(String),
+    Reservation(String),
+}
+
+/// Written into the key rather than inferred from the handle's shape, so the format stays unambiguous whatever the run-name rules become.
+const RUN_PREFIX: &str = "run";
+const RESERVATION_PREFIX: &str = "name";
+
+impl GrantHolder {
+    fn key(&self, connector: &str) -> String {
+        let (prefix, handle) = match self {
+            Self::Run(id) => (RUN_PREFIX, id),
+            Self::Reservation(name) => (RESERVATION_PREFIX, name),
+        };
+        format!("{prefix}{SEP}{handle}{SEP}{connector}")
+    }
+
+    /// The holder and connector a key names, or `None` for a key this build does not understand.
+    fn parse(key: &str) -> Option<(Self, &str)> {
+        let (prefix, rest) = splits(key)?;
+        let (handle, connector) = splits(rest)?;
+        let holder = match prefix {
+            RUN_PREFIX => Self::Run(handle.to_string()),
+            RESERVATION_PREFIX => Self::Reservation(handle.to_string()),
+            _ => return None,
+        };
+        Some((holder, connector))
+    }
+}
+
+/// The holders a re-authentication of `name`'s `connection` invalidates the grant of: every grant naming that connection whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
 ///
-/// Runs, not keys: these are reported to the user, and a key carries the separator.
+/// Holders, not keys: these are reported to the user, and a key carries the separator.
 pub fn grants_invalidated_by(
     grants: &DecisionFile<RunDecision>,
     name: &str,
     connection: &str,
     reported: &Authority,
-) -> Vec<String> {
-    let mut invalidated: Vec<String> = grants
+) -> Vec<GrantHolder> {
+    let mut invalidated: Vec<GrantHolder> = grants
         .iter()
         .filter(|(key, decision)| invalidates(key, decision, name, connection, reported))
-        .filter_map(|(key, _)| splits(key).map(|(run, _)| run.to_string()))
+        .filter_map(|(key, _)| GrantHolder::parse(key).map(|(holder, _)| holder))
         .collect();
     invalidated.sort();
     invalidated
 }
 
-/// One row's own answer, so what is reported and what is dropped cannot drift apart — a run may hold grants of several connectors, and only this one's is invalidated.
+/// One row's own answer, so what is reported and what is dropped cannot drift apart — a holder may hold grants of several connectors, and only this one's is invalidated.
 fn invalidates(
     key: &str,
     decision: &RunDecision,
@@ -195,7 +224,7 @@ fn invalidates(
     connection: &str,
     reported: &Authority,
 ) -> bool {
-    splits(key).is_some_and(|(_, keyed)| keyed == name)
+    GrantHolder::parse(key).is_some_and(|(_, keyed)| keyed == name)
         && names_connection_with_other_authority(decision, connection, reported)
 }
 
@@ -313,7 +342,7 @@ impl<'a> ConnectorStore<'a> {
         name: &str,
         label: &str,
         connection: Connection,
-    ) -> io::Result<Vec<String>> {
+    ) -> io::Result<Vec<GrantHolder>> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
         let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
@@ -343,18 +372,18 @@ impl<'a> ConnectorStore<'a> {
         Ok(before - self.values.load()?.len())
     }
 
-    pub fn decision(&self, run: &str, name: &str) -> io::Result<Option<RunDecision>> {
-        Ok(self.grants.load()?.remove(&run_key(run, name)))
+    pub fn decision(&self, holder: &GrantHolder, name: &str) -> io::Result<Option<RunDecision>> {
+        Ok(self.grants.load()?.remove(&holder.key(name)))
     }
 
     /// The grant that applies to the digest installed right now. A grant bound to other bytes is not one, so any update offers again (§7.1).
     pub fn grant_for(
         &self,
-        run: &str,
+        holder: &GrantHolder,
         name: &str,
         installed_digest: &str,
     ) -> io::Result<Option<RunDecision>> {
-        Ok(self.decision(run, name)?.filter(|decision| {
+        Ok(self.decision(holder, name)?.filter(|decision| {
             matches!(decision, RunDecision::Granted { .. }) && decision.decides(installed_digest)
         }))
     }
@@ -362,22 +391,22 @@ impl<'a> ConnectorStore<'a> {
     /// Records a run's answer, returning whatever it displaces. A run holds one answer per connector, so granting again replaces the prior one (§3.2.4).
     pub fn decide(
         &self,
-        run: &str,
+        holder: &GrantHolder,
         name: &str,
         decision: RunDecision,
     ) -> io::Result<Option<RunDecision>> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
-        let displaced = grants.insert(run_key(run, name), decision);
+        let displaced = grants.insert(holder.key(name), decision);
         self.grants.save(&grants)?;
         Ok(displaced)
     }
 
     /// Clears what a run decided, granted or declined, so its next start asks again (§8.4).
-    pub fn forget(&self, run: &str, name: &str) -> io::Result<bool> {
+    pub fn forget(&self, holder: &GrantHolder, name: &str) -> io::Result<bool> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
-        let removed = grants.remove(&run_key(run, name)).is_some();
+        let removed = grants.remove(&holder.key(name)).is_some();
         if removed {
             self.grants.save(&grants)?;
         }
@@ -406,6 +435,14 @@ impl<'a> ConnectorStore<'a> {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+
+    fn a_run() -> GrantHolder {
+        GrantHolder::Run("1a2b3c4d0000000000000000000000aa".to_string())
+    }
+
+    fn another_run() -> GrantHolder {
+        GrantHolder::Run("9f8e7d6c0000000000000000000000bb".to_string())
+    }
 
     struct FakeMap<T> {
         state: StdMutex<DecisionFile<T>>,
@@ -785,7 +822,7 @@ mod tests {
         assert_eq!(installed.name, "some-provider");
         assert_eq!(store.installed().unwrap().len(), 1);
         assert!(store.connections_of("some-provider").unwrap().is_empty());
-        assert_eq!(store.decision("/work", "some-provider").unwrap(), None);
+        assert_eq!(store.decision(&a_run(), "some-provider").unwrap(), None);
     }
 
     #[test]
@@ -904,7 +941,7 @@ mod tests {
             .unwrap();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", Some("work"), Authority::default()),
             )
@@ -915,7 +952,7 @@ mod tests {
         assert!(store.installed().unwrap().is_empty());
         assert!(store.connections_of("some-provider").unwrap().is_empty());
         assert_eq!(
-            store.decision("/work", "some-provider").unwrap(),
+            store.decision(&a_run(), "some-provider").unwrap(),
             Some(granted("sha256:abc", Some("work"), Authority::default())),
             "uninstalling stops the offer; it does not retract a grant"
         );
@@ -1021,13 +1058,13 @@ mod tests {
         let first = granted("sha256:abc", Some("work"), Authority::default());
         assert_eq!(
             store
-                .decide("/work", "some-provider", first.clone())
+                .decide(&a_run(), "some-provider", first.clone())
                 .unwrap(),
             None
         );
         let displaced = store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", Some("personal"), Authority::default()),
             )
@@ -1044,21 +1081,21 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", RunDecision::Declined)
+            .decide(&a_run(), "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
-            store.decision("/work", "some-provider").unwrap(),
+            store.decision(&a_run(), "some-provider").unwrap(),
             Some(RunDecision::Declined)
         );
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", None, Authority::default()),
             )
             .unwrap();
         assert!(matches!(
-            store.decision("/work", "some-provider").unwrap(),
+            store.decision(&a_run(), "some-provider").unwrap(),
             Some(RunDecision::Granted { .. })
         ));
     }
@@ -1069,12 +1106,15 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", None, Authority::default()),
             )
             .unwrap();
-        assert_eq!(store.decision("/other", "some-provider").unwrap(), None);
+        assert_eq!(
+            store.decision(&another_run(), "some-provider").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1083,21 +1123,21 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:old", Some("work"), Authority::default()),
             )
             .unwrap();
         assert_eq!(
             store
-                .grant_for("/work", "some-provider", "sha256:new")
+                .grant_for(&a_run(), "some-provider", "sha256:new")
                 .unwrap(),
             None,
             "a republished connector has no grant here"
         );
         assert!(
             store
-                .grant_for("/work", "some-provider", "sha256:old")
+                .grant_for(&a_run(), "some-provider", "sha256:old")
                 .unwrap()
                 .is_some(),
             "reinstalling the same digest resumes that grant"
@@ -1109,11 +1149,11 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", RunDecision::Declined)
+            .decide(&a_run(), "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
             store
-                .grant_for("/work", "some-provider", "sha256:abc")
+                .grant_for(&a_run(), "some-provider", "sha256:abc")
                 .unwrap(),
             None
         );
@@ -1127,15 +1167,20 @@ mod tests {
             granted("sha256:abc", None, Authority::default()),
             RunDecision::Declined,
         ] {
-            store.decide("/work", "some-provider", decision).unwrap();
-            assert!(store.forget("/work", "some-provider").unwrap());
-            assert_eq!(store.decision("/work", "some-provider").unwrap(), None);
+            store.decide(&a_run(), "some-provider", decision).unwrap();
+            assert!(store.forget(&a_run(), "some-provider").unwrap());
+            assert_eq!(store.decision(&a_run(), "some-provider").unwrap(), None);
         }
     }
 
     #[test]
     fn forgetting_a_project_that_decided_nothing_reports_it() {
-        assert!(!Rig::new().store().forget("/work", "some-provider").unwrap());
+        assert!(
+            !Rig::new()
+                .store()
+                .forget(&a_run(), "some-provider")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1146,7 +1191,7 @@ mod tests {
         let authority = Authority::of(["repo:read"]);
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", Some("work"), authority.clone()),
             )
@@ -1155,7 +1200,7 @@ mod tests {
             .record_authentication("some-provider", "work", connection(authority))
             .unwrap();
         assert!(invalidated.is_empty());
-        assert!(store.decision("/work", "some-provider").unwrap().is_some());
+        assert!(store.decision(&a_run(), "some-provider").unwrap().is_some());
     }
 
     #[test]
@@ -1164,7 +1209,7 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
             )
@@ -1178,7 +1223,7 @@ mod tests {
             .unwrap();
         assert_eq!(invalidated.len(), 1);
         assert_eq!(
-            store.decision("/work", "some-provider").unwrap(),
+            store.decision(&a_run(), "some-provider").unwrap(),
             None,
             "the project is asked again rather than silently widened"
         );
@@ -1190,7 +1235,7 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted(
                     "sha256:abc",
@@ -1218,21 +1263,21 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
             )
             .unwrap();
         store
             .decide(
-                "/other",
+                &another_run(),
                 "some-provider",
                 granted("sha256:abc", Some("personal"), Authority::of(["repo:read"])),
             )
             .unwrap();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "other-provider",
                 granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
             )
@@ -1247,8 +1292,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(invalidated.len(), 1);
-        assert!(store.decision("/other", "some-provider").unwrap().is_some());
-        assert!(store.decision("/work", "other-provider").unwrap().is_some());
+        assert!(
+            store
+                .decision(&another_run(), "some-provider")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .decision(&a_run(), "other-provider")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1258,7 +1313,7 @@ mod tests {
         let store = rig.store();
         store
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 granted("sha256:abc", None, Authority::default()),
             )
@@ -1280,7 +1335,7 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", RunDecision::Declined)
+            .decide(&a_run(), "some-provider", RunDecision::Declined)
             .unwrap();
         assert!(
             store
@@ -1293,7 +1348,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store.decision("/work", "some-provider").unwrap(),
+            store.decision(&a_run(), "some-provider").unwrap(),
             Some(RunDecision::Declined)
         );
     }
@@ -1315,7 +1370,7 @@ mod tests {
         // A grant that survives beside a re-authenticated connection is a grant silently widened: the run would apply the method backed by authority the project never consented to.
         let rig = Rig::new();
         rig.grants.state.lock().unwrap().insert(
-            run_key("/work", "some-provider"),
+            a_run().key("some-provider"),
             granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
         );
         *rig.grants.fail_save.lock().unwrap() = true;
@@ -1332,7 +1387,7 @@ mod tests {
 
         let store = rig.store();
         let grant_applies = store
-            .grant_for("/work", "some-provider", "sha256:abc")
+            .grant_for(&a_run(), "some-provider", "sha256:abc")
             .unwrap()
             .is_some();
         let connection_widened = store
@@ -1353,7 +1408,7 @@ mod tests {
         assert!(
             rig.store()
                 .decide(
-                    "/work",
+                    &a_run(),
                     "some-provider",
                     granted("sha256:abc", None, Authority::default())
                 )
@@ -1363,8 +1418,8 @@ mod tests {
             .state
             .lock()
             .unwrap()
-            .insert(run_key("/work", "some-provider"), RunDecision::Declined);
-        assert!(rig.store().forget("/work", "some-provider").is_err());
+            .insert(a_run().key("some-provider"), RunDecision::Declined);
+        assert!(rig.store().forget(&a_run(), "some-provider").is_err());
     }
 
     #[test]
@@ -1453,16 +1508,94 @@ mod tests {
     }
 
     #[test]
-    fn an_invalidated_grant_names_the_run_that_holds_it_and_not_the_store_key() {
-        // These reach the user through `lns connector connect`, and a store key carries the NUL separator.
-        let mut grants = DecisionFile::new();
-        grants.insert(
-            run_key("1a2b3c4d", "some-provider"),
-            granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+    fn a_row_under_a_key_this_build_does_not_understand_is_inert() {
+        // The prefix is what discriminates a run from a reserved name, so a row without one is unreadable — and must therefore also be un-invalidated rather than silently dropped.
+        let rig = Rig::new();
+        // The arity an older build wrote, and a prefix only a later one knows: the first fails the shape check, the second the prefix check.
+        let stale = [
+            format!("1a2b3c4d{SEP}some-provider"),
+            format!("dir{SEP}/work{SEP}some-provider"),
+        ];
+        for key in &stale {
+            rig.grants.state.lock().unwrap().insert(
+                key.clone(),
+                granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+            );
+        }
+
+        let invalidated = rig
+            .store()
+            .record_authentication(
+                "some-provider",
+                "work",
+                connection(Authority::of(["admin"])),
+            )
+            .expect("store the connection");
+
+        assert!(invalidated.is_empty(), "nothing this build can name");
+        for key in &stale {
+            assert!(
+                rig.grants.state.lock().unwrap().contains_key(key),
+                "a row it cannot read is a row it must not delete: {key:?}"
+            );
+        }
+        for handle in ["1a2b3c4d", "/work"] {
+            for holder in [
+                GrantHolder::Run(handle.to_string()),
+                GrantHolder::Reservation(handle.to_string()),
+            ] {
+                assert_eq!(
+                    rig.store().decision(&holder, "some-provider").unwrap(),
+                    None,
+                    "and it answers for nobody: {holder:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reservation_is_keyed_by_the_name_and_is_not_a_grant_of_any_run() {
+        // §7.1: the reservation is the one row a run's name keys, so it must not answer for a run that happens to hold that name.
+        let rig = Rig::new();
+        let store = rig.store();
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        store
+            .decide(
+                &reserved,
+                "some-provider",
+                granted("sha256:abc", None, Authority::default()),
+            )
+            .unwrap();
+        assert!(
+            store
+                .decision(&reserved, "some-provider")
+                .unwrap()
+                .is_some()
         );
         assert_eq!(
+            store
+                .decision(&GrantHolder::Run("reviewer".to_string()), "some-provider")
+                .unwrap(),
+            None,
+            "a run and a name are different holders, even spelled the same"
+        );
+    }
+
+    #[test]
+    fn an_invalidated_grant_names_the_holder_and_not_the_store_key() {
+        // These reach the user through `lns connector connect`, and a store key carries the NUL separator.
+        let mut grants = DecisionFile::new();
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        for holder in [a_run(), reserved.clone()] {
+            grants.insert(
+                holder.key("some-provider"),
+                granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+            );
+        }
+        assert_eq!(
             grants_invalidated_by(&grants, "some-provider", "work", &Authority::of(["admin"])),
-            vec!["1a2b3c4d".to_string()]
+            vec![a_run(), reserved],
+            "a reservation is invalidated like the grant it is"
         );
     }
 
@@ -1470,9 +1603,9 @@ mod tests {
     fn the_invalidated_keys_come_back_in_a_stable_order() {
         // They are reported to the user, so two runs must not shuffle them.
         let mut grants = DecisionFile::new();
-        for dir in ["/z-project", "/a-project", "/m-project"] {
+        for id in ["cccc", "aaaa", "bbbb"] {
             grants.insert(
-                run_key(dir, "some-provider"),
+                GrantHolder::Run(id.to_string()).key("some-provider"),
                 granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
             );
         }

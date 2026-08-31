@@ -160,6 +160,22 @@ pub async fn run(
     }
 }
 
+/// Whether a run answers to this handle. The service decides it — the CLI holds no registry — so an ambiguous id prefix surfaces as the error it is (cli-spec §2.4).
+async fn run_exists(svc: &dyn ConnectorService, run: &str) -> Result<bool> {
+    match send(
+        svc,
+        Request::InspectRun {
+            run: run.to_string(),
+        },
+    )
+    .await?
+    {
+        Response::RunInspect { .. } => Ok(true),
+        Response::RunUnknown { .. } => Ok(false),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
 /// The installed connector by name, so a verb reads its methods without guessing what it declares.
 async fn installed_view(svc: &dyn ConnectorService, name: &str) -> Result<ConnectorView> {
     match send(svc, Request::ListConnectors).await? {
@@ -391,6 +407,14 @@ async fn grant(
         );
     }
     disclose(&connector, &method, &args.run, prompt)?;
+    // The same predicate the service applies, so the disclosure cannot promise a reservation the write refuses.
+    if !run_exists(svc, &args.run).await? && lns_ipc::validate_run_name(&args.run).is_ok() {
+        writeln!(
+            prompt,
+            "  no run is named {run}. This reserves the decision for the run you next create with that name.",
+            run = args.run
+        )?;
+    }
     write!(prompt, "grant it? [y/N] ")?;
     prompt.flush()?;
     let answer = terminal.read_answer()?;
@@ -424,18 +448,23 @@ async fn grant(
             method,
             connection,
             displaced,
+            reserved,
             ..
         } => {
+            // The service decides this, not the probe above: a run may be created between the two.
+            let verb = if reserved { "reserved" } else { "granted" };
+            let run = &args.run;
             match connection {
-                Some(connection) => {
-                    writeln!(writer, "granted {name} with {method} as {connection}")?
-                }
-                None => writeln!(writer, "granted {name} with {method}")?,
+                Some(connection) => writeln!(
+                    writer,
+                    "{verb} {name} with {method} as {connection} for {run}"
+                )?,
+                None => writeln!(writer, "{verb} {name} with {method} for {run}")?,
             }
             if let Some(displaced) = displaced {
                 writeln!(
                     writer,
-                    "  replaced {displaced}, which this project no longer applies"
+                    "  replaced {displaced}, which {run} no longer applies"
                 )?;
             }
             Ok(0)
@@ -509,6 +538,7 @@ async fn forget(
         Response::ConnectorForgotten {
             name,
             had_decision: false,
+            ..
         } => {
             writeln!(
                 writer,
@@ -517,10 +547,11 @@ async fn forget(
             )?;
             Ok(1)
         }
-        Response::ConnectorForgotten { name, .. } => {
+        Response::ConnectorForgotten { name, reserved, .. } => {
+            let what = if reserved { "reservation" } else { "decision" };
             writeln!(
                 writer,
-                "cleared {run}'s decision about {name}",
+                "cleared {run}'s {what} about {name}",
                 run = args.run
             )?;
             Ok(0)
@@ -719,6 +750,10 @@ mod tests {
     struct CannedService {
         responses: Mutex<VecDeque<Option<Response>>>,
         sent: Mutex<Vec<Request>>,
+        /// Answered outside the queue, so a `--run` probe never shifts the connector responses a test cans.
+        run_is_unknown: bool,
+        /// Overrides both, for the answers a probe should refuse rather than read.
+        run_probe: Option<Response>,
     }
 
     impl CannedService {
@@ -726,6 +761,27 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 sent: Mutex::new(Vec::new()),
+                run_is_unknown: false,
+                run_probe: None,
+            }
+        }
+
+        /// A probe answered with something that is neither `RunInspect` nor `RunUnknown`.
+        fn probing_with(
+            answer: Response,
+            responses: impl IntoIterator<Item = Option<Response>>,
+        ) -> Self {
+            Self {
+                run_probe: Some(answer),
+                ..Self::with(responses)
+            }
+        }
+
+        /// The same script, against a handle no run answers to.
+        fn reserving(responses: impl IntoIterator<Item = Option<Response>>) -> Self {
+            Self {
+                run_is_unknown: true,
+                ..Self::with(responses)
             }
         }
 
@@ -736,7 +792,30 @@ mod tests {
 
     impl ConnectorService for CannedService {
         fn request(&self, req: Request) -> LocalBoxFuture<'_, Option<Response>> {
-            self.sent.lock().unwrap().push(req);
+            self.sent.lock().unwrap().push(req.clone());
+            if let Request::InspectRun { run } = req {
+                if let Some(answer) = self.run_probe.clone() {
+                    return Box::pin(async move { Some(answer) });
+                }
+                let resp = if self.run_is_unknown {
+                    Response::RunUnknown { run }
+                } else {
+                    Response::RunInspect {
+                        details: Box::new(lns_ipc::RunDetails {
+                            summary: lns_ipc::RunSummary {
+                                id: "1a2b3c4d0000000000000000000000aa".into(),
+                                name: run,
+                                image: "someimage".into(),
+                                command: "sh".into(),
+                                status: lns_ipc::RunStatus::Running,
+                                started: "2026-08-31T00:00:00Z".into(),
+                            },
+                            config: lns_ipc::RunConfig::default(),
+                        }),
+                    }
+                };
+                return Box::pin(async move { Some(resp) });
+            }
             let resp = self
                 .responses
                 .lock()
@@ -1101,6 +1180,7 @@ mod tests {
                     connection: Some("work".into()),
                     displaced: None,
                     unchanged: false,
+                    reserved: false,
                 }),
             ]);
             let (_, seen) = drive(
@@ -1125,6 +1205,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_id_that_resolves_to_nothing_is_never_offered_as_a_reservation() {
+        // §2.4: only a name can name a run that does not exist yet, and the disclosure must not promise what the write will refuse.
+        let svc = CannedService::reserving([Some(listing(vec![with_methods(vec![method(
+            "token", true,
+        )])]))]);
+        let (_, seen) = drive(
+            ConnectorCommand::Grant(GrantArgs {
+                name: "some-provider".into(),
+                method: Some("token".into()),
+                connection: None,
+                run: "1a2b".into(),
+            }),
+            &svc,
+            &["n"],
+            &cwd(),
+        )
+        .await
+        .expect("grant");
+        assert!(
+            !seen.contains("reserves the decision"),
+            "an id prefix is an error at the service, so nothing may offer to reserve it: {seen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_answered_with_neither_answer_is_refused_rather_than_read() {
+        let svc = CannedService::probing_with(
+            Response::Acknowledged,
+            [Some(listing(vec![with_methods(vec![method(
+                "token", true,
+            )])]))],
+        );
+        let err = run(
+            &ConnectorCommand::Grant(GrantArgs {
+                name: "some-provider".into(),
+                method: Some("token".into()),
+                connection: None,
+                run: "reviewer".into(),
+            }),
+            &svc,
+            &mut asking(&["y"]),
+            &cwd(),
+            None,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect_err("a probe answer this build does not understand");
+        assert!(
+            format!("{err:#}").contains("unexpected response"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_run_is_probed_before_the_user_consents_never_after() {
+        // cli-spec §3.3: the disclosure is what the user answers, so "this reserves the decision" cannot arrive after the y/N.
+        let svc = CannedService::reserving([
+            Some(listing(vec![with_methods(vec![method("token", true)])])),
+            Some(Response::ConnectorGranted {
+                name: "some-provider".into(),
+                method: "token".into(),
+                connection: None,
+                displaced: None,
+                unchanged: false,
+                reserved: true,
+            }),
+        ]);
+        let (_, seen) = drive(
+            ConnectorCommand::Grant(GrantArgs {
+                name: "some-provider".into(),
+                method: Some("token".into()),
+                connection: None,
+                run: "revieweer".into(),
+            }),
+            &svc,
+            &["y"],
+            &cwd(),
+        )
+        .await
+        .expect("grant");
+        assert!(
+            seen.contains("no run is named revieweer"),
+            "the reservation is disclosed: {seen}"
+        );
+        let probe = svc
+            .sent()
+            .iter()
+            .position(|req| matches!(req, Request::InspectRun { .. }))
+            .expect("the run is probed");
+        let grant = svc
+            .sent()
+            .iter()
+            .position(|req| matches!(req, Request::GrantConnector { .. }))
+            .expect("the grant is sent");
+        assert!(probe < grant, "sent: {:?}", svc.sent());
+    }
+
+    #[tokio::test]
     async fn granting_names_the_run_it_grants() {
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![method("token", true)])])),
@@ -1134,6 +1313,7 @@ mod tests {
                 connection: None,
                 displaced: None,
                 unchanged: false,
+                reserved: false,
             }),
         ]);
         let (_, seen) = drive(
@@ -1391,6 +1571,7 @@ mod tests {
                 connection: None,
                 displaced: None,
                 unchanged: false,
+                reserved: false,
             }),
         ]);
         let (code, seen) = drive(

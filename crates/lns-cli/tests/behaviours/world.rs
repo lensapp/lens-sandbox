@@ -193,6 +193,8 @@ pub struct ConnectorCliRig {
     pub disconnected: Option<usize>,
     pub forgot: Option<bool>,
     pub grant_unchanged: bool,
+    /// Set when no run answers to the handle `--run` names, so `grant` reserves. Default is a run that exists.
+    pub run_is_unknown: bool,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub run: Option<crate::runner::CliRun>,
 }
