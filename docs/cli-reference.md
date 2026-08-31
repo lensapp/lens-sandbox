@@ -274,8 +274,8 @@ workload does.
 | `attach`   | `lns attach` | Re-join a sandbox's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves it running and returns you to your shell (no signal is sent). Stdin reaches the workload only if the sandbox was started with stdin open. |
 | `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
 | `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
-| `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. Refuses a running one; `-f`/`--force` stops it first. |
-| `prune`    | —            | Remove every stopped sandbox, writable layers included. Lists them and asks first, unless `-f`/`--force`. |
+| `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. What it granted and declined about a connector goes with it, so a new sandbox of that name is asked again. Refuses a running one; `-f`/`--force` stops it first. |
+| `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks first, unless `-f`/`--force`. |
 
 ## `lns volume`
 

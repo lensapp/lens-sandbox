@@ -402,6 +402,32 @@ impl<'a> ConnectorStore<'a> {
         Ok(displaced)
     }
 
+    /// Everything one run decided, dropped with the run, because consent goes with the thing it was given to and not before (§8.4).
+    pub fn forget_run(&self, run_id: &str) -> io::Result<usize> {
+        self.drop_runs(|id| id == run_id)
+    }
+
+    /// The rows of runs no record names — hygiene rather than a guard, because a run id is never reused and so a row left behind is dead weight (§7.1).
+    pub fn forget_runs_except(&self, recorded: &BTreeSet<String>) -> io::Result<usize> {
+        self.drop_runs(|id| !recorded.contains(id))
+    }
+
+    /// Reservations are keyed by a name, so no run's removal reaches one.
+    fn drop_runs(&self, doomed: impl Fn(&str) -> bool) -> io::Result<usize> {
+        let _guard = self.lock();
+        let mut grants = self.grants.load()?;
+        let before = grants.len();
+        grants.retain(|key, _| match GrantHolder::parse(key) {
+            Some((GrantHolder::Run(id), _)) => !doomed(&id),
+            _ => true,
+        });
+        let dropped = before - grants.len();
+        if dropped > 0 {
+            self.grants.save(&grants)?;
+        }
+        Ok(dropped)
+    }
+
     /// Every reservation for `run_name` becomes that run's own grant, consumed once, and never replacing an answer the run already gave (§3.2.4).
     pub fn claim_reservations(&self, run_name: &str, run_id: &str) -> io::Result<usize> {
         self.take_reservations(run_name, Some(run_id))
@@ -1602,6 +1628,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn removing_a_run_removes_everything_it_decided_and_nothing_else() {
+        // §8.4: consent is removed with the thing it was given to, and not before.
+        let rig = Rig::new();
+        let store = rig.store();
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        for holder in [a_run(), another_run(), reserved.clone()] {
+            for connector in ["some-provider", "other-provider"] {
+                store
+                    .decide(
+                        &holder,
+                        connector,
+                        granted("sha256:abc", None, Authority::default()),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let GrantHolder::Run(id) = a_run() else {
+            unreachable!("a_run is a run")
+        };
+        assert_eq!(store.forget_run(&id).unwrap(), 2, "both of its connectors");
+
+        assert_eq!(store.decision(&a_run(), "some-provider").unwrap(), None);
+        assert!(
+            store
+                .decision(&another_run(), "some-provider")
+                .unwrap()
+                .is_some(),
+            "another run's consent is not this run's to remove"
+        );
+        assert!(
+            store
+                .decision(&reserved, "some-provider")
+                .unwrap()
+                .is_some(),
+            "a reservation belongs to a name, not to the run that just went"
+        );
+        assert_eq!(store.forget_run(&id).unwrap(), 0, "and it is idempotent");
+    }
+
+    #[test]
+    fn a_sweep_drops_the_rows_of_runs_this_machine_no_longer_records() {
+        // Hygiene, not a security control: a run id is never reused, so a row left behind is dead weight rather than consent anyone can inherit.
+        let rig = Rig::new();
+        let store = rig.store();
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        for holder in [a_run(), another_run(), reserved.clone()] {
+            store
+                .decide(
+                    &holder,
+                    "some-provider",
+                    granted("sha256:abc", None, Authority::default()),
+                )
+                .unwrap();
+        }
+        let GrantHolder::Run(kept) = a_run() else {
+            unreachable!("a_run is a run")
+        };
+
+        assert_eq!(
+            store.forget_runs_except(&[kept.clone()].into()).unwrap(),
+            1,
+            "only the run no record names"
+        );
+
+        assert!(store.decision(&a_run(), "some-provider").unwrap().is_some());
+        assert_eq!(
+            store.decision(&another_run(), "some-provider").unwrap(),
+            None
+        );
+        assert!(
+            store
+                .decision(&reserved, "some-provider")
+                .unwrap()
+                .is_some(),
+            "a reservation waits for a run that does not exist yet, so no record names it"
+        );
     }
 
     #[test]
