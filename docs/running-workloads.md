@@ -300,7 +300,10 @@ lns run -w /workspace ghcr.io/acme/agent
 ### Naming a run
 
 Every run has a numeric id (`run #7`) **and** a name. Pass `--name` to choose
-one; omit it and Lens Sandbox assigns a memorable `adjective_noun` name. Either
+one, or omit it and Lens Sandbox names the run after the document it runs plus
+one memorable word — a project whose `lns.yaml` declares `name: hermes` gets
+`hermes-falcon`, then `hermes-otter`. A run of a bare image reference has no
+document to borrow from, so it gets two words instead: `amber-falcon`. Either
 handle works anywhere a run id is accepted:
 
 ```bash

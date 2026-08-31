@@ -121,6 +121,7 @@ async fn a_running_run_named(w: &mut BehaviourWorld, name: String) {
     run_registry::register_named(
         id.clone(),
         Some(name),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     )
     .expect("the scenario's running run registers");
@@ -271,6 +272,7 @@ async fn a_run_whose_workload_exits(w: &mut BehaviourWorld, rm_flag: String) {
     run_registry::register_named(
         id.clone(),
         Some("auto-rm".into()),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     )
     .expect("the scenario's run registers");
@@ -343,6 +345,7 @@ async fn two_stopped_one_running(w: &mut BehaviourWorld) {
     run_registry::register_named(
         live.clone(),
         Some("survivor".into()),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     )
     .expect("the scenario's running run registers");

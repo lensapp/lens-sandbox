@@ -139,6 +139,7 @@ async fn a_running_run(w: &mut BehaviourWorld, name: String) {
     run_registry::register_named(
         id.clone(),
         Some(name.clone()),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     )
     .expect("the scenario's running run registers");
@@ -185,6 +186,7 @@ fn a_running_run_holds_the_volume(w: &mut BehaviourWorld, volume: String) {
     run_registry::register_named(
         id.clone(),
         Some("volume-holder".into()),
+        None,
         fresh_handle("some-image", lns_ipc::RunConfig::default()),
     )
     .expect("the scenario's holder registers");

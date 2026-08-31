@@ -709,6 +709,7 @@ where
     let command_label = args.cmd.join(" ");
     let started_label = rfc3339_now();
     let requested_name = args.name.clone();
+    let document_name = crate::run::document_name(args.definition.as_deref());
     let config = lns_ipc::RunConfig::from_run_args(&args);
 
     let logs = Arc::new(crate::run_log::RunLogBuffer::default());
@@ -756,9 +757,12 @@ where
         exec_environment: Default::default(),
     };
     let registered = match &mode {
-        crate::run::LaunchMode::Fresh => {
-            crate::run_registry::register_named(run_id.clone(), requested_name, handle)
-        }
+        crate::run::LaunchMode::Fresh => crate::run_registry::register_named(
+            run_id.clone(),
+            requested_name,
+            document_name.as_deref(),
+            handle,
+        ),
         crate::run::LaunchMode::Restart { .. } => {
             crate::run_registry::transition_to_live(&run_id, handle)
         }
