@@ -226,7 +226,7 @@ impl ApprovalSession {
             Ok(opened) => {
                 self.forget_offer(&offer.name);
                 self.apply_granted_egress(&offer.name, opened);
-                self.release(&held);
+                self.release(&offer.name, &held);
                 DecisionOutcome::Resolved
             }
             Err(why) => {
@@ -299,12 +299,18 @@ impl ApprovalSession {
         }
     }
 
-    /// Lets go of every request that was waiting on this connector, because one answer decided it for all of them.
-    fn release(&self, ids: &[String]) {
+    /// Lets go every request the offer held, recording each opening a grant made.
+    fn release(&self, connector: &str, ids: &[String]) {
         for id in ids {
             self.notifier.dismiss(id);
             if let Some(entry) = self.remove_pending(id) {
                 self.answer(id, &entry, Decision::AllowOnce);
+                // Named, so the line is not read as a card the user answered destination by destination.
+                self.record_approval(
+                    &entry,
+                    Decision::AllowOnce,
+                    Some(format!("granted {connector}")),
+                );
             }
         }
     }
@@ -450,7 +456,7 @@ impl ApprovalSession {
         if rule_stands {
             self.save_persisted();
         }
-        self.record_approval(&entry, decision);
+        self.record_approval(&entry, decision, None);
         DecisionOutcome::Resolved
     }
 
@@ -496,7 +502,8 @@ impl ApprovalSession {
         }
     }
 
-    fn record_approval(&self, entry: &PendingEntry, decision: Decision) {
+    /// `why` overrides the request's own reason, for an opening the user did not answer destination by destination.
+    fn record_approval(&self, entry: &PendingEntry, decision: Decision, why: Option<String>) {
         let Some(recorder) = self.ledger.get() else {
             return;
         };
@@ -507,7 +514,7 @@ impl ApprovalSession {
             kind: ApprovalKind::Network,
             target: entry.audit_target().to_string(),
             decision,
-            reason: (!entry.reason.is_empty()).then(|| entry.reason.clone()),
+            reason: why.or_else(|| (!entry.reason.is_empty()).then(|| entry.reason.clone())),
         });
     }
 
@@ -1583,6 +1590,42 @@ pub(crate) mod tests {
         f.0.hold_for_offers(vec![offering("token", &["work", "personal"])]);
         f.0.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
         f
+    }
+
+    #[test]
+    fn granting_writes_the_ledger_line_for_every_destination_it_lets_go() {
+        // A grant is the one way a held destination opens, and an opening nothing recorded is an opening `lns audit` cannot account for.
+        let recorder = Arc::new(CapturingRecorder::default());
+        let f = fixture();
+        f.0.set_ledger_recorder(recorder.clone());
+        f.0.set_connector_port(Arc::new(FakeConnectorPort::default()));
+        f.0.hold_for_offers(vec![offering("token", &["work"])]);
+        f.0.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+
+        f.0.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
+
+        let events = recorder.events.lock().unwrap().clone();
+        let opened: Vec<&LedgerEvent> = events
+            .iter()
+            .filter(|event| matches!(event, LedgerEvent::Approval { .. }))
+            .collect();
+        assert_eq!(
+            opened.len(),
+            1,
+            "one destination was let go, so the chain holds one line for it: {events:?}"
+        );
+        let LedgerEvent::Approval {
+            target,
+            decision,
+            reason,
+            ..
+        } = opened[0];
+        assert_eq!(target, "api.some-provider.example");
+        assert_eq!(*decision, LedgerDecision::AllowOnce);
+        assert!(
+            reason.as_deref() == Some("granted some-provider"),
+            "the line must say which grant opened it, or the reader cannot tell it from an answered card: {reason:?}"
+        );
     }
 
     #[test]
