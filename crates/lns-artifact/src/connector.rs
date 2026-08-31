@@ -247,6 +247,7 @@ fn validate_method(
         .validate_binary_scopes()
         .context("connector policy")?;
     let mut written = BTreeSet::new();
+    let mut files = BTreeSet::new();
     let mut inline_bytes = 0usize;
     for fileset in &method.filesets {
         crate::sandbox::validate_fileset(fileset, crate::spec::GuestAnchor::Home)?;
@@ -256,8 +257,16 @@ fn validate_method(
             );
         }
         // Per method, not per document: methods are alternatives, so only one ever writes.
-        if !written.insert(&fileset.guest_path) {
+        if !written.insert(guest_directory(&fileset.guest_path)) {
             bail!("duplicate guest path {}", fileset.guest_path);
+        }
+        for name in fileset.inline.iter().flatten().map(|(name, _)| name) {
+            let path = guest_file(&fileset.guest_path, name);
+            if !files.insert(path.clone()) {
+                bail!(
+                    "two of this method's files land on {path}: the guest can hold one, so a grant would write neither"
+                );
+            }
         }
         inline_bytes += fileset
             .inline
@@ -272,6 +281,25 @@ fn validate_method(
         );
     }
     refuse_a_secret_shaped_file_carrying_no_declared_placeholder(method, path_files)
+}
+
+/// One spelling per guest file. An empty or `.` segment is legal in a `guestPath`, so two spellings of one file would slip past every rule that compares paths.
+pub fn guest_file(guest_path: &str, name: &str) -> String {
+    guest_directory(&format!("{guest_path}/{name}"))
+}
+
+/// Home-anchored, like every connector `guestPath` (§3.2.3): the result always starts `~/`.
+pub fn guest_directory(guest_path: &str) -> String {
+    let mut resolved = String::from("~");
+    for segment in guest_path
+        .trim_start_matches('~')
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+    {
+        resolved.push('/');
+        resolved.push_str(segment);
+    }
+    resolved
 }
 
 fn validate_auth(auth: &Auth) -> Result<()> {
@@ -614,6 +642,30 @@ mod tests {
         assert!(
             format!("{err:#}").contains("duplicate guest path"),
             "the card names every fileset a method writes, so two entries claiming one path would disclose two writes where one happens; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn one_guest_path_written_two_ways_is_still_one_guest_path() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.x","inline":{"a":"1"}},{"guestPath":"~/.x/","inline":{"b":"2"}}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate guest path"),
+            "a trailing slash is a spelling, not a second directory, and comparing the raw strings would let a method claim one path twice; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn two_of_a_methods_files_may_not_land_on_one_path() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.x","inline":{"b/c.json":"1"}},{"guestPath":"~/.x/b","inline":{"c.json":"2"}}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("land on ~/.x/b/c.json"),
+            "the directories differ, so only the resolved file paths show that the guest is asked to hold one file twice; got: {err:#}"
         );
     }
 

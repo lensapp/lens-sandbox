@@ -4,9 +4,9 @@ use lns_artifact::connector::Method;
 use lns_ipc::SecretValues;
 use lns_spec::{Credential, InjectionKind};
 
-use crate::approval_flow::protocol::{GrantedPayload, WireCredential, WireInjection};
+use crate::approval_flow::protocol::{GrantedPayload, WireCredential, WireFile, WireInjection};
 
-/// Everything a granted method contributes: its egress, the credentials the boundary arms, and its plain `env`. Filesets wait on the install keeping their bytes, so a method declaring one is not offerable.
+/// Everything a granted method contributes: its egress, the credentials the boundary arms, its plain `env`, and the files it writes.
 pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload {
     GrantedPayload {
         egress: policy_of(method),
@@ -16,8 +16,20 @@ pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload
             .map(|credential| armed(credential, values))
             .collect(),
         env: method.env.clone(),
-        files: Vec::new(),
+        files: inline_files(method),
     }
+}
+
+/// Every inline file, at the path its entry names. A `path` fileset supplies nothing yet — install keeps no layer, so the method carrying one is not offerable either.
+fn inline_files(method: &Method) -> Vec<WireFile> {
+    let mut files = Vec::new();
+    for fileset in &method.filesets {
+        for (name, content) in fileset.inline.iter().flatten() {
+            let path = lns_artifact::connector::guest_file(&fileset.guest_path, name);
+            files.push(WireFile::text(&path, content, None).owned_by(fileset.owner));
+        }
+    }
+    files
 }
 
 fn policy_of(method: &Method) -> lns_policy::Policy {
@@ -101,6 +113,82 @@ mod tests {
             .spec
             .methods
             .remove(0)
+    }
+
+    #[test]
+    fn an_inline_fileset_is_supplied_under_the_path_the_method_names() {
+        let granted = granted_payload(
+            &method(serde_json::json!({
+                "name": "token",
+                "auth": { "kind": "token" },
+                "filesets": [{
+                    "guestPath": "~/.some-provider",
+                    "inline": { "config.json": "{}", "nested/hint.txt": "read me" },
+                }],
+            })),
+            &SecretValues::default(),
+        );
+        assert_eq!(
+            granted
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "~/.some-provider/config.json",
+                "~/.some-provider/nested/hint.txt"
+            ],
+            "an inline key is a path under the directory the entry names, so the guest writes the tree the author wrote"
+        );
+        assert_eq!(
+            granted.files[0].content,
+            crate::approval_flow::protocol::WireFileContent::Content("{}".to_string()),
+            "inline content is text by its own shape, so base64 would only obscure it"
+        );
+        assert_eq!(
+            granted.files[0].mode, None,
+            "core writes 0600, which is what a credentials file wants and what the spec states"
+        );
+    }
+
+    #[test]
+    fn one_guest_file_has_one_spelling_however_the_document_wrote_it() {
+        let granted = granted_payload(
+            &method(serde_json::json!({
+                "name": "token",
+                "auth": { "kind": "token" },
+                "filesets": [{ "guestPath": "~/.a//b/", "inline": { "c.json": "{}" } }],
+            })),
+            &SecretValues::default(),
+        );
+        assert_eq!(
+            granted.files[0].path, "~/.a/b/c.json",
+            "an empty segment is legal in a guestPath, so two spellings of one file would slip past the rule refusing two connectors that write it"
+        );
+    }
+
+    #[test]
+    fn a_fileset_the_document_pins_to_root_says_so_on_the_wire() {
+        let granted = granted_payload(
+            &method(serde_json::json!({
+                "name": "token",
+                "auth": { "kind": "token" },
+                "filesets": [
+                    { "guestPath": "~/.a", "inline": { "a.txt": "a" }, "owner": "root" },
+                    { "guestPath": "~/.b", "inline": { "b.txt": "b" } },
+                ],
+            })),
+            &SecretValues::default(),
+        );
+        assert_eq!(
+            granted.files[0].owner,
+            Some(crate::approval_flow::protocol::WireFileOwner::Root),
+            "owner: root is how a document keeps a file from the workload, so dropping it would hand over what it withheld"
+        );
+        assert_eq!(
+            granted.files[1].owner, None,
+            "the workload is core's own default, so naming it would only add a field to every frame"
+        );
     }
 
     fn token_method(kind: &str) -> Method {
