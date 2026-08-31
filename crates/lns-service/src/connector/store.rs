@@ -402,6 +402,57 @@ impl<'a> ConnectorStore<'a> {
         Ok(displaced)
     }
 
+    /// Every reservation for `run_name` becomes that run's own grant, consumed once, and never replacing an answer the run already gave (§3.2.4).
+    pub fn claim_reservations(&self, run_name: &str, run_id: &str) -> io::Result<usize> {
+        self.take_reservations(run_name, Some(run_id))
+    }
+
+    /// Every reservation for `run_name` is dropped, taken by nobody: the name went to a run the user did not name (§3.2.4).
+    pub fn discard_reservations(&self, run_name: &str) -> io::Result<usize> {
+        self.take_reservations(run_name, None)
+    }
+
+    fn take_reservations(&self, run_name: &str, taker: Option<&str>) -> io::Result<usize> {
+        let _guard = self.lock();
+        let mut grants = self.grants.load()?;
+        let reserved = GrantHolder::Reservation(run_name.to_string());
+        let claimed: Vec<(String, RunDecision)> = grants
+            .iter()
+            .filter_map(|(key, decision)| match GrantHolder::parse(key) {
+                Some((holder, connector)) if holder == reserved => {
+                    Some((connector.to_string(), decision.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+        for (connector, decision) in &claimed {
+            grants.remove(&reserved.key(connector));
+            if let Some(run_id) = taker {
+                grants
+                    .entry(GrantHolder::Run(run_id.to_string()).key(connector))
+                    .or_insert_with(|| decision.clone());
+            }
+        }
+        self.grants.save(&grants)?;
+        Ok(claimed.len())
+    }
+
+    /// The names an unclaimed reservation waits for, so nothing else gives one of them to a run (§3.2.4).
+    pub fn reserved_names(&self) -> io::Result<BTreeSet<String>> {
+        Ok(self
+            .grants
+            .load()?
+            .keys()
+            .filter_map(|key| match GrantHolder::parse(key) {
+                Some((GrantHolder::Reservation(name), _)) => Some(name),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Clears what a run decided, granted or declined, so its next start asks again (§8.4).
     pub fn forget(&self, holder: &GrantHolder, name: &str) -> io::Result<bool> {
         let _guard = self.lock();
@@ -1551,6 +1602,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn creating_a_run_with_a_reserved_name_takes_the_reservation_once() {
+        // §3.2.4: the run created with that name takes it, holds a grant of its own, and the reservation is gone — so a second run of that name is asked.
+        let rig = Rig::new();
+        let store = rig.store();
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        let decision = granted("sha256:abc", Some("work"), Authority::default());
+        store
+            .decide(&reserved, "some-provider", decision.clone())
+            .unwrap();
+
+        assert_eq!(store.claim_reservations("reviewer", "1a2b").unwrap(), 1);
+
+        assert_eq!(
+            store
+                .decision(&GrantHolder::Run("1a2b".to_string()), "some-provider")
+                .unwrap(),
+            Some(decision),
+            "the run holds a grant of its own from now on"
+        );
+        assert_eq!(
+            store.decision(&reserved, "some-provider").unwrap(),
+            None,
+            "consumed once"
+        );
+        assert_eq!(
+            store.claim_reservations("reviewer", "9f8e").unwrap(),
+            0,
+            "a second run of that name finds nothing and is asked"
+        );
+    }
+
+    #[test]
+    fn a_claim_never_replaces_an_answer_the_run_already_gave() {
+        // A claim adds consent; replacing a decline would grant what the run said no to, with no card.
+        let rig = Rig::new();
+        let store = rig.store();
+        let run = GrantHolder::Run("1a2b".to_string());
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        store
+            .decide(&run, "some-provider", RunDecision::Declined)
+            .unwrap();
+        store
+            .decide(
+                &reserved,
+                "some-provider",
+                granted("sha256:abc", None, Authority::default()),
+            )
+            .unwrap();
+
+        assert_eq!(store.claim_reservations("reviewer", "1a2b").unwrap(), 1);
+
+        assert_eq!(
+            store.decision(&run, "some-provider").unwrap(),
+            Some(RunDecision::Declined),
+            "the run's own answer stands"
+        );
+        assert_eq!(
+            store.decision(&reserved, "some-provider").unwrap(),
+            None,
+            "and the reservation is consumed either way"
+        );
+    }
+
+    #[test]
+    fn a_reservation_a_generated_name_collided_with_is_discarded_rather_than_left_standing() {
+        // §3.2.4: the name now belongs to a run that did not consent to it, so leaving the row would hand it to some later run.
+        let rig = Rig::new();
+        let store = rig.store();
+        let reserved = GrantHolder::Reservation("amber_otter".to_string());
+        store
+            .decide(
+                &reserved,
+                "some-provider",
+                granted("sha256:abc", None, Authority::default()),
+            )
+            .unwrap();
+
+        assert_eq!(store.discard_reservations("amber_otter").unwrap(), 1);
+
+        assert_eq!(store.decision(&reserved, "some-provider").unwrap(), None);
+        assert_eq!(
+            store
+                .decision(&GrantHolder::Run("1a2b".to_string()), "some-provider")
+                .unwrap(),
+            None,
+            "discarding is not a quiet claim"
+        );
+    }
+
+    #[test]
+    fn the_reserved_names_are_the_names_nothing_else_may_choose() {
+        let rig = Rig::new();
+        let store = rig.store();
+        for holder in [
+            GrantHolder::Reservation("reviewer".to_string()),
+            GrantHolder::Reservation("billing".to_string()),
+            a_run(),
+        ] {
+            store
+                .decide(
+                    &holder,
+                    "some-provider",
+                    granted("sha256:abc", None, Authority::default()),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.reserved_names().unwrap(),
+            ["billing".to_string(), "reviewer".to_string()].into(),
+            "a run's own grant reserves no name"
+        );
     }
 
     #[test]

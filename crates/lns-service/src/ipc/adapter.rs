@@ -478,17 +478,13 @@ where
         config,
         exec_environment: Default::default(),
     };
-    let registered = match &mode {
-        crate::run::LaunchMode::Fresh => {
-            crate::run_registry::register_named(run_id.clone(), requested_name, handle)
-        }
-        crate::run::LaunchMode::Restart { .. } => {
-            crate::run_registry::transition_to_live(&run_id, handle)
-        }
-    };
+    let fresh = matches!(mode, crate::run::LaunchMode::Fresh);
+    let requested = requested_name.clone();
+    let registered = register(&run_id, requested_name, handle, fresh).await;
     drop(runtime_cache_registration);
     match registered {
         Ok(microvm) => {
+            take_reservations(&microvm, &run_id, fresh, requested).await;
             let _ = microvm_tx.send(microvm);
         }
         Err(message) => {
@@ -639,4 +635,51 @@ async fn handle_exec(mut stream: UnixStream, args: lns_ipc::ExecImageArgs) -> an
         &mut frame_rx,
     )
     .await
+}
+
+/// A new run is named, avoiding any name a reservation waits for; a restart carries the name and the run id it already had.
+async fn register(
+    run_id: &str,
+    requested_name: Option<String>,
+    handle: crate::run_registry::RunHandle,
+    fresh: bool,
+) -> Result<String, String> {
+    if !fresh {
+        return crate::run_registry::transition_to_live(run_id, handle);
+    }
+    // Read off the runtime thread, because the connector store is blocking file I/O (§7.1).
+    let reserved = tokio::task::spawn_blocking(crate::connector::real::reserved_names)
+        .await
+        .unwrap_or_default();
+    crate::run_registry::register_named_avoiding(
+        run_id.to_string(),
+        requested_name,
+        handle,
+        &reserved,
+    )
+}
+
+/// Runs before the boot the caller is waiting on, so nothing reads this run's grants until the reservation has moved.
+async fn take_reservations(
+    assigned_name: &str,
+    run_id: &str,
+    fresh: bool,
+    requested_name: Option<String>,
+) {
+    let assigned_name = assigned_name.to_string();
+    let run_id = run_id.to_string();
+    let taken = tokio::task::spawn_blocking(move || {
+        crate::connector::real::take_reservations_for(
+            &assigned_name,
+            &run_id,
+            fresh,
+            requested_name.as_deref(),
+        )
+    })
+    .await;
+    if let Err(e) = taken {
+        crate::log::warn!(
+            "taking what was reserved for this run failed, so it starts without it: {e}"
+        );
+    }
 }

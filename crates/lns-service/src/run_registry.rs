@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -175,10 +175,20 @@ pub fn register_named(
     requested: Option<String>,
     handle: RunHandle,
 ) -> Result<String, String> {
+    register_named_avoiding(run_id, requested, handle, &BTreeSet::new())
+}
+
+/// Registers a run, and does not generate a name `reserved` holds. A reservation is not a run, so `--name` may still claim one; only the generator avoids them (§3.2.4).
+pub fn register_named_avoiding(
+    run_id: String,
+    requested: Option<String>,
+    handle: RunHandle,
+    reserved: &BTreeSet<String>,
+) -> Result<String, String> {
     let mut next_name = || run_name::name_for_index(NEXT_NAME_SEQ.fetch_add(1, Ordering::Relaxed));
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     let map = g.get_or_insert_with(HashMap::new);
-    register_named_in(map, run_id, requested, handle, &mut next_name)
+    register_named_in(map, run_id, requested, handle, &mut next_name, reserved)
 }
 
 fn register_named_in(
@@ -187,13 +197,14 @@ fn register_named_in(
     requested: Option<String>,
     mut handle: RunHandle,
     next_name: &mut dyn FnMut() -> String,
+    reserved: &BTreeSet<String>,
 ) -> Result<String, String> {
     let name = match requested {
         Some(requested) => {
             check_name_available(Some(&*map), &requested)?;
             requested
         }
-        None => unique_auto_name(map, next_name),
+        None => unique_auto_name(map, next_name, reserved),
     };
     handle.name = name.clone();
     map.insert(run_id, RunEntry::Live(handle));
@@ -219,18 +230,20 @@ fn check_name_available(map: Option<&HashMap<String, RunEntry>>, name: &str) -> 
 fn unique_auto_name(
     map: &HashMap<String, RunEntry>,
     next_name: &mut dyn FnMut() -> String,
+    reserved: &BTreeSet<String>,
 ) -> String {
+    let free = |name: &str| name_holder(map, name).is_none() && !reserved.contains(name);
     for _ in 0..run_name::pool_size() {
         let candidate = next_name();
-        if name_holder(map, &candidate).is_none() {
+        if free(&candidate) {
             return candidate;
         }
     }
     let base = next_name();
-    (0..=map.len() as u32)
+    (0..=(map.len() + reserved.len()) as u32)
         .map(|n| format!("{base}_{n}"))
-        .find(|name| name_holder(map, name).is_none())
-        .expect("more distinct suffixes than names in use")
+        .find(|name| free(name))
+        .expect("more distinct suffixes than names in use or reserved")
 }
 
 fn name_holder(map: &HashMap<String, RunEntry>, name: &str) -> Option<String> {
@@ -702,6 +715,7 @@ mod tests {
             Some("reviewer".into()),
             h,
             &mut (gen_amber as fn() -> String),
+            &BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(name, "reviewer");
@@ -719,6 +733,7 @@ mod tests {
             Some("reviewer".into()),
             h,
             &mut (gen_amber as fn() -> String),
+            &BTreeSet::new(),
         )
         .unwrap_err();
         assert!(err.contains("already in use by run aa07"), "got: {err}");
@@ -734,6 +749,7 @@ mod tests {
             Some("abcdef".into()),
             h,
             &mut (gen_amber as fn() -> String),
+            &BTreeSet::new(),
         )
         .unwrap_err();
     }
@@ -748,6 +764,7 @@ mod tests {
             None,
             h,
             &mut (gen_amber as fn() -> String),
+            &BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(name, "amber_otter");
@@ -760,7 +777,15 @@ mod tests {
         let (h, _rx) = make_handle();
         let mut seq = ["amber_otter", "amber_otter", "bold_falcon"].into_iter();
         let mut next_name = || seq.next().unwrap().to_string();
-        let name = register_named_in(&mut map, "aa08".into(), None, h, &mut next_name).unwrap();
+        let name = register_named_in(
+            &mut map,
+            "aa08".into(),
+            None,
+            h,
+            &mut next_name,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(name, "bold_falcon");
     }
 
@@ -770,7 +795,15 @@ mod tests {
         named_handle(&mut map, "aa07", "amber_otter").await;
         let (h, _rx) = make_handle();
         let mut next_name = || "amber_otter".to_string();
-        let name = register_named_in(&mut map, "aa08".into(), None, h, &mut next_name).unwrap();
+        let name = register_named_in(
+            &mut map,
+            "aa08".into(),
+            None,
+            h,
+            &mut next_name,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(name, "amber_otter_0");
     }
 
@@ -814,6 +847,27 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("no such run")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generated_name_is_never_one_a_reservation_waits_for() {
+        // §3.2.4: an automatically generated name never takes a reservation, so the generator must not choose one — otherwise the run gets a name whose consent it may not have.
+        let mut map = HashMap::new();
+        let (h, _rx) = make_handle();
+        let reserved: BTreeSet<String> = [gen_amber()].into_iter().collect();
+        let name = register_named_in(
+            &mut map,
+            "aa01".into(),
+            None,
+            h,
+            &mut (gen_amber as fn() -> String),
+            &reserved,
+        )
+        .unwrap();
+        assert!(
+            !reserved.contains(&name),
+            "the generator kept offering {name:?}, which a reservation waits for"
         );
     }
 
@@ -1603,6 +1657,7 @@ mod tests {
             Some("reviewer".into()),
             h,
             &mut (gen_amber as fn() -> String),
+            &BTreeSet::new(),
         )
         .unwrap_err();
         assert!(err.contains("already in use by run aa07"), "got: {err}");
