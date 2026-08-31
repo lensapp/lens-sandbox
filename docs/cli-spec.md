@@ -434,10 +434,16 @@ lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 
 `SANDBOX` is a `RUN`. `--kind` takes one of `launch`, `exit`, `restart`,
 `sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
-`approval`, `credential`, `connector`, or `tool`. Filters compose.
-`credential` covers binding and injecting a value, with or without a connector;
+`approval`, `connector`, or `tool`. Filters compose.
 `connector` covers granting, declining, and forgetting one. `--connector <ID>`
 keeps only what was decided about that one.
+
+**Arming a credential is not an event of its own.** A grant records that the
+credential will be armed and the connector digest it bound to, and every
+destination it opens is recorded as an approval. The one thing a per-boot line
+would add is a fingerprint of the value behind it — a live secret's hash in a
+ledger that holds none. The timeline records the decision, not each application
+of it.
 
 **Connecting is not a connector decision the timeline holds.** Every line the
 timeline carries answers for one run — but a connection is
@@ -452,10 +458,10 @@ running again, `sandbox_run` records the run against the artifact it ran, and
 swept with every other stopped one.
 
 It is not `lns sandbox audit`, because half of what it reads is not a sandbox's:
-the timeline merges each sandbox's own chain with the durable ledger of
-approvals, credential uses, and connector decisions, which spans sandboxes and
-outlives every one of them. A sandbox's chain also outlives the sandbox —
-removing one does not remove what it did.
+the timeline merges each sandbox's own chain with the durable ledger of approvals
+and connector decisions, which spans sandboxes and outlives every one of them. A
+sandbox's chain also outlives the sandbox — removing one does not remove what it
+did.
 
 - Integrity is checked as the log is read. A chain that has been altered,
   truncated, or cannot be verified against its anchor raises an inline
