@@ -2331,9 +2331,9 @@ mod tests {
         );
     }
 
-    /// `PreBootQuestions` has no detach field to set, which is the whole point: `-d` cannot reach a question that is asked before anything boots, so a detached run answers at the terminal like any other.
+    /// A pulled artifact is asked about twice — consent to its declared effects, then KEEP or DROP for the secret-shaped file — and this pins that both answers come from the terminal, in that order; the detach boundary is a different claim and is pinned by `a_detached_run_reads_its_answer_from_the_terminal_it_was_given`, which drives `run_image` with `-d`.
     #[test]
-    fn detaching_is_not_one_of_the_questions_asked_before_boot() {
+    fn both_the_pull_confirm_and_the_secret_question_take_the_terminals_answer() {
         let dir = tempfile::tempdir().expect("a temp dir for the bind source");
         std::fs::write(dir.path().join(".env"), b"TOKEN=1").expect("a secret-shaped file");
         let bind_specs = vec![lns_ipc::BindSpec {
@@ -2370,7 +2370,7 @@ mod tests {
         assert_eq!(
             binds[0].kept,
             vec![".env".to_string()],
-            "both questions took the terminal's answer, so `-d --yes` is a choice and not the only way through"
+            "the consent answer was consumed first and the KEEP answer second, so both questions read the terminal rather than one of them reading the other's answer"
         );
     }
 
