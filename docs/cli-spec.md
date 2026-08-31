@@ -151,7 +151,7 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
 | Operand | Written as |
 |---|---|
 | `REF` | A registry coordinate (`ghcr.io/team/hermes:1.4.0`, `you/agent`, `name@sha256:…`) **or** a path to a local document (`.`, `./dir`, `lns.dev.yaml`). |
-| `RUN` | A sandbox's numeric id (`7`), its name (`reviewer`), or a unique id prefix. |
+| `RUN` | A sandbox's id (`1a2b3c4d0000`, shown to 12 characters), its name (`reviewer`), or a unique id prefix. |
 | `PATTERN` | A destination: host, wildcard host (`*.github.com`), CIDR, or `host:port`. |
 | `NAME` | A volume name, a connector id, or a registry host. |
 | `CONNECTION` | A connector connection's label, unique per connector. |
@@ -160,7 +160,8 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
 - A command takes a `REF` or a `RUN`, never either. Given the wrong kind, it says
   which it wanted and which command takes the one you typed.
 - An id and a name are interchangeable wherever a `RUN` is accepted. A name is
-  never all digits, so the two can never collide.
+  never all lowercase hex, so the two can never collide — an id and any prefix of
+  one are lowercase hex, and a name is refused if it is.
 - A bare `REF` is qualified, never guessed: `--registry`, then your
   `run.registry` default, then the Lens hub (`hub.lns.run`). A fully-qualified
   reference is used as written.
@@ -235,7 +236,7 @@ keeping its `ENTRYPOINT`; `--` is accepted but not required.
 | Option | Default | Meaning |
 |---|---|---|
 | `-f`, `--file <FILE>` | `./lns.yaml` | Document to run instead of `./lns.yaml`. Cannot be combined with `REF`. |
-| `--name <NAME>` | auto | Name the sandbox, usable in place of its id everywhere. Auto-generated (`adjective_noun`) when omitted; never all digits. |
+| `--name <NAME>` | auto | Name the sandbox, usable in place of its id everywhere. Auto-generated (`adjective_noun`) when omitted; never all lowercase hex. |
 | `--registry <HOST>` | `hub.lns.run` | Registry that qualifies a bare reference. |
 | `--cpus <N>` | `1` | vCPUs. Falls back to the `run.cpus` default. |
 | `-m`, `--mem <SIZE>` | `512` | RAM in MiB, or with a unit (`2g`, `512m`, `38Gi`; binary, rounded up to a whole MiB). Falls back to `run.mem`. Alias: `--memory`. |
