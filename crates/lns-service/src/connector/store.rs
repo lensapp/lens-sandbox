@@ -319,7 +319,7 @@ impl<'a> ConnectorStore<'a> {
     /// Connections go first so a failed write cannot leave real values behind under a name nothing installed.
     pub fn uninstall(&self, name: &str) -> io::Result<bool> {
         let _guard = self.lock();
-        self.retain_connections(|key| splits(key).is_some_and(|(keyed, _)| keyed != name))?;
+        self.drop_the_connections_of(name, None)?;
         self.installed.remove(name)
     }
 
@@ -364,13 +364,18 @@ impl<'a> ConnectorStore<'a> {
     pub fn drop_connections(&self, name: &str, label: Option<&str>) -> io::Result<usize> {
         let _guard = self.lock();
         let before = self.values.load()?.len();
+        self.drop_the_connections_of(name, label)?;
+        Ok(before - self.values.load()?.len())
+    }
+
+    /// Uninstall and disconnect share one predicate so neither deletes a key it cannot parse.
+    fn drop_the_connections_of(&self, name: &str, label: Option<&str>) -> io::Result<()> {
         self.retain_connections(|key| match splits(key) {
             Some((keyed, keyed_label)) => {
                 keyed != name || label.is_some_and(|wanted| keyed_label != wanted)
             }
             None => true,
-        })?;
-        Ok(before - self.values.load()?.len())
+        })
     }
 
     pub fn decision(&self, holder: &GrantHolder, name: &str) -> io::Result<Option<RunDecision>> {
@@ -1070,6 +1075,24 @@ mod tests {
     #[test]
     fn uninstalling_something_never_installed_reports_it() {
         assert!(!Rig::new().store().uninstall("absent").unwrap());
+    }
+
+    #[test]
+    fn uninstalling_leaves_a_row_it_cannot_read_where_it_found_it() {
+        // A row without the separator names no connector, so uninstalling one is not the occasion to delete it — the same rule the grants side already holds to.
+        let rig = Rig::new();
+        rig.values
+            .state
+            .lock()
+            .unwrap()
+            .insert("handwritten".to_string(), connection(Authority::default()));
+
+        rig.store().uninstall("some-provider").unwrap();
+
+        assert!(
+            rig.values.state.lock().unwrap().contains_key("handwritten"),
+            "a row it cannot read is a row it must not delete"
+        );
     }
 
     #[test]
