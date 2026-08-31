@@ -1479,18 +1479,23 @@ fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Resp
 }
 
 /// What applying this method will do, each line named by §3.2.4 and omitted when there is nothing to say.
+fn disclosure_lines(method: &lns_ipc::ConnectorMethodView) -> Vec<String> {
+    [
+        ("Opens", method.opens.clone()),
+        ("Sets", method.sets()),
+        ("Writes", method.writes.clone()),
+    ]
+    .into_iter()
+    .filter(|(_, items)| !items.is_empty())
+    .map(|(label, items)| format!("{label}: {}", items.join(", ")))
+    .collect()
+}
+
 fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
-    for (label, items) in [
-        ("Opens", &method.opens),
-        ("Sets", &method.env),
-        ("Writes", &method.writes),
-    ] {
-        if items.is_empty() {
-            continue;
-        }
+    for line in disclosure_lines(method) {
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new(format!("{label}: {}", items.join(", ")))
+            egui::RichText::new(line)
                 .size(theme::FONT_CAPTION)
                 .color(window::TEXT_MUTED),
         );
@@ -2330,6 +2335,28 @@ mod tests {
             ..waiting
         };
         assert!(ready_to_grant(&method, &filled));
+    }
+
+    #[test]
+    fn the_card_names_every_variable_applying_the_method_sets() {
+        // §3.2.4: the card is labelled with what applying it will do, and a variable a credential fills is a variable the method sets.
+        let method = lns_ipc::ConnectorMethodView {
+            name: "token".into(),
+            label: "token".into(),
+            auth_label: Some("token".into()),
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: vec!["SOME_REGION".into()],
+            credentials: vec!["SOME_TOKEN".into()],
+            asks: vec!["token".into()],
+            help: None,
+        };
+        assert_eq!(
+            disclosure_lines(&method),
+            ["Sets: SOME_REGION, SOME_TOKEN"],
+            "the secret field is labelled by the sign-in now, so the disclosure is the only place the variable is named"
+        );
     }
 
     #[test]

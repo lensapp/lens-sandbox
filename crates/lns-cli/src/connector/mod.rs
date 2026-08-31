@@ -490,13 +490,7 @@ fn disclose(
     labelled(prompt, "method", &method.label)?;
     disclose_list(prompt, "opens", &method.opens)?;
     disclose_list(prompt, "writes", &method.writes)?;
-    let sets: Vec<String> = method
-        .env
-        .iter()
-        .chain(method.credentials.iter())
-        .cloned()
-        .collect();
-    disclose_list(prompt, "sets", &sets)?;
+    disclose_list(prompt, "sets", &method.sets())?;
     for connection in &connector.connections {
         let authority = if connection.authority.is_empty() {
             "no authority reported".to_string()

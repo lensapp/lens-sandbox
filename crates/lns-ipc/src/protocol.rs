@@ -391,6 +391,17 @@ pub struct ConnectorMethodView {
     pub help: Option<String>,
 }
 
+impl ConnectorMethodView {
+    /// Every variable applying this method sets, which §3.2.4 requires the card and `grant` to name: its plain `env`, and the variable each credential fills.
+    pub fn sets(&self) -> Vec<String> {
+        self.env
+            .iter()
+            .chain(self.credentials.iter())
+            .cloned()
+            .collect()
+    }
+}
+
 impl ConnectorView {
     /// A name for a new connection that this connector does not already hold: the method's own name, then `-2`, `-3`. A label it holds would replace that account rather than add one, and the store keys a connection by connector and label alone — so a name another method made still collides. Both the CLI and the approval card name connections by this rule, and they must agree.
     pub fn free_connection_name(&self, method: &str) -> String {
@@ -1094,6 +1105,31 @@ mod secret_tests {
 
 #[cfg(test)]
 mod tests {
+
+    fn a_method_setting(env: &[&str], credentials: &[&str]) -> ConnectorMethodView {
+        ConnectorMethodView {
+            name: "token".into(),
+            label: "token".into(),
+            auth_label: Some("token".into()),
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: env.iter().map(|e| (*e).to_string()).collect(),
+            credentials: credentials.iter().map(|c| (*c).to_string()).collect(),
+            asks: Vec::new(),
+            help: None,
+        }
+    }
+
+    #[test]
+    fn the_variables_a_method_sets_are_its_env_and_the_one_each_credential_fills() {
+        // §3.2.4: both the card and `lns connector grant` disclose this, and two spellings of it would let one of them omit a variable the other names.
+        assert_eq!(
+            a_method_setting(&["SOME_REGION"], &["SOME_TOKEN"]).sets(),
+            ["SOME_REGION", "SOME_TOKEN"]
+        );
+        assert!(a_method_setting(&[], &[]).sets().is_empty());
+    }
 
     fn holding(labels: &[&str]) -> ConnectorView {
         ConnectorView {
