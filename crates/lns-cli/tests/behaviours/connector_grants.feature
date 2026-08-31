@@ -19,6 +19,22 @@ Feature: inspecting and forgetting per-workload connector grants
     When the user runs connector command "grants"
     Then the listing shows "def:/work/app" holding "allow" for "some-provider"
 
+  Scenario: The listing names its columns
+    Given the workload "def:/work/app" was granted "some-provider"
+    When the user runs connector command "grants"
+    Then the listing is headed "WORKLOAD  CONNECTOR  VERDICT"
+
+  Scenario: A workload composed with a mixin lists as the composition the user typed
+    Given the workload "def:/work/app" composed with mixin "ghcr.io/acme/tools@sha256:abc" was granted "some-provider"
+    When the user runs connector command "grants"
+    Then the listing shows "def:/work/app + ghcr.io/acme/tools@sha256:abc" holding "allow" for "some-provider"
+    And the output survives a pipe
+
+  Scenario: A script still matches a composed workload on its stored key
+    Given the workload "def:/work/app" composed with mixin "ghcr.io/acme/tools@sha256:abc" was granted "some-provider"
+    When the user runs connector command "grants --format json"
+    Then the json keeps the composed key of "def:/work/app" and "ghcr.io/acme/tools@sha256:abc" verbatim
+
   Scenario: A workload that declined the connector is listed as a deny
     Given the workload "def:/work/app" was denied "some-provider"
     When the user runs connector command "grants"
