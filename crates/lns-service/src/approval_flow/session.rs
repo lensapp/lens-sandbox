@@ -1610,24 +1610,14 @@ pub(crate) mod tests {
             .filter(|event| matches!(event, LedgerEvent::Approval { .. }))
             .collect();
         assert_eq!(
-            opened.len(),
-            1,
-            "one destination was let go, so the chain holds one line for it: {events:?}"
-        );
-        let LedgerEvent::Approval {
-            target,
-            decision,
-            reason,
-            ..
-        } = opened[0]
-        else {
-            unreachable!("filtered to approvals above")
-        };
-        assert_eq!(target, "api.some-provider.example");
-        assert_eq!(*decision, LedgerDecision::AllowOnce);
-        assert!(
-            reason.as_deref() == Some("granted some-provider"),
-            "the line must say which grant opened it, or the reader cannot tell it from an answered card: {reason:?}"
+            opened,
+            [&LedgerEvent::Approval {
+                kind: ApprovalKind::Network,
+                target: "api.some-provider.example".into(),
+                decision: LedgerDecision::AllowOnce,
+                reason: Some("granted some-provider".into()),
+            }],
+            "one destination was let go, so the chain holds one line for it, and that line must say which grant opened it or the reader cannot tell it from an answered card: {events:?}"
         );
     }
 
