@@ -815,12 +815,16 @@ empty, `.`, or `..` segment, and no control characters.
 **Secret-shaped names are refused.** Real secrets stay outside the workload, so
 a path segment naming one fails the document — in a `path` directory, in an
 `inline` key, and in a `hostPath`. The check covers
-names starting with `.env` or `credentials.`, names ending in `.pem`, `.key`,
-`.ppk`, or `.keystore`, and the exact names `.npmrc`, `.netrc`,
+names starting with `.env`, `credentials.`, or `.credentials`, names ending in
+`.pem`, `.key`, `.ppk`, or `.keystore`, and the exact names `.npmrc`, `.netrc`,
 `.git-credentials`, `.pgpass`, `.pypirc`, `.yarnrc.yml`, `auth.json`,
 `credentials`, the SSH key names (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`),
 and the credential directories `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`,
 `.oci`, `.docker`.
+
+Both spellings of `credentials` are named because a per-user store is usually the
+dotted one. `.credentials.json` is the file a coding agent keeps its subscription
+token in, and a check that reads only `credentials.` lets that name through.
 
 A [connector](#32-kind-connector) is the one exception, and a narrow one. Its
 filesets exist to write exactly these files, and
