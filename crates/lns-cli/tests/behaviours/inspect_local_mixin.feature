@@ -26,7 +26,7 @@ Feature: previewing a composition against a local document
     When the user runs artifact command "inspect --mixin ./obs"
     Then the exit code is 0
     And the output contains "tool: node@22"
-    And the output does not contain "node@20"
+    And the output does not contain "tool: node@20"
 
   Scenario: each flag merges in the order the user gave it
     Given a valid lns.yaml in the current directory
@@ -35,7 +35,7 @@ Feature: previewing a composition against a local document
     When the user runs artifact command "inspect --mixin ./first --mixin ./second"
     Then the exit code is 0
     And the output contains "tool: node@22"
-    And the output does not contain "node@20"
+    And the output does not contain "tool: node@20"
 
   Scenario: a mixin the mixin names is merged as well
     Given a valid lns.yaml in the current directory
@@ -56,6 +56,19 @@ Feature: previewing a composition against a local document
     Then the exit code is 0
     And the output contains "mixin: /work/obs/lns.yaml"
     And the output contains "mixin: /work/deep/lns.yaml"
+
+  Scenario: each merged entry names the source that decided it
+    Given a lns.yaml declaring tools ["node@20"]
+    And the mixin "./obs" declares tool "node@22"
+    When the user runs artifact command "inspect --mixin ./obs"
+    Then the exit code is 0
+    And the output contains "tool: node@22  [from /work/obs/lns.yaml, replaced node@20 from the sandbox]"
+
+  Scenario: a render of one document alone names no source
+    Given a lns.yaml declaring tools ["node@20"]
+    When the user runs artifact command "inspect"
+    Then the exit code is 0
+    And the output does not contain "[from"
 
   Scenario: a published mixin reference is refused, and the message says why
     Given a valid lns.yaml in the current directory
@@ -111,7 +124,7 @@ Feature: previewing a composition against a local document
     Then the exit code is 0
     And the output contains "tool: python@3.12"
     And the output contains "tool: node@22"
-    And the output does not contain "node@20"
+    And the output does not contain "tool: node@20"
 
   Scenario: a mixin the document declares by published reference is listed, not merged
     Given an lns.yaml layering on "ghcr.io/acme/obs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

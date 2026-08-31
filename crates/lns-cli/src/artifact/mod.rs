@@ -667,17 +667,39 @@ fn render_cached_inspect<W: std::io::Write>(
             for entry in &view.env {
                 writeln!(out, "env: {entry}")?;
             }
-            render_mounts(out, &view.mounts)?;
+            let attributed: &[lns_ipc::SourceContribution] = if view.mixins.is_empty() {
+                &[]
+            } else {
+                &view.contributions
+            };
+            render_mounts(out, &view.mounts, attributed)?;
             if !view.ports.is_empty() {
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
-            render_filesets(out, &view.filesets)?;
+            render_filesets(out, &view.filesets, attributed)?;
             render_connectors(out, &view.connectors)?;
             for credential in &view.credentials {
-                writeln!(out, "credential: {}", credential_disclosure(credential))?;
+                writeln!(
+                    out,
+                    "credential: {}{}",
+                    credential_disclosure(credential),
+                    crate::run::summary::contribution_attribution(
+                        attributed,
+                        lns_ipc::ContributionBlock::Credential,
+                        &credential.env_var
+                    )
+                )?;
             }
             for tool in &view.tools {
-                writeln!(out, "tool: {tool}")?;
+                writeln!(
+                    out,
+                    "tool: {tool}{}",
+                    crate::run::summary::contribution_attribution(
+                        attributed,
+                        lns_ipc::ContributionBlock::Tool,
+                        lns_artifact::merge::tool_name(tool)
+                    )
+                )?;
             }
             render_scripts(out, &view.scripts)?;
             render_policy_flags(out, &view.policy_flags)?;
@@ -694,11 +716,11 @@ fn render_cached_inspect<W: std::io::Write>(
             for entry in &view.env {
                 writeln!(out, "env: {entry}")?;
             }
-            render_mounts(out, &view.mounts)?;
+            render_mounts(out, &view.mounts, &[])?;
             if !view.ports.is_empty() {
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
-            render_filesets(out, &view.filesets)?;
+            render_filesets(out, &view.filesets, &[])?;
             for credential in &view.credentials {
                 writeln!(out, "credential: {}", credential_disclosure(credential))?;
             }
@@ -718,7 +740,11 @@ fn render_cached_inspect<W: std::io::Write>(
 }
 
 /// One renderer for both kinds, since a mixin's mounts read exactly as a sandbox's do.
-fn render_mounts<W: std::io::Write>(out: &mut W, mounts: &[lns_ipc::SandboxMount]) -> Result<()> {
+fn render_mounts<W: std::io::Write>(
+    out: &mut W,
+    mounts: &[lns_ipc::SandboxMount],
+    contributions: &[lns_ipc::SourceContribution],
+) -> Result<()> {
     for mount in mounts {
         let kind = match mount.kind {
             lns_ipc::SandboxMountKind::Bind => "bind",
@@ -727,8 +753,14 @@ fn render_mounts<W: std::io::Write>(out: &mut W, mounts: &[lns_ipc::SandboxMount
         let mode = if mount.read_only { " (read-only)" } else { "" };
         writeln!(
             out,
-            "mount: {kind} {} -> {}{mode}",
-            mount.source, mount.target
+            "mount: {kind} {} -> {}{mode}{}",
+            mount.source,
+            mount.target,
+            crate::run::summary::contribution_attribution(
+                contributions,
+                lns_ipc::ContributionBlock::Mount,
+                &mount.target
+            )
         )?;
     }
     Ok(())
@@ -737,14 +769,20 @@ fn render_mounts<W: std::io::Write>(out: &mut W, mounts: &[lns_ipc::SandboxMount
 fn render_filesets<W: std::io::Write>(
     out: &mut W,
     filesets: &[lns_ipc::SandboxFileset],
+    contributions: &[lns_ipc::SourceContribution],
 ) -> Result<()> {
     for fileset in filesets {
         let source = crate::run::summary::fileset_view_source_display(fileset);
         let owner = crate::run::summary::fileset_view_owner_display(fileset.owner);
         writeln!(
             out,
-            "fileset: {source} -> {} (owner: {owner})",
-            fileset.guest_path
+            "fileset: {source} -> {} (owner: {owner}){}",
+            fileset.guest_path,
+            crate::run::summary::contribution_attribution(
+                contributions,
+                lns_ipc::ContributionBlock::Mount,
+                &fileset.guest_path
+            )
         )?;
     }
     Ok(())
@@ -1315,6 +1353,103 @@ mod tests {
             text.contains("script: pre-start (runs as the workload user)"),
             "a script naming no user runs as the workload does, and a reader should not have to infer that from a blank; got: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn inspect_cached_attributes_each_entry_of_a_composed_sandbox() {
+        let contribution = |block, key: &str, displaced: Vec<lns_ipc::DisplacedEntry>| {
+            lns_ipc::SourceContribution {
+                block,
+                key: key.into(),
+                source: "ghcr.io/acme/obs:2".into(),
+                note: None,
+                displaced,
+            }
+        };
+        let svc = CannedService::with_inspect_image(
+            Response::Error {
+                message: "no such run: hermes:1.4.0".into(),
+            },
+            Response::ImageInspected {
+                inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    mixins: vec!["ghcr.io/acme/obs:2".into()],
+                    pinned_mixins: Vec::new(),
+                    contributions: vec![
+                        contribution(
+                            lns_ipc::ContributionBlock::Tool,
+                            "node",
+                            vec![lns_ipc::DisplacedEntry {
+                                source: "the sandbox".into(),
+                                summary: "node@20".into(),
+                            }],
+                        ),
+                        contribution(lns_ipc::ContributionBlock::Credential, "SOME_TOKEN", vec![]),
+                        contribution(lns_ipc::ContributionBlock::Mount, "/cache", vec![]),
+                        contribution(
+                            lns_ipc::ContributionBlock::Mount,
+                            "/root/.agent/settings",
+                            vec![],
+                        ),
+                    ],
+                    reference: "hermes:1.4.0".into(),
+                    digest: String::new(),
+                    image: "docker.io/library/alpine@sha256:abc".into(),
+                    workdir: None,
+                    user: None,
+                    mounts: vec![lns_ipc::SandboxMount {
+                        kind: lns_ipc::SandboxMountKind::Volume,
+                        source: "obs-cache".into(),
+                        target: "/cache".into(),
+                        read_only: false,
+                        exclude: Vec::new(),
+                        optional: false,
+                        size_bytes: None,
+                    }],
+                    ports: Vec::new(),
+                    filesets: vec![lns_ipc::SandboxFileset {
+                        path: None,
+                        inline: true,
+                        host_path: None,
+                        guest_path: "/root/.agent/settings".into(),
+                        owner: lns_ipc::SandboxFilesetOwner::Workload,
+                        optional: false,
+                    }],
+                    connectors: Vec::new(),
+                    env: Vec::new(),
+                    credentials: vec![lns_spec::Credential {
+                        env_var: "SOME_TOKEN".into(),
+                        placeholder: "lns-placeholder-some-token".into(),
+                        injections: vec![lns_spec::InjectionDef {
+                            kind: lns_spec::InjectionKind::BearerHeader,
+                            domain: "api.some-provider.example".into(),
+                            header: None,
+                        }],
+                    }],
+                    tools: vec!["node@22".into()],
+                    scripts: Vec::new(),
+                    policy_flags: Vec::new(),
+                    cpus: None,
+                    mem_mib: None,
+                    disk_bytes: None,
+                })),
+            },
+        );
+        let mut out = Vec::new();
+        inspect_cached(&svc, "hermes:1.4.0", &[], &mut out)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for line in [
+            "tool: node@22  [from ghcr.io/acme/obs:2, replaced node@20 from the sandbox]",
+            "credential: SOME_TOKEN -> api.some-provider.example  [from ghcr.io/acme/obs:2]",
+            "mount: volume obs-cache -> /cache  [from ghcr.io/acme/obs:2]",
+            "fileset: inline -> /root/.agent/settings (owner: workload)  [from ghcr.io/acme/obs:2]",
+        ] {
+            assert!(
+                text.contains(line),
+                "the service already ships which source decided each entry, and a reader of a pulled artifact needs it most; missing {line:?} in: {text}"
+            );
+        }
     }
 
     #[tokio::test]
