@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "linux"))]
 mod boot;
 mod cmdline;
+mod hosts;
 mod mount;
 mod seed;
 mod staged;
