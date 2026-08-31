@@ -146,6 +146,31 @@ mod tests {
     }
 
     #[test]
+    fn a_filesets_path_that_is_not_a_directory_fails_the_install() {
+        // A store too confused to clear must not be written over: the digest would then promise bytes the layers do not match.
+        let (_tmp, set) = dir();
+        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
+        let dir_path = set.of("some-provider").unwrap();
+        std::fs::write(dir_path.join("filesets"), b"not a directory").unwrap();
+
+        // No layers, so nothing after the clear can fail: the refusal is the clear's alone.
+        let err = set
+            .put("some-provider", "sha256:def", b"{}", &[])
+            .unwrap_err();
+
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::NotFound,
+            "an absent filesets directory is the ordinary case; anything else is a store to stop at: {err}"
+        );
+        assert_eq!(
+            set.list().unwrap()[0].digest,
+            "sha256:abc",
+            "the install stopped before it replaced the digest a grant is bound to"
+        );
+    }
+
+    #[test]
     fn uninstalling_takes_the_packed_filesets_with_it() {
         let (_tmp, set) = dir();
         set.put("some-provider", "sha256:abc", b"{}", &[b"first".to_vec()])

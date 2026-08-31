@@ -1280,6 +1280,11 @@ mod tests {
             }
         }
 
+        /// The double refuses what the pull must never do, so a production regression that did it fails here instead of passing quietly.
+        fn refuse<T>(what: &str) -> Result<T> {
+            anyhow::bail!("a packed fileset layer pull must not {what}")
+        }
+
         fn packed(&self) -> crate::artifact::PackedLayer {
             crate::artifact::PackedLayer {
                 digest: format!("sha256:{}", hex::encode(Sha256::digest(&self.blob))),
@@ -1293,8 +1298,8 @@ mod tests {
             &self,
             _reference: &oci_client::Reference,
         ) -> Result<(oci_client::manifest::OciImageManifest, String, String)> {
-            anyhow::bail!(
-                "a packed fileset layer is addressed by the manifest its own artifact was peeked from, so materializing one must not fetch a second manifest"
+            Self::refuse(
+                "fetch a second manifest: the layer is addressed by the one its own artifact was peeked from",
             )
         }
 
@@ -1304,7 +1309,7 @@ mod tests {
             _descriptor: &oci_client::manifest::OciDescriptor,
             _on_chunk: &(dyn Fn(u64) + Send + Sync),
         ) -> Result<Vec<u8>> {
-            anyhow::bail!("fileset pulls must stream, never materialize a blob Vec")
+            Self::refuse("materialize a blob Vec: it streams to a path")
         }
 
         async fn pull_blob_to_path(
@@ -1340,6 +1345,46 @@ mod tests {
         "registry.example.test/team/sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_double_refuses_what_a_layer_pull_must_never_do() {
+        use crate::image::Registry;
+        let registry = StreamingRegistry::layer(vec![7; 16], false);
+
+        assert!(
+            registry
+                .pull_manifest_and_config(&pinned_reference())
+                .await
+                .is_err()
+        );
+        let descriptor = oci_client::manifest::OciDescriptor {
+            digest: registry.packed().digest,
+            ..Default::default()
+        };
+        let ignored: &(dyn Fn(u64) + Send + Sync) = &|_| {};
+        assert!(
+            registry
+                .pull_blob(&pinned_reference(), &descriptor, ignored)
+                .await
+                .is_err()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = registry
+            .pull_blob_to_path(
+                &pinned_reference(),
+                &descriptor,
+                8,
+                &dir.path().join("blob"),
+                ignored,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("8-byte limit"),
+            "the double also holds the cap, so a pull that stopped checking it would surface here; got: {err:#}"
+        );
     }
 
     #[tokio::test]

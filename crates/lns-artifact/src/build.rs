@@ -572,7 +572,7 @@ mod tests {
         // from_utf8_lossy turns one invalid byte into three, so counting the lossy text would charge a document for bytes it does not ship.
         let mut data = vec![b'a'; crate::connector::MAX_METHOD_FILESET_BYTES - 1];
         data.push(0x80);
-        let built = build_artifact(
+        build_artifact(
             &connector_packing_one_directory(),
             &[vec![FileEntry {
                 path: "config.json".to_string(),
@@ -580,12 +580,8 @@ mod tests {
                 mode: 0o600,
             }]],
             None,
-        );
-        assert!(
-            built.is_ok(),
-            "a directory of exactly the ceiling still builds: {:#}",
-            built.unwrap_err()
-        );
+        )
+        .expect("a directory of exactly the ceiling still builds");
     }
 
     fn unpacked(layer: &Blob) -> std::collections::BTreeMap<String, (u32, Vec<u8>)> {
