@@ -1,6 +1,10 @@
 //! `~/.lns/connectors/<name>/` — one directory per installed connector, holding
-//! `document.json` verbatim and the `digest` those bytes came from
-//! (`docs/cli-spec.md` §7.3).
+//! `document.json` verbatim, the `digest` those bytes came from, and the packed
+//! filesets the same artifact carried (`docs/cli-spec.md` §7.3).
+//!
+//! The layers are written before the document, so a write that fails part-way
+//! leaves a connector whose grant cannot read what it needs rather than one
+//! that reads the wrong bytes.
 
 use std::fs;
 use std::io;
@@ -12,6 +16,7 @@ use super::store::{Installed, InstalledSet};
 
 const DOCUMENT: &str = "document.json";
 const DIGEST: &str = "digest";
+const FILESETS: &str = "filesets";
 
 pub struct ConnectorDir {
     root: PathBuf,
@@ -60,10 +65,30 @@ impl InstalledSet for ConnectorDir {
         Ok(installed)
     }
 
-    fn put(&self, name: &str, digest: &str, document: &[u8]) -> io::Result<()> {
+    fn put(
+        &self,
+        name: &str,
+        digest: &str,
+        document: &[u8],
+        filesets: &[Vec<u8>],
+    ) -> io::Result<()> {
         let dir = self.of(name)?;
+        // The old layers go first: a reinstall that dropped a fileset would otherwise keep sending the files it no longer declares.
+        match fs::remove_dir_all(dir.join(FILESETS)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        for (index, layer) in filesets.iter().enumerate() {
+            write_json_secret_atomic(&layer_path(&dir, index), layer)?;
+        }
         write_json_secret_atomic(&dir.join(DOCUMENT), document)?;
         write_json_secret_atomic(&dir.join(DIGEST), digest.as_bytes())
+    }
+
+    /// One packed fileset by its index in the document's `path` entries, which is the order it was kept in.
+    fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+        fs::read(layer_path(&self.of(name)?, index))
     }
 
     fn remove(&self, name: &str) -> io::Result<bool> {
@@ -73,6 +98,10 @@ impl InstalledSet for ConnectorDir {
             Err(e) => Err(e),
         }
     }
+}
+
+fn layer_path(dir: &Path, index: usize) -> PathBuf {
+    dir.join(FILESETS).join(format!("{index}.tar.gz"))
 }
 
 fn read_one(dir: &Path, name: &str) -> Option<Installed> {
@@ -97,6 +126,59 @@ mod tests {
     }
 
     #[test]
+    fn a_packed_fileset_is_kept_beside_the_document_it_came_with() {
+        // A grant sends the files on every policy change, so the bytes have to outlive the install that fetched them.
+        let (_tmp, set) = dir();
+        set.put(
+            "some-provider",
+            "sha256:abc",
+            b"{}",
+            &[b"first".to_vec(), b"second".to_vec()],
+        )
+        .unwrap();
+
+        assert_eq!(set.fileset_layer("some-provider", 0).unwrap(), b"first");
+        assert_eq!(
+            set.fileset_layer("some-provider", 1).unwrap(),
+            b"second",
+            "layers are kept in declaration order, which is the order the document's path entries are read in"
+        );
+    }
+
+    #[test]
+    fn uninstalling_takes_the_packed_filesets_with_it() {
+        let (_tmp, set) = dir();
+        set.put("some-provider", "sha256:abc", b"{}", &[b"first".to_vec()])
+            .unwrap();
+
+        assert!(set.remove("some-provider").unwrap());
+
+        assert!(
+            set.fileset_layer("some-provider", 0).is_err(),
+            "real content under a name nothing installed is what uninstall exists to remove"
+        );
+    }
+
+    #[test]
+    fn reinstalling_with_fewer_filesets_leaves_none_of_the_old_ones() {
+        // An update that dropped a fileset would otherwise keep sending the old one's files.
+        let (_tmp, set) = dir();
+        set.put(
+            "some-provider",
+            "sha256:abc",
+            b"{}",
+            &[b"first".to_vec(), b"second".to_vec()],
+        )
+        .unwrap();
+
+        set.put("some-provider", "sha256:def", b"{}", &[b"only".to_vec()])
+            .unwrap();
+
+        assert_eq!(set.fileset_layer("some-provider", 0).unwrap(), b"only");
+        assert!(set.fileset_layer("some-provider", 1).is_err());
+    }
+
+    #[test]
     fn a_machine_with_no_connectors_installed_lists_none() {
         // The root is created by the first install, so its absence is the empty set and not an error.
         let (_tmp, set) = dir();
@@ -108,7 +190,8 @@ mod tests {
         // A grant binds to these bytes, so anything that reformats them would invalidate every grant.
         let (_tmp, set) = dir();
         let document = b"{\"apiVersion\":\"lns.run/v1\",  \"kind\":\"connector\"}";
-        set.put("some-provider", "sha256:abc", document).unwrap();
+        set.put("some-provider", "sha256:abc", document, &[])
+            .unwrap();
         assert_eq!(
             set.list().unwrap(),
             vec![Installed {
@@ -122,9 +205,9 @@ mod tests {
     #[test]
     fn installing_the_same_name_replaces_the_document_and_its_digest() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:old", b"{\"v\":1}")
+        set.put("some-provider", "sha256:old", b"{\"v\":1}", &[])
             .unwrap();
-        set.put("some-provider", "sha256:new", b"{\"v\":2}")
+        set.put("some-provider", "sha256:new", b"{\"v\":2}", &[])
             .unwrap();
         let installed = set.list().unwrap();
         assert_eq!(installed.len(), 1);
@@ -136,7 +219,7 @@ mod tests {
     fn the_list_is_ordered_by_name_so_output_does_not_shuffle() {
         let (_tmp, set) = dir();
         for name in ["other-provider", "some-provider", "a-provider"] {
-            set.put(name, "sha256:abc", b"{}").unwrap();
+            set.put(name, "sha256:abc", b"{}", &[]).unwrap();
         }
         let names: Vec<String> = set.list().unwrap().into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["a-provider", "other-provider", "some-provider"]);
@@ -145,7 +228,7 @@ mod tests {
     #[test]
     fn a_directory_with_no_document_is_a_half_finished_install_and_is_skipped() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}").unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
         fs::create_dir_all(set.root.join("interrupted")).unwrap();
         let names: Vec<String> = set.list().unwrap().into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["some-provider"]);
@@ -164,7 +247,7 @@ mod tests {
     #[test]
     fn uninstalling_reports_whether_anything_was_there() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}").unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
         assert!(set.remove("some-provider").unwrap());
         assert!(!set.remove("some-provider").unwrap());
         assert_eq!(set.list().unwrap(), Vec::new());
@@ -176,7 +259,7 @@ mod tests {
         let (_tmp, set) = dir();
         for bad in ["../escaped", "a/b", "..", ".", "", ".hidden", "/absolute"] {
             let err = set
-                .put(bad, "sha256:abc", b"{}")
+                .put(bad, "sha256:abc", b"{}", &[])
                 .expect_err("a traversing name must be refused");
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
@@ -217,7 +300,7 @@ mod tests {
     fn an_install_that_cannot_land_surfaces_its_error() {
         let (_tmp, set) = dir();
         fs::create_dir_all(set.root.join("some-provider").join(DOCUMENT)).unwrap();
-        assert!(set.put("some-provider", "sha256:abc", b"{}").is_err());
+        assert!(set.put("some-provider", "sha256:abc", b"{}", &[]).is_err());
     }
 
     #[test]
@@ -225,7 +308,7 @@ mod tests {
         // A connector document is not itself a secret, but it sits in the same 0700 tree and the one write helper keeps one rule.
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}").unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
         let mode = fs::metadata(set.root.join("some-provider").join(DOCUMENT))
             .unwrap()
             .permissions()

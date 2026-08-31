@@ -4,6 +4,7 @@
 pub mod conflicts;
 pub mod dir;
 pub mod handler;
+pub mod layer;
 pub mod offer;
 pub mod payload;
 pub mod real;

@@ -367,9 +367,56 @@ pub(crate) async fn pull_connector_with<R: Registry>(
         anyhow::bail!("{reference} is not a connector artifact");
     }
     Ok(crate::connector::source::FetchedConnector {
+        filesets: pull_connector_filesets(client, &parsed, &manifest).await?,
         digest: manifest_digest,
         document: config_json.into_bytes(),
     })
+}
+
+/// Every packed fileset the artifact carries, in manifest order, bounded before anything is fetched.
+///
+/// A declared size is the registry's claim; the budget is checked against it first so a hostile artifact cannot make this machine download what it may not keep, and against the bytes that arrive so it cannot lie its way past.
+async fn pull_connector_filesets<R: Registry>(
+    client: &R,
+    parsed: &Reference,
+    manifest: &OciImageManifest,
+) -> Result<Vec<Vec<u8>>> {
+    let layers = crate::artifact::fileset::packed_layers(manifest);
+    let declared: u64 = layers.iter().map(|layer| layer.size).sum();
+    refuse_beyond_the_transfer_budget(declared)?;
+    let mut fetched = Vec::new();
+    let mut spent = 0u64;
+    for layer in &layers {
+        let descriptor = OciDescriptor {
+            media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+            digest: layer.digest.clone(),
+            size: i64::try_from(layer.size).unwrap_or(i64::MAX),
+            ..Default::default()
+        };
+        let bytes = client.pull_blob(parsed, &descriptor, &|_| {}).await?;
+        spent = spent.saturating_add(bytes.len() as u64);
+        refuse_beyond_the_transfer_budget(spent)?;
+        let arrived = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        if arrived != layer.digest {
+            anyhow::bail!(
+                "fileset layer {} does not hash to the digest its manifest declared",
+                layer.digest
+            );
+        }
+        fetched.push(bytes);
+    }
+    Ok(fetched)
+}
+
+/// A cheap early gate over what an artifact would transfer, so a hostile one cannot make this machine download what install would refuse to keep. Install decides the real question, over what a layer expands to.
+fn refuse_beyond_the_transfer_budget(bytes: u64) -> Result<()> {
+    let limit = crate::connector::store::MAX_CONNECTOR_FILESET_BYTES;
+    if bytes > limit {
+        anyhow::bail!(
+            "this connector's fileset layers transfer more than the {limit}-byte limit one connector may bring"
+        );
+    }
+    Ok(())
 }
 
 fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
@@ -1303,6 +1350,98 @@ mod tests {
             manifest_digest: format!("sha256:{}", "c".repeat(64)),
             blobs: vec![],
         }
+    }
+
+    fn connector_carrying_a_layer(layer: Vec<u8>, declared: Option<u64>) -> FakeImage {
+        let mut image = build_connector_artifact();
+        let digest = sha256_hex(&layer);
+        image.manifest.layers = vec![OciDescriptor {
+            media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+            digest: digest.clone(),
+            size: declared.unwrap_or(layer.len() as u64) as i64,
+            ..Default::default()
+        }];
+        image.blobs = vec![(digest, layer)];
+        image
+    }
+
+    #[tokio::test]
+    async fn pull_connector_brings_the_packed_fileset_the_artifact_carries() {
+        ensure_global_trace_subscriber();
+        let registry = connector_carrying_a_layer(b"packed bytes".to_vec(), None).into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let fetched = pull_connector_with(&registry, &pinned).await.unwrap();
+
+        assert_eq!(
+            fetched.filesets,
+            vec![b"packed bytes".to_vec()],
+            "install keeps what a method writes, so the pull has to bring it"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_a_layer_that_does_not_hash_to_its_declared_digest() {
+        ensure_global_trace_subscriber();
+        let mut image = connector_carrying_a_layer(b"packed bytes".to_vec(), None);
+        let lied = format!("sha256:{}", "b".repeat(64));
+        image.manifest.layers[0].digest = lied.clone();
+        image.blobs = vec![(lied, b"other bytes entirely".to_vec())];
+        let registry = image.into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("does not hash to the digest"),
+            "the layer digest is what ties the files to the bytes a grant binds to; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_more_than_one_connector_may_bring_before_fetching_it() {
+        ensure_global_trace_subscriber();
+        let registry = connector_carrying_a_layer(
+            b"small".to_vec(),
+            Some(crate::connector::store::MAX_CONNECTOR_FILESET_BYTES + 1),
+        )
+        .into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("one connector may bring"),
+            "got: {err:#}"
+        );
+        assert!(
+            !registry
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("blob:")),
+            "a declared size is the registry's claim, and refusing it after the download is refusing it too late"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_connector_refuses_a_layer_bigger_than_the_size_it_declared() {
+        // A budget checked only against declared sizes trusts the registry to describe itself honestly.
+        ensure_global_trace_subscriber();
+        let registry = connector_carrying_a_layer(
+            vec![b'a'; crate::connector::store::MAX_CONNECTOR_FILESET_BYTES as usize + 1],
+            Some(16),
+        )
+        .into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("one connector may bring"),
+            "got: {err:#}"
+        );
     }
 
     #[tokio::test]
