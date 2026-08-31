@@ -42,11 +42,11 @@ Feature: lns connector, on this machine
     Then the connector command fails
     And the connector error says "other-provider already serves that destination"
 
-  Scenario: the list names what each connector serves and holds no profile yet
+  Scenario: the list names what each connector serves and holds no connection yet
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     When the user runs connector command "list"
     Then the connector output names "some-provider"
-    And the output says it holds no profile
+    And the output says it holds no connection
 
   Scenario: a machine with nothing installed says so
     Given the service holds no connectors
@@ -55,11 +55,11 @@ Feature: lns connector, on this machine
     And the output says no connectors are installed
 
   Scenario: uninstalling says the grants outlive it
-    Given the service uninstalls "some-provider" dropping 2 profiles
+    Given the service uninstalls "some-provider" dropping 2 connections
     When the user runs connector command "uninstall some-provider"
     Then the connector command succeeds
     And the output says projects keep what they granted
-    And the output says 2 profiles were dropped
+    And the output says 2 connections were dropped
 
   Scenario: uninstalling something that is not installed exits 1
     Given the service holds no connectors
@@ -87,7 +87,7 @@ Feature: lns connector, on this machine
 
   Scenario: connecting suggests a name the machine does not already hold
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And the machine holds the profile "token" of "some-provider" for method "token"
+    And the machine holds the connection "token" of "some-provider" for method "token"
     And the service connects "some-provider" as "token-2"
     And the user types ""
     And the user types "sk-live-real"
@@ -169,16 +169,16 @@ Feature: lns connector, on this machine
     Then the connector command succeeds
     And the output says it replaced "session"
 
-  Scenario: disconnecting a connector holding no profile exits 1
+  Scenario: disconnecting a connector holding no connection exits 1
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And the service disconnects "some-provider" dropping 0 profiles
+    And the service disconnects "some-provider" dropping 0 connections
     When the user runs connector command "disconnect some-provider"
     Then the connector command exits 1
-    And the output says it holds no profile to disconnect
+    And the output says it holds no connection to disconnect
 
   Scenario: disconnecting says the connector stays installed
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And the service disconnects "some-provider" dropping 2 profiles
+    And the service disconnects "some-provider" dropping 2 connections
     When the user runs connector command "disconnect some-provider"
     Then the connector command succeeds
     And the output says it stays installed

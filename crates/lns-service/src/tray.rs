@@ -10,7 +10,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::{PendingPrompt, ProfileChoice};
+use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
 use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
@@ -436,9 +436,9 @@ impl eframe::App for TrayApp {
             Some(CardAction::Grant {
                 id,
                 method,
-                profile,
+                connection,
             }) => {
-                self.window_state.grant(&id, &method, profile);
+                self.window_state.grant(&id, &method, connection);
                 ui.ctx().request_repaint();
             }
             Some(CardAction::Decline { id }) => {
@@ -469,11 +469,11 @@ pub enum CardAction {
     DismissInform {
         index: usize,
     },
-    /// Connect this project to the offered connector, with the profile the card chose.
+    /// Connect this project to the offered connector, with the connection the card chose.
     Grant {
         id: String,
         method: String,
-        profile: ProfileChoice,
+        connection: ConnectionChoice,
     },
     /// A standing no for this project (§3.2.4).
     Decline {
@@ -1243,7 +1243,7 @@ fn render_network_card(
     )
 }
 
-/// The card §3.2.4 requires: what applying the method will do, which profile it uses, and the two answers a project can give.
+/// The card §3.2.4 requires: what applying the method will do, which connection it uses, and the two answers a project can give.
 fn render_connector_card(
     ui: &mut egui::Ui,
     prompt: &PendingPrompt,
@@ -1275,7 +1275,7 @@ fn render_connector_card(
             crate::ui::badges(ui, prompt.badges());
             match method {
                 Some(method) => {
-                    render_profile_choice(ui, offer, method, draft);
+                    render_connection_choice(ui, offer, method, draft);
                     render_disclosure(ui, method);
                     ready.set(ready_to_grant(method, draft));
                 }
@@ -1302,7 +1302,7 @@ fn render_connector_card(
         ConnectorChoice::Grant => CardAction::Grant {
             id: id.clone(),
             method: method_name,
-            profile: profile_choice(draft),
+            connection: connection_choice(draft),
         },
         ConnectorChoice::Decline => CardAction::Decline { id },
     });
@@ -1326,8 +1326,8 @@ fn chosen_method<'a>(
     }
 }
 
-/// Which profile the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
-fn render_profile_choice(
+/// Which connection the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
+fn render_connection_choice(
     ui: &mut egui::Ui,
     offer: &lns_ipc::ConnectorView,
     method: &lns_ipc::ConnectorMethodView,
@@ -1336,10 +1336,10 @@ fn render_profile_choice(
     if !method.needs_connect {
         return;
     }
-    let held: Vec<&lns_ipc::ConnectorProfileView> = offer
-        .profiles
+    let held: Vec<&lns_ipc::ConnectorConnectionView> = offer
+        .connections
         .iter()
-        .filter(|profile| profile.method == method.name)
+        .filter(|connection| connection.method == method.name)
         .collect();
     // Nothing to choose between, so the card asks for the one thing it needs instead of offering a choice of one.
     if held.is_empty() {
@@ -1350,27 +1350,28 @@ fn render_profile_choice(
         render_new_connection(ui, method, draft);
         return;
     }
-    if draft.profile.is_none() && !draft.connecting {
-        draft.profile = Some(held[0].label.clone());
+    if draft.connection.is_none() && !draft.connecting {
+        draft.connection = Some(held[0].label.clone());
     }
     ui.add_space(14.0);
-    section_label(ui, "PROFILE");
+    section_label(ui, "CONNECTION");
     ui.add_space(6.0);
     let picked = crate::ui::chips(
         ui,
         held.iter()
-            .map(|profile| {
+            .map(|connection| {
                 (
-                    profile.label.as_str(),
-                    !draft.connecting && draft.profile.as_deref() == Some(profile.label.as_str()),
+                    connection.label.as_str(),
+                    !draft.connecting
+                        && draft.connection.as_deref() == Some(connection.label.as_str()),
                 )
             })
-            .chain(std::iter::once((NEW_PROFILE, draft.connecting))),
+            .chain(std::iter::once((NEW_CONNECTION, draft.connecting))),
     );
     match picked.as_deref() {
-        Some(NEW_PROFILE) => begin_connecting(method, draft, offer),
+        Some(NEW_CONNECTION) => begin_connecting(method, draft, offer),
         Some(label) => {
-            draft.profile = Some(label.to_string());
+            draft.connection = Some(label.to_string());
             draft.connecting = false;
         }
         None => {}
@@ -1388,13 +1389,13 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-/// The chip that connects a new profile instead of picking one already held. "profile" throughout, because that is the word `lns connector` and the spec both use.
-const NEW_PROFILE: &str = "+ new";
+/// The chip that starts a new connection instead of picking one already held. "connection" throughout, because that is the word `lns connector` and the spec both use.
+const NEW_CONNECTION: &str = "+ new";
 
-/// What the chosen profile can reach, which §3.2.4 makes part of the disclosure — under the chips, because only the chosen one is being granted.
+/// What the chosen connection can reach, which §3.2.4 makes part of the disclosure — under the chips, because only the chosen one is being granted.
 fn render_chosen_authority(
     ui: &mut egui::Ui,
-    held: &[&lns_ipc::ConnectorProfileView],
+    held: &[&lns_ipc::ConnectorConnectionView],
     draft: &OfferDraft,
 ) {
     if draft.connecting {
@@ -1402,8 +1403,8 @@ fn render_chosen_authority(
     }
     let Some(chosen) = held
         .iter()
-        .find(|profile| draft.profile.as_deref() == Some(profile.label.as_str()))
-        .filter(|profile| !profile.authority.is_empty())
+        .find(|connection| draft.connection.as_deref() == Some(connection.label.as_str()))
+        .filter(|connection| !connection.authority.is_empty())
     else {
         return;
     };
@@ -1448,16 +1449,16 @@ fn render_new_connection(
     }
 }
 
-/// Suggests a name nothing already holds, because reusing one silently replaces the profile under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
+/// Suggests a name nothing already holds, because reusing one silently replaces the connection under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
 fn begin_connecting(
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
     offer: &lns_ipc::ConnectorView,
 ) {
     draft.connecting = true;
-    draft.profile = None;
+    draft.connection = None;
     if draft.label.is_empty() {
-        draft.label = offer.free_profile_name(&method.name);
+        draft.label = offer.free_connection_name(&method.name);
     }
 }
 
@@ -1520,13 +1521,13 @@ fn render_needs_a_newer_lns(ui: &mut egui::Ui, offer: &lns_ipc::ConnectorView) {
     );
 }
 
-/// A method that authenticates cannot be granted until there is a profile behind it.
+/// A method that authenticates cannot be granted until there is a connection behind it.
 fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
     if !method.needs_connect {
         return true;
     }
     if !draft.connecting {
-        return draft.profile.is_some();
+        return draft.connection.is_some();
     }
     !draft.label.trim().is_empty()
         && method.credentials.iter().all(|credential| {
@@ -1537,16 +1538,16 @@ fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> 
         })
 }
 
-fn profile_choice(draft: &OfferDraft) -> ProfileChoice {
+fn connection_choice(draft: &OfferDraft) -> ConnectionChoice {
     if draft.connecting {
-        return ProfileChoice::New {
+        return ConnectionChoice::New {
             label: draft.label.trim().to_string(),
             values: lns_ipc::SecretValues(draft.values.clone()),
         };
     }
-    match &draft.profile {
-        Some(label) => ProfileChoice::Held(label.clone()),
-        None => ProfileChoice::None,
+    match &draft.connection {
+        Some(label) => ConnectionChoice::Held(label.clone()),
+        None => ConnectionChoice::None,
     }
 }
 
@@ -1644,11 +1645,11 @@ impl CardState {
     }
 }
 
-/// A connector card being filled in: which method and profile, and any connection being made.
+/// A connector card being filled in: which method, which connection, and any connection the card is creating.
 #[derive(Default)]
 pub struct OfferDraft {
     method: Option<String>,
-    profile: Option<String>,
+    connection: Option<String>,
     connecting: bool,
     label: String,
     values: std::collections::BTreeMap<String, String>,
@@ -1945,7 +1946,7 @@ mod tests {
 
     fn offered_prompt(
         method: &str,
-        profiles: &[(&str, &[&str])],
+        connections: &[(&str, &[&str])],
         credentials: &[&str],
     ) -> Snapshot {
         Snapshot {
@@ -1970,9 +1971,9 @@ mod tests {
                         credentials: credentials.iter().map(|c| c.to_string()).collect(),
                         help: None,
                     }],
-                    profiles: profiles
+                    connections: connections
                         .iter()
-                        .map(|(label, authority)| lns_ipc::ConnectorProfileView {
+                        .map(|(label, authority)| lns_ipc::ConnectorConnectionView {
                             label: label.to_string(),
                             method: method.into(),
                             authority: authority.iter().map(|a| a.to_string()).collect(),
@@ -1994,14 +1995,14 @@ mod tests {
             Some(CardAction::Grant {
                 id: "r1".into(),
                 method: "open".into(),
-                profile: ProfileChoice::None,
+                connection: ConnectionChoice::None,
             }),
-            "a method that does not authenticate is granted with no profile behind it"
+            "a method that does not authenticate is granted with no connection behind it"
         );
     }
 
     #[test]
-    fn the_card_grants_with_the_profile_it_defaulted_to() {
+    fn the_card_grants_with_the_connection_it_defaulted_to() {
         let fired = click_labelled_control(
             offered_prompt(
                 "token",
@@ -2016,40 +2017,40 @@ mod tests {
             Some(CardAction::Grant {
                 id: "r1".into(),
                 method: "token".into(),
-                profile: ProfileChoice::Held("work".into()),
+                connection: ConnectionChoice::Held("work".into()),
             }),
-            "with several profiles held the card picks the first and says which, rather than granting nameless"
+            "with several connections held the card picks the first and says which, rather than granting nameless"
         );
     }
 
     #[test]
-    fn the_profile_the_card_chose_is_the_one_the_grant_names() {
-        // The user's whole reason for the radio list: two profiles held, and this run needs the second.
+    fn the_connection_the_card_chose_is_the_one_the_grant_names() {
+        // The user's whole reason for the radio list: two connections held, and this run needs the second.
         let chosen = OfferDraft {
-            profile: Some("personal".into()),
+            connection: Some("personal".into()),
             ..OfferDraft::default()
         };
         assert_eq!(
-            profile_choice(&chosen),
-            ProfileChoice::Held("personal".into())
+            connection_choice(&chosen),
+            ConnectionChoice::Held("personal".into())
         );
     }
 
     #[test]
     fn a_connection_being_made_carries_its_values_rather_than_a_name_that_is_not_stored_yet() {
-        // The label names a profile that does not exist until the connect runs, so sending it as a held one would refuse.
+        // The label names a connection that does not exist until the connect runs, so sending it as a held one would refuse.
         let typing = OfferDraft {
             connecting: true,
             label: "  token-2  ".into(),
             values: [("SOME_TOKEN".to_string(), "sk-live".to_string())]
                 .into_iter()
                 .collect(),
-            profile: Some("work".into()),
+            connection: Some("work".into()),
             ..OfferDraft::default()
         };
         assert_eq!(
-            profile_choice(&typing),
-            ProfileChoice::New {
+            connection_choice(&typing),
+            ConnectionChoice::New {
                 label: "token-2".into(),
                 values: lns_ipc::SecretValues(
                     [("SOME_TOKEN".to_string(), "sk-live".to_string())]
@@ -2082,12 +2083,12 @@ mod tests {
     }
 
     #[test]
-    fn a_method_with_no_profile_of_its_own_goes_straight_to_the_connect_form() {
-        // The connector holds a profile, but not for this method: offering "Connect a new one" would be a link to swap a profile the user does not have.
+    fn a_method_with_no_connection_of_its_own_goes_straight_to_the_connect_form() {
+        // The connector holds a connection, but not for this method: offering "Connect a new one" would be a link to swap a connection the user does not have.
         let mut snapshot = offered_prompt("session", &[], &["SESSION_TOKEN"]);
         let offer = snapshot.pending[0].offer.as_mut().expect("an offer");
-        // Held under the *other* method, and named after this one: the store keys a profile by connector and label alone, so the suggestion must step past it.
-        offer.profiles.push(lns_ipc::ConnectorProfileView {
+        // Held under the *other* method, and named after this one: the store keys a connection by connector and label alone, so the suggestion must step past it.
+        offer.connections.push(lns_ipc::ConnectorConnectionView {
             label: "session".into(),
             method: "token".into(),
             authority: Vec::new(),
@@ -2096,11 +2097,11 @@ mod tests {
         assert_eq!(
             form_state(snapshot, "session-2"),
             (false, true),
-            "no chip to swap a profile the user does not have, and the form open with a free name already in it"
+            "no chip to swap a connection the user does not have, and the form open with a free name already in it"
         );
     }
 
-    /// Whether the card offers another profile to switch to, and whether the connect form is open with the suggested name in its field.
+    /// Whether the card offers another connection to switch to, and whether the connect form is open with the suggested name in its field.
     fn form_state(snapshot: Snapshot, suggested: &str) -> (bool, bool) {
         use egui_kittest::kittest::Queryable;
         let mut cards = CardState::default();
@@ -2118,21 +2119,21 @@ mod tests {
         harness.run();
         harness.run();
         (
-            harness.query_all_by_label(NEW_PROFILE).next().is_some(),
+            harness.query_all_by_label(NEW_CONNECTION).next().is_some(),
             // by_all rather than by_one: a text input exposes its value on the field and again on its inner text node.
             harness.query_all_by_value(suggested).next().is_some(),
         )
     }
 
     #[test]
-    fn a_method_that_already_holds_a_profile_offers_the_choice_first() {
-        // Every profile is a chip, so the one being granted is visible without opening anything.
+    fn a_method_that_already_holds_a_connection_offers_the_choice_first() {
+        // Every connection is a chip, so the one being granted is visible without opening anything.
         let snapshot = offered_prompt(
             "token",
             &[("work", &[]), ("personal", &[])],
             &["SOME_TOKEN"],
         );
-        for chip in ["work", "personal", NEW_PROFILE] {
+        for chip in ["work", "personal", NEW_CONNECTION] {
             assert!(control_exists(snapshot.clone(), chip), "{chip}");
         }
     }
@@ -2168,8 +2169,8 @@ mod tests {
     }
 
     #[test]
-    fn granting_carries_the_profile_whose_chip_was_clicked() {
-        // The whole reason for a selector: two profiles held, and this run needs the second.
+    fn granting_carries_the_connection_whose_chip_was_clicked() {
+        // The whole reason for a selector: two connections held, and this run needs the second.
         let snapshot = offered_prompt(
             "token",
             &[("work", &["repo"]), ("personal", &[])],
@@ -2181,14 +2182,14 @@ mod tests {
             Some(CardAction::Grant {
                 id: "r1".into(),
                 method: "token".into(),
-                profile: ProfileChoice::Held("personal".into()),
+                connection: ConnectionChoice::Held("personal".into()),
             })
         );
     }
 
     #[test]
-    fn the_chosen_profiles_authority_is_disclosed_under_its_chip() {
-        // §3.2.4 makes the profile's authority part of what the card discloses, and the chosen one is the profile the grant applies — so it must follow the choice, not sit on whichever profile happens to be first.
+    fn the_chosen_connections_authority_is_disclosed_under_its_chip() {
+        // §3.2.4 makes the connection's authority part of what the card discloses, and the chosen one is the connection the grant applies — so it must follow the choice, not sit on whichever connection happens to be first.
         let held: &[(&str, &[&str])] = &[("work", &["repo", "issues"]), ("personal", &[])];
         assert!(control_exists(
             offered_prompt("token", held, &["SOME_TOKEN"]),
@@ -2200,11 +2201,11 @@ mod tests {
 
         assert!(
             !after_choosing_the_other,
-            "the other profile grants nothing named, so nothing is disclosed"
+            "the other connection grants nothing named, so nothing is disclosed"
         );
     }
 
-    /// Whether `repo, issues` is still on the card once `chip` is the chosen profile.
+    /// Whether `repo, issues` is still on the card once `chip` is the chosen connection.
     fn scopes_after_picking(snapshot: Snapshot, chip: &str) -> bool {
         use egui_kittest::kittest::Queryable;
         let mut cards = CardState::default();
@@ -2298,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_method_needing_a_profile_cannot_be_granted_until_there_is_one() {
+    fn a_method_needing_a_connection_cannot_be_granted_until_there_is_one() {
         // Granting first would refuse at the store, after the user already consented.
         let waiting = OfferDraft {
             connecting: true,
@@ -2332,7 +2333,7 @@ mod tests {
 
     #[test]
     fn a_new_connection_is_named_something_not_already_taken() {
-        // §7.1: a colliding label silently replaces the profile already under it, which is the one outcome a second profile must not produce.
+        // §7.1: a colliding label silently replaces the connection already under it, which is the one outcome a second connection must not produce.
         let method = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
@@ -2372,9 +2373,9 @@ mod tests {
             digest: "sha256:abc".into(),
             serves: Vec::new(),
             methods: Vec::new(),
-            profiles: labels
+            connections: labels
                 .iter()
-                .map(|label| lns_ipc::ConnectorProfileView {
+                .map(|label| lns_ipc::ConnectorConnectionView {
                     label: label.to_string(),
                     method: "token".into(),
                     authority: Vec::new(),

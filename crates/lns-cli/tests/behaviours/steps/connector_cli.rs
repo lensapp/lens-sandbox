@@ -7,12 +7,12 @@ use cucumber::{given, then, when};
 use lns_cli::command::parse_args;
 use lns_cli::connector::{self, ConnectorArgs, ConnectorService};
 use lns_cli::local_future::LocalBoxFuture;
-use lns_ipc::{ConnectorMethodView, ConnectorProfileView, ConnectorView, Request, Response};
+use lns_ipc::{ConnectorConnectionView, ConnectorMethodView, ConnectorView, Request, Response};
 
 const CWD: &str = "/work";
 const DIGEST: &str = "sha256:abc";
 
-fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
+fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
     ConnectorView {
         name: name.to_string(),
         digest: DIGEST.to_string(),
@@ -41,9 +41,9 @@ fn view(name: &str, serves: &str, profiles: Vec<&str>) -> ConnectorView {
                 help: None,
             },
         ],
-        profiles: profiles
+        connections: connections
             .into_iter()
-            .map(|label| ConnectorProfileView {
+            .map(|label| ConnectorConnectionView {
                 label: label.to_string(),
                 method: "token".to_string(),
                 authority: Vec::new(),
@@ -62,7 +62,7 @@ struct FakeConnectorService {
     forgot: Option<bool>,
     grant_unchanged: bool,
     held: Vec<ConnectorView>,
-    dropped_profiles: Option<usize>,
+    dropped_connections: Option<usize>,
     refuse_message: Option<String>,
     unreachable: bool,
     requests: Arc<Mutex<Vec<Request>>>,
@@ -80,7 +80,7 @@ impl FakeConnectorService {
             forgot: rig.forgot,
             grant_unchanged: rig.grant_unchanged,
             held: rig.held.clone(),
-            dropped_profiles: rig.dropped_profiles,
+            dropped_connections: rig.dropped_connections,
             refuse_message: rig.refuse_message.clone(),
             unreachable: rig.unreachable,
             requests: rig.requests.clone(),
@@ -106,18 +106,20 @@ impl FakeConnectorService {
             Request::ListConnectors => Response::ConnectorList {
                 connectors: self.held.clone(),
             },
-            Request::UninstallConnector { name } => match self.dropped_profiles {
-                Some(dropped_profiles) if self.installed_name.as_deref() == Some(name) => {
+            Request::UninstallConnector { name } => match self.dropped_connections {
+                Some(dropped_connections) if self.installed_name.as_deref() == Some(name) => {
                     Response::ConnectorUninstalled {
                         name: name.clone(),
-                        dropped_profiles,
+                        dropped_connections,
                     }
                 }
                 _ => Response::ConnectorUnknown { name: name.clone() },
             },
-            Request::ConnectConnector { name, profile, .. } => Response::ConnectorConnected {
+            Request::ConnectConnector {
+                name, connection, ..
+            } => Response::ConnectorConnected {
                 name: name.clone(),
-                profile: self.connected.clone().unwrap_or_else(|| profile.clone()),
+                connection: self.connected.clone().unwrap_or_else(|| connection.clone()),
                 invalidated: Vec::new(),
             },
             Request::DisconnectConnector { name, .. } => Response::ConnectorDisconnected {
@@ -132,7 +134,7 @@ impl FakeConnectorService {
                 Response::ConnectorGranted {
                     name: name.clone(),
                     method: granted,
-                    profile: None,
+                    connection: None,
                     displaced,
                     unchanged: self.grant_unchanged,
                 }
@@ -164,8 +166,8 @@ fn service_holds(world: &mut BehaviourWorld, name: String, serves: String) {
     world.connector.held.push(view(&name, &serves, Vec::new()));
 }
 
-#[given(expr = "the machine holds the profile {string} of {string} for method {string}")]
-fn machine_holds_profile(
+#[given(expr = "the machine holds the connection {string} of {string} for method {string}")]
+fn machine_holds_connection(
     world: &mut BehaviourWorld,
     label: String,
     connector: String,
@@ -176,8 +178,8 @@ fn machine_holds_profile(
         .held
         .iter_mut()
         .find(|view| view.name == connector)
-        .expect("the connector must be installed before it holds a profile");
-    held.profiles.push(lns_ipc::ConnectorProfileView {
+        .expect("the connector must be installed before it holds a connection");
+    held.connections.push(lns_ipc::ConnectorConnectionView {
         label,
         method,
         authority: Vec::new(),
@@ -189,10 +191,10 @@ fn service_holds_none(world: &mut BehaviourWorld) {
     world.connector.held.clear();
 }
 
-#[given(expr = "the service uninstalls {string} dropping {int} profiles")]
+#[given(expr = "the service uninstalls {string} dropping {int} connections")]
 fn service_uninstalls(world: &mut BehaviourWorld, name: String, dropped: usize) {
     world.connector.installed_name = Some(name);
-    world.connector.dropped_profiles = Some(dropped);
+    world.connector.dropped_connections = Some(dropped);
 }
 
 #[given(expr = "the connector service refuses with {string}")]
@@ -345,8 +347,8 @@ fn output_names(world: &mut BehaviourWorld, name: String) {
     assert!(run.output.contains(&name), "got: {}", run.output);
 }
 
-#[then(expr = "the output says it holds no profile")]
-fn says_no_profile(world: &mut BehaviourWorld) {
+#[then(expr = "the output says it holds no connection")]
+fn says_no_connection(world: &mut BehaviourWorld) {
     let run = run_of(world);
     let row = run
         .output
@@ -355,7 +357,7 @@ fn says_no_profile(world: &mut BehaviourWorld) {
         .unwrap_or_else(|| panic!("no row names the connector: {}", run.output));
     assert!(
         row.trim_end().ends_with("none"),
-        "a connector with no profile is the normal state after an install, so the PROFILES cell says so: {row}"
+        "a connector with no connection is the normal state after an install, so the CONNECTIONS cell says so: {row}"
     );
 }
 
@@ -379,11 +381,12 @@ fn says_grants_outlive(world: &mut BehaviourWorld) {
     );
 }
 
-#[then(expr = "the output says {int} profiles were dropped")]
-fn says_profiles_dropped(world: &mut BehaviourWorld, dropped: usize) {
+#[then(expr = "the output says {int} connections were dropped")]
+fn says_connections_dropped(world: &mut BehaviourWorld, dropped: usize) {
     let run = run_of(world);
     assert!(
-        run.output.contains(&format!("dropped {dropped} profile")),
+        run.output
+            .contains(&format!("dropped {dropped} connection")),
         "got: {}",
         run.output
     );
@@ -407,8 +410,8 @@ fn error_mentions_service(world: &mut BehaviourWorld) {
 }
 
 #[given(expr = "the service connects {string} as {string}")]
-fn service_connects(world: &mut BehaviourWorld, _name: String, profile: String) {
-    world.connector.connected = Some(profile);
+fn service_connects(world: &mut BehaviourWorld, _name: String, connection: String) {
+    world.connector.connected = Some(connection);
 }
 
 #[given(expr = "the service reports the grant unchanged for {string}")]
@@ -432,7 +435,7 @@ fn service_grants_replacing(
     world.connector.granted = Some((method, Some(displaced)));
 }
 
-#[given(expr = "the service disconnects {string} dropping {int} profiles")]
+#[given(expr = "the service disconnects {string} dropping {int} connections")]
 fn service_disconnects(world: &mut BehaviourWorld, _name: String, dropped: usize) {
     world.connector.disconnected = Some(dropped);
 }
@@ -511,11 +514,11 @@ fn says_replaced(world: &mut BehaviourWorld, displaced: String) {
     );
 }
 
-#[then(expr = "the output says it holds no profile to disconnect")]
-fn says_no_profile_to_disconnect(world: &mut BehaviourWorld) {
+#[then(expr = "the output says it holds no connection to disconnect")]
+fn says_no_connection_to_disconnect(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
-        run.output.contains("holds no profile to disconnect"),
+        run.output.contains("holds no connection to disconnect"),
         "got: {}",
         run.output
     );

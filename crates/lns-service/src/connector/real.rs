@@ -10,7 +10,7 @@ use lns_policy::decision_store::JsonDecisionStore;
 
 use super::handler;
 use super::registry::RegistryConnectors;
-use super::store::{ConnectorStore, Profile, ProjectDecision};
+use super::store::{Connection, ConnectorStore, ProjectDecision};
 use crate::approval_flow::protocol::GrantedPayload;
 
 /// One machine verb, named without the wire type so the dispatcher hands over no store of its own.
@@ -21,18 +21,18 @@ pub enum Call {
     Connect {
         name: String,
         method: String,
-        profile: String,
+        connection: String,
         values: std::collections::BTreeMap<String, String>,
     },
     Disconnect {
         name: String,
-        profile: Option<String>,
+        connection: Option<String>,
     },
     Grant {
         name: String,
         project_dir: String,
         method: String,
-        profile: Option<String>,
+        connection: Option<String>,
     },
     Forget {
         name: String,
@@ -88,7 +88,7 @@ impl RealConnectorPort {
     fn with_store<T>(&self, f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T, String> {
         let paths = Paths::resolve().map_err(|e| format!("{e:#}"))?;
         let installed = super::dir::ConnectorDir::new(paths.connectors);
-        let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
+        let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
         let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
         f(&ConnectorStore::new(&installed, &values, &grants)).map_err(|e| format!("{e:#}"))
     }
@@ -112,10 +112,10 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         name: &str,
         digest: &str,
         method: &str,
-        profile: Option<&str>,
+        connection: Option<&str>,
     ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
         self.with_store(|store| {
-            handler::grant_disclosed(store, name, digest, &self.project_dir, method, profile)
+            handler::grant_disclosed(store, name, digest, &self.project_dir, method, connection)
         })
     }
 
@@ -157,7 +157,7 @@ fn with_project_store<T>(
         .with_context(|| format!("project directory {} is not utf-8", folded.display()))?;
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
-    let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
+    let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
     let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
     f(&ConnectorStore::new(&installed, &values, &grants), dir)
 }
@@ -165,7 +165,7 @@ fn with_project_store<T>(
 pub async fn answer(call: Call) -> Result<Response> {
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
-    let values: JsonDecisionStore<Profile> = JsonDecisionStore::new(paths.values);
+    let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
     let grants: JsonDecisionStore<ProjectDecision> = JsonDecisionStore::new(paths.grants);
     let store = ConnectorStore::new(&installed, &values, &grants);
     match call {
@@ -173,9 +173,9 @@ pub async fn answer(call: Call) -> Result<Response> {
             connector: handler::install(&store, &RegistryConnectors, &source).await?,
         }),
         Call::Uninstall(name) => Ok(match handler::uninstall(&store, &name)? {
-            Some(dropped_profiles) => Response::ConnectorUninstalled {
+            Some(dropped_connections) => Response::ConnectorUninstalled {
                 name,
-                dropped_profiles,
+                dropped_connections,
             },
             None => Response::ConnectorUnknown { name },
         }),
@@ -185,31 +185,32 @@ pub async fn answer(call: Call) -> Result<Response> {
         Call::Connect {
             name,
             method,
-            profile,
+            connection,
             values,
         } => {
-            let connected = handler::connect(&store, &name, &method, &profile, values)?;
+            let connected = handler::connect(&store, &name, &method, &connection, values)?;
             Ok(Response::ConnectorConnected {
                 name,
-                profile: connected.profile,
+                connection: connected.connection,
                 invalidated: connected.invalidated,
             })
         }
-        Call::Disconnect { name, profile } => Ok(Response::ConnectorDisconnected {
-            dropped: handler::disconnect(&store, &name, profile.as_deref())?,
+        Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
+            dropped: handler::disconnect(&store, &name, connection.as_deref())?,
             name,
         }),
         Call::Grant {
             name,
             project_dir,
             method,
-            profile,
+            connection,
         } => {
-            let granted = handler::grant(&store, &name, &project_dir, &method, profile.as_deref())?;
+            let granted =
+                handler::grant(&store, &name, &project_dir, &method, connection.as_deref())?;
             Ok(Response::ConnectorGranted {
                 name,
                 method: granted.method,
-                profile: granted.profile,
+                connection: granted.connection,
                 displaced: granted.displaced,
                 unchanged: granted.unchanged,
             })
@@ -342,7 +343,7 @@ mod tests {
     /// Through the store rather than hand-written json, so the file this reads back is the shape a real decline writes.
     fn decline(home: &Path, dir: &str) {
         let installed = super::super::dir::ConnectorDir::new(home.join("connectors"));
-        let values: JsonDecisionStore<Profile> =
+        let values: JsonDecisionStore<Connection> =
             JsonDecisionStore::new(home.join("connector-values.json"));
         let grants: JsonDecisionStore<ProjectDecision> =
             JsonDecisionStore::new(home.join("connector-grants.json"));
@@ -495,7 +496,7 @@ mod tests {
         assert_eq!(
             supply.credentials[0].injections[0].value(),
             "Bearer sk-live",
-            "the profile the grant named is the one that arms it"
+            "the connection the grant named is the one that arms it"
         );
         assert!(
             granted_supply_for(Path::new("/elsewhere")).is_empty(),
@@ -519,7 +520,7 @@ mod tests {
                     ProjectDecision::Granted {
                         digest: "sha256:abc".to_string(),
                         method: "token".to_string(),
-                        profile: None,
+                        connection: None,
                         authority: Default::default(),
                     },
                 )?;
@@ -551,7 +552,7 @@ mod tests {
                 ProjectDecision::Granted {
                     digest: "sha256:the-version-they-agreed-to".to_string(),
                     method: "token".to_string(),
-                    profile: None,
+                    connection: None,
                     authority: Default::default(),
                 },
             )?;

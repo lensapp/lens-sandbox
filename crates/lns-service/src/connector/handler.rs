@@ -1,10 +1,10 @@
 //! The three machine verbs of `docs/cli-spec.md` §3.3, over a store and a source.
 
 use anyhow::Result;
-use lns_ipc::{ConnectorMethodView, ConnectorProfileView, ConnectorView};
+use lns_ipc::{ConnectorConnectionView, ConnectorMethodView, ConnectorView};
 
 use super::source::{ConnectorSource, Source};
-use super::store::{ConnectorStore, Installed, Profile};
+use super::store::{Connection, ConnectorStore, Installed};
 use std::collections::BTreeMap;
 
 /// Resolve `<REF|PATH>` and install what it names. The digest comes from the resolver, never from a caller, because a grant binds to it.
@@ -18,12 +18,12 @@ pub async fn install<S: ConnectorSource + ?Sized>(
     Ok(view_of(
         &definition,
         &fetched.digest,
-        &store.profiles_of(&definition.name)?,
+        &store.connections_of(&definition.name)?,
     ))
 }
 
 pub fn uninstall(store: &ConnectorStore<'_>, name: &str) -> Result<Option<usize>> {
-    let held = store.profiles_of(name)?.len();
+    let held = store.connections_of(name)?.len();
     Ok(store.uninstall(name)?.then_some(held))
 }
 
@@ -37,15 +37,15 @@ pub fn list(store: &ConnectorStore<'_>) -> Result<Vec<ConnectorView>> {
 
 /// A stored document that will not parse is still listed, by name and digest alone, so `list` can show what `install` refuses to work beside.
 fn one_installed(store: &ConnectorStore<'_>, entry: &Installed) -> Result<ConnectorView> {
-    let profiles = store.profiles_of(&entry.name)?;
+    let connections = store.connections_of(&entry.name)?;
     Ok(match lns_artifact::connector::parse(&entry.document) {
-        Ok(definition) => view_of(&definition, &entry.digest, &profiles),
+        Ok(definition) => view_of(&definition, &entry.digest, &connections),
         Err(_) => ConnectorView {
             name: entry.name.clone(),
             digest: entry.digest.clone(),
             serves: Vec::new(),
             methods: Vec::new(),
-            profiles: profile_views(&profiles),
+            connections: connection_views(&connections),
         },
     })
 }
@@ -53,7 +53,7 @@ fn one_installed(store: &ConnectorStore<'_>, entry: &Installed) -> Result<Connec
 fn view_of(
     definition: &lns_artifact::connector::ConnectorDefinition,
     digest: &str,
-    profiles: &BTreeMap<String, Profile>,
+    connections: &BTreeMap<String, Connection>,
 ) -> ConnectorView {
     ConnectorView {
         name: definition.name.clone(),
@@ -83,7 +83,7 @@ fn view_of(
                 help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
             })
             .collect(),
-        profiles: profile_views(profiles),
+        connections: connection_views(connections),
     }
 }
 
@@ -107,21 +107,21 @@ fn opened_by(method: &lns_artifact::connector::Method) -> Vec<String> {
         .collect()
 }
 
-fn profile_views(profiles: &BTreeMap<String, Profile>) -> Vec<ConnectorProfileView> {
-    profiles
+fn connection_views(connections: &BTreeMap<String, Connection>) -> Vec<ConnectorConnectionView> {
+    connections
         .iter()
-        .map(|(label, profile)| ConnectorProfileView {
+        .map(|(label, connection)| ConnectorConnectionView {
             label: label.clone(),
-            method: profile.method.clone(),
-            authority: profile.authority.0.iter().cloned().collect(),
+            method: connection.method.clone(),
+            authority: connection.authority.0.iter().cloned().collect(),
         })
         .collect()
 }
 
-/// What one connect produced: the profile it stored, and the project directories whose grant its authority no longer matches (§3.2.4).
+/// What one connect produced: the connection it stored, and the project directories whose grant its authority no longer matches (§3.2.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connected {
-    pub profile: String,
+    pub connection: String,
     pub invalidated: Vec<String>,
 }
 
@@ -129,13 +129,13 @@ pub struct Connected {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Granted {
     pub method: String,
-    pub profile: Option<String>,
+    pub connection: Option<String>,
     pub displaced: Option<String>,
     /// True when the project already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
     pub unchanged: bool,
 }
 
-/// Store what an authentication returned as a profile. A method with no `auth` has nothing to connect and is granted instead (cli-spec §3.3).
+/// Store what an authentication returned as a connection. A method with no `auth` has nothing to connect and is granted instead (cli-spec §3.3).
 pub fn connect(
     store: &ConnectorStore<'_>,
     name: &str,
@@ -154,7 +154,7 @@ pub fn connect(
     let invalidated = store.record_authentication(
         name,
         label,
-        super::store::Profile {
+        super::store::Connection {
             method: method.name.clone(),
             // A `kind: token` exchange reports no authority (§3.2.4).
             authority: super::store::Authority::default(),
@@ -162,15 +162,19 @@ pub fn connect(
         },
     )?;
     Ok(Connected {
-        profile: label.to_string(),
+        connection: label.to_string(),
         invalidated,
     })
 }
 
-/// Drop one profile, or every profile of a connector. The connector stays installed and grants naming a dropped profile stay (cli-spec §3.3).
-pub fn disconnect(store: &ConnectorStore<'_>, name: &str, profile: Option<&str>) -> Result<usize> {
+/// Drop one connection, or every connection of a connector. The connector stays installed and grants naming a dropped connection stay (cli-spec §3.3).
+pub fn disconnect(
+    store: &ConnectorStore<'_>,
+    name: &str,
+    connection: Option<&str>,
+) -> Result<usize> {
     installed_entry(store, name)?;
-    Ok(store.drop_profiles(name, profile)?)
+    Ok(store.drop_connections(name, connection)?)
 }
 
 /// Record this project's grant of one method, replacing whatever it decided before.
@@ -179,16 +183,16 @@ pub fn grant(
     name: &str,
     project_dir: &str,
     method: &str,
-    profile: Option<&str>,
+    connection: Option<&str>,
 ) -> Result<Granted> {
     let entry = installed_entry(store, name)?;
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
     refuse_a_path_another_connector_writes(store, project_dir, name, &entry, &method.name)?;
-    let profile = behind_the_method(store, name, method, profile)?;
-    let authority = match &profile {
+    let connection = behind_the_method(store, name, method, connection)?;
+    let authority = match &connection {
         Some(label) => store
-            .profiles_of(name)?
+            .connections_of(name)?
             .get(label)
             .map(|held| held.authority.clone())
             .unwrap_or_default(),
@@ -197,14 +201,14 @@ pub fn grant(
     let decision = super::store::ProjectDecision::Granted {
         digest: entry.digest.clone(),
         method: method.name.clone(),
-        profile: profile.clone(),
+        connection: connection.clone(),
         authority,
     };
     let held = store.decision(project_dir, name)?;
     if held.as_ref() == Some(&decision) {
         return Ok(Granted {
             method: method.name.clone(),
-            profile,
+            connection,
             displaced: None,
             unchanged: true,
         });
@@ -212,7 +216,7 @@ pub fn grant(
     let displaced = store.decide(project_dir, name, decision)?;
     Ok(Granted {
         method: method.name.clone(),
-        profile,
+        connection,
         displaced: displaced.and_then(displaced_method),
         unchanged: false,
     })
@@ -229,7 +233,7 @@ pub fn grant_disclosed(
     disclosed_digest: &str,
     project_dir: &str,
     method: &str,
-    profile: Option<&str>,
+    connection: Option<&str>,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
     let entry = installed_entry(store, name)?;
     if entry.digest != disclosed_digest {
@@ -237,9 +241,9 @@ pub fn grant_disclosed(
             "{name} was replaced since this card was raised, so it now opens something you were not shown; the next run offers the new version"
         );
     }
-    // The profile `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
-    let settled = grant(store, name, project_dir, method, profile)?;
-    supplied_by(store, &entry, method, settled.profile.as_deref())
+    // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
+    let settled = grant(store, name, project_dir, method, connection)?;
+    supplied_by(store, &entry, method, settled.connection.as_deref())
 }
 
 /// Two grants claiming one guest path reach the guest as two creates: the second fails, the batch rolls back, and every granted file for the run goes with it. So the collision is refused where a user can still answer it.
@@ -292,7 +296,7 @@ pub fn granted_supply(
         let Some(super::store::ProjectDecision::Granted {
             digest,
             method,
-            profile,
+            connection,
             ..
         }) = store.decision(project_dir, &entry.name)?
         else {
@@ -302,7 +306,7 @@ pub fn granted_supply(
         if digest != entry.digest {
             continue;
         }
-        match supplied_by(store, &entry, &method, profile.as_deref()) {
+        match supplied_by(store, &entry, &method, connection.as_deref()) {
             Ok(payload) => {
                 supplied.insert(entry.name.clone(), payload);
             }
@@ -337,18 +341,18 @@ fn drop_a_connector_writing_a_path_another_already_holds(
     }
 }
 
-/// The egress, credentials, `env` and files one granted method contributes, armed with the values the named profile holds.
+/// The egress, credentials, `env` and files one granted method contributes, armed with the values the named connection holds.
 fn supplied_by(
     store: &ConnectorStore<'_>,
     entry: &Installed,
     method: &str,
-    profile: Option<&str>,
+    connection: Option<&str>,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
-    let values = match profile {
+    let values = match connection {
         Some(label) => store
-            .profiles_of(&entry.name)?
+            .connections_of(&entry.name)?
             .remove(label)
             .map(|held| lns_ipc::SecretValues(held.values))
             .unwrap_or_default(),
@@ -369,7 +373,7 @@ pub fn offerable(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<Co
             Ok(definition) => offers.push(view_of(
                 &definition,
                 &entry.digest,
-                &store.profiles_of(&entry.name)?,
+                &store.connections_of(&entry.name)?,
             )),
             Err(_) => unreadable.push(entry.name),
         }
@@ -397,7 +401,7 @@ fn decided_here(store: &ConnectorStore<'_>, project_dir: &str, entry: &Installed
     }
 }
 
-/// Which profile stands behind a method: none for one that does not authenticate, the named one, or the only one held.
+/// Which connection stands behind a method: none for one that does not authenticate, the named one, or the only one held.
 fn behind_the_method(
     store: &ConnectorStore<'_>,
     name: &str,
@@ -407,32 +411,32 @@ fn behind_the_method(
     if method.auth.is_none() {
         if let Some(named) = named {
             anyhow::bail!(
-                "method {} of {name} does not authenticate, so it takes no profile; drop --profile {named}",
+                "method {} of {name} does not authenticate, so it takes no connection; drop --connection {named}",
                 method.name
             );
         }
         return Ok(None);
     }
-    // A profile records the method that produced it, so one made for another method holds values for another method's credentials.
-    let held: BTreeMap<String, Profile> = store
-        .profiles_of(name)?
+    // A connection records the method that produced it, so one made for another method holds values for another method's credentials.
+    let held: BTreeMap<String, Connection> = store
+        .connections_of(name)?
         .into_iter()
-        .filter(|(_, profile)| profile.method == method.name)
+        .filter(|(_, connection)| connection.method == method.name)
         .collect();
     match named {
         Some(named) if held.contains_key(named) => Ok(Some(named.to_string())),
         Some(named) => anyhow::bail!(
-            "{name} holds no profile named {named} for method {}",
+            "{name} holds no connection named {named} for method {}",
             method.name
         ),
         None if held.len() == 1 => Ok(held.into_keys().next()),
         None if held.is_empty() => anyhow::bail!(
-            "{name} authenticates and this machine holds no profile for method {}; run `lns connector connect {name} --method {}` first",
+            "{name} authenticates and this machine holds no connection for method {}; run `lns connector connect {name} --method {}` first",
             method.name,
             method.name
         ),
         None => anyhow::bail!(
-            "{name} holds {} profiles for method {}, so name one with --profile",
+            "{name} holds {} connections for method {}, so name one with --connection",
             held.len(),
             method.name
         ),
@@ -621,7 +625,7 @@ mod tests {
 
     struct Rig {
         set: FakeSet,
-        values: FakeMap<Profile>,
+        values: FakeMap<Connection>,
         grants: FakeMap<super::super::store::ProjectDecision>,
     }
 
@@ -707,7 +711,7 @@ mod tests {
             [("token", "API token", true), ("open", "open", false)],
             "a method with no auth has nothing to connect, and one with no label falls back to its name"
         );
-        assert!(view.profiles.is_empty(), "installing connects nothing");
+        assert!(view.connections.is_empty(), "installing connects nothing");
     }
 
     #[tokio::test]
@@ -779,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uninstalling_reports_how_many_profiles_it_dropped() {
+    async fn uninstalling_reports_how_many_connections_it_dropped() {
         let rig = Rig::new();
         install(
             &rig.store(),
@@ -793,7 +797,7 @@ mod tests {
                 .record_authentication(
                     "some-provider",
                     label,
-                    Profile {
+                    Connection {
                         method: "token".to_string(),
                         authority: Authority::default(),
                         values: Default::default(),
@@ -811,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_list_names_each_connector_with_the_profiles_this_machine_holds() {
+    async fn the_list_names_each_connector_with_the_connections_this_machine_holds() {
         let rig = Rig::new();
         install(
             &rig.store(),
@@ -824,7 +828,7 @@ mod tests {
             .record_authentication(
                 "some-provider",
                 "work",
-                Profile {
+                Connection {
                     method: "token".to_string(),
                     authority: Authority::of(["repo:read"]),
                     values: Default::default(),
@@ -836,8 +840,8 @@ mod tests {
 
         assert_eq!(listed.len(), 1);
         assert_eq!(
-            listed[0].profiles,
-            [ConnectorProfileView {
+            listed[0].connections,
+            [ConnectorConnectionView {
                 label: "work".to_string(),
                 method: "token".to_string(),
                 authority: vec!["repo:read".to_string()],
@@ -879,15 +883,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connecting_stores_a_profile_the_machine_then_holds() {
+    async fn connecting_stores_a_connection_the_machine_then_holds() {
         let rig = Rig::new();
         installed(&rig).await;
         let connected = connect(&rig.store(), "some-provider", "token", "work", values())
             .expect("token is an offerable method that authenticates");
-        assert_eq!(connected.profile, "work");
+        assert_eq!(connected.connection, "work");
         assert!(connected.invalidated.is_empty());
         assert_eq!(
-            rig.store().profiles_of("some-provider").unwrap()["work"].method,
+            rig.store().connections_of("some-provider").unwrap()["work"].method,
             "token"
         );
     }
@@ -924,7 +928,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnecting_drops_the_profiles_and_leaves_the_connector_installed() {
+    async fn disconnecting_drops_the_connections_and_leaves_the_connector_installed() {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
@@ -951,13 +955,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn granting_a_method_that_authenticates_takes_the_only_profile_held() {
+    async fn granting_a_method_that_authenticates_takes_the_only_connection_held() {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
         let granted = grant(&rig.store(), "some-provider", "/work", "token", None).expect("grant");
         assert_eq!(granted.method, "token");
-        assert_eq!(granted.profile.as_deref(), Some("work"));
+        assert_eq!(granted.connection.as_deref(), Some("work"));
         assert_eq!(granted.displaced, None);
     }
 
@@ -976,7 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn granting_a_method_that_authenticates_with_no_profile_held_says_to_connect_first() {
+    async fn granting_a_method_that_authenticates_with_no_connection_held_says_to_connect_first() {
         let rig = Rig::new();
         installed(&rig).await;
         let err = grant(&rig.store(), "some-provider", "/work", "token", None)
@@ -986,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn granting_with_several_profiles_held_and_none_named_asks_for_one() {
+    async fn granting_with_several_connections_held_and_none_named_asks_for_one() {
         let rig = Rig::new();
         installed(&rig).await;
         for label in ["work", "personal"] {
@@ -995,11 +999,11 @@ mod tests {
         let err = grant(&rig.store(), "some-provider", "/work", "token", None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("--profile"), "{err}");
+        assert!(err.contains("--connection"), "{err}");
     }
 
     #[tokio::test]
-    async fn granting_a_profile_the_machine_does_not_hold_is_refused() {
+    async fn granting_a_connection_the_machine_does_not_hold_is_refused() {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
@@ -1012,19 +1016,19 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no profile named other"), "{err}");
+        assert!(err.contains("no connection named other"), "{err}");
     }
 
     #[tokio::test]
-    async fn granting_a_method_that_does_not_authenticate_takes_no_profile() {
+    async fn granting_a_method_that_does_not_authenticate_takes_no_connection() {
         let rig = Rig::new();
         installed(&rig).await;
         let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
-        assert_eq!(granted.profile, None);
+        assert_eq!(granted.connection, None);
         let err = grant(&rig.store(), "some-provider", "/work", "open", Some("work"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("takes no profile"), "{err}");
+        assert!(err.contains("takes no connection"), "{err}");
     }
 
     #[tokio::test]
@@ -1106,8 +1110,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_grant_will_not_take_a_profile_another_method_produced() {
-        // A profile records the method that made it, so one made elsewhere holds values for another method's credentials.
+    async fn a_grant_will_not_take_a_connection_another_method_produced() {
+        // A connection records the method that made it, so one made elsewhere holds values for another method's credentials.
         let rig = Rig::new();
         rig.set
             .put(
@@ -1126,12 +1130,12 @@ mod tests {
         assert_eq!(
             rig.store().decision("/work", "some-provider").unwrap(),
             None,
-            "nothing may be recorded when the profile does not belong to the method"
+            "nothing may be recorded when the connection does not belong to the method"
         );
     }
 
     #[tokio::test]
-    async fn naming_a_profile_of_another_method_is_refused() {
+    async fn naming_a_connection_of_another_method_is_refused() {
         let rig = Rig::new();
         rig.set
             .put(
@@ -1151,12 +1155,12 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no profile named personal"), "{err}");
+        assert!(err.contains("no connection named personal"), "{err}");
     }
 
     #[tokio::test]
     async fn a_grant_the_project_already_holds_is_unchanged_rather_than_a_replacement() {
-        // cli-spec §3.3: exits 1 when the project already granted that method and profile — and "replaced" would be false.
+        // cli-spec §3.3: exits 1 when the project already granted that method and connection — and "replaced" would be false.
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
@@ -1318,7 +1322,7 @@ mod tests {
                 ProjectDecision::Granted {
                     digest: "sha256:abc".to_string(),
                     method: "open".to_string(),
-                    profile: None,
+                    connection: None,
                     authority: Default::default(),
                 },
             )
@@ -1358,7 +1362,7 @@ mod tests {
                 ProjectDecision::Granted {
                     digest: "sha256:old".to_string(),
                     method: "open".to_string(),
-                    profile: None,
+                    connection: None,
                     authority: Default::default(),
                 },
             )
@@ -1630,7 +1634,7 @@ mod tests {
                     ProjectDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
-                        profile: None,
+                        connection: None,
                         authority: Default::default(),
                     },
                 )
@@ -1693,7 +1697,7 @@ mod tests {
                     ProjectDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
-                        profile: None,
+                        connection: None,
                         authority: Default::default(),
                     },
                 )
@@ -1731,7 +1735,7 @@ mod tests {
                     ProjectDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
-                        profile: None,
+                        connection: None,
                         authority: Default::default(),
                     },
                 )
@@ -1829,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn granting_a_connected_method_arms_it_with_the_value_that_profile_holds() {
+    fn granting_a_connected_method_arms_it_with_the_value_that_connection_holds() {
         let rig = Rig::new();
         let doc = serde_json::json!({
             "apiVersion": "lns.run/v1",

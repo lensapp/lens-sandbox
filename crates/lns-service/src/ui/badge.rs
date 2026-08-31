@@ -22,7 +22,7 @@ fn badge(ui: &mut egui::Ui, label: &str) {
         });
 }
 
-/// One profile the user can pick. Badge-shaped but painted from the button palette, because a chip is a control and the badges above it are not — a solid surface and brighter text where a badge is translucent and muted, and the card's action colour when it is the chosen one.
+/// One connection the user can pick. Badge-shaped but painted from the button palette, because a chip is a control and the badges above it are not — a solid surface and brighter text where a badge is translucent and muted, and the card's action colour when it is the chosen one.
 pub fn chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let (fill, stroke, text) = if selected {
         (

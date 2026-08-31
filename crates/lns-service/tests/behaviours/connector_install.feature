@@ -14,7 +14,7 @@ Feature: installing a connector on this machine
     When the machine installs the connector
     Then the install succeeds
     And the machine holds the connector "some-provider"
-    And the machine holds no profile for "some-provider"
+    And the machine holds no connection for "some-provider"
 
   Scenario: a second connector serving a domain the first already covers refuses
     Given the connector "some-provider" serves "*.some-provider.example"
