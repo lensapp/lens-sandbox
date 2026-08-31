@@ -5,7 +5,10 @@ Feature: running a pulled sandbox asks before mounting into the workload
   is mounted, attached, or booted — and names --yes as the escape hatch.
   Detaching is no answer to it: -d decides who holds the terminal after
   boot, and every question is asked before that.
-  All of it is virt-free: the refusal happens ahead of any VM work.
+  Every assertion here is made ahead of any VM work: the disclosure, the
+  refusal, and the summary are all printed before the boot is asked for. The
+  --yes scenario is the one run that goes on to ask for a boot, so its exit
+  code is deliberately left unasserted rather than tied to this host's virt.
 
   Background:
     Given a clean lns cache home
@@ -32,10 +35,12 @@ Feature: running a pulled sandbox asks before mounting into the workload
     And the output contains "--yes"
     And the output does not contain "started run"
 
-  Scenario: a detached run passed --yes is asked nothing
+  Scenario: a detached run passed --yes still discloses, and is asked nothing
     Given the user pushes a sandbox built from ./lns.yaml in one step
     When I run "run -d --yes <pushed-ref>" in the project directory
-    Then the output does not contain "declares these effects:"
+    Then the output contains "lns run"
+    And the output contains the pushed reference
+    And the output does not contain "declares these effects:"
     And the output does not contain "no terminal to confirm"
     And the output does not contain "Continue?"
 
