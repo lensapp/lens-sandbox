@@ -264,8 +264,7 @@ mod tests {
     #[test]
     fn a_document_under_any_name_digests_the_directory_it_sits_in() {
         // §7.1: the digest must be what a push of that directory publishes, and `lns push -f ./x/lns.dev.yaml` roots both the filesets and the README at `./x`. Rooting anywhere else here would make the grant stop surviving a publish.
-        let doc =
-            document(r#","filesets":[{"path":"./seed","guestPath":"/home/agent/.some-provider"}]"#);
+        let doc = document(r#","filesets":[{"path":"./seed","guestPath":"~/.some-provider"}]"#);
         let readme = b"# some-provider\n";
         let fs = MapFs::with(&[
             ("/work/README.md", readme),
@@ -328,9 +327,8 @@ mod tests {
     #[test]
     fn a_path_fileset_is_snapshotted_into_the_digest() {
         // The digest must cover the files, or two connectors differing only in a fileset would share one grant.
-        let doc = document(
-            r#","filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]"#,
-        );
+        let doc =
+            document(r#","filesets":[{"path":"./some-provider","guestPath":"~/.some-provider"}]"#);
         let with_file = MapFs::with(&[(
             "/work/some-provider/credentials.json",
             br#"{"token":"some_LNSPLACEHOLDER0000000000"}"#,
@@ -361,7 +359,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_fileset_names_the_method_and_the_path() {
-        let doc = document(r#","filesets":[{"path":"./absent","guestPath":"/home/agent/.x"}]"#);
+        let doc = document(r#","filesets":[{"path":"./absent","guestPath":"~/.x"}]"#);
         let err = read_local(&MapFs::default(), reading(doc), Path::new("/work/lns.yaml"))
             .unwrap_err()
             .to_string();

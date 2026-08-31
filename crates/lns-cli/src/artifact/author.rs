@@ -673,7 +673,7 @@ mod tests {
             "      egress:\n        http:\n          - match: api.stripe.com\n            verdict: allow\n",
             "        tcp:\n          - match: api.stripe.com:5432\n            verdict: allow\n",
             "      credentials:\n        - envVar: STRIPE_KEY\n          placeholder: stripe_LNSPLACEHOLDER00000\n",
-            "      filesets:\n        - guestPath: /home/agent/.stripe\n          inline:\n            config.json: '{}'\n",
+            "      filesets:\n        - guestPath: ~/.stripe\n          inline:\n            config.json: '{}'\n",
             "      env:\n        STRIPE_REGION: eu\n",
             "    - name: sso\n      auth:\n        kind: oauth_device\n",
             "    - name: open\n      egress:\n        http:\n          - match: api.stripe.com\n            verdict: allow\n",
@@ -689,7 +689,7 @@ mod tests {
             "method:       token (auth: token)",
             "1 route(s), 1 raw TCP rule(s)",
             "credential: STRIPE_KEY",
-            "file:       /home/agent/.stripe",
+            "file:       ~/.stripe",
             "env:        STRIPE_REGION=eu",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in: {text}");

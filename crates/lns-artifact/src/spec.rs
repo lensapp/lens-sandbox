@@ -115,15 +115,30 @@ pub struct Port {
     pub container: i64,
 }
 
-pub fn validate_guest_path(path: &str) -> Result<()> {
+/// Where a guest path is allowed to start, which differs by the mechanism that writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestAnchor {
+    /// Resolved by the host before boot, so the whole filesystem is reachable.
+    Root,
+    /// Written into a running guest over the policy channel, which reaches only that guest's home.
+    Home,
+}
+
+pub fn validate_guest_path(path: &str, anchor: GuestAnchor) -> Result<()> {
     if path.is_empty() {
         bail!("guest path must not be empty");
     }
     if path.chars().any(char::is_control) {
         bail!("guest path {path:?} must not contain control characters");
     }
-    if !path.starts_with('/') {
-        bail!("guest path {path} must be absolute (start with `/`)");
+    match anchor {
+        GuestAnchor::Root if !path.starts_with('/') => {
+            bail!("guest path {path} must be absolute (start with `/`)")
+        }
+        GuestAnchor::Home if !path.starts_with("~/") => bail!(
+            "guest path {path} must start with `~/`: it is written into a running guest, which reaches only that guest's home"
+        ),
+        _ => {}
     }
     if path.split('/').any(|segment| segment == "..") {
         bail!("guest path {path} must not contain a `..` segment");
@@ -282,28 +297,66 @@ mod tests {
 
     #[test]
     fn validate_guest_path_rejects_empty_relative_and_traversing_paths() {
-        assert!(validate_guest_path("/root/.some-agent/skills").is_ok());
+        assert!(validate_guest_path("/root/.some-agent/skills", GuestAnchor::Root).is_ok());
         assert!(
-            format!("{:#}", validate_guest_path("").unwrap_err()).contains("must not be empty")
+            format!(
+                "{:#}",
+                validate_guest_path("", GuestAnchor::Root).unwrap_err()
+            )
+            .contains("must not be empty")
         );
         assert!(
-            format!("{:#}", validate_guest_path("relative").unwrap_err())
-                .contains("must be absolute")
+            format!(
+                "{:#}",
+                validate_guest_path("relative", GuestAnchor::Root).unwrap_err()
+            )
+            .contains("must be absolute")
         );
         assert!(
-            format!("{:#}", validate_guest_path("/a/../b").unwrap_err()).contains("`..` segment")
+            format!(
+                "{:#}",
+                validate_guest_path("/a/../b", GuestAnchor::Root).unwrap_err()
+            )
+            .contains("`..` segment")
+        );
+    }
+
+    #[test]
+    fn a_home_anchored_path_is_the_only_one_a_running_guest_can_be_given() {
+        assert!(validate_guest_path("~/.some-provider", GuestAnchor::Home).is_ok());
+        for outside in ["/home/agent/.x", "~alice/.x", "relative"] {
+            assert!(
+                format!(
+                    "{:#}",
+                    validate_guest_path(outside, GuestAnchor::Home).unwrap_err()
+                )
+                .contains("must start with `~/`"),
+                "a policy change reaches only the guest's own home, so {outside} has nowhere to land"
+            );
+        }
+        assert!(
+            format!(
+                "{:#}",
+                validate_guest_path("~/../etc/shadow", GuestAnchor::Home).unwrap_err()
+            )
+            .contains("`..` segment"),
+            "the home anchor must not become a way out of the home"
         );
     }
 
     #[test]
     fn validate_guest_path_rejects_control_characters() {
         assert!(
-            validate_guest_path("/.lens\n/etc").is_err(),
+            validate_guest_path("/.lens\n/etc", GuestAnchor::Root).is_err(),
             "a newline in a guest path is line-injected into the newline-delimited /.lens/fileset-owned chown manifest and must be refused at the validation chokepoint"
         );
         assert!(
-            validate_guest_path("/ok\u{7f}/x").is_err(),
+            validate_guest_path("/ok\u{7f}/x", GuestAnchor::Root).is_err(),
             "any control character in a guest path must be refused"
+        );
+        assert!(
+            validate_guest_path("~/ok\n/x", GuestAnchor::Home).is_err(),
+            "a connector document is pushed to a registry, so the same refusal holds for the home anchor"
         );
     }
 
