@@ -1,7 +1,7 @@
 //! The connector records of `docs/sandbox-spec.md` §7.1.
 //!
 //! `DecisionStore::save` replaces a whole map, so every mutation is
-//! load-mutate-save under `write`; an in-process lock suffices only while every
+//! load-mutate-save under one process-wide lock; that suffices only while every
 //! connector write arrives over the service's IPC, leaving lns-service the sole
 //! writer of these files.
 
@@ -243,11 +243,13 @@ fn names_connection_with_other_authority(
     }
 }
 
+/// Held across every load-mutate-save. Process-wide rather than per store, because each entry point opens a store of its own over the same three files, so a lock one instance owned would serialize nothing.
+static WRITE: Mutex<()> = Mutex::new(());
+
 pub struct ConnectorStore<'a> {
     installed: &'a dyn InstalledSet,
     values: &'a dyn DecisionStore<Connection>,
     grants: &'a dyn DecisionStore<RunDecision>,
-    write: Mutex<()>,
 }
 
 impl<'a> ConnectorStore<'a> {
@@ -260,7 +262,6 @@ impl<'a> ConnectorStore<'a> {
             installed,
             values,
             grants,
-            write: Mutex::new(()),
         }
     }
 
@@ -501,8 +502,8 @@ impl<'a> ConnectorStore<'a> {
     }
 
     /// A poisoned lock means a prior writer panicked mid-mutation; the map is still whole on disk, so the next writer proceeds rather than refusing every connector operation.
-    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.write
+    fn lock(&self) -> std::sync::MutexGuard<'static, ()> {
+        WRITE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -524,9 +525,14 @@ mod tests {
         GrantHolder::Run(OTHER_RUN_ID.to_string())
     }
 
+    /// Announces the first save and waits to be released, so a test can hold one write open while it starts another.
+    type BlockOnce = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
     struct FakeMap<T> {
         state: StdMutex<DecisionFile<T>>,
         fail_save: StdMutex<bool>,
+        block_first_save: StdMutex<Option<BlockOnce>>,
+        announce_load: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
     }
 
     /// Hand-written because a derived `Default` would demand `T: Default`, which neither stored value has or needs.
@@ -535,18 +541,27 @@ mod tests {
             Self {
                 state: StdMutex::new(DecisionFile::new()),
                 fail_save: StdMutex::new(false),
+                block_first_save: StdMutex::new(None),
+                announce_load: StdMutex::new(None),
             }
         }
     }
 
     impl<T: Clone + Send + Sync> DecisionStore<T> for FakeMap<T> {
         fn load(&self) -> io::Result<DecisionFile<T>> {
+            if let Some(announce) = self.announce_load.lock().unwrap().as_ref() {
+                let _ = announce.send(());
+            }
             Ok(self.state.lock().unwrap().clone())
         }
 
         fn save(&self, state: &DecisionFile<T>) -> io::Result<()> {
             if *self.fail_save.lock().unwrap() {
                 return Err(io::Error::other("disk full"));
+            }
+            if let Some((entered, wait)) = self.block_first_save.lock().unwrap().take() {
+                entered.send(()).expect("the test is waiting");
+                wait.recv().expect("the test releases this save");
             }
             *self.state.lock().unwrap() = state.clone();
             Ok(())
@@ -1851,6 +1866,65 @@ mod tests {
                 .unwrap(),
             None,
             "a run and a name are different holders, even spelled the same"
+        );
+    }
+
+    #[test]
+    fn a_write_in_flight_holds_off_the_next_one_though_each_opens_its_own_store() {
+        // Every entry point opens a store of its own over the same files, so a lock one instance owns serializes nothing and the second load-mutate-save drops the first one's row.
+        let rig = std::sync::Arc::new(Rig::new());
+        let (entered, is_inside) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        *rig.grants.block_first_save.lock().unwrap() = Some((entered, wait));
+
+        let first = std::thread::spawn({
+            let rig = std::sync::Arc::clone(&rig);
+            move || {
+                rig.store()
+                    .decide(
+                        &a_run(),
+                        "some-provider",
+                        granted("sha256:abc", None, Authority::default()),
+                    )
+                    .unwrap()
+            }
+        });
+        is_inside.recv().expect("the first write reached its save");
+        let (loaded, has_loaded) = std::sync::mpsc::channel();
+        *rig.grants.announce_load.lock().unwrap() = Some(loaded);
+        let second = std::thread::spawn({
+            let rig = std::sync::Arc::clone(&rig);
+            move || {
+                rig.store()
+                    .decide(
+                        &another_run(),
+                        "some-provider",
+                        granted("sha256:abc", None, Authority::default()),
+                    )
+                    .unwrap()
+            }
+        });
+        // Waiting for the load rather than for the write to finish, so the race the fix closes is reached every run and not only when the threads happen to interleave.
+        assert!(
+            has_loaded
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err(),
+            "the second write read the grants while the first was still saving them"
+        );
+        release.send(()).expect("let the first write finish");
+        first.join().expect("the first write");
+        second.join().expect("the second write");
+
+        let store = rig.store();
+        assert!(
+            store.decision(&a_run(), "some-provider").unwrap().is_some(),
+            "the first run's grant was loaded away by a write that started while it was still saving"
+        );
+        assert!(
+            store
+                .decision(&another_run(), "some-provider")
+                .unwrap()
+                .is_some()
         );
     }
 
