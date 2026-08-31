@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Write;
 
 use anyhow::{Context, Result};
@@ -82,11 +83,11 @@ pub fn render_table(
         .max(headers.len());
     let mut widths = vec![0usize; columns];
     for (i, header) in headers.iter().enumerate() {
-        widths[i] = header.len();
+        widths[i] = display_width(header);
     }
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
+            widths[i] = widths[i].max(display_width(&display_cell(cell)));
         }
     }
     let header_cells: Vec<String> = headers.iter().map(|h| (*h).to_string()).collect();
@@ -100,6 +101,7 @@ pub fn render_table(
 fn write_row(out: &mut dyn Write, cells: &[String], widths: &[usize]) -> std::io::Result<()> {
     let last = cells.iter().rposition(|cell| !cell.is_empty()).unwrap_or(0);
     for (i, cell) in cells.iter().enumerate().take(last + 1) {
+        let cell = display_cell(cell);
         if i == last {
             write!(out, "{cell}")?;
         } else {
@@ -112,6 +114,40 @@ fn write_row(out: &mut dyn Write, cells: &[String], widths: &[usize]) -> std::io
         }
     }
     writeln!(out)
+}
+
+/// A cell as a terminal may safely receive it: every control character escaped, because a column
+/// carries whatever the record underneath it holds and some of those legitimately contain one —
+/// `lns-policy` separates a composed mixin from its workload with a NUL, precisely because no path
+/// or OCI reference can contain one. Written raw, a single such cell makes `grep` call the whole
+/// stream binary and refuse to match it, and an ESC in a cell is a sequence the terminal obeys
+/// rather than shows. Escaping here rather than at each call site means a table added later is safe
+/// without knowing to ask.
+///
+/// Only control characters are escaped, and uniformly as `\xNN`: a backslash a path really contains
+/// is left as itself rather than doubled, since the point is a stream that survives a pipe, not a
+/// round-trippable encoding. `--format json` needs none of this — serde escapes controls already.
+fn display_cell(cell: &str) -> Cow<'_, str> {
+    if !cell.chars().any(char::is_control) {
+        return Cow::Borrowed(cell);
+    }
+    let mut escaped = String::with_capacity(cell.len());
+    for ch in cell.chars() {
+        if ch.is_control() {
+            escaped.push_str(&format!("\\x{:02x}", ch as u32));
+        } else {
+            escaped.push(ch);
+        }
+    }
+    Cow::Owned(escaped)
+}
+
+/// Column widths count `char`s because the padding below is applied in `char`s: measuring the same
+/// cell in bytes pushed every row holding a non-ASCII name out of line. A `char` is still not a
+/// terminal column for wide or combining scripts, which would need a unicode-width table to get
+/// right; this keeps the two halves of the calculation agreeing on one unit.
+fn display_width(cell: &str) -> usize {
+    cell.chars().count()
 }
 
 /// The size column every table renders through, in the binary units the JSON carries raw.
@@ -357,5 +393,74 @@ a     c
     fn a_column_beyond_the_headers_is_still_sized_from_the_rows() {
         let text = rendered(&["A"], &[vec!["x".into(), "longer".into()]]);
         assert_eq!(text, "A\nx  longer\n");
+    }
+
+    /// A workload key composed with a mixin carries a NUL, and one of those on stdout is what makes
+    /// `grep` answer "binary file matches" instead of the line the user asked for.
+    #[test]
+    fn no_control_character_reaches_the_stream_from_a_cell() {
+        let text = rendered(
+            &["WORKLOAD", "VERDICT"],
+            &[vec!["def:/w\u{0}mixin".into(), "allow".into()]],
+        );
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "a table a pipe can carry has no control bytes in it: {text:?}"
+        );
+        assert!(
+            text.contains("def:/w\\x00mixin"),
+            "the byte is shown, not dropped: {text:?}"
+        );
+    }
+
+    #[test]
+    fn an_escape_sequence_in_a_cell_is_shown_rather_than_obeyed() {
+        let text = rendered(&["NAME"], &[vec!["\u{1b}[31mred".into()]]);
+        assert_eq!(
+            text, "NAME\n\\x1b[31mred\n",
+            "a record must not be able to colour or reposition the terminal it prints on"
+        );
+    }
+
+    #[test]
+    fn an_escaped_cell_is_measured_as_it_prints_not_as_it_was_stored() {
+        let text = rendered(
+            &["NAME", "N"],
+            &[
+                vec!["a\u{0}b".into(), "1".into()],
+                vec!["wwwww".into(), "2".into()],
+            ],
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[1], "a\\x00b  1",
+            "the escape widened the cell past the column: {text:?}"
+        );
+        assert_eq!(lines[2], "wwwww   2");
+    }
+
+    #[test]
+    fn columns_line_up_when_a_cell_is_not_ascii() {
+        let text = rendered(
+            &["NAME", "N"],
+            &[
+                vec!["äöü".into(), "1".into()],
+                vec!["abc".into(), "2".into()],
+            ],
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[1].chars().count(),
+            lines[2].chars().count(),
+            "a multi-byte name is three columns wide, not six: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_cell_is_passed_through_untouched() {
+        assert!(
+            matches!(display_cell("ordinary/path:1.0"), Cow::Borrowed(_)),
+            "the common row must not pay for the rare one"
+        );
     }
 }
