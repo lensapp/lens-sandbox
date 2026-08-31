@@ -29,6 +29,10 @@ pub struct BehaviourWorld {
     pub composed_env: Option<lns_service::workload_env::WorkloadEnv>,
     pub resolved_workdir: Option<Option<String>>,
     pub user_env: Vec<String>,
+    /// Each variable a granted connector fills for the run, by the connector that fills it.
+    pub filled_by_a_grant: std::collections::BTreeMap<String, String>,
+    /// What the run dropped because a grant fills it, from every source.
+    pub refused_env: Vec<lns_service::workload_env::Refused>,
     /// `spec.env` entries, merged ahead of `-e` exactly as `sandbox_launch` merges them.
     pub definition_env: Vec<String>,
 

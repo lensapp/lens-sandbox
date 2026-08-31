@@ -31,7 +31,14 @@ fn given_image_env(world: &mut BehaviourWorld, key: String, value: String) {
 
 #[when(regex = r#"^the user runs `([^`]*)`$"#)]
 fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
-    let user_env = user_env_from(&cmd);
+    // The run drops these before its environment travels, so the audit chain records what entered rather than what was typed.
+    let typed = user_env_from(&cmd);
+    let (user_env, refused) = lns_service::workload_env::without_what_a_grant_fills(
+        &typed,
+        &world.filled_by_a_grant,
+        lns_service::workload_env::source_among(&typed),
+    );
+    world.refused_env = refused;
     let image_env = world.image_env.clone();
     world.composed_env = Some(run_workload_env(
         image_env.as_deref(),
@@ -39,7 +46,17 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
         None,
         None,
         &Default::default(),
+        &world.filled_by_a_grant,
     ));
+    let from_the_image = composed(world)
+        .map(|c| c.refused.clone())
+        .unwrap_or_default();
+    // One answer over every source, the way the run reports it: warning per source would name a variable twice.
+    world.refused_env = lns_service::workload_env::one_refusal_per_variable(
+        std::mem::take(&mut world.refused_env)
+            .into_iter()
+            .chain(from_the_image),
+    );
     world.user_env = user_env;
 }
 
@@ -84,5 +101,71 @@ fn then_audit_records(
     match env.get(&key).and_then(|v| v.as_str()) {
         Some(v) if v == value => Ok(()),
         other => Err(format!("audit env[{key}] = {other:?}, want {value:?}")),
+    }
+}
+
+#[given(regex = r#"^the connector "([^"]+)" fills (\S+) for this run$"#)]
+fn the_connector_fills(world: &mut BehaviourWorld, connector: String, key: String) {
+    world.filled_by_a_grant.insert(key, connector);
+}
+
+#[then(regex = r#"^the workload's environment carries no (\S+) entry$"#)]
+fn then_env_carries_no_entry(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
+    let env = &composed(world)?.env;
+    match env
+        .iter()
+        .find(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))
+    {
+        Some(found) => Err(format!("a grant fills {key}, so {found:?} must not be set")),
+        None => Ok(()),
+    }
+}
+
+#[then(regex = r#"^the run is told "([^"]+)" fills (\S+)$"#)]
+fn then_the_run_is_told(
+    world: &mut BehaviourWorld,
+    connector: String,
+    key: String,
+) -> Result<(), String> {
+    let refused = world.refused_env.clone();
+    match refused.iter().find(|refused| refused.key == key) {
+        Some(refused) => {
+            let warning = lns_service::workload_env::refusal_warning(refused);
+            if warning.contains(&connector) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the warning does not name the connector: {warning}"
+                ))
+            }
+        }
+        None => Err(format!("{key} was dropped silently, refused: {refused:?}")),
+    }
+}
+
+#[then(regex = r#"^the audit entry for the run records no (\S+) entry$"#)]
+fn then_audit_records_no_entry(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
+    match lns_service::workload_env::injected_env(&world.user_env)
+        .and_then(|env| env.get(&key).cloned())
+    {
+        Some(value) => Err(format!(
+            "the chain says {key} entered the sandbox as {value:?}, and it did not"
+        )),
+        None => Ok(()),
+    }
+}
+
+#[then(regex = r#"^the run names (\S+) once$"#)]
+fn then_the_run_names_once(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
+    let named = world
+        .refused_env
+        .iter()
+        .filter(|refused| refused.key == key)
+        .count();
+    match named {
+        1 => Ok(()),
+        other => Err(format!(
+            "{key} was named {other} times, so the reader is given {other} remedies for one variable"
+        )),
     }
 }

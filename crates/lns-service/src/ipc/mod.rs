@@ -1156,7 +1156,15 @@ pub(super) fn build_session_params(
     run_id: &str,
 ) -> crate::vm::session_client::SessionParams {
     let exec_environment = crate::run_registry::exec_environment(run_id);
-    let env = crate::workload_env::exec_session_env(&exec_environment, &args.env);
+    // Read now rather than from the run's start: the card grants during the run, and an exec joining afterwards must be held to what the run holds today.
+    let filled_by_a_grant = crate::connector::real::variables_a_grant_fills(run_id);
+    let joining =
+        crate::workload_env::exec_session_env(&exec_environment, &args.env, &filled_by_a_grant);
+    // The run says what its grants displaced; an exec that dropped a variable in silence would look like the caller mistyped it.
+    for refused in crate::workload_env::one_refusal_per_variable(joining.refused) {
+        log::warn!("{}", crate::workload_env::refusal_warning(&refused));
+    }
+    let env = joining.env;
     crate::vm::session_client::SessionParams {
         argv: args.argv,
         env,
@@ -3799,6 +3807,7 @@ mod tests {
             None,
             None,
             &tools,
+            &Default::default(),
         );
         let workload_path = workload
             .env
@@ -3832,6 +3841,68 @@ mod tests {
                 .find(|kv| kv.starts_with("SOME_TOOL_HOME=")),
             Some(workload_tool_var),
             "and the vars the tools need to find their own payload"
+        );
+    }
+
+    /// A connector installed and granted through the real store, so the exec reads what a card would have written rather than a value the test handed it.
+    fn grant_filling_some_token(home: &std::path::Path, run_id: &str) {
+        let dir = home.join("connectors").join("some-provider");
+        std::fs::create_dir_all(&dir).expect("connector dir");
+        std::fs::write(
+            dir.join("document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": "some-provider",
+                "spec": {
+                    "serves": ["api.some-provider.example"],
+                    "methods": [{
+                        "name": "token",
+                        "auth": { "kind": "token" },
+                        "credentials": [{
+                            "envVar": "SOME_TOKEN",
+                            "placeholder": "some-provider-LNSPLACEHOLDER00",
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .expect("document");
+        std::fs::write(dir.join("digest"), "sha256:abc").expect("digest");
+        crate::connector::real::record_a_grant_for_a_test(run_id, "some-provider", "sha256:abc");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn an_exec_drops_a_variable_the_run_s_grant_fills_and_says_who_fills_it() {
+        // An exec is a second way into a live run; letting its caller set that variable would put the real secret beside the placeholder the boundary substitutes, and dropping it in silence reads as the caller's own typo.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.clone(), None, handle).expect("register");
+        // Recorded after the run is registered, which is when the card grants: an exec held to the run's start would miss it.
+        grant_filling_some_token(home.path(), &run_id);
+        let mut args = exec_args(vec!["printenv".into()], false, false);
+        args.env = vec!["SOME_TOKEN=sk-live-real".into(), "SAFE=1".into()];
+
+        let mut params = None;
+        let said = crate::test_env::captured_messages(|| {
+            params = Some(build_session_params(args, &run_id));
+        });
+        crate::run_registry::deregister(&run_id);
+
+        let env = params.expect("the exec was built").env;
+        assert!(
+            !env.iter().any(|kv| kv.starts_with("SOME_TOKEN=")),
+            "the run refused this variable, and an exec is not a way around that: {env:?}"
+        );
+        assert!(env.contains(&"SAFE=1".to_string()), "got: {env:?}");
+        assert!(
+            said.iter()
+                .any(|m| m.contains("SOME_TOKEN") && m.contains("some-provider")),
+            "the caller must be told which connector fills it: {said:?}"
         );
     }
 
