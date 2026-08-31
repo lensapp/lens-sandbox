@@ -295,6 +295,15 @@ fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
     })
 }
 
+/// A published document asks every machine that pulls it for the host files it declares, so the author hears which of them read as a credential from the push rather than from a consumer.
+fn warn_pushed_host_paths(doc: &[u8]) {
+    if let Ok(def) = lns_artifact::sandbox::parse_document(doc) {
+        crate::run::summary::warn_credential_shaped_host_paths(
+            crate::run::summary::declared_host_paths(&def),
+        );
+    }
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
     ports: PushPorts<'_, F, P, R>,
@@ -320,6 +329,7 @@ where
         terminal,
     } = confirm;
     refuse_unpushable_tools(doc)?;
+    warn_pushed_host_paths(doc);
     // Packing first reads the directories offline, so a broken document or fileset refuses the push before it consults the index or uploads a mixin.
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
@@ -371,6 +381,7 @@ where
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
+    warn_pushed_host_paths(doc);
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;

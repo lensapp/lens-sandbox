@@ -426,6 +426,12 @@ pub async fn run_image(
         (_, Some(published)) => published.filesets.clone(),
         _ => Vec::new(),
     };
+    // Ahead of the summary and of the host-path prompt, so the warning is in front of the developer while the decision is still theirs to make.
+    crate::run::summary::warn_credential_shaped_host_paths(
+        args.filesets
+            .iter()
+            .filter_map(|fileset| fileset.host_path.as_deref()),
+    );
     args.tools = match (&target, &published) {
         (crate::run::target::RunTarget::Local { def, .. }, _) => def.spec.tools.clone(),
         (_, Some(published)) => published.tools.clone(),
