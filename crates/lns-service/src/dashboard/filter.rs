@@ -67,6 +67,7 @@ mod tests {
             run: run.into(),
             kind: kind.into(),
             detail: detail.into(),
+            connector: None,
             raw: Value::Null,
         }
     }

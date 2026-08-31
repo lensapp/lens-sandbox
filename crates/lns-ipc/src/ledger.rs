@@ -26,6 +26,25 @@ impl Decision {
     }
 }
 
+/// What a run decided about a connector. Connecting is not one: a connection is the machine's, held by no run, so no run's timeline could account for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorVerb {
+    Granted,
+    Declined,
+    Forgotten,
+}
+
+impl ConnectorVerb {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Declined => "declined",
+            Self::Forgotten => "forgot",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LedgerEvent {
@@ -36,12 +55,32 @@ pub enum LedgerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    Connector {
+        connector: String,
+        verb: ConnectorVerb,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection: Option<String>,
+        /// The bytes the grant bound to; a decline answers for every version and a forget clears whatever was there, so neither carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+    },
 }
 
 impl LedgerEvent {
     pub fn name(&self) -> &'static str {
         match self {
             LedgerEvent::Approval { .. } => "approval",
+            LedgerEvent::Connector { .. } => "connector",
+        }
+    }
+
+    /// The connector an event concerns, which is what `lns audit --connector` filters on.
+    pub fn connector(&self) -> Option<&str> {
+        match self {
+            LedgerEvent::Approval { .. } => None,
+            LedgerEvent::Connector { connector, .. } => Some(connector),
         }
     }
 }
@@ -82,6 +121,64 @@ mod tests {
             reason: Some("policy-ambiguous".into()),
         });
         assert_eq!(back.event.name(), "approval");
+    }
+
+    #[test]
+    fn a_connector_decision_round_trips_through_json() {
+        let back = round_trip(LedgerEvent::Connector {
+            connector: "some-provider".into(),
+            verb: ConnectorVerb::Granted,
+            method: Some("token".into()),
+            connection: Some("work".into()),
+            digest: Some("sha256:abc".into()),
+        });
+        assert_eq!(back.event.name(), "connector");
+        assert_eq!(back.event.connector(), Some("some-provider"));
+    }
+
+    #[test]
+    fn a_decision_that_names_no_method_or_connection_writes_neither() {
+        let record = LedgerRecord {
+            ts: "2026-06-29T14:02:11Z".into(),
+            run: "5e6f7a8b0000000000000000000000bb".into(),
+            microvm: "calm-finch".into(),
+            event: LedgerEvent::Connector {
+                connector: "some-provider".into(),
+                verb: ConnectorVerb::Forgotten,
+                method: None,
+                connection: None,
+                digest: None,
+            },
+        };
+        let line = serde_json::to_string(&record).expect("serialize");
+        assert!(!line.contains("method"), "{line}");
+        assert!(!line.contains("digest"), "{line}");
+        assert_eq!(
+            serde_json::from_str::<LedgerRecord>(&line).expect("deserialize"),
+            record
+        );
+    }
+
+    #[test]
+    fn every_verb_has_a_word_the_timeline_reads() {
+        for (verb, word) in [
+            (ConnectorVerb::Granted, "granted"),
+            (ConnectorVerb::Declined, "declined"),
+            (ConnectorVerb::Forgotten, "forgot"),
+        ] {
+            assert_eq!(verb.word(), word);
+        }
+    }
+
+    #[test]
+    fn an_approval_names_no_connector_so_the_filter_leaves_it_out() {
+        let record = round_trip(LedgerEvent::Approval {
+            kind: ApprovalKind::Network,
+            target: "api.foo.com:443".into(),
+            decision: Decision::AllowOnce,
+            reason: None,
+        });
+        assert_eq!(record.event.connector(), None);
     }
 
     #[test]

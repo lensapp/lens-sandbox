@@ -30,18 +30,22 @@ anchor mirrored to external append-only storage) is tracked as follow-up.
 ## Reading the log checks integrity
 
 `lns audit` shows one chronological timeline of every event across all sandboxes —
-egress and mounts from each run's log, plus the approvals recorded across runs
-in the durable ledger. `lns audit <sandbox>`
+egress and mounts from each run's log, plus the approvals and connector decisions
+recorded across runs in the durable ledger. `lns audit <sandbox>`
 scopes it to one run (by run id or unique id prefix). See the
 [CLI reference](cli-reference.md) for filters.
+
+A connector decision is a run's own: granting a method, declining one, or forgetting
+what it decided. Connecting is not recorded, because a connection belongs to the
+machine rather than to any run.
 
 Provisioning a run's [declared tools](running-workloads.md#tools--declared-toolchains)
 is recorded in that run's chain: what was fetched, from where, and the exact
 version it resolved to. Warm runs reuse the machine cache and fetch nothing, so
 they add no provisioning events. `lns pull` provisions a published sandbox's
 pinned tools ahead of its first run, before any run exists — those fetches are
-recorded on the same durable chain as approvals, with the pull in place of a
-sandbox name, so nothing is acquired without a record.
+recorded on the same durable chain as approvals and connector decisions, with the
+pull in place of a sandbox name, so nothing is acquired without a record.
 
 Integrity is verified **as the log is read** — there is no separate verify step. As
 `lns audit` reads each chain it compares it against its anchor, and if anything is

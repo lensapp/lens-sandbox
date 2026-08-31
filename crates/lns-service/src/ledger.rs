@@ -391,8 +391,9 @@ mod tests {
                 if !self.seen_first.swap(true, Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                let LedgerEvent::Approval { target, .. } = &record.event;
-                self.targets.lock().unwrap().push(target.clone());
+                if let LedgerEvent::Approval { target, .. } = &record.event {
+                    self.targets.lock().unwrap().push(target.clone());
+                }
                 Ok(())
             }
         }

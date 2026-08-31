@@ -163,15 +163,20 @@ fn running_policies(
 }
 
 /// What this run has already decided about the machine's connectors, read off the runtime thread because every read here blocks (§3.2.1, §7.1).
-async fn install_connectors(session: &Arc<ApprovalSession>, run_id: &str) -> Result<()> {
+async fn install_connectors(
+    session: &Arc<ApprovalSession>,
+    run_id: &str,
+    microvm: &str,
+) -> Result<()> {
     let session = Arc::clone(session);
     let run_id = run_id.to_string();
-    tokio::task::spawn_blocking(move || read_connector_state(&session, &run_id))
+    let microvm = microvm.to_string();
+    tokio::task::spawn_blocking(move || read_connector_state(&session, &run_id, &microvm))
         .await
         .context("reading this run's connectors")
 }
 
-fn read_connector_state(session: &Arc<ApprovalSession>, run_id: &str) {
+fn read_connector_state(session: &Arc<ApprovalSession>, run_id: &str, microvm: &str) {
     session.hold_for_offers(crate::connector::real::offers_for_run(run_id));
     // A run that already granted a connector gets what it grants on every later start, not only on the start it answered.
     for (connector, supply) in crate::connector::real::granted_supply_for(run_id) {
@@ -179,6 +184,7 @@ fn read_connector_state(session: &Arc<ApprovalSession>, run_id: &str) {
     }
     session.set_connector_port(Arc::new(crate::connector::real::RealConnectorPort::new(
         run_id.to_string(),
+        microvm.to_string(),
     )));
 }
 
@@ -219,7 +225,7 @@ pub(super) async fn start(
         session.set_shipped_policy(baseline.clone());
     }
 
-    install_connectors(&session, &run_id).await?;
+    install_connectors(&session, &run_id, &microvm_name).await?;
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -939,7 +945,7 @@ mod tests {
         install_some_provider(home.path());
         let (session, _frame_rx) = fixture_session();
 
-        install_connectors(&session, UNDECIDED_RUN)
+        install_connectors(&session, UNDECIDED_RUN, "calm-finch")
             .await
             .expect("reading the run's connectors");
 
@@ -969,7 +975,7 @@ mod tests {
         grant_in(home.path(), DECIDED_RUN);
         let (session, _frame_rx) = fixture_session();
 
-        install_connectors(&session, DECIDED_RUN)
+        install_connectors(&session, DECIDED_RUN, "calm-finch")
             .await
             .expect("reading the run's connectors");
 

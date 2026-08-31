@@ -55,6 +55,7 @@ fn ocsf_row(ts: &str, run: &str, raw: Value) -> TimelineRow {
         run: run.into(),
         kind,
         detail,
+        connector: None,
         raw,
     }
 }

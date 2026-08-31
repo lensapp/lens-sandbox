@@ -58,6 +58,20 @@ pub fn ledger_event(record: &LedgerRecord) -> Map<String, Value> {
             decision_word(*decision),
             reason.as_deref(),
         ),
+        LedgerEvent::Connector {
+            connector,
+            verb,
+            method,
+            connection,
+            digest,
+        } => lns_ocsf::connector(
+            &cx.ctx(),
+            connector,
+            verb.word(),
+            method.as_deref(),
+            connection.as_deref(),
+            digest.as_deref(),
+        ),
     };
     into_object(value)
 }

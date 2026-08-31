@@ -1898,7 +1898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_connects_grants_forgets_and_disconnects_a_connector() {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());

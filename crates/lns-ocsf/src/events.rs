@@ -113,6 +113,56 @@ pub fn approval(
     ev.build()
 }
 
+/// One run's decision about one connector, as `lns audit --kind connector` reads it. The digest a grant bound to is disclosed beside the event and not in the message, the way `sandbox_run` treats its own.
+pub fn connector(
+    ctx: &Context,
+    connector: &str,
+    verb: &str,
+    method: Option<&str>,
+    connection: Option<&str>,
+    digest: Option<&str>,
+) -> Value {
+    let mut ev = Event::new(
+        "connector",
+        class::AUTHENTICATION,
+        category::IAM,
+        activity::LOGON,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        connector_message(connector, verb, method, connection).into(),
+    )
+    .set("service", json!({"name": connector}))
+    .set("actor", lns_actor())
+    .note("lns_connector", connector.into())
+    .note("lns_verb", verb.into());
+    if let Some(method) = method {
+        ev = ev.note("lns_method", method.into());
+    }
+    if let Some(connection) = connection {
+        ev = ev.note("lns_connection", connection.into());
+    }
+    if let Some(digest) = digest {
+        ev = ev.note("lns_connector_digest", digest.into());
+    }
+    ev.build()
+}
+
+fn connector_message(
+    connector: &str,
+    verb: &str,
+    method: Option<&str>,
+    connection: Option<&str>,
+) -> String {
+    match (method, connection) {
+        (Some(method), Some(connection)) => format!("{verb} {connector} {method} as {connection}"),
+        (Some(method), None) => format!("{verb} {connector} {method}"),
+        _ => format!("{verb} {connector}"),
+    }
+}
+
 pub fn egress(
     ctx: &Context,
     method: &str,
@@ -455,6 +505,60 @@ mod tests {
             ts_rfc3339: "2026-06-29T14:00:00Z",
             run: "9e8d7c6b0000",
             microvm: "calm-finch",
+        }
+    }
+
+    #[test]
+    fn a_grant_names_the_connector_the_method_and_the_account_behind_it() {
+        let ev = connector(
+            &ctx(),
+            "some-provider",
+            "granted",
+            Some("token"),
+            Some("work"),
+            Some("sha256:abc"),
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["message"], "granted some-provider token as work");
+        assert_eq!(ev["unmapped"]["lns_connector"], "some-provider");
+        assert_eq!(ev["unmapped"]["lns_verb"], "granted");
+        assert_eq!(ev["unmapped"]["lns_method"], "token");
+        assert_eq!(ev["unmapped"]["lns_connection"], "work");
+        assert_eq!(
+            ev["unmapped"]["lns_connector_digest"], "sha256:abc",
+            "a grant binds to bytes, and which bytes is the whole of what it consented to"
+        );
+        assert_eq!(ev["service"]["name"], "some-provider");
+    }
+
+    #[test]
+    fn a_grant_of_a_method_that_authenticates_nothing_names_no_account() {
+        let ev = connector(
+            &ctx(),
+            "some-provider",
+            "granted",
+            Some("open"),
+            None,
+            Some("sha256:abc"),
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["message"], "granted some-provider open");
+        assert!(ev["unmapped"].get("lns_connection").is_none());
+    }
+
+    #[test]
+    fn a_decline_and_a_forget_name_the_connector_alone() {
+        for (verb, expected) in [
+            ("declined", "declined some-provider"),
+            ("forgot", "forgot some-provider"),
+        ] {
+            let ev = connector(&ctx(), "some-provider", verb, None, None, None);
+            assert_schema_valid(&ev);
+            assert_eq!(ev["message"], expected);
+            assert!(
+                ev["unmapped"].get("lns_connector_digest").is_none(),
+                "neither answers for one version of the bytes, so neither claims one"
+            );
         }
     }
 

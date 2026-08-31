@@ -68,12 +68,14 @@ mod tests {
             run: run.into(),
             kind: "egress".into(),
             detail: String::new(),
+            connector: None,
             raw: Value::Null,
         }
     }
 
     fn row_named(run: &str, microvm: &str) -> TimelineRow {
         TimelineRow {
+            connector: None,
             raw: serde_json::json!({
                 "unmapped": {"lns_run": run, "lns_microvm": microvm, "lns_kind": "egress"}
             }),
@@ -83,6 +85,7 @@ mod tests {
 
     fn row_launch(run: &str, microvm: &str, image: &str) -> TimelineRow {
         TimelineRow {
+            connector: None,
             raw: serde_json::json!({
                 "unmapped": {"lns_run": run, "lns_microvm": microvm, "lns_kind": "launch", "lns_image": image}
             }),

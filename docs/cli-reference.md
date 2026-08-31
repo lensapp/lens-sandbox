@@ -401,20 +401,27 @@ Show one chronological timeline of every audit event across all sandboxes — or
 ```bash
 lns audit                                   # every event, every sandbox, newest first
 lns audit <sandbox>                         # scope to one sandbox: run id or unique id prefix
-lns audit [--kind <kind>] [--format <table|jsonl>]
+lns audit [--kind <kind>] [--connector <id>] [--format <table|jsonl>]
 ```
 
 `lns audit` merges two sources into a single newest-first timeline: the per-run audit
-logs (launch, egress, injected env, volume/bind mounts) and the durable approval
-ledger (`approval` events recorded across runs).
+logs (launch, egress, injected env, volume/bind mounts) and the durable ledger
+(`approval` and `connector` events recorded across runs).
 `<sandbox>` narrows it to one run — resolved as a run id or a unique id prefix; an
 unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 
 Filters compose:
 
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`,
-  `approval`, `tool`.
+  `approval`, `connector`, `tool`.
+- `--connector <id>` — only what one connector was decided about.
 - `--format jsonl` — one raw JSON event per line instead of the table.
+
+A `connector` event is what one run decided: `granted`, `declined`, or `forgot`. A
+grant records the method, the account behind it, and the digest it bound to.
+Connecting records nothing — a connection belongs to the machine and to no run, so
+no run's timeline could account for it. A grant reserved for a name no run holds yet
+shows with no run against it, and stays that way once a run takes the reservation.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline
