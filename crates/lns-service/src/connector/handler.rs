@@ -466,7 +466,7 @@ fn definition_of(
     lns_artifact::connector::parse(&entry.document)
 }
 
-/// What this version can deliver, which is narrower than what a document may declare: a packed fileset's bytes are not kept at install, so a method writing one cannot be applied yet (§3.2.2).
+/// What this version can deliver, which is narrower than what a document may declare: install keeps a packed fileset's bytes, but nothing reads them back into the files a grant sends, so a method writing one cannot be applied yet (§3.2.2).
 fn can_apply(method: &lns_artifact::connector::Method) -> bool {
     method.is_offerable()
         && method

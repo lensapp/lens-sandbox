@@ -20,7 +20,7 @@ pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload
     }
 }
 
-/// Every inline file, at the path its entry names. A `path` fileset supplies nothing yet — install keeps no layer, so the method carrying one is not offerable either.
+/// Every inline file, at the path its entry names. A `path` fileset supplies nothing yet — install keeps its layer, but nothing expands it here, so the method carrying one is not offerable either.
 fn inline_files(method: &Method) -> Vec<WireFile> {
     let mut files = Vec::new();
     for fileset in &method.filesets {
