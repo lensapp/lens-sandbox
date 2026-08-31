@@ -91,7 +91,7 @@ them:
 A `connector` is the one kind that grants nothing even after it arrives.
 Installing it opens nothing, arms nothing, writes nothing, and sets nothing — it
 only makes the destinations it serves ask. What grants is the user granting one of
-its methods to a project ([§3.2.4](#324-installing-connecting-and-applying)).
+its methods to a run ([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.4 Credentials, and what a connector adds
 
@@ -137,7 +137,7 @@ already granted at boot produce the same run.
 
 **Nothing applies until the user grants a method.** Installing is not a merge and
 not a seed: it grants nothing, and only makes the connector's destinations ask.
-A **grant** applies one method to one project; a **connect** authenticates where a
+A **grant** applies one method to one run; a **connect** authenticates where a
 method requires it, and the card does both at once
 ([§3.2.4](#324-installing-connecting-and-applying)).
 
@@ -1065,7 +1065,7 @@ file is written, no variable is set. What it does do is make its `serves`
 destinations **ask** ([§3.2.1](#321-serves)).
 
 Two later acts change what a run gets: a **grant** applies one method to one
-project, and a **connect** authenticates where a method requires it
+run, and a **connect** authenticates where a method requires it
 ([§3.2.4](#324-installing-connecting-and-applying)).
 
 Three stored facts, each about a different scope:
@@ -1074,7 +1074,7 @@ Three stored facts, each about a different scope:
 |---|---|---|
 | **installed** | the document is on this machine, so it can be offered | the machine |
 | **connected** | at least one **connection** exists — one successful connect, holding what its `auth` produced | the machine |
-| **granted** | this project may use a named method, and the connection behind it where that method authenticates | the project directory |
+| **granted** | this run may use a named method, and the connection behind it where that method authenticates | the run, or the name reserved for one |
 
 A run has a granted method's payload **applied**: in force in the guest. That is
 not a fourth stored fact, only what a run does with the three above.
@@ -1084,7 +1084,7 @@ not a fourth stored fact, only what a run does with the three above.
 The destinations that make this connector relevant, written in the
 [`match`](#42-the-egress-definition) grammar. At least one entry.
 
-**`serves` grants nothing — it asks.** While a project has neither granted nor
+**`serves` grants nothing — it asks.** While a run has neither granted nor
 declined this connector, every destination `serves` covers is held and asked
 about, **whatever the run's own [egress](#42-the-egress-definition) allowed** — a
 request that reaches a service unauthenticated fails just as surely as one that is
@@ -1276,7 +1276,7 @@ only makes its destinations ask ([§3.2.1](#321-serves)).
    method's `credentials` draw from. A method with no `auth`, and an existing
    connection, both skip this part.
 3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
-   running guest, and a grant is recorded for this project — the method, and the
+   running guest, and a grant is recorded for this run — the method, and the
    connection behind it where one exists
    ([§8.4](#84-where-a-connector-grant-goes)).
 
@@ -1287,17 +1287,46 @@ standing.
 
 | Prompt | Asks | Fires on |
 |---|---|---|
-| The **consent** card | choose a method — and a connection, where it authenticates — and use it in this project | a destination `serves` covers that the run's own egress does not **deny** |
-| The **connect** prompt | re-authenticate the connection this project granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
+| The **consent** card | choose a method — and a connection, where it authenticates — and use it in this run | a destination `serves` covers that the run's own egress does not **deny** |
+| The **connect** prompt | re-authenticate the connection this run granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
 
 A grant MAY also be given ahead of any request, with the same disclosure and no
 held request (`lns connector grant`). The trigger decides when the card
 appears, never whether consent must be informed.
 
+**A grant belongs to one run.** Not to a directory: the working directory
+decides which [local mixin](#8-the-local-mixin) resolves, and nothing about
+consent. A run keeps what it was granted across every stop and start. It loses
+that grant when the run is removed, and not before.
+
+**A grant MAY also be given ahead of the run**, to a name no run holds yet. It
+is then a **reservation**. Exactly one act takes a reservation: **creating a run
+with an explicit name**. Two rules follow, and together they stop a reservation
+becoming a standing consent that any later run inherits:
+
+1. **A reservation is consumed once.** The run created with that name takes it,
+   holds a grant of its own from then on, and the reservation is gone. A second
+   run of that name is asked.
+2. **An automatically generated name never takes one.** A reservation records
+   the user naming a run, and the user did not name that one. The generator does
+   not choose a reserved name either, so the two rarely meet. Where they do —
+   a reservation written in the same instant a run is given that name — the
+   reservation is **discarded**, because the name now belongs to a run that did
+   not consent to it.
+
+**Renaming a run takes nothing.** A rename moves a handle; it does not create a
+run, and a reservation is for a run that does not exist yet. So renaming a run
+onto a reserved name leaves both the run and the reservation as they were.
+
+**A run takes its reservation when it is created**, before the resolved sandbox
+is disclosed ([§1.5](#15-one-disclosure)). So the first run of that name
+discloses the granted method like any other, and nothing reaches a guest that
+the pre-boot disclosure did not name.
+
 **A `deny` is the only verdict that silences the card.** Everything else asks —
 a destination nothing decided, and a destination the run allows. So a run holds a
 request for a served destination it would otherwise have allowed, until this
-project grants or declines the connector. A connector is not offered before boot
+run grants or declines the connector. A connector is not offered before boot
 either, because nothing yet said the run needs it.
 
 The card is what a `deny` silences, not a grant. `lns connector grant` gives a
@@ -1312,8 +1341,9 @@ before or after it — a connector is source 4, and
 [§4.2](#42-the-egress-definition) lets a later source turn a `deny` into an
 `allow`. The override MUST be named in the pre-boot
 disclosure ([§1.5](#15-one-disclosure)) and on the consent card that introduces
-it. The [local mixin](#8-the-local-mixin) is unaffected: it is source 5, so a
-`deny` the developer typed still wins.
+it. A reservation is no exception: a run takes one as it is created, before the
+disclosure resolves. The [local mixin](#8-the-local-mixin) is unaffected: it is
+source 5, so a `deny` the developer typed still wins.
 
 **The held request waits, and applying does not depend on it.** The request that
 triggered the offer stays held while the user chooses a connection and satisfies any
@@ -1323,13 +1353,15 @@ to a browser can outlast it — then that request fails as any refused request d
 **An expired hold does not cancel the connect:** the user finishes, the connection
 applies, and the next request succeeds.
 
-**`env` reaches the next run.** The granted method's `env`, and the `placeholder`
-of each credential it declares, are set for workloads that start after the grant;
-the workload that triggered the offer keeps the environment it was launched
-with. A tool authenticating over the wire works immediately; one reading
-a variable works from the next `lns run`.
+**`env` reaches the next workload of that run.** The granted method's `env`, and
+the `placeholder` of each credential it declares, are set for workloads that
+start after the grant; the workload that triggered the offer keeps the
+environment it was launched with. A tool authenticating over the wire works
+immediately; one reading a variable works from the next `lns sandbox exec`, or
+the next start of that run. It does **not** reach a fresh `lns run`: that is a
+different run, and it holds no grant.
 
-**Declining is a per-project standing no**, remembered outside every document
+**Declining is one run's standing no**, remembered outside every document
 ([§8.4](#84-where-a-connector-grant-goes)) and retractable there.
 
 **A machine MAY hold several connections of one connector**, including several of
@@ -1348,7 +1380,7 @@ token id, an issue time, the order of a set — MUST NOT be part of it.
 
 **A grant names a method, and — where that method has `auth` — the connection that
 supplies its values.** Two connections of one method may hold different authority, so
-a project that granted one has not granted its sibling.
+a run that granted one has not granted its sibling.
 
 A method with no `auth` produces no connection. Its grant names the method alone, and
 it is granted like any other: **a connector is never applied without a grant, with
@@ -1373,11 +1405,11 @@ authority comes back unchanged, and raises the consent card when it does not.
 
 A grant MUST NOT be silently widened.
 
-**A project holds at most one grant per connector, so it grants at most one
+**A run holds at most one grant per connector, so it grants at most one
 method.** Granting again replaces the prior grant: that method's payload is
 retracted — egress closes, injections disarm, filesets are removed — and the new
 one's applies. That is what keeps a connector one merge source
-([§3.3.2](#332-merge-rules)), and it is how a project moves between methods and
+([§3.3.2](#332-merge-rules)), and it is how a run moves between methods and
 between connections of one method.
 
 **Granted is not connected.** The combination is reachable: `lns connector
@@ -1386,7 +1418,7 @@ connector restores the document without restoring what it held
 ([§7.1](#71-connectors)). In that state:
 
 - The granted method **is** the run's source in [§3.3.2](#332-merge-rules), so
-  its `egress`, its `filesets`, and its `env` apply as the project consented.
+  its `egress`, its `filesets`, and its `env` apply as the run consented.
   They needed no value.
 - Its `credentials` ship **unarmed** — the placeholder is registered, no value
   substitutes for it. A request carrying the placeholder is held rather than
@@ -1757,7 +1789,7 @@ injection covered the request proceeds untouched by this rule.
 What survives is a real mismatch, and there are two:
 
 - The injection is **unarmed** — declared, with no value behind it. One state
-  produces this: a [connector](#32-kind-connector) connection a project granted, on
+  produces this: a [connector](#32-kind-connector) connection a run granted, on
   a machine that no longer holds it
   ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
   own credential cannot reach it, because [§3.1.7](#317-credentials) resolves
@@ -1950,7 +1982,7 @@ there, because they depend on state no document carries — they run at launch:
 | Check | Depends on |
 |---|---|
 | Whether a declared credential has a value bound ([§3.1.7](#317-credentials)) | Per-machine credential values. |
-| Which connector method this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the connections it holds, and the project's own grants. |
+| Which connector method this run has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the connections it holds, and the run's own grants. |
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
@@ -2076,34 +2108,46 @@ every sandbox; each declared credential is simply asked for directly, as
 [§3.1.7](#317-credentials) describes.
 
 Installing is neither connecting nor granting. Installing alone applies nothing:
-what applies a method is a project's grant, and what arms its credentials is a
-connect ([§3.2](#32-kind-connector)). So installing into a project that already
-holds a matching grant — a reinstall of bytes it consented to — applies the
-granted method's `egress`, `filesets`, and `env` on the next run, and asks for a
-connect when a request needs a value.
+what applies a method is a run's grant, and what arms its credentials is a
+connect ([§3.2](#32-kind-connector)). So installing bytes a run already holds a
+matching grant for — a reinstall of what it consented to — applies the granted
+method again to that run: at once where the run is running, by the same blocks
+[§3.2.4](#324-installing-connecting-and-applying) lets a grant apply mid-run, and
+at its next start otherwise. It asks for a connect when a request needs a value.
 
-Four things live per machine, none of them in any document:
+Five things live per machine, none of them in any document:
 
 | What | Keyed by | Scope |
 |---|---|---|
 | The installed set — each connector's document, stored verbatim at the digest it came from | name | The machine |
 | Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then connection | The machine |
-| Which method a project granted, the connection behind it where the method authenticates, and the authority it consented to | directory, then name, digest | The project directory |
-| Which connectors a project declined | directory, then name | The project directory |
+| Which method a run granted, the connection behind it where the method authenticates, and the authority it consented to | run, then name, digest | The run |
+| Which connectors a run declined | run, then name | The run |
+| A grant **reserved** for a name no run holds yet | run name, then connector, digest | That name, until a run takes it |
 
 The second row admits many connections per connector, including many of one method
 ([§3.2.4](#324-installing-connecting-and-applying)). The third names the method a
-project consented to, and the connection behind it where one exists — a method with
-no `auth` has none.
+run consented to, and the connection behind it where one exists — a method with
+no `auth` has none. The third and fourth are keyed by the run itself and not by
+its name, so a name that `lns sandbox rm` frees carries nothing to the next run
+that takes it.
 
-A connector that is installed and neither granted nor declined here holds no row
-of its own, and still changes the run: its `serves` destinations ask
+The fifth is the one row keyed by a run's *name* rather than by the run itself,
+because it is written before the run it is for exists.
+[§3.2.4](#324-installing-connecting-and-applying) states what takes it — creating
+a run with an explicit name, and nothing else — and the two rules that stop it
+becoming a standing consent: a reservation is consumed once, and an
+automatically generated name never takes one.
+
+A connector that is installed and neither granted nor declined by a run holds no
+row of its own, and still changes that run: its `serves` destinations ask
 ([§3.2.1](#321-serves)).
 
 **The two keys differ deliberately.** A connection's key starts with the connector
-name and survives an update; a grant is keyed by the digest too and does not. So
-a connector republished with a changed `egress` is offered again — the user is
-asked to consent to the new bytes — while every connection stays signed in.
+name and survives an update; a grant is keyed by the digest too and does not, and
+a reservation is a grant in this respect. So a connector republished with a
+changed `egress` is offered again — the user is asked to consent to the new bytes
+— while every connection stays signed in.
 Re-consenting is cheap; signing in again is not, and making an update log the
 user out would teach them to avoid updates.
 
@@ -2130,17 +2174,17 @@ Three rules follow from a connector arriving over the network:
   connector may claim the same variable, because they are alternatives and only
   one is ever applied ([§3.2.2](#322-methods)).
 
-**Uninstalling stops the offer; it does not retract a grant.** A project that
+**Uninstalling stops the offer; it does not retract a grant.** A run that
 already granted a method keeps that decision, and reinstalling the same digest
 resumes that grant with no fresh consent prompt — the grant was bound to those
 bytes and those bytes came back. This is deliberate: uninstalling is housekeeping
-on the machine, and withdrawing consent is a decision about a project. A project
+on the machine, and withdrawing consent is a decision about a run. A run
 retracts its own grant, or its decline, through the store that holds it
 ([§8.4](#84-where-a-connector-grant-goes)).
 
 **Uninstalling does drop every connection**, because they are machine state and the
 machine is what is being cleaned. So a reinstall resumes the grant and **not** the
-connection: the project's consent stands, the machine is asked to connect again,
+connection: the run's consent stands, the machine is asked to connect again,
 and the run behaves as [§3.2.4](#324-installing-connecting-and-applying) describes
 for a granted connection the machine no longer holds.
 
@@ -2266,12 +2310,17 @@ rather than inheriting an answer. Worse, the answer would not even work there:
 where a grant names a connection, that connection is this machine's and no other
 machine holds it.
 
-So a grant lives in the per-project store the machine already keeps
-([§7.1](#71-connectors)), keyed by directory. The run reads it and merges the
-granted method at the position [§3.3.2](#332-merge-rules) gives it — the same
-merge, from a different source.
+So a grant lives in the store the machine already keeps
+([§7.1](#71-connectors)), keyed by the run — and, before that run exists, by the
+name the user will give it. The run reads it and merges the granted method at the
+position [§3.3.2](#332-merge-rules) gives it — the same merge, from a different
+source.
 
-A decline lives beside it, and both are retractable: a project can forget what it
+**The working directory decides nothing about consent**
+([§3.2.4](#324-installing-connecting-and-applying)). Two runs in one directory
+each answer for themselves.
+
+A decline lives beside it, and both are retractable: a run can forget what it
 decided about one connector, so the next run asks again. Neither is a document,
 so neither is committed, and a mis-clicked deny is never permanent.
 

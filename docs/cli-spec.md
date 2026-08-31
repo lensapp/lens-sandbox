@@ -34,7 +34,7 @@ has a kind:
 |---|---|
 | `sandbox` | A complete sandbox: its base image, the egress it needs, the credentials it needs, and the files, tools, and mounts it brings. |
 | `mixin` | A capability layered onto a sandbox: tools, filesets, egress, credentials. |
-| `connector` | A mixin you install on this machine, offered when a run reaches a service it covers. Nothing it carries applies until you grant it to a project. |
+| `connector` | A mixin you install on this machine, offered when a run reaches a service it covers. Nothing it carries applies until you grant it to a run. |
 
 A **sandbox** is what a sandbox artifact becomes when it runs: a live guest with
 an id, a name, and a state. It outlives its workload — when the workload exits,
@@ -162,6 +162,13 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
 - An id and a name are interchangeable wherever a `RUN` is accepted. A name is
   never all lowercase hex, so the two can never collide — an id and any prefix of
   one are lowercase hex, and a name is refused if it is.
+- `RUN` names a run that exists. `lns connector grant --run` and `lns connector
+  forget --run` are the one exception: both also take a name no run holds yet.
+  `grant` reserves the decision for the run the user next creates with that name,
+  and `forget` clears a reservation waiting for it
+  ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
+  A name is never all lowercase hex, so an id or id prefix that resolves to
+  nothing is an error there, never a reservation.
 - A bare `REF` is qualified, never guessed: `--registry`, then your
   `run.registry` default, then the Lens hub (`hub.lns.run`). A fully-qualified
   reference is used as written.
@@ -284,8 +291,8 @@ contributed it. That summary is the one thing you approve.
 | `attach` | `lns attach` | Re-joins the live session, most useful after `run -d`. The detach chord leaves the sandbox running and returns you to your shell; no signal is sent. Stdin reaches the workload only if the sandbox was started with stdin open. |
 | `ls` | `lns ps` | Lists running sandboxes with their state, CPU, and memory. `-a` includes stopped ones. |
 | `inspect` | `lns inspect` | Prints one sandbox's live state and launch configuration, with its resolved mixin embedded. |
-| `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. `-f`/`--force` stops a running one first. |
-| `prune` | | Removes every stopped sandbox, writable layers included. Lists them and asks, unless `-f`/`--force`. |
+| `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. What it granted and declined goes with it. `-f`/`--force` stops a running one first. |
+| `prune` | | Removes every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks, unless `-f`/`--force`. |
 
 Interrupting `lns` at the terminal (`Ctrl-C`) stops the sandbox. The detach chord
 does not: it returns your terminal, exits `0`, and leaves the workload running.
@@ -326,23 +333,25 @@ lns connector uninstall <ID>
 lns connector list [--format <table|json>]
 lns connector connect <ID> [--method <NAME>] [--as <CONNECTION>]
 lns connector disconnect <ID> [--connection <CONNECTION>]
-lns connector grant <ID> [--method <NAME>] [--connection <CONNECTION>] [--project <PATH>]
-lns connector forget <ID> [--project <PATH>]
+lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>]
+lns connector forget <ID> --run <RUN>
 ```
 
 | Verb | What it does |
 |---|---|
-| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. It does make the connector's destinations ask, in every project that has neither granted nor declined it. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
-| `uninstall` | Removes it from this machine, with every connection it held. A project that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
+| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. It does make the connector's destinations ask, in every run that has neither granted nor declined it. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
+| `uninstall` | Removes it from this machine, with every connection it held. A run that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
 | `list` | Lists what is installed: what each connector serves, its methods — marking those that need no connect — and the connections this machine holds for it. |
-| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **connection**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several connections of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a project still decides which connection to use. |
-| `disconnect` | Drops one connection, or every connection of a connector when `--connection` is absent. Exits `1` when the connector holds none — a connector whose methods all lack `auth` never holds one. The connector stays installed, projects that granted a dropped connection keep their grants, and you are asked to connect again the next time a request needs a value. |
-| `grant` | Grants this project a method before a run asks for it. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the connection's authority where it authenticates — and asks. `--method` names the method; omitted, you choose when more than one is offerable. `--connection` names the connection behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no connection, `grant` says to `connect` first rather than starting an authentication of its own. A project holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. `--project <PATH>` acts on another directory. Exits `1` when the project already granted that method and connection. |
-| `forget` | Clears this project's decision about one connector, granted or declined, so the next run asks again. The inverse of `grant`. `--project <PATH>` acts on another directory. Exits `1` when there was nothing to forget. |
+| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **connection**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several connections of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a run still decides which connection to use. |
+| `disconnect` | Drops one connection, or every connection of a connector when `--connection` is absent. Exits `1` when the connector holds none — a connector whose methods all lack `auth` never holds one. The connector stays installed, runs that granted a dropped connection keep their grants, and you are asked to connect again the next time a request needs a value. |
+| `grant` | Grants one run a method before it asks for it. `--run` names the run and is required — there is no working directory to fall back on. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the connection's authority where it authenticates — and asks. `--method` names the method; omitted, you choose when more than one is offerable. `--connection` names the connection behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no connection, `grant` says to `connect` first rather than starting an authentication of its own. A run holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. Where `--run` names no run, what it prints says so, and the answer reserves the decision for the run the user next creates with that name. Exits `1` when the run already granted that method and connection, or when a reservation for that name already names them. |
+| `forget` | Clears one run's decision about one connector, granted or declined, so the next start asks again. It also clears a reservation waiting for a name. The inverse of `grant`, and `--run` is required for the same reason. Exits `1` when there was nothing to forget. |
 
 Four verbs bound the decision, across two scopes. On the machine: `install`
-makes a connector offerable, and `connect` signs in and stores a connection. In a
-project: `grant` lets it use one method, and `forget` takes that back.
+makes a connector offerable, and `connect` signs in and stores a connection. On a
+run: `grant` lets it use one method, and `forget` takes that back. The working
+directory is not a scope here — it decides which local mixin resolves, and
+nothing about consent.
 
 **`--as` naming a connection that already exists re-authenticates that one in
 place.** Where the authentication comes back with different authority, the grants
@@ -618,7 +627,7 @@ you may also answer early, at your terminal, with the same disclosure.
   what you pointed at, and `-f` on `lns sandbox rm` means "stop it first", not
   "delete without asking".
 - A flag answers only the question it names. No flag answers the connector card:
-  connecting is done per machine, and granting is decided per project.
+  connecting is done per machine, and granting is decided per run.
 - With no terminal to ask at, a command that would have asked **refuses** and
   names the flag that would have answered it. It never assumes.
 
@@ -676,7 +685,7 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 |---|---|
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
 | `~/.lns/connectors/` | The connectors installed on this machine, each stored verbatim at the digest it came from. |
-| `~/.lns/connector-grants.json` | Which connector method a project granted, the connection behind it where it authenticates, the authority it consented to, and which connectors it declined. |
+| `~/.lns/connector-grants.json` | Which connector method a run granted, the connection behind it where it authenticates, the authority it consented to, which connectors it declined, and the grants reserved for a name no run holds yet. |
 | `~/.lns/connector-values.json` | The connections this machine holds — each one's authority and the values its `auth` returned, mode `0600`. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
