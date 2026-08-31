@@ -157,6 +157,72 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
     }
 }
 
+/// What one run creation did with the reservations waiting for the name it was given.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reservations {
+    /// The run the user named took them, and holds their grants from now on.
+    Taken(usize),
+    /// A generated name got them, so they were dropped: the name belongs to a run that did not consent to them (§3.2.4).
+    Discarded(usize),
+    /// A restart, which carries its name and its run id over and so has nothing to take.
+    Untouched,
+    /// The store could not be read, so this run starts un-granted and the card asks.
+    Unreadable,
+}
+
+/// §3.2.4's take rule, applied to one run creation: only a run the user named takes a reservation, and only as it is created.
+pub fn take_reservations_for(
+    assigned_name: &str,
+    run_id: &str,
+    fresh: bool,
+    requested_name: Option<&str>,
+) -> Reservations {
+    if !fresh {
+        return Reservations::Untouched;
+    }
+    let named_by_the_user = requested_name.is_some();
+    let taken = with_stores(|store| {
+        Ok(if named_by_the_user {
+            store.claim_reservations(assigned_name, run_id)?
+        } else {
+            store.discard_reservations(assigned_name)?
+        })
+    });
+    match taken {
+        Err(e) => {
+            crate::log::warn!(
+                "cannot read what was reserved for {assigned_name}, so this run starts without it: {e:#}"
+            );
+            Reservations::Unreadable
+        }
+        Ok(taken) if named_by_the_user => Reservations::Taken(taken),
+        Ok(0) => Reservations::Discarded(0),
+        Ok(dropped) => {
+            // A grant the user recorded is being deleted, and no card asked; saying nothing would make it look like it never landed.
+            crate::log::warn!(
+                "dropped {dropped} grant(s) reserved for {assigned_name}: that name went to a run you did not name, so nothing consented to them"
+            );
+            Reservations::Discarded(dropped)
+        }
+    }
+}
+
+/// The names an unclaimed reservation waits for. Unreadable state reserves none: a collision is a confusion, and the discard is what keeps it from being a leak (§3.2.4).
+pub fn reserved_names() -> std::collections::BTreeSet<String> {
+    with_stores(|store| Ok(store.reserved_names()?)).unwrap_or_else(|e| {
+        crate::log::warn!("cannot read which names are reserved: {e:#}");
+        Default::default()
+    })
+}
+
+fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T> {
+    let paths = Paths::resolve()?;
+    let installed = super::dir::ConnectorDir::new(paths.connectors);
+    let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
+    let grants: JsonDecisionStore<RunDecision> = JsonDecisionStore::new(paths.grants);
+    f(&ConnectorStore::new(&installed, &values, &grants))
+}
+
 /// What the grants this run already made supply to it as it starts, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
 pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
     match read_granted_supply(&GrantHolder::Run(run_id.to_string())) {
@@ -177,11 +243,7 @@ fn with_run_store<T>(
     holder: &GrantHolder,
     f: impl FnOnce(&ConnectorStore<'_>, &GrantHolder) -> Result<T>,
 ) -> Result<T> {
-    let paths = Paths::resolve()?;
-    let installed = super::dir::ConnectorDir::new(paths.connectors);
-    let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
-    let grants: JsonDecisionStore<RunDecision> = JsonDecisionStore::new(paths.grants);
-    f(&ConnectorStore::new(&installed, &values, &grants), holder)
+    with_stores(|store| f(store, holder))
 }
 
 pub async fn answer(call: Call) -> Result<Response> {
@@ -510,6 +572,93 @@ mod tests {
             resolved.expect("reviewer resolves"),
             GrantHolder::Run(RUN.to_string()),
             "the store never sees a name for a run that exists"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_run_the_user_named_takes_what_was_reserved_and_a_generated_name_discards_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let reserved = GrantHolder::Reservation("reviewer".to_string());
+        grant_naming_work(
+            home.path(),
+            &reserved,
+            crate::connector::store::Authority::default(),
+        );
+
+        assert_eq!(reserved_names(), ["reviewer".to_string()].into());
+        assert_eq!(
+            take_reservations_for("reviewer", RUN, true, Some("reviewer")),
+            Reservations::Taken(1)
+        );
+        assert!(reserved_names().is_empty(), "consumed once");
+        assert!(
+            granted_supply_for(RUN).contains_key("some-provider"),
+            "the run it was reserved for is supplied on this very start"
+        );
+
+        grant_naming_work(
+            home.path(),
+            &reserved,
+            crate::connector::store::Authority::default(),
+        );
+        assert_eq!(
+            take_reservations_for("reviewer", OTHER_RUN, true, None),
+            Reservations::Discarded(1)
+        );
+        assert!(
+            reserved_names().is_empty(),
+            "a generated name discards rather than leaving it for a later run"
+        );
+        assert!(
+            !granted_supply_for(OTHER_RUN).contains_key("some-provider"),
+            "discarding is not a quiet claim"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_generated_name_no_reservation_waits_for_drops_nothing_and_says_nothing() {
+        // The ordinary case: most runs are auto-named and no reservation is waiting, so the discard must be silent.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        assert_eq!(
+            take_reservations_for("amber_otter", RUN, true, None),
+            Reservations::Discarded(0)
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn a_restart_takes_nothing_because_it_carries_its_own_run_id() {
+        // §3.2.4: a rename or a restart is not the creation of a run, so a reservation for that name stays waiting.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        grant_naming_work(
+            home.path(),
+            &GrantHolder::Reservation("reviewer".to_string()),
+            crate::connector::store::Authority::default(),
+        );
+
+        assert_eq!(
+            take_reservations_for("reviewer", RUN, false, Some("reviewer")),
+            Reservations::Untouched
+        );
+        assert_eq!(reserved_names(), ["reviewer".to_string()].into());
+    }
+
+    #[test]
+    #[serial(env)]
+    fn connector_state_this_build_cannot_reach_reserves_nothing_and_takes_nothing() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        assert!(reserved_names().is_empty());
+        assert_eq!(
+            take_reservations_for("reviewer", RUN, true, Some("reviewer")),
+            Reservations::Unreadable
         );
     }
 
