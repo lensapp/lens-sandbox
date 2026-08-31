@@ -55,4 +55,5 @@ Feature: authoring a sandbox definition offline
     Then the exit code is 0
     And the output contains "Sandbox: sandbox"
     And the output contains "alpine:3.20"
+    And the output does not contain "docker.io"
     And the output contains "route(s)"
