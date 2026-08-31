@@ -177,8 +177,16 @@ fn project_of(policy_path: &Path) -> Option<&Path> {
         .filter(|dir| !dir.as_os_str().is_empty())
 }
 
-/// What this project has already decided about the machine's connectors, and the store a card writes its answer to (§3.2.1, §7.1).
-fn install_connectors(session: &Arc<ApprovalSession>, policy_path: &Path) {
+/// What this project has already decided about the machine's connectors, read off the runtime thread because every read here blocks (§3.2.1, §7.1).
+async fn install_connectors(session: &Arc<ApprovalSession>, policy_path: &Path) -> Result<()> {
+    let session = Arc::clone(session);
+    let policy_path = policy_path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_connector_state(&session, &policy_path))
+        .await
+        .context("reading this project's connectors")
+}
+
+fn read_connector_state(session: &Arc<ApprovalSession>, policy_path: &Path) {
     session.hold_for_offers(offers_for_project(policy_path));
     // A project that already granted a connector gets what it grants on every later run, not only on the run it answered.
     for (connector, supply) in project_of(policy_path)
@@ -237,7 +245,7 @@ pub(super) async fn start(
         session.set_shipped_policy(baseline.clone());
     }
 
-    install_connectors(&session, policy_path);
+    install_connectors(&session, policy_path).await?;
 
     tokio::spawn(decision_delivery_loop(
         Arc::downgrade(&session),
@@ -962,7 +970,9 @@ mod tests {
         let project = tempfile::tempdir().expect("tempdir");
         let (session, _frame_rx) = fixture_session();
 
-        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"));
+        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"))
+            .await
+            .expect("reading the project's connectors");
 
         // The run allows the destination outright, so nothing would ask about it; the hold is what raises the offer.
         let mut allowed = Policy::default();
@@ -991,7 +1001,9 @@ mod tests {
         grant_in(home.path(), project.path());
         let (session, _frame_rx) = fixture_session();
 
-        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"));
+        install_connectors(&session, &project.path().join("lns-local-mixin.yaml"))
+            .await
+            .expect("reading the project's connectors");
 
         let published = session.policy_message().network.expect("a network section");
         assert!(

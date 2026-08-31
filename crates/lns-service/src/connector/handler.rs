@@ -302,10 +302,13 @@ pub fn granted_supply(
         if digest != entry.digest {
             continue;
         }
-        supplied.insert(
-            entry.name.clone(),
-            supplied_by(store, &entry, &method, profile.as_deref())?,
-        );
+        match supplied_by(store, &entry, &method, profile.as_deref()) {
+            Ok(payload) => {
+                supplied.insert(entry.name.clone(), payload);
+            }
+            // A grant is per connector, so one this run cannot supply must not take the others with it.
+            Err(e) => crate::log::error!("{} supplies nothing to this run: {e:#}", entry.name),
+        }
     }
     drop_a_connector_writing_a_path_another_already_holds(&mut supplied);
     Ok(supplied)
@@ -1525,6 +1528,45 @@ mod tests {
         assert!(
             rig.store().decision("/work", "beta").unwrap().is_none(),
             "a refused grant must not be recorded, or the next run restores the collision"
+        );
+    }
+
+    #[test]
+    fn one_connector_this_run_cannot_supply_costs_only_its_own_grant() {
+        // A grant is per connector, so one unreadable connector must not take the rest of the project's grants with it — the run would start with no egress it was promised and no card to ask again.
+        let rig = Rig::new();
+        rig.set.put("alpha", "sha256:a", b"not a document").unwrap();
+        rig.set
+            .put("beta", "sha256:b", &writing("beta", "~/.beta"))
+            .unwrap();
+        for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
+            rig.store()
+                .decide(
+                    "/work",
+                    name,
+                    ProjectDecision::Granted {
+                        digest: digest.to_string(),
+                        method: "open".to_string(),
+                        profile: None,
+                        authority: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let mut supplied = BTreeMap::new();
+        let messages = crate::test_env::captured_messages(|| {
+            supplied = granted_supply(&rig.store(), "/work").expect("the store itself is readable");
+        });
+
+        assert_eq!(
+            supplied.keys().collect::<Vec<_>>(),
+            ["beta"],
+            "beta granted its own method and must still get it"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("alpha")),
+            "a grant this run drops must say which connector it was; got: {messages:?}"
         );
     }
 
