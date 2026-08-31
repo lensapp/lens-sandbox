@@ -288,6 +288,21 @@ fn then_output_does_not_contain(w: &mut BehaviourWorld, needle: String) -> Resul
     }
 }
 
+#[then(regex = r#"^the output does not contain "([^"]*)" in any casing$"#)]
+fn then_output_does_not_contain_any_casing(
+    w: &mut BehaviourWorld,
+    needle: String,
+) -> Result<(), String> {
+    let output = &w.result.as_ref().ok_or("no CLI run captured")?.output;
+    if output.to_lowercase().contains(&needle.to_lowercase()) {
+        Err(format!(
+            "expected output not to contain {needle:?} in any casing, got {output:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[given(
     regex = r#"^the service reports run (\d+) of image "([^"]+)" running with (\d+) cpus and (\d+) MiB$"#
 )]

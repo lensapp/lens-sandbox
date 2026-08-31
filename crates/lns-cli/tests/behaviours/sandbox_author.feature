@@ -26,7 +26,7 @@ Feature: authoring a document
     When the user runs artifact command "init"
     Then the exit code is 0
     And the file "lns.yaml" contains "image: alpine:3.20"
-    And the file "lns.yaml" does not contain "docker"
+    And the file "lns.yaml" does not contain "docker" in any casing
 
   Scenario: the created-file line lands on stderr, so a piped stdout stays the answer
     Given the current directory has no lns.yaml

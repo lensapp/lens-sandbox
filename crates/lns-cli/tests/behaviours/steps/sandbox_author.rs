@@ -299,6 +299,22 @@ fn file_does_not_contain(
     }
 }
 
+#[then(regex = r#"^the file "([^"]+)" does not contain "([^"]+)" in any casing$"#)]
+fn file_does_not_contain_any_casing(
+    w: &mut BehaviourWorld,
+    name: String,
+    needle: String,
+) -> Result<(), String> {
+    let contents = authored(w, &name)?;
+    if contents.to_lowercase().contains(&needle.to_lowercase()) {
+        Err(format!(
+            "expected {name} not to contain {needle:?} in any casing, got:\n{contents}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn authored<'a>(w: &'a BehaviourWorld, name: &str) -> Result<&'a String, String> {
     w.author_files
         .get(&PathBuf::from("/work").join(name))
