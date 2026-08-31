@@ -75,14 +75,6 @@ impl LedgerEvent {
             LedgerEvent::Connector { .. } => "connector",
         }
     }
-
-    /// The connector an event concerns, which is what `lns audit --connector` filters on.
-    pub fn connector(&self) -> Option<&str> {
-        match self {
-            LedgerEvent::Approval { .. } => None,
-            LedgerEvent::Connector { connector, .. } => Some(connector),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +125,6 @@ mod tests {
             digest: Some("sha256:abc".into()),
         });
         assert_eq!(back.event.name(), "connector");
-        assert_eq!(back.event.connector(), Some("some-provider"));
     }
 
     #[test]
@@ -168,17 +159,6 @@ mod tests {
         ] {
             assert_eq!(verb.word(), word);
         }
-    }
-
-    #[test]
-    fn an_approval_names_no_connector_so_the_filter_leaves_it_out() {
-        let record = round_trip(LedgerEvent::Approval {
-            kind: ApprovalKind::Network,
-            target: "api.foo.com:443".into(),
-            decision: Decision::AllowOnce,
-            reason: None,
-        });
-        assert_eq!(record.event.connector(), None);
     }
 
     #[test]
