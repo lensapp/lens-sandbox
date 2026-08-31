@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -18,8 +18,8 @@ pub struct Wanted<'a> {
 pub struct LocalMixins {
     pub declared_keys: Vec<String>,
     pub flag_keys: Vec<String>,
-    /// Published references met along the way, which an offline render lists rather than merges.
-    pub unresolved: Vec<String>,
+    /// Published references met along the way, held in the graph as empty placeholders so the merge lists each one where it was declared, and merges nothing for it.
+    pub published: BTreeSet<String>,
     pub graph: BTreeMap<String, lns_artifact::sandbox::SandboxSpec>,
 }
 
@@ -28,14 +28,14 @@ pub fn resolve<F: Fs + ?Sized>(fs: &F, wanted: &Wanted) -> Result<LocalMixins> {
     let mut walk = Walk {
         fs,
         graph: BTreeMap::new(),
-        unresolved: Vec::new(),
+        published: BTreeSet::new(),
     };
     let declared_keys = walk.reach_all(wanted.declared, wanted.document_dir)?;
     let flag_keys = walk.reach_demanded(wanted.flags, wanted.invocation_dir)?;
     Ok(LocalMixins {
         declared_keys,
         flag_keys,
-        unresolved: walk.unresolved,
+        published: walk.published,
         graph: walk.graph,
     })
 }
@@ -43,7 +43,7 @@ pub fn resolve<F: Fs + ?Sized>(fs: &F, wanted: &Wanted) -> Result<LocalMixins> {
 struct Walk<'a, F: Fs + ?Sized> {
     fs: &'a F,
     graph: BTreeMap<String, lns_artifact::sandbox::SandboxSpec>,
-    unresolved: Vec<String>,
+    published: BTreeSet<String>,
 }
 
 impl<F: Fs + ?Sized> Walk<'_, F> {
@@ -52,7 +52,7 @@ impl<F: Fs + ?Sized> Walk<'_, F> {
         for reference in references {
             match self.reach(reference, dir)? {
                 Some(key) => keys.push(key),
-                None => self.note_unresolved(reference),
+                None => keys.push(self.hold_published(reference)),
             }
         }
         Ok(keys)
@@ -96,9 +96,9 @@ impl<F: Fs + ?Sized> Walk<'_, F> {
         Ok(Some(key))
     }
 
-    fn note_unresolved(&mut self, reference: &str) {
-        if !self.unresolved.iter().any(|seen| seen == reference) {
-            self.unresolved.push(reference.to_string());
-        }
+    fn hold_published(&mut self, reference: &str) -> String {
+        self.graph.entry(reference.to_string()).or_default();
+        self.published.insert(reference.to_string());
+        reference.to_string()
     }
 }

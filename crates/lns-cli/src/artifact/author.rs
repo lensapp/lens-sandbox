@@ -283,21 +283,29 @@ fn compose<F: Fs + ?Sized>(
     base.mixins = local.declared_keys.clone();
     let sources = lns_artifact::merge::flatten(&base, &local.flag_keys, None, &local.graph)?;
     Ok(Composition {
+        mixins: mixin_lines(&sources, &local.published),
         spec: lns_artifact::merge::merge(&sources)?.spec,
-        mixins: mixin_lines(&local),
     })
 }
 
-/// §3.3.1 makes the resolved document's path a mixin's identity, so that is what a merged one is named by; a published one has none, and the line says why it is only listed.
-fn mixin_lines(local: &super::mixin_offline::LocalMixins) -> Vec<String> {
-    local
-        .declared_keys
+/// The merge's own source list is the disclosure, so every merged mixin is listed however deep it was named, once, in merge order; §3.3.1 makes the resolved document's path its identity, a published one has none, and its line says why it is only listed.
+fn mixin_lines(
+    sources: &[lns_artifact::merge::Source],
+    published: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    sources
         .iter()
-        .chain(&local.flag_keys)
-        .cloned()
-        .chain(local.unresolved.iter().map(|reference| {
-            format!("{reference} (published; not merged, because this render is offline)")
-        }))
+        .skip(1)
+        .map(|source| {
+            if published.contains(source.label) {
+                format!(
+                    "{} (published; not merged, because this render is offline)",
+                    source.label
+                )
+            } else {
+                source.label.to_string()
+            }
+        })
         .collect()
 }
 
@@ -666,6 +674,70 @@ mod tests {
         assert!(
             text.contains("mixin: /work/mixins/postgres-tools/lns.yaml"),
             "§3.3.1 makes the resolved document the mixin's identity, and that is what the disclosure names: {text}"
+        );
+    }
+
+    #[test]
+    fn a_mixin_a_mixin_names_is_listed_alongside_what_it_merged() {
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", valid_yaml()),
+            (
+                "/work/obs/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  mixins:\n    - ../deep\n",
+            ),
+            (
+                "/work/deep/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: deep\nspec:\n  tools:\n    - python@3.12\n",
+            ),
+        ]);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("mixin: /work/deep/lns.yaml"),
+            "the render exists to disclose what merged, and this mixin's tool merged: {text}"
+        );
+    }
+
+    #[test]
+    fn a_path_both_declared_and_named_by_a_flag_is_listed_once() {
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  mixins:\n    - ./obs\n";
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", yaml),
+            (
+                "/work/obs/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n",
+            ),
+        ]);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text.matches("mixin: /work/obs/lns.yaml").count(),
+            1,
+            "one document is one source, however many spellings reached it: {text}"
+        );
+    }
+
+    #[test]
+    fn a_published_entry_is_listed_where_it_was_declared() {
+        let yaml = format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  mixins:\n    - ghcr.io/acme/obs@sha256:{}\n    - ./local\n",
+            "a".repeat(64)
+        );
+        let fs = MapFs::with(&[
+            ("/work/lns.yaml", yaml.as_str()),
+            (
+                "/work/local/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: local\nspec:\n  tools:\n    - node@22\n",
+            ),
+        ]);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.find("ghcr.io/acme/obs").unwrap() < text.find("/work/local/lns.yaml").unwrap(),
+            "the list is the merge order, and the document declared the published entry first: {text}"
         );
     }
 

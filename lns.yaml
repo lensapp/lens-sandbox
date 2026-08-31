@@ -1,0 +1,60 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: lens-sandbox-dev
+spec:
+  image: docker.io/library/rust:1.97.1-bookworm
+  command: bash
+  workdir: /workspace
+  env:
+    CARGO_HOME: /opt/cargo
+    RUSTUP_HOME: /opt/rustup
+    CARGO_TARGET_DIR: /build
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    CC_aarch64_unknown_linux_musl: gcc
+    AR_aarch64_unknown_linux_musl: ar
+    CC_x86_64_unknown_linux_musl: gcc
+    AR_x86_64_unknown_linux_musl: ar
+  resources:
+    cpu: 8
+    memory: 8Gi
+  egress:
+    http:
+      - match: index.crates.io
+        verdict: allow
+        description: cargo registry index
+      - match: static.crates.io
+        verdict: allow
+        description: crate downloads
+      - match: static.rust-lang.org
+        verdict: allow
+        description: rustup toolchain and musl targets (rust-toolchain.toml)
+      - match: github.com
+        verdict: allow
+        description: git dependency lens-sandbox-core (cargo fetch)
+    tcp: []
+  connectors: []
+  credentials: []
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+    - type: volume
+      source: lns-dev-cargo-home
+      target: /opt/cargo
+    - type: volume
+      source: lns-dev-rustup-home
+      target: /opt/rustup
+    - type: volume
+      source: lns-dev-target
+      target: /build
+  scripts:
+    - when: pre-start
+      run: |
+        cd /workspace
+        rustup show >/dev/null
+  filesets: []
+  ports: []
+  tools:
+    - jq@1.7.1
+    - gh@2.97.0
