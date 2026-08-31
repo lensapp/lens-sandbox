@@ -1050,7 +1050,7 @@ mod tests {
                     }],
                     "filesets": [{
                         "inline": { "credentials.json": "{\"token\":\"some_LNSPLACEHOLDER0000000000\"}" },
-                        "guestPath": "/home/agent/.some-provider",
+                        "guestPath": "~/.some-provider",
                     }],
                 }],
             },
@@ -1066,7 +1066,7 @@ mod tests {
             ["other.example", "db.example:5432"],
             "a method's egress is not bounded by `serves`, so both tables reach the card"
         );
-        assert_eq!(method.writes, ["/home/agent/.some-provider"]);
+        assert_eq!(method.writes, ["~/.some-provider"]);
         assert_eq!(method.env, ["SOME_REGION"]);
         assert_eq!(method.credentials, ["SOME_TOKEN"]);
     }
@@ -1362,7 +1362,7 @@ mod tests {
                 "methods": [{
                     "name": "token",
                     "auth": { "kind": "token" },
-                    "filesets": [{ "guestPath": "/home/agent/.some-provider", "path": "./seed" }],
+                    "filesets": [{ "guestPath": "~/.some-provider", "path": "./seed" }],
                 }],
             },
         })

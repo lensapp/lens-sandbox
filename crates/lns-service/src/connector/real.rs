@@ -275,7 +275,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("lns.yaml"),
-            "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves: [api.some-provider.example]\n  methods:\n    - name: token\n      auth:\n        kind: token\n      filesets:\n        - path: ./seed\n          guestPath: /home/agent/.some-provider\n",
+            "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves: [api.some-provider.example]\n  methods:\n    - name: token\n      auth:\n        kind: token\n      filesets:\n        - path: ./seed\n          guestPath: ~/.some-provider\n",
         )
         .unwrap();
         std::fs::create_dir(dir.path().join("seed")).unwrap();

@@ -777,7 +777,7 @@ mod tests {
         );
     }
 
-    const CONNECTOR_WITH_A_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]}]}}"#;
+    const CONNECTOR_WITH_A_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"~/.some-provider"}]}]}}"#;
 
     #[test]
     fn packing_reads_a_connectors_secret_shaped_file_so_push_can_check_its_content() {

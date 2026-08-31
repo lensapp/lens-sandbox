@@ -327,11 +327,11 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
         .validate_binary_scopes()
         .context("sandbox policy")?;
     if let Some(workdir) = &doc.spec.workdir {
-        spec::validate_guest_path(workdir).context("workdir")?;
+        spec::validate_guest_path(workdir, spec::GuestAnchor::Root).context("workdir")?;
     }
     let mut targets = BTreeSet::new();
     for volume in &doc.spec.volumes {
-        spec::validate_guest_path(&volume.target)
+        spec::validate_guest_path(&volume.target, spec::GuestAnchor::Root)
             .with_context(|| format!("volume targeting {}", volume.target))?;
         if overlaps_runtime_namespace(&volume.target) {
             bail!(
@@ -349,7 +349,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     }
     crate::tools::parse_all(&doc.spec.tools)?;
     for fileset in &doc.spec.filesets {
-        validate_fileset(fileset)?;
+        validate_fileset(fileset, spec::GuestAnchor::Root)?;
         refuse_a_secret_shaped_inline_name(fileset)?;
         if !targets.insert(claimed_path(&fileset.guest_path)) {
             bail!("duplicate guest path {}", fileset.guest_path);
@@ -424,7 +424,7 @@ fn validate_scripts(scripts: &[ScriptStep]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
+pub(crate) fn validate_fileset(fileset: &FilesetEntry, anchor: spec::GuestAnchor) -> Result<()> {
     let source_count = usize::from(fileset.path.is_some())
         + usize::from(fileset.inline.is_some())
         + usize::from(fileset.host_path.is_some());
@@ -462,7 +462,7 @@ pub(crate) fn validate_fileset(fileset: &FilesetEntry) -> Result<()> {
         ),
         None => {}
     }
-    spec::validate_guest_path(&fileset.guest_path).context("fileset guestPath")?;
+    spec::validate_guest_path(&fileset.guest_path, anchor).context("fileset guestPath")?;
     if overlaps_runtime_namespace(&fileset.guest_path) {
         bail!(
             "fileset guestPath {} overlaps the /.lens runtime namespace, which belongs to the sandbox itself",

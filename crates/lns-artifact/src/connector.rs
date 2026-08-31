@@ -245,7 +245,7 @@ fn validate_method(
         .context("connector policy")?;
     let mut written = BTreeSet::new();
     for fileset in &method.filesets {
-        crate::sandbox::validate_fileset(fileset)?;
+        crate::sandbox::validate_fileset(fileset, crate::spec::GuestAnchor::Home)?;
         if fileset.host_path.is_some() {
             bail!(
                 "a connector must not declare a fileset hostPath: a connector is installed once and used in every project, so reading a path off whichever machine happens to be running it is a sandbox concern"
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn a_method_carries_the_payload_a_grant_applies() {
         let def = parse(&with_methods(&format!(
-            r#"[{{"name":"token","label":"API token","auth":{{"kind":"token","help":"where to get one"}},"egress":{{"http":[{{"match":"api.some-provider.example","verdict":"allow"}}]}},"credentials":[{CREDENTIAL}],"env":{{"SOME_PROVIDER_REGION":"eu"}},"filesets":[{{"guestPath":"/home/agent/.some-provider","inline":{{"config.json":"{{}}"}}}}]}}]"#
+            r#"[{{"name":"token","label":"API token","auth":{{"kind":"token","help":"where to get one"}},"egress":{{"http":[{{"match":"api.some-provider.example","verdict":"allow"}}]}},"credentials":[{CREDENTIAL}],"env":{{"SOME_PROVIDER_REGION":"eu"}},"filesets":[{{"guestPath":"~/.some-provider","inline":{{"config.json":"{{}}"}}}}]}}]"#
         )))
         .expect("§3.2.2 lets a method carry egress, credentials, env and a fileset");
         assert_eq!(def.name, "some-provider");
@@ -357,7 +357,7 @@ mod tests {
             method.env.get("SOME_PROVIDER_REGION").map(String::as_str),
             Some("eu")
         );
-        assert_eq!(method.filesets[0].guest_path, "/home/agent/.some-provider");
+        assert_eq!(method.filesets[0].guest_path, "~/.some-provider");
         assert!(method.is_offerable());
     }
 
@@ -410,7 +410,7 @@ mod tests {
             let payload = match block {
                 "egress" => r#"{"http":[]}"#.to_string(),
                 "credentials" => format!("[{CREDENTIAL}]"),
-                "filesets" => r#"[{"guestPath":"/a","inline":{"a":"b"}}]"#.to_string(),
+                "filesets" => r#"[{"guestPath":"~/a","inline":{"a":"b"}}]"#.to_string(),
                 _ => r#"{"A":"b"}"#.to_string(),
             };
             let err = parse(&document(&format!(
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn a_method_refuses_a_fileset_that_reads_the_machine_running_it() {
         let err = parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"hostPath":"~/.some-provider/config.json","guestPath":"/home/agent/.some-provider/config.json"}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"hostPath":"~/.some-provider/config.json","guestPath":"~/.some-provider/config.json"}]}]"#,
         ))
         .unwrap_err();
         assert!(
@@ -525,9 +525,45 @@ mod tests {
     }
 
     #[test]
+    fn a_connector_fileset_writes_under_the_guests_home() {
+        let def = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.some-provider","inline":{"config.json":"{}"}}]}]"#,
+        ))
+        .expect("§3.2.3 anchors a connector fileset at the home the running guest reports");
+        assert_eq!(
+            def.spec.methods[0].filesets[0].guest_path,
+            "~/.some-provider"
+        );
+    }
+
+    #[test]
+    fn a_connector_fileset_may_not_name_an_absolute_guest_path() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"/home/agent/.some-provider","inline":{"config.json":"{}"}}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must start with `~/`"),
+            "a method is applied on a policy change, which reaches only the home of the running guest, so an absolute path is refused where the document is parsed rather than at grant; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_connector_fileset_may_not_name_another_users_home() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~alice/.some-provider","inline":{"config.json":"{}"}}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must start with `~/`"),
+            "a document does not choose whose files it writes; got: {err:#}"
+        );
+    }
+
+    #[test]
     fn two_filesets_in_one_method_may_not_claim_one_guest_path() {
         let err = parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"/home/agent/.x","inline":{"a":"1"}},{"guestPath":"/home/agent/.x","inline":{"b":"2"}}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.x","inline":{"a":"1"}},{"guestPath":"~/.x","inline":{"b":"2"}}]}]"#,
         ))
         .unwrap_err();
         assert!(
@@ -539,7 +575,7 @@ mod tests {
     #[test]
     fn two_methods_may_each_write_the_same_guest_path() {
         parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"/home/agent/.x","inline":{"a":"1"}}]},{"name":"sso","auth":{"kind":"token"},"filesets":[{"guestPath":"/home/agent/.x","inline":{"b":"2"}}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.x","inline":{"a":"1"}}]},{"name":"sso","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.x","inline":{"b":"2"}}]}]"#,
         ))
         .expect("methods are alternatives, so only one ever writes and the paths cannot collide");
     }
@@ -559,7 +595,7 @@ mod tests {
     #[test]
     fn a_credential_inside_a_method_may_carry_no_env_var() {
         let def = parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"filesets":[{"guestPath":"/home/agent/.some-provider/credentials.json","inline":{"credentials.json":"{\"token\":\"some_LNSPLACEHOLDER0000000000\"}"}}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}],"filesets":[{"guestPath":"~/.some-provider/credentials.json","inline":{"credentials.json":"{\"token\":\"some_LNSPLACEHOLDER0000000000\"}"}}]}]"#,
         ))
         .expect("a fileset-delivered credential serves a client that never reads the environment");
         let credential = &def.spec.methods[0].credentials[0];
@@ -596,7 +632,7 @@ mod tests {
     #[test]
     fn a_secret_shaped_inline_file_must_carry_a_placeholder_its_own_method_declares() {
         let err = parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"guestPath":"/home/agent/.some-provider","inline":{"credentials.json":"{\"token\":\"sk-live-real\"}"}}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"guestPath":"~/.some-provider","inline":{"credentials.json":"{\"token\":\"sk-live-real\"}"}}]}]"#,
         ))
         .unwrap_err();
         assert!(
@@ -608,7 +644,7 @@ mod tests {
     #[test]
     fn a_secret_shaped_file_cannot_borrow_a_sibling_methods_marker() {
         let err = parse(&with_methods(
-            r#"[{"name":"a","auth":{"kind":"token"},"credentials":[{"envVar":"A_TOKEN","placeholder":"a_LNSPLACEHOLDER00000000"}]},{"name":"b","auth":{"kind":"token"},"credentials":[{"envVar":"B_TOKEN","placeholder":"b_LNSPLACEHOLDER00000000"}],"filesets":[{"guestPath":"/home/agent/.p","inline":{"credentials.json":"{\"token\":\"a_LNSPLACEHOLDER00000000\"}"}}]}]"#,
+            r#"[{"name":"a","auth":{"kind":"token"},"credentials":[{"envVar":"A_TOKEN","placeholder":"a_LNSPLACEHOLDER00000000"}]},{"name":"b","auth":{"kind":"token"},"credentials":[{"envVar":"B_TOKEN","placeholder":"b_LNSPLACEHOLDER00000000"}],"filesets":[{"guestPath":"~/.p","inline":{"credentials.json":"{\"token\":\"a_LNSPLACEHOLDER00000000\"}"}}]}]"#,
         ))
         .unwrap_err();
         assert!(
@@ -620,7 +656,7 @@ mod tests {
     #[test]
     fn a_path_fileset_is_checked_against_the_bytes_beside_the_document() {
         let json = with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"/home/agent/.some-provider"}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"~/.some-provider"}]}]"#,
         );
         let beside = BTreeMap::from([(
             "./some-provider".to_string(),
@@ -643,7 +679,7 @@ mod tests {
     #[test]
     fn path_filesets_names_the_method_that_packs_each_directory() {
         let def = parse(&with_methods(
-            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"path":"./a","guestPath":"/a"}]},{"name":"sso","auth":{"kind":"token"},"filesets":[{"path":"./b","guestPath":"/b"}]}]"#,
+            r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"path":"./a","guestPath":"~/a"}]},{"name":"sso","auth":{"kind":"token"},"filesets":[{"path":"./b","guestPath":"~/b"}]}]"#,
         ))
         .expect("two methods may each pack a directory");
         assert_eq!(
