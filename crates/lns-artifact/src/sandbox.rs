@@ -534,6 +534,7 @@ fn refuse_a_secret_shaped_inline_name(fileset: &FilesetEntry) -> Result<()> {
 pub fn looks_like_secret_name(name: &str) -> bool {
     name.starts_with(".env")
         || name.starts_with("credentials.")
+        || name.starts_with(".credentials")
         || name.ends_with(".pem")
         || name.ends_with(".key")
         || name.ends_with(".ppk")
@@ -2128,6 +2129,7 @@ mod tests {
             "../settings.json",
             ".claude/../state.json",
             ".aws/credentials.json",
+            ".claude/.credentials.json",
             "nested/.env.local",
         ] {
             let spec = format!(
