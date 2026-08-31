@@ -47,6 +47,16 @@ Feature: previewing a composition against a local document
     And the output contains "tool: node@22"
     And the output contains "tool: python@3.12"
 
+  Scenario: every merged mixin is listed, however deep it was named
+    Given a valid lns.yaml in the current directory
+    And the mixin "./obs" declares tool "node@22"
+    And the mixin "./obs" layers on "../deep"
+    And the mixin "./deep" declares tool "python@3.12"
+    When the user runs artifact command "inspect --mixin ./obs"
+    Then the exit code is 0
+    And the output contains "mixin: /work/obs/lns.yaml"
+    And the output contains "mixin: /work/deep/lns.yaml"
+
   Scenario: a published mixin reference is refused, and the message says why
     Given a valid lns.yaml in the current directory
     When the user runs artifact command "inspect --mixin ghcr.io/acme/obs:2"
