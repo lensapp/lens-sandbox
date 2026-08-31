@@ -12,6 +12,8 @@ use anyhow::{Context, Result, bail};
 pub struct FetchedConnector {
     pub digest: String,
     pub document: Vec<u8>,
+    /// Every packed fileset the same artifact carried, in the order the document declares its `path` entries.
+    pub filesets: Vec<Vec<u8>>,
 }
 
 /// Which of the two forms `<REF|PATH>` named. `Local` is the connector's document, absolute by the time it reaches the service, because the service's working directory is not the user's.
@@ -79,6 +81,10 @@ pub fn read_local<F: lns_artifact::walk::SnapshotFs + ?Sized>(
     let built = lns_artifact::build::build_artifact(&document, &filesets, readme.as_deref())
         .context("building the connector artifact")?;
     Ok(FetchedConnector {
+        filesets: built
+            .fileset_layers()
+            .map(|layer| layer.data.clone())
+            .collect(),
         digest: built.manifest_digest,
         document,
     })

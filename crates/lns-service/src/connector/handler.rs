@@ -14,7 +14,7 @@ pub async fn install<S: ConnectorSource + ?Sized>(
     operand: &str,
 ) -> Result<ConnectorView> {
     let fetched = source.fetch(&Source::of(operand)?).await?;
-    let definition = store.install(&fetched.digest, &fetched.document)?;
+    let definition = store.install(&fetched.digest, &fetched.document, &fetched.filesets)?;
     Ok(view_of(
         &definition,
         &fetched.digest,
@@ -537,13 +537,20 @@ mod tests {
     #[derive(Default)]
     struct FakeSet {
         entries: Mutex<Vec<Installed>>,
+        layers: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
     }
 
     impl InstalledSet for FakeSet {
         fn list(&self) -> std::io::Result<Vec<Installed>> {
             Ok(self.entries.lock().unwrap().clone())
         }
-        fn put(&self, name: &str, digest: &str, document: &[u8]) -> std::io::Result<()> {
+        fn put(
+            &self,
+            name: &str,
+            digest: &str,
+            document: &[u8],
+            filesets: &[Vec<u8>],
+        ) -> std::io::Result<()> {
             let mut held = self.entries.lock().unwrap();
             held.retain(|e| e.name != name);
             held.push(Installed {
@@ -551,7 +558,22 @@ mod tests {
                 digest: digest.to_string(),
                 document: document.to_vec(),
             });
+            self.layers
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), filesets.to_vec());
             Ok(())
+        }
+        fn fileset_layer(&self, name: &str, index: usize) -> std::io::Result<Vec<u8>> {
+            self.layers
+                .lock()
+                .unwrap()
+                .get(name)
+                .and_then(|layers| layers.get(index))
+                .cloned()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "no such fileset layer")
+                })
         }
         fn remove(&self, name: &str) -> std::io::Result<bool> {
             let mut held = self.entries.lock().unwrap();
@@ -574,6 +596,7 @@ mod tests {
             Ok(FetchedConnector {
                 digest: self.digest.clone(),
                 document: self.document.clone(),
+                filesets: Vec::new(),
             })
         }
     }
@@ -789,7 +812,7 @@ mod tests {
         // `install` refuses while one of these is present, so `list` is how the user finds out which to uninstall.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document")
+            .put("mystery", "sha256:xyz", b"not a document", &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed.len(), 1);
@@ -1001,7 +1024,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
         let err = grant(&rig.store(), "some-provider", "/work", "future", None)
             .unwrap_err()
             .to_string();
@@ -1046,6 +1071,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &two_token_methods("some-provider"),
+                &[],
             )
             .unwrap();
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
@@ -1069,6 +1095,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &two_token_methods("some-provider"),
+                &[],
             )
             .unwrap();
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
@@ -1129,7 +1156,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
 
         let listed = list(&rig.store()).unwrap();
         let method = &listed[0].methods[0];
@@ -1164,7 +1193,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(
             listed[0].methods[0].credentials,
@@ -1196,7 +1227,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
     }
@@ -1206,7 +1239,9 @@ mod tests {
     }
 
     fn installed_as(rig: &Rig, name: &str, host: &str, digest: &str) {
-        rig.set.put(name, digest, &document(name, host)).unwrap();
+        rig.set
+            .put(name, digest, &document(name, host), &[])
+            .unwrap();
     }
 
     #[test]
@@ -1314,7 +1349,7 @@ mod tests {
         // A run must launch beside a connector this build cannot read; holding nothing is the safe direction, since a destination is asked about only when an offer could follow.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}")
+            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
             .unwrap();
         installed_as(
             &rig,
@@ -1364,7 +1399,7 @@ mod tests {
         // Deciding before parsing keeps the warning true: a declined connector is not one this run failed to read.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}")
+            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
             .unwrap();
         rig.store()
             .decide("/work", "broken", ProjectDecision::Declined)
@@ -1397,7 +1432,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
 
         let payload = grant_disclosed(
             &rig.store(),
@@ -1453,6 +1490,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
+                &[],
             )
             .unwrap();
 
@@ -1486,10 +1524,10 @@ mod tests {
         // Two entries claiming one path reach the guest as two creates. The second fails, the batch rolls back, and every granted file for the run goes with it.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"))
+            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"))
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
             .unwrap();
         grant_disclosed(&rig.store(), "alpha", "sha256:a", "/work", "open", None).expect("first");
 
@@ -1511,10 +1549,10 @@ mod tests {
         // `lns connector grant` reaches `grant` without passing the card, so a check only the card ran would let the CLI record what the card refuses.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"))
+            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"))
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
             .unwrap();
         grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
 
@@ -1535,9 +1573,11 @@ mod tests {
     fn one_connector_this_run_cannot_supply_costs_only_its_own_grant() {
         // A grant is per connector, so one unreadable connector must not take the rest of the project's grants with it — the run would start with no egress it was promised and no card to ask again.
         let rig = Rig::new();
-        rig.set.put("alpha", "sha256:a", b"not a document").unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.beta"))
+            .put("alpha", "sha256:a", b"not a document", &[])
+            .unwrap();
+        rig.set
+            .put("beta", "sha256:b", &writing("beta", "~/.beta"), &[])
             .unwrap();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.store()
@@ -1575,10 +1615,10 @@ mod tests {
         // `.` is a legal guestPath segment, so a second connector could name a file the first already writes and be refused by neither guard.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/shared/x"))
+            .put("alpha", "sha256:a", &writing("alpha", "~/shared/x"), &[])
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/shared/./x"))
+            .put("beta", "sha256:b", &writing("beta", "~/shared/./x"), &[])
             .unwrap();
         grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
 
@@ -1601,7 +1641,7 @@ mod tests {
             ("gamma", "sha256:g", vec!["~/.own"]),
         ] {
             rig.set
-                .put(name, digest, &writing_all(name, &paths))
+                .put(name, digest, &writing_all(name, &paths), &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1639,7 +1679,7 @@ mod tests {
         let rig = Rig::new();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.set
-                .put(name, digest, &writing(name, "~/.shared"))
+                .put(name, digest, &writing(name, "~/.shared"), &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1692,7 +1732,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
 
         let offered = offerable(&rig.store(), "/work").expect("offerable");
         assert!(
@@ -1765,7 +1807,9 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        rig.set.put("some-provider", "sha256:abc", &doc).unwrap();
+        rig.set
+            .put("some-provider", "sha256:abc", &doc, &[])
+            .unwrap();
         connect(
             &rig.store(),
             "some-provider",

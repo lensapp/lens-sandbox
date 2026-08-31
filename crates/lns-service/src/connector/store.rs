@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Mutex;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use lns_artifact::connector::ConnectorDefinition;
 use lns_policy::decision_store::{DecisionFile, DecisionStore};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,15 @@ pub struct Installed {
 
 pub trait InstalledSet: Send + Sync {
     fn list(&self) -> io::Result<Vec<Installed>>;
-    fn put(&self, name: &str, digest: &str, document: &[u8]) -> io::Result<()>;
+    fn put(
+        &self,
+        name: &str,
+        digest: &str,
+        document: &[u8],
+        filesets: &[Vec<u8>],
+    ) -> io::Result<()>;
+    /// One packed fileset by its index in the document's `path` entries.
+    fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>>;
     fn remove(&self, name: &str) -> io::Result<bool>;
 }
 
@@ -89,6 +97,64 @@ impl ProjectDecision {
             Self::Declined => true,
         }
     }
+}
+
+/// What one connector may keep, over every fileset of every method it declares. §3.2.3 caps a method, and nothing caps how many methods a document declares.
+pub const MAX_CONNECTOR_FILESET_BYTES: u64 =
+    4 * lns_artifact::connector::MAX_METHOD_FILESET_BYTES as u64;
+
+/// The document read against the directories its `path` entries pack, so §3.2.3's byte count and §3.2.5's content check hold at install exactly as they held at push.
+fn read_with_its_filesets(document: &[u8], filesets: &[Vec<u8>]) -> Result<ConnectorDefinition> {
+    let shape = lns_artifact::connector::parse(document)?;
+    let packing = lns_artifact::connector::path_filesets(&shape.spec);
+    if packing.len() != filesets.len() {
+        bail!(
+            "this connector declares {} packed fileset(s) but {} came with it",
+            packing.len(),
+            filesets.len()
+        );
+    }
+    let mut by_path: BTreeMap<String, super::layer::PackedFiles> = BTreeMap::new();
+    let mut spent = 0u64;
+    for ((method, path), layer) in packing.iter().zip(filesets) {
+        // Charged against what a layer expands to, never against what it travelled as: a megabyte of zeros compresses to a kilobyte, and it is the expansion this machine holds.
+        let ceiling = (lns_artifact::connector::MAX_METHOD_FILESET_BYTES as u64)
+            .min(MAX_CONNECTOR_FILESET_BYTES - spent);
+        let files = super::layer::expand(layer, ceiling)
+            .map_err(|e| match e.downcast_ref::<super::layer::BudgetExceeded>() {
+                // The narrower of the two ceilings is the one that bit, and only this caller knows which that was.
+                Some(_) if ceiling < lns_artifact::connector::MAX_METHOD_FILESET_BYTES as u64 => {
+                    anyhow::anyhow!(
+                        "this connector's filesets total more than the {MAX_CONNECTOR_FILESET_BYTES}-byte limit one connector may bring"
+                    )
+                }
+                _ => e,
+            })
+            .with_context(|| format!("method {method} fileset {path}"))?;
+        spent += files
+            .values()
+            .map(|file| file.bytes.len() as u64)
+            .sum::<u64>();
+        // One `path` names one directory, so two layers under it are two answers to one question, and the check would see only the last.
+        if let Some(first) = by_path.insert((*path).to_string(), files.clone())
+            && first != files
+        {
+            bail!("this connector packs {path} more than once, with different bytes each time");
+        }
+    }
+    let read: BTreeMap<String, BTreeMap<String, Vec<u8>>> = by_path
+        .into_iter()
+        .map(|(path, files)| {
+            (
+                path,
+                files
+                    .into_iter()
+                    .map(|(name, file)| (name, file.bytes))
+                    .collect(),
+            )
+        })
+        .collect();
+    lns_artifact::connector::parse_with_path_files(document, &read)
 }
 
 fn profile_key(name: &str, label: &str) -> String {
@@ -176,8 +242,13 @@ impl<'a> ConnectorStore<'a> {
     }
 
     /// Parse, refuse what the installed set already answers for, then store. Installing grants nothing (§7.1).
-    pub fn install(&self, digest: &str, document: &[u8]) -> Result<ConnectorDefinition> {
-        let candidate = lns_artifact::connector::parse(document)?;
+    pub fn install(
+        &self,
+        digest: &str,
+        document: &[u8],
+        filesets: &[Vec<u8>],
+    ) -> Result<ConnectorDefinition> {
+        let candidate = read_with_its_filesets(document, filesets)?;
         let _guard = self.lock();
         let (installed, unreadable) = self.installed_definitions()?;
         // An unreadable document hides its own `serves` and variables, so a conflict could not be decided and would surface as an ambiguous offer at some later launch instead.
@@ -192,9 +263,14 @@ impl<'a> ConnectorStore<'a> {
             bail!("{conflict}");
         }
         self.installed
-            .put(&candidate.name, digest, document)
+            .put(&candidate.name, digest, document, filesets)
             .map_err(anyhow::Error::from)?;
         Ok(candidate)
+    }
+
+    /// One packed fileset of an installed connector, by its index in the document's `path` entries.
+    pub fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+        self.installed.fileset_layer(name, index)
     }
 
     /// Removes every profile the connector held, then the connector, and leaves what projects granted untouched (§7.1).
@@ -352,6 +428,7 @@ mod tests {
     struct FakeSet {
         entries: StdMutex<Vec<Installed>>,
         fail_put: StdMutex<bool>,
+        layers: StdMutex<std::collections::BTreeMap<String, Vec<Vec<u8>>>>,
     }
 
     impl InstalledSet for FakeSet {
@@ -359,7 +436,13 @@ mod tests {
             Ok(self.entries.lock().unwrap().clone())
         }
 
-        fn put(&self, name: &str, digest: &str, document: &[u8]) -> io::Result<()> {
+        fn put(
+            &self,
+            name: &str,
+            digest: &str,
+            document: &[u8],
+            filesets: &[Vec<u8>],
+        ) -> io::Result<()> {
             if *self.fail_put.lock().unwrap() {
                 return Err(io::Error::other("disk full"));
             }
@@ -370,7 +453,21 @@ mod tests {
                 digest: digest.to_string(),
                 document: document.to_vec(),
             });
+            self.layers
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), filesets.to_vec());
             Ok(())
+        }
+
+        fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+            self.layers
+                .lock()
+                .unwrap()
+                .get(name)
+                .and_then(|layers| layers.get(index))
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such fileset layer"))
         }
 
         fn remove(&self, name: &str) -> io::Result<bool> {
@@ -399,6 +496,229 @@ mod tests {
         fn store(&self) -> ConnectorStore<'_> {
             ConnectorStore::new(&self.set, &self.values, &self.grants)
         }
+    }
+
+    fn packing(name: &str, path: &str) -> Vec<u8> {
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": name,
+            "spec": {
+                "serves": [format!("api.{name}.example")],
+                "methods": [{
+                    "name": "open",
+                    "filesets": [{ "path": path, "guestPath": "~/.some-provider" }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn layer_of(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let entries: Vec<lns_artifact::build::FileEntry> = files
+            .iter()
+            .map(|(path, data)| lns_artifact::build::FileEntry {
+                path: (*path).to_string(),
+                data: data.clone(),
+                mode: 0o600,
+            })
+            .collect();
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"seed","spec":{"filesets":[{"path":"./seed","guestPath":"/seed"}]}}"#;
+        lns_artifact::build::build_artifact(doc, &[entries], None)
+            .expect("a packable directory")
+            .fileset_layers()
+            .next()
+            .expect("one layer")
+            .data
+            .clone()
+    }
+
+    #[test]
+    fn installing_keeps_the_packed_fileset_that_came_with_the_document() {
+        let rig = Rig::new();
+        let layer = layer_of(&[("config.json", b"{}".to_vec())]);
+
+        rig.store()
+            .install(
+                "sha256:abc",
+                &packing("some-provider", "./seed"),
+                std::slice::from_ref(&layer),
+            )
+            .expect("a connector packing one directory");
+
+        assert_eq!(
+            rig.store().fileset_layer("some-provider", 0).unwrap(),
+            layer,
+            "the bytes outlive the install, because a grant sends them on every policy change"
+        );
+    }
+
+    #[test]
+    fn installing_refuses_a_packed_fileset_past_what_its_method_may_write() {
+        // The count runs where the bytes are: a document alone cannot show what a directory holds, so install reads the layer it was given.
+        let rig = Rig::new();
+        let oversized = layer_of(&[(
+            "config.json",
+            vec![b'a'; lns_artifact::connector::MAX_METHOD_FILESET_BYTES + 1],
+        )]);
+
+        let err = rig
+            .store()
+            .install(
+                "sha256:abc",
+                &packing("some-provider", "./seed"),
+                &[oversized],
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("byte limit"), "got: {err:#}");
+        assert!(
+            rig.store().installed().unwrap().is_empty(),
+            "a refused install leaves nothing installed"
+        );
+    }
+
+    #[test]
+    fn a_full_budget_does_not_rewrite_every_other_refusal_as_its_own() {
+        // The remaining budget being narrow does not make it the reason a layer was refused, and a user told the wrong reason trims the wrong thing.
+        let rig = Rig::new();
+        let methods: Vec<serde_json::Value> = (0..5)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("m{i}"),
+                    "filesets": [{ "path": format!("./seed{i}"), "guestPath": format!("~/.p{i}") }],
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": { "serves": ["api.some-provider.example"], "methods": methods },
+        })
+        .to_string()
+        .into_bytes();
+        let fat = layer_of(&[(
+            "config.json",
+            vec![0u8; lns_artifact::connector::MAX_METHOD_FILESET_BYTES],
+        )]);
+        let mut layers = vec![fat; 4];
+        layers.push(super::super::layer::fixtures::raw_layer("../escape", b"x"));
+
+        let err = rig
+            .store()
+            .install("sha256:abc", &doc, &layers)
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("escapes the path"),
+            "got: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("./seed4"),
+            "the refusal must still say which fileset it was; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn the_budget_counts_what_a_layer_expands_to_not_what_it_travelled_as() {
+        // A megabyte of zeros compresses to about a kilobyte, so a budget over compressed bytes admits thousands of layers and expands gigabytes. Install is the seam both arms pass through, so this covers a local install too.
+        let rig = Rig::new();
+        let methods: Vec<serde_json::Value> = (0..100)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("m{i}"),
+                    "filesets": [{ "path": format!("./seed{i}"), "guestPath": format!("~/.p{i}") }],
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": { "serves": ["api.some-provider.example"], "methods": methods },
+        })
+        .to_string()
+        .into_bytes();
+        let fat = layer_of(&[(
+            "config.json",
+            vec![0u8; lns_artifact::connector::MAX_METHOD_FILESET_BYTES],
+        )]);
+        let layers = vec![fat; 100];
+
+        let err = rig
+            .store()
+            .install("sha256:abc", &doc, &layers)
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("one connector may bring"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn installing_refuses_two_layers_under_one_path_that_disagree() {
+        // Keyed by path alone, the second layer would replace the first and the first would be stored unchecked — and a registry supplies each one independently.
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [
+                    { "name": "a", "filesets": [{ "path": "./seed", "guestPath": "~/.a" }] },
+                    { "name": "b", "filesets": [{ "path": "./seed", "guestPath": "~/.b" }] },
+                ],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let smuggled = layer_of(&[("credentials.json", br#"{"token":"sk-live-real"}"#.to_vec())]);
+        let benign = layer_of(&[("config.json", b"{}".to_vec())]);
+
+        let err = rig
+            .store()
+            .install("sha256:abc", &doc, &[smuggled, benign])
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("more than once, with different bytes"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn installing_refuses_a_document_whose_filesets_did_not_come_with_it() {
+        // A count that silently saw no bytes would pass every oversized directory.
+        let rig = Rig::new();
+        let err = rig
+            .store()
+            .install("sha256:abc", &packing("some-provider", "./seed"), &[])
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declares 1 packed fileset(s) but 0 came with it"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn installing_refuses_a_packed_secret_that_carries_no_placeholder() {
+        // §3.2.5 is checkable only where the bytes are, and install is the second place they are in hand.
+        let rig = Rig::new();
+        let layer = layer_of(&[("credentials.json", br#"{"token":"sk-live-real"}"#.to_vec())]);
+
+        let err = rig
+            .store()
+            .install("sha256:abc", &packing("some-provider", "./seed"), &[layer])
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("carries no placeholder"),
+            "got: {err:#}"
+        );
     }
 
     fn document(name: &str, host: &str, var: &str) -> Vec<u8> {
@@ -447,6 +767,7 @@ mod tests {
             .install(
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
             )
             .unwrap();
         assert_eq!(installed.name, "some-provider");
@@ -460,7 +781,7 @@ mod tests {
         let rig = Rig::new();
         assert!(
             rig.store()
-                .install("sha256:abc", b"not a document")
+                .install("sha256:abc", b"not a document", &[])
                 .is_err()
         );
         assert!(rig.store().installed().unwrap().is_empty());
@@ -474,12 +795,14 @@ mod tests {
             .install(
                 "sha256:abc",
                 &document("some-provider", "*.some-provider.example", "SOME_TOKEN"),
+                &[],
             )
             .unwrap();
         let err = store
             .install(
                 "sha256:def",
                 &document("other-provider", "api.some-provider.example", "OTHER_TOKEN"),
+                &[],
             )
             .unwrap_err()
             .to_string();
@@ -492,8 +815,8 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         let doc = document("some-provider", "api.some-provider.example", "SOME_TOKEN");
-        store.install("sha256:old", &doc).unwrap();
-        store.install("sha256:new", &doc).unwrap();
+        store.install("sha256:old", &doc, &[]).unwrap();
+        store.install("sha256:new", &doc, &[]).unwrap();
         let installed = store.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].digest, "sha256:new");
@@ -507,7 +830,8 @@ mod tests {
             rig.store()
                 .install(
                     "sha256:abc",
-                    &document("some-provider", "api.some-provider.example", "SOME_TOKEN")
+                    &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                    &[],
                 )
                 .is_err()
         );
@@ -518,13 +842,14 @@ mod tests {
         // Its `serves` and its variables are invisible while it cannot be parsed, so an overlapping connector would install cleanly and the ambiguous offer would surface at some later launch instead.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document")
+            .put("mystery", "sha256:xyz", b"not a document", &[])
             .unwrap();
         let err = rig
             .store()
             .install(
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
             )
             .unwrap_err()
             .to_string();
@@ -536,14 +861,15 @@ mod tests {
         // Refusing the install must not brick the machine: removing the offender needs no parse.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document")
+            .put("mystery", "sha256:xyz", b"not a document", &[])
             .unwrap();
         assert!(rig.store().uninstall("mystery").unwrap());
         assert!(
             rig.store()
                 .install(
                     "sha256:abc",
-                    &document("some-provider", "api.some-provider.example", "SOME_TOKEN")
+                    &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                    &[],
                 )
                 .is_ok()
         );
@@ -558,6 +884,7 @@ mod tests {
             .install(
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
             )
             .unwrap();
         store
@@ -1014,6 +1341,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
             )
             .unwrap();
         rig.values.state.lock().unwrap().insert(
