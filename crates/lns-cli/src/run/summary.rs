@@ -110,7 +110,16 @@ fn attribution(args: &RunArgs, block: lns_ipc::ContributionBlock, key: &str) -> 
     if args.resolved_mixins.is_empty() {
         return String::new();
     }
-    args.contributions
+    contribution_attribution(&args.contributions, block, key)
+}
+
+/// One author is not an attribution question, so a caller rendering an uncomposed document passes no contributions.
+pub(crate) fn contribution_attribution(
+    contributions: &[lns_ipc::SourceContribution],
+    block: lns_ipc::ContributionBlock,
+    key: &str,
+) -> String {
+    contributions
         .iter()
         .find(|c| c.block == block && c.key == key)
         .map(attribution_of)
@@ -119,16 +128,31 @@ fn attribution(args: &RunArgs, block: lns_ipc::ContributionBlock, key: &str) -> 
 
 /// The suffix one contribution renders as, taken from the entry rather than found again by key, since a key names one entry only outside egress.
 fn attribution_of(found: &lns_ipc::SourceContribution) -> String {
-    let replaced: Vec<String> = found
-        .displaced
-        .iter()
-        .map(|d| format!(", replaced {} from {}", d.summary, short_source(&d.source)))
-        .collect();
-    format!(
-        "  [from {}{}]",
-        short_source(&found.source),
-        replaced.join("")
+    from_suffix(
+        &found.source,
+        found
+            .displaced
+            .iter()
+            .map(|d| (d.summary.as_str(), d.source.as_str())),
     )
+}
+
+/// The same suffix for a merge the CLI ran itself, so an offline render attributes an entry the way a run summary does.
+pub(crate) fn merged_attribution(found: &lns_artifact::merge::Contribution) -> String {
+    from_suffix(
+        &found.source,
+        found
+            .displaced
+            .iter()
+            .map(|d| (d.summary.as_str(), d.source.as_str())),
+    )
+}
+
+fn from_suffix<'a>(source: &str, displaced: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    let replaced: String = displaced
+        .map(|(summary, from)| format!(", replaced {summary} from {}", short_source(from)))
+        .collect();
+    format!("  [from {}{replaced}]", short_source(source))
 }
 
 /// A source as the disclosure names it, with a digest shortened the way every other reference in this summary is.

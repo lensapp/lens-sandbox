@@ -250,10 +250,25 @@ pub fn inspect_local<F: Fs, W: Write>(
     Ok(0)
 }
 
-/// A composed document and the mixin line each source earned, since a published reference has no resolved document to name.
+/// A composed document, the mixin line each source earned — a published reference has no resolved document to name — and the merge's record of which source decided each entry.
 struct Composition {
     spec: lns_artifact::sandbox::SandboxSpec,
     mixins: Vec<String>,
+    contributions: Vec<lns_artifact::merge::Contribution>,
+}
+
+impl Composition {
+    /// One author is not an attribution question, so a render of the document alone names no source.
+    fn attribution(&self, block: lns_artifact::merge::Block, key: &str) -> String {
+        if self.mixins.is_empty() {
+            return String::new();
+        }
+        self.contributions
+            .iter()
+            .find(|c| c.block == block && c.key == key)
+            .map(crate::run::summary::merged_attribution)
+            .unwrap_or_default()
+    }
 }
 
 /// Every mixin this machine holds merges by §3.3.2 — the document, then what it declares, then each flag — because an offline render can read them all without resolving anything.
@@ -268,6 +283,7 @@ fn compose<F: Fs + ?Sized>(
         return Ok(Composition {
             spec: def.spec.clone(),
             mixins: Vec::new(),
+            contributions: Vec::new(),
         });
     }
     let local = super::mixin_offline::resolve(
@@ -282,9 +298,11 @@ fn compose<F: Fs + ?Sized>(
     let mut base = def.spec.clone();
     base.mixins = local.declared_keys.clone();
     let sources = lns_artifact::merge::flatten(&base, &local.flag_keys, None, &local.graph)?;
+    let merged = lns_artifact::merge::merge(&sources)?;
     Ok(Composition {
         mixins: mixin_lines(&sources, &local.published),
-        spec: lns_artifact::merge::merge(&sources)?.spec,
+        spec: merged.spec,
+        contributions: merged.contributions,
     })
 }
 
@@ -338,6 +356,7 @@ fn render_effective<W: Write>(
     for (key, value) in &spec.env {
         writeln!(out, "  env:          {key}={value}")?;
     }
+    let mount = lns_artifact::merge::Block::Mount;
     for volume in &spec.volumes {
         let kind = if volume.is_bind() { "bind" } else { "volume" };
         let mode = if volume.read_only() {
@@ -347,9 +366,10 @@ fn render_effective<W: Write>(
         };
         writeln!(
             out,
-            "  mount:        {kind} {} -> {} ({mode})",
+            "  mount:        {kind} {} -> {} ({mode}){}",
             volume.source(),
-            volume.target
+            volume.target,
+            composed.attribution(mount, &volume.target)
         )?;
     }
     for fileset in &spec.filesets {
@@ -357,8 +377,9 @@ fn render_effective<W: Write>(
         let owner = crate::run::summary::fileset_owner_display(fileset.owner);
         writeln!(
             out,
-            "  fileset:      {source} -> {} (owner: {owner})",
-            fileset.guest_path
+            "  fileset:      {source} -> {} (owner: {owner}){}",
+            fileset.guest_path,
+            composed.attribution(mount, &fileset.guest_path)
         )?;
     }
     writeln!(
@@ -373,12 +394,20 @@ fn render_effective<W: Write>(
     for credential in &spec.credentials {
         writeln!(
             out,
-            "  credential: {}",
-            super::credential_disclosure(credential)
+            "  credential: {}{}",
+            super::credential_disclosure(credential),
+            composed.attribution(lns_artifact::merge::Block::Credential, &credential.env_var)
         )?;
     }
     for tool in &spec.tools {
-        writeln!(out, "  tool: {tool}")?;
+        writeln!(
+            out,
+            "  tool: {tool}{}",
+            composed.attribution(
+                lns_artifact::merge::Block::Tool,
+                lns_artifact::merge::tool_name(tool)
+            )
+        )?;
     }
     Ok(())
 }
@@ -738,6 +767,40 @@ mod tests {
         assert!(
             text.find("ghcr.io/acme/obs").unwrap() < text.find("/work/local/lns.yaml").unwrap(),
             "the list is the merge order, and the document declared the published entry first: {text}"
+        );
+    }
+
+    #[test]
+    fn each_merged_entry_names_the_source_that_decided_it() {
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  tools:\n    - node@20\n";
+        let mixin = "apiVersion: lns.run/v1\nkind: mixin\nname: obs\nspec:\n  tools:\n    - node@22\n  credentials:\n    - envVar: SOME_TOKEN\n      placeholder: lns-placeholder-some-token\n      injections:\n        - kind: bearer_header\n          domain: api.some-provider.example\n  filesets:\n    - inline:\n        settings.json: '{}'\n      guestPath: /root/.agent/settings\n  volumes:\n    - type: volume\n      source: obs-cache\n      target: /cache\n";
+        let fs = MapFs::with(&[("/work/lns.yaml", yaml), ("/work/obs/lns.yaml", mixin)]);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &["./obs".to_string()], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for line in [
+            "tool: node@22  [from /work/obs/lns.yaml, replaced node@20 from the sandbox]",
+            "credential: SOME_TOKEN -> api.some-provider.example  [from /work/obs/lns.yaml]",
+            "fileset:      inline -> /root/.agent/settings (owner: workload)  [from /work/obs/lns.yaml]",
+            "mount:        volume obs-cache -> /cache (read-write)  [from /work/obs/lns.yaml]",
+        ] {
+            assert!(
+                text.contains(line),
+                "a reader of a composition must not have to open each source to learn which one put an entry there; missing {line:?} in: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_render_of_one_document_alone_names_no_source() {
+        let yaml = "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: x:1\n  tools:\n    - node@20\n";
+        let fs = fake("/work/lns.yaml", yaml);
+        let mut out = Vec::new();
+        inspect_local(&fs, cwd(), None, None, &[], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("[from"),
+            "one author is not an attribution question: {text}"
         );
     }
 

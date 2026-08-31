@@ -443,8 +443,8 @@ fn take_over<T: Clone>(into: &mut Option<T>, from: &Option<T>) {
     }
 }
 
-/// The tool a `name@version` entry names, so a later source's version of one tool replaces an earlier source's rather than joining it.
-fn tool_name(entry: &str) -> &str {
+/// The tool a `name@version` entry names — the key its [`Contribution`] is filed under — so a later source's version of one tool replaces an earlier source's rather than joining it.
+pub fn tool_name(entry: &str) -> &str {
     entry.split_once('@').map_or(entry, |(name, _)| name)
 }
 
