@@ -1504,6 +1504,26 @@ mod tests {
     }
 
     #[test]
+    fn a_mixin_env_key_a_sandbox_credential_fills_still_resolves() {
+        // One variable holds one value is an authoring rule, and neither source breaks it: the merge is where they meet, and no edit to either could avoid it, because nothing lets a sandbox unset a key a mixin set.
+        let merged = merged(&sources(&[
+            ("obs", r#"{"env":{"SOME_TOKEN":"dummy"}}"#),
+            (
+                ROOT_LABEL,
+                r#"{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}"#,
+            ),
+        ]));
+        let resolved = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "sandbox",
+            "name": "hermes",
+            "spec": merged,
+        });
+        crate::sandbox::parse_resolved(resolved.to_string().as_bytes())
+            .expect("a resolution neither source could have authored differently");
+    }
+
+    #[test]
     fn credentials_union_by_the_variable_they_claim() {
         let merged = merged(&sources(&[
             (

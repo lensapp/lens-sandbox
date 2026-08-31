@@ -262,6 +262,11 @@ fn validate_method(
             );
         }
     }
+    lns_spec::credential::refuse_a_variable_a_credential_also_fills(
+        method.env.keys(),
+        &method.credentials,
+    )
+    .map_err(anyhow::Error::msg)?;
     method
         .egress
         .validate_local_transport()
@@ -763,6 +768,19 @@ mod tests {
             r#"[{{"name":"token","auth":{{"kind":"token"}},"filesets":[{{"guestPath":"~/.a","inline":{{{files}}}}}]}}]"#
         )))
         .expect("the rule is MUST NOT exceed, so the ceiling itself is a size a method may write");
+    }
+
+    #[test]
+    fn a_method_may_not_set_a_variable_a_credential_of_its_own_fills() {
+        // One variable holds one value, which the install already refuses between two connectors; inside one method nothing would decide which of the two the workload reads.
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"env":{"SOME_TOKEN":"plain"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SOME_TOKEN"),
+            "the refusal must name the variable claimed twice; got: {err:#}"
+        );
     }
 
     #[test]
