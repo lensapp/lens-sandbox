@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 
 use lns_policy::{Egress, HttpRule, NetworkPolicy, Policy, Scheme, Transport, Verdict};
@@ -243,6 +245,54 @@ impl std::fmt::Debug for WireInjection {
     }
 }
 
+/// One file a granted method writes into the running guest, in the shape `lens-sandbox-core` reads.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFile {
+    pub path: String,
+    #[serde(flatten)]
+    pub content: WireFileContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+}
+
+/// An entry carrying both spellings, or neither, is one core refuses, so neither state is representable here.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireFileContent {
+    Content(String),
+    ContentB64(String),
+}
+
+impl WireFile {
+    pub fn text(path: &str, content: &str, mode: Option<u32>) -> Self {
+        Self {
+            path: path.to_string(),
+            content: WireFileContent::Content(content.to_string()),
+            mode,
+        }
+    }
+
+    /// A packed file is arbitrary bytes, which text is not a shape for.
+    pub fn bytes(path: &str, content: &[u8], mode: Option<u32>) -> Self {
+        Self {
+            path: path.to_string(),
+            content: WireFileContent::ContentB64(BASE64.encode(content)),
+            mode,
+        }
+    }
+}
+
+/// §3.2.5 requires a fileset to carry a placeholder rather than a value, but a document that breaks that rule must not reach the trace stream through us.
+impl std::fmt::Debug for WireFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireFile")
+            .field("path", &self.path)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Outbound `policy` payload; the receiver tolerates extra fields, so we send only `network`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +304,8 @@ pub struct PolicyMessage {
     pub credentials: Option<Vec<WireCredential>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<WireFile>>,
 }
 
 /// What a granted method contributes to the running policy, kept together because the guest replaces each section it receives (§3.3.2 source 4).
@@ -262,6 +314,7 @@ pub struct GrantedPayload {
     pub egress: Policy,
     pub credentials: Vec<WireCredential>,
     pub env: BTreeMap<String, String>,
+    pub files: Vec<WireFile>,
 }
 
 impl GrantedPayload {
@@ -288,6 +341,7 @@ impl GrantedPayload {
                 .extend(granted.egress.network.egress.tcp.iter().cloned());
             combined.credentials.extend(granted.credentials.clone());
             combined.env.extend(granted.env.clone());
+            combined.files.extend(granted.files.clone());
         }
         Some(combined)
     }
@@ -304,6 +358,7 @@ impl PolicyMessage {
         Self {
             credentials: Some(granted.credentials.clone()).filter(|c| !c.is_empty()),
             env: Some(granted.env.clone()).filter(|e| !e.is_empty()),
+            files: Some(granted.files.clone()).filter(|f| !f.is_empty()),
             ..Self::seeded_holding(policy, serves)
         }
     }
@@ -314,6 +369,7 @@ impl PolicyMessage {
             network: Some(WireNetwork::seeded_holding(policy.network, serves)),
             credentials: None,
             env: None,
+            files: None,
         }
     }
 }
@@ -361,6 +417,83 @@ mod tests {
     use super::*;
     use lns_policy::{NetworkPolicy, RouteRule, Transport, Verdict};
     use serde_json::json;
+
+    #[test]
+    fn a_granted_fileset_rides_the_frame_in_the_shape_the_guest_reads() {
+        let granted = GrantedPayload {
+            files: vec![
+                WireFile::text("~/.some-provider/config.json", "{}", None),
+                WireFile::bytes("~/.some-provider/seal.bin", &[0, 1], Some(0o600)),
+            ],
+            ..GrantedPayload::default()
+        };
+        let frame = PolicyMessage::granting(Policy::default(), &[], &granted);
+        let v = serde_json::to_value(&frame).unwrap();
+        assert_eq!(v["files"][0]["path"], "~/.some-provider/config.json");
+        assert_eq!(v["files"][0]["content"], "{}");
+        assert!(
+            v["files"][0].get("contentB64").is_none(),
+            "core refuses an entry that sets both content and contentB64"
+        );
+        assert_eq!(
+            v["files"][1]["contentB64"], "AAE=",
+            "a packed file is arbitrary bytes, so text is not a shape it always has"
+        );
+        assert_eq!(v["files"][1]["mode"], 384);
+    }
+
+    #[test]
+    fn a_grant_without_a_fileset_carries_no_files_section() {
+        let frame = PolicyMessage::granting(Policy::default(), &[], &GrantedPayload::default());
+        let v = serde_json::to_value(&frame).unwrap();
+        assert!(
+            v.get("files").is_none(),
+            "an empty section is not the same as no section: core deletes what a frame it receives does not carry"
+        );
+    }
+
+    #[test]
+    fn every_grants_files_ride_one_frame() {
+        let grants = BTreeMap::from([
+            (
+                "docs".to_string(),
+                GrantedPayload {
+                    files: vec![WireFile::text("~/.docs/config.json", "{}", None)],
+                    ..GrantedPayload::default()
+                },
+            ),
+            (
+                "some-provider".to_string(),
+                GrantedPayload {
+                    files: vec![WireFile::text("~/.some-provider/config.json", "{}", None)],
+                    ..GrantedPayload::default()
+                },
+            ),
+        ]);
+        let combined =
+            GrantedPayload::combined(&grants).expect("two grants combine into one layer");
+        assert_eq!(
+            combined
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["~/.docs/config.json", "~/.some-provider/config.json"],
+            "the guest replaces the whole section, so a frame carrying one grant's files would retract the rest"
+        );
+    }
+
+    #[test]
+    fn a_wire_file_never_prints_its_content() {
+        let rendered = format!(
+            "{:?}",
+            WireFile::text("~/.some-provider/credentials.json", "sk-live-real", None)
+        );
+        assert!(
+            rendered.contains("~/.some-provider/credentials.json") && !rendered.contains("sk-live"),
+            "a fileset carries a placeholder by rule, but a document that breaks the rule must not put its content on the trace stream; got: {rendered}"
+        );
+    }
 
     #[test]
     fn policy_frame_serializes_with_type_discriminator() {

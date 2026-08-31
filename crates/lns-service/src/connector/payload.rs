@@ -16,6 +16,7 @@ pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload
             .map(|credential| armed(credential, values))
             .collect(),
         env: method.env.clone(),
+        files: Vec::new(),
     }
 }
 
