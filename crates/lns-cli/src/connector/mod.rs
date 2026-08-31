@@ -223,13 +223,14 @@ async fn connect(
             args.name
         );
     }
-    let (connector, method) = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
+    let (connector, method, asked_for) =
+        method_to_connect(svc, &args.name, args.method.as_deref()).await?;
     writeln!(prompt, "connecting {} with {}", args.name, method.label)?;
     let connection = match args.label.clone() {
         Some(named) => named,
         None => confirm_name(&connector, &method, terminal, prompt)?,
     };
-    let values = ask_for_each(&method, terminal, prompt)?;
+    let values = ask_for_each(&method, &asked_for, terminal, prompt)?;
     let req = Request::ConnectConnector {
         name: args.name.clone(),
         method: method.name.clone(),
@@ -278,7 +279,7 @@ async fn method_to_connect(
     svc: &dyn ConnectorService,
     name: &str,
     named: Option<&str>,
-) -> Result<(ConnectorView, lns_ipc::ConnectorMethodView)> {
+) -> Result<(ConnectorView, lns_ipc::ConnectorMethodView, String)> {
     let connector = installed_view(svc, name).await?;
     let method = match named {
         Some(named) => connector
@@ -296,37 +297,38 @@ async fn method_to_connect(
             why_unofferable(&method)
         );
     }
-    if method.credentials.is_empty() && method.needs_connect {
+    let Some(asked_for) = method.auth_label.clone() else {
+        bail!(
+            "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
+            method.name
+        );
+    };
+    if method.asks.is_empty() {
         bail!(
             "method {} declares no credential, so there is no value to ask for",
             method.name
         );
     }
-    if !method.needs_connect {
-        bail!(
-            "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
-            method.name
-        );
-    }
-    Ok((connector, method))
+    Ok((connector, method, asked_for))
 }
 
-/// Ask once per credential the method declares, naming the variable the value is for, so a method needing two is not answered with one.
+/// Ask once per value the method's `auth` produces, under the key the grant reads it back under, so the value the user types is the value the credential is armed with.
 fn ask_for_each(
     method: &lns_ipc::ConnectorMethodView,
+    label: &str,
     terminal: &mut dyn Terminal,
     prompt: &mut impl Write,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let mut values = std::collections::BTreeMap::new();
-    for credential in &method.credentials {
-        write!(prompt, "{credential} (not shown): ")?;
+    for ask in &method.asks {
+        write!(prompt, "{label} (not shown): ")?;
         prompt.flush()?;
         let value = terminal.read_secret()?.trim().to_string();
         writeln!(prompt)?;
         if value.is_empty() {
-            bail!("no value was given for {credential}, so nothing was connected");
+            bail!("no value was given for {label}, so nothing was connected");
         }
-        values.insert(credential.clone(), value);
+        values.insert(ask.clone(), value);
     }
     Ok(values)
 }
@@ -625,7 +627,7 @@ fn report_installed(connector: &ConnectorView, writer: &mut impl Write) -> std::
 
 /// What a method needs before a run can use it, so both `install` and `list` answer "what do I do next" rather than only naming it.
 fn method_summary(method: &lns_ipc::ConnectorMethodView) -> String {
-    let state = match (method.offerable, method.needs_connect) {
+    let state = match (method.offerable, method.auth_label.is_some()) {
         (false, _) => why_unofferable(method),
         (true, true) => "connect first",
         (true, false) => "ready to grant",
@@ -909,13 +911,14 @@ mod tests {
             methods: vec![lns_ipc::ConnectorMethodView {
                 name: "future".into(),
                 label: "Future sign-in".into(),
-                needs_connect: true,
+                auth_label: Some("token".to_string()),
                 offerable: false,
                 opens: Vec::new(),
                 writes: Vec::new(),
                 env: Vec::new(),
                 help: None,
                 credentials: Vec::new(),
+                asks: Vec::new(),
             }],
             connections: Vec::new(),
         };
@@ -1011,13 +1014,14 @@ mod tests {
         lns_ipc::ConnectorMethodView {
             name: name.into(),
             label: name.into(),
-            needs_connect: true,
+            auth_label: Some("token".to_string()),
             offerable,
             opens: vec!["other.example".into()],
             writes: vec!["/home/agent/.netrc".into()],
             env: vec!["SOME_REGION".into()],
             help: None,
             credentials: vec!["SOME_TOKEN".into()],
+            asks: vec!["token".into()],
         }
     }
 
@@ -1597,13 +1601,14 @@ mod tests {
         let bare = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
-            needs_connect: true,
+            auth_label: Some("token".to_string()),
             offerable: true,
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
             help: None,
             credentials: Vec::new(),
+            asks: Vec::new(),
         };
         let svc = CannedService::with([Some(listing(vec![with_methods(vec![bare])]))]);
         // Driven through `run` rather than `drive`, because what the user was asked before the refusal is the point and `drive` drops the prompt on an error.
@@ -1774,18 +1779,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connecting_asks_once_per_credential_and_keys_each_by_its_variable() {
-        // A method may declare several credentials, so one answer cannot stand for all of them.
+    async fn connecting_asks_once_per_value_the_auth_produces_and_not_once_per_variable() {
+        // A `kind: token` auth produces one value, so two credentials drawing on it are two variables holding one secret — asking twice would collect a second value nothing reads.
         let two = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
-            needs_connect: true,
+            auth_label: Some("token".to_string()),
             offerable: true,
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
             help: None,
             credentials: vec!["SOME_TOKEN".into(), "SOME_SECRET".into()],
+            asks: vec!["token".into()],
         };
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![two])])),
@@ -1807,9 +1813,11 @@ mod tests {
         )
         .await
         .expect("connect");
-        for named in ["SOME_TOKEN", "SOME_SECRET"] {
-            assert!(seen.contains(named), "{named} was never asked for: {seen}");
-        }
+        assert_eq!(
+            seen.matches("not shown").count(),
+            1,
+            "one value the auth produces is one question: {seen}"
+        );
         let values = svc
             .sent
             .lock()
@@ -1820,7 +1828,10 @@ mod tests {
                 _ => None,
             })
             .expect("a connect request must have been sent");
-        assert_eq!(values["SOME_TOKEN"], "first");
-        assert_eq!(values["SOME_SECRET"], "second");
+        assert_eq!(
+            values,
+            [("token".to_string(), "first".to_string())].into(),
+            "the value travels under the auth output both credentials draw on, which is the key the grant reads it back under"
+        );
     }
 }

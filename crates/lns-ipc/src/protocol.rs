@@ -372,8 +372,8 @@ pub struct ConnectorView {
 pub struct ConnectorMethodView {
     pub name: String,
     pub label: String,
-    /// False for a method with no `auth`: there is nothing to connect, so it is granted directly.
-    pub needs_connect: bool,
+    /// What a connect calls the value it asks for — the `auth`'s own label, else its kind. Absent for a method with no `auth`: there is nothing to connect, so it is granted directly.
+    pub auth_label: Option<String>,
     /// False where this version does not implement the method's `auth.kind`, which the card must not offer.
     pub offerable: bool,
     /// The egress this method opens, which `serves` does not bound.
@@ -382,8 +382,10 @@ pub struct ConnectorMethodView {
     pub writes: Vec<String>,
     /// The plain `env` keys it sets.
     pub env: Vec<String>,
-    /// Each credential it needs a value for, named by its `envVar` or, absent one, its placeholder.
+    /// Each credential it sets, named by its `envVar` or, absent one, its placeholder.
     pub credentials: Vec<String>,
+    /// Each `auth` output a connect must supply a value for, deduplicated: two credentials drawing on one output are one value to ask for, and it is this key the grant reads the value back under (§4.1).
+    pub asks: Vec<String>,
     /// The connector author's own words about where to get the value (§3.2.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,

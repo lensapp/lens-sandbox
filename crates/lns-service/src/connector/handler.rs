@@ -66,7 +66,7 @@ fn view_of(
             .map(|method| ConnectorMethodView {
                 name: method.name.clone(),
                 label: method.label().to_string(),
-                needs_connect: method.auth.is_some(),
+                auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
                 offerable: can_apply(method),
                 opens: opened_by(method),
                 writes: method
@@ -80,11 +80,23 @@ fn view_of(
                     .iter()
                     .map(|credential| credential.owner().to_string())
                     .collect(),
+                asks: asked_of(method),
                 help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
             })
             .collect(),
         connections: connection_views(connections),
     }
+}
+
+/// The `auth` outputs a connect must supply, which is what [`super::payload`] later reads the values back under, so the ask and the read cannot drift apart (§4.1).
+fn asked_of(method: &lns_artifact::connector::Method) -> Vec<String> {
+    method
+        .credentials
+        .iter()
+        .filter_map(|credential| lns_artifact::connector::input_of(method, credential))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Every destination a method's egress opens, http and raw alike, because `serves` does not bound what a method opens. A `deny` rule closes rather than opens, so it is not disclosed as one.
@@ -714,7 +726,7 @@ mod tests {
         assert_eq!(
             view.methods
                 .iter()
-                .map(|m| (m.name.as_str(), m.label.as_str(), m.needs_connect))
+                .map(|m| (m.name.as_str(), m.label.as_str(), m.auth_label.is_some()))
                 .collect::<Vec<_>>(),
             [("token", "API token", true), ("open", "open", false)],
             "a method with no auth has nothing to connect, and one with no label falls back to its name"
@@ -1872,13 +1884,16 @@ mod tests {
         rig.set
             .put("some-provider", "sha256:abc", &doc, &[])
             .unwrap();
+        // Keyed by what the method's own view asks for, because a test that guessed the key would pass while the CLI and the card asked under another one.
+        let asked = list(&rig.store()).expect("list")[0].methods[0].asks.clone();
         connect(
             &rig.store(),
             "some-provider",
             "token",
             "work",
-            [("SOME_TOKEN".to_string(), "sk-live".to_string())]
+            asked
                 .into_iter()
+                .map(|ask| (ask, "sk-live".to_string()))
                 .collect(),
         )
         .expect("connect");

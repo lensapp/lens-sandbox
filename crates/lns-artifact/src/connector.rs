@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::sandbox::FilesetEntry;
 use crate::spec;
 
-/// The `auth.kind` values this version can offer; any other parses and leaves its method unofferable (§3.2.2).
-const KNOWN_AUTH_KINDS: [&str; 1] = ["token"];
+/// The value each `auth.kind` this version can offer produces, which a credential's `field` names. Any other kind parses and leaves its method unofferable (§3.2.2).
+const AUTH_OUTPUTS: [(&str, &str); 1] = [("token", "token")];
 
 /// What one method may write, counted across its filesets (§3.2.3).
 pub const MAX_METHOD_FILESET_BYTES: usize = crate::sandbox::MAX_INLINE_TOTAL_BYTES;
@@ -65,12 +65,20 @@ impl Method {
     pub fn is_offerable(&self) -> bool {
         self.auth
             .as_ref()
-            .is_none_or(|auth| KNOWN_AUTH_KINDS.contains(&auth.kind.as_str()))
+            .is_none_or(|auth| auth.output().is_some())
     }
 
     pub fn label(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.name)
     }
+}
+
+/// The auth output one credential draws its value from: the `field` it names, or the one value the method's `auth` produces. `None` under a kind this version does not know, whose method cannot be connected anyway (§4.1).
+pub fn input_of(method: &Method, credential: &lns_spec::Credential) -> Option<String> {
+    credential
+        .field
+        .clone()
+        .or_else(|| Some(method.auth.as_ref()?.output()?.to_string()))
 }
 
 /// How the user proves they may use a method. `kind` decides what else it accepts.
@@ -85,6 +93,21 @@ pub struct Auth {
     /// Tolerated only for a `kind` this version does not know; strict decoding holds for one it does (§1.2).
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Auth {
+    /// The value this kind produces, or `None` for a kind this version does not know and so decodes nothing of (§3.2.2).
+    fn output(&self) -> Option<&'static str> {
+        AUTH_OUTPUTS
+            .iter()
+            .find(|(kind, _)| *kind == self.kind)
+            .map(|(_, output)| *output)
+    }
+
+    /// What a connect calls the value it asks for: the author's own word for it, else the kind.
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.kind)
+    }
 }
 
 /// The blocks a method may not carry, each naming the mechanism that decides it rather than the rule.
@@ -231,6 +254,7 @@ fn validate_method(
     }
     lns_spec::credential::validate_all(&method.credentials, lns_spec::credential::Source::Method)
         .map_err(anyhow::Error::msg)?;
+    refuse_a_field_the_auth_does_not_produce(method)?;
     for key in method.env.keys() {
         if !lns_spec::is_legal_env_var_name(key) {
             bail!(
@@ -308,11 +332,34 @@ pub fn guest_directory(guest_path: &str) -> String {
     resolved
 }
 
+/// §4.1: `field` names one of the method's `auth` outputs. A `field` naming anything else looks up a value nothing supplies, so the credential would install, connect and grant and still reach the guest unarmed.
+fn refuse_a_field_the_auth_does_not_produce(method: &Method) -> Result<()> {
+    let Some(auth) = &method.auth else {
+        return Ok(());
+    };
+    // A kind this version does not know decodes no `auth`, so what it produces is not this version's to judge (§3.2.2).
+    let Some(output) = auth.output() else {
+        return Ok(());
+    };
+    for credential in &method.credentials {
+        if let Some(field) = &credential.field
+            && field != output
+        {
+            bail!(
+                "credential {} draws on field {field:?}, but a {:?} auth produces {output}: nothing would supply that value and the credential would reach the guest unarmed",
+                credential.owner(),
+                auth.kind
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_auth(auth: &Auth) -> Result<()> {
     if auth.kind.trim().is_empty() {
         bail!("a method's auth must name its kind");
     }
-    if KNOWN_AUTH_KINDS.contains(&auth.kind.as_str())
+    if auth.output().is_some()
         && let Some(unknown) = auth.extra.keys().next()
     {
         bail!(
@@ -385,6 +432,71 @@ mod tests {
     }
 
     const SERVES: &str = r#""serves":["api.some-provider.example"]"#;
+
+    fn drawing_on(field: Option<&str>) -> Vec<u8> {
+        let field = field.map_or(String::new(), |field| format!(r#","field":"{field}""#));
+        with_methods(&format!(
+            r#"[{{"name":"token","auth":{{"kind":"token"}},"credentials":[{{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"{field}}}]}}]"#
+        ))
+    }
+
+    #[test]
+    fn a_field_naming_the_one_value_its_auth_produces_is_what_the_credential_draws_on() {
+        let parsed =
+            parse(&drawing_on(Some("token"))).expect("field names the token auth's output");
+        let method = &parsed.spec.methods[0];
+        assert_eq!(
+            input_of(method, &method.credentials[0]),
+            Some("token".to_string())
+        );
+    }
+
+    #[test]
+    fn a_credential_naming_no_field_draws_on_its_auth_s_one_value() {
+        // Otherwise the connect and the grant each pick their own key, and the credential reaches the guest unarmed.
+        let parsed = parse(&drawing_on(None)).expect("a credential may name no field");
+        let method = &parsed.spec.methods[0];
+        assert_eq!(
+            input_of(method, &method.credentials[0]),
+            Some("token".to_string())
+        );
+    }
+
+    #[test]
+    fn a_field_naming_something_its_auth_does_not_produce_is_refused() {
+        // §4.1: nothing would supply that value, so the credential would install, connect, grant, and still reach the guest unarmed.
+        let err = parse(&drawing_on(Some("access_token"))).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("access_token"), "{rendered}");
+        assert!(rendered.contains("unarmed"), "{rendered}");
+    }
+
+    #[test]
+    fn a_field_under_a_kind_this_version_does_not_know_is_not_judged() {
+        // §3.2.2: a reader that does not know a kind does not decode that auth at all, so what it produces is not this version's to check.
+        let document = with_methods(
+            r#"[{"name":"future","auth":{"kind":"oauth_device"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]"#,
+        );
+        let parsed = parse(&document).expect("an unknown kind parses");
+        let method = &parsed.spec.methods[0];
+        assert!(!method.is_offerable());
+        assert_eq!(
+            input_of(method, &method.credentials[0]),
+            Some("access_token".to_string()),
+            "the field it named is still what it would draw on, once a build knows the kind"
+        );
+    }
+
+    #[test]
+    fn a_credential_naming_no_field_under_an_unknown_kind_draws_on_nothing_this_version_can_name() {
+        let document = with_methods(
+            r#"[{"name":"future","auth":{"kind":"oauth_device"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}]"#,
+        );
+        let parsed = parse(&document).expect("an unknown kind parses");
+        let method = &parsed.spec.methods[0];
+        assert_eq!(input_of(method, &method.credentials[0]), None);
+    }
+
     const CREDENTIAL: &str = r#"{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}"#;
 
     fn with_methods(methods: &str) -> Vec<u8> {

@@ -1333,7 +1333,7 @@ fn render_connection_choice(
     method: &lns_ipc::ConnectorMethodView,
     draft: &mut OfferDraft,
 ) {
-    if !method.needs_connect {
+    if method.auth_label.is_none() {
         return;
     }
     let held: Vec<&lns_ipc::ConnectorConnectionView> = offer
@@ -1442,10 +1442,11 @@ fn render_new_connection(
             .margin(egui::Margin::symmetric(10, 9))
             .desired_width(f32::INFINITY),
     );
-    for credential in &method.credentials {
+    let asked_for = method.auth_label.as_deref().unwrap_or_default();
+    for ask in &method.asks {
         ui.add_space(6.0);
-        let value = draft.values.entry(credential.clone()).or_default();
-        secret_input(ui, value, credential);
+        let value = draft.values.entry(ask.clone()).or_default();
+        secret_input(ui, value, asked_for);
     }
 }
 
@@ -1523,19 +1524,17 @@ fn render_needs_a_newer_lns(ui: &mut egui::Ui, offer: &lns_ipc::ConnectorView) {
 
 /// A method that authenticates cannot be granted until there is a connection behind it.
 fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
-    if !method.needs_connect {
+    if method.auth_label.is_none() {
         return true;
     }
     if !draft.connecting {
         return draft.connection.is_some();
     }
     !draft.label.trim().is_empty()
-        && method.credentials.iter().all(|credential| {
-            draft
-                .values
-                .get(credential)
-                .is_some_and(|v| !v.trim().is_empty())
-        })
+        && method
+            .asks
+            .iter()
+            .all(|ask| draft.values.get(ask).is_some_and(|v| !v.trim().is_empty()))
 }
 
 fn connection_choice(draft: &OfferDraft) -> ConnectionChoice {
@@ -1963,12 +1962,13 @@ mod tests {
                     methods: vec![lns_ipc::ConnectorMethodView {
                         name: method.into(),
                         label: method.into(),
-                        needs_connect: !credentials.is_empty(),
+                        auth_label: (!credentials.is_empty()).then(|| "token".to_string()),
                         offerable: true,
                         opens: vec!["api.some-provider.example".into()],
                         writes: Vec::new(),
                         env: Vec::new(),
                         credentials: credentials.iter().map(|c| c.to_string()).collect(),
+                        asks: credentials.iter().map(|c| c.to_string()).collect(),
                         help: None,
                     }],
                     connections: connections
@@ -2309,12 +2309,13 @@ mod tests {
         let method = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
-            needs_connect: true,
+            auth_label: Some("token".into()),
             offerable: true,
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
             credentials: vec!["SOME_TOKEN".into()],
+            asks: vec!["SOME_TOKEN".into()],
             help: None,
         };
         assert!(
@@ -2337,12 +2338,13 @@ mod tests {
         let method = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
-            needs_connect: true,
+            auth_label: Some("token".into()),
             offerable: true,
             opens: Vec::new(),
             writes: Vec::new(),
             env: Vec::new(),
             credentials: Vec::new(),
+            asks: Vec::new(),
             help: None,
         };
         let mut first = OfferDraft::default();

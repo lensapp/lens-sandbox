@@ -1,5 +1,6 @@
 pub mod approval_flow;
 pub mod artifact_dispatch;
+pub mod connector_connect;
 pub mod connector_install;
 pub mod declared_launch;
 pub mod declared_tools;
