@@ -12,6 +12,9 @@ use crate::spec;
 /// The `auth.kind` values this version can offer; any other parses and leaves its method unofferable (§3.2.2).
 const KNOWN_AUTH_KINDS: [&str; 1] = ["token"];
 
+/// What one method may write, counted across its filesets (§3.2.3).
+pub const MAX_METHOD_FILESET_BYTES: usize = crate::sandbox::MAX_INLINE_TOTAL_BYTES;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorDefinition {
     pub name: String,
@@ -244,6 +247,7 @@ fn validate_method(
         .validate_binary_scopes()
         .context("connector policy")?;
     let mut written = BTreeSet::new();
+    let mut inline_bytes = 0usize;
     for fileset in &method.filesets {
         crate::sandbox::validate_fileset(fileset, crate::spec::GuestAnchor::Home)?;
         if fileset.host_path.is_some() {
@@ -255,6 +259,17 @@ fn validate_method(
         if !written.insert(&fileset.guest_path) {
             bail!("duplicate guest path {}", fileset.guest_path);
         }
+        inline_bytes += fileset
+            .inline
+            .iter()
+            .flat_map(|files| files.values())
+            .map(String::len)
+            .sum::<usize>();
+    }
+    if inline_bytes > MAX_METHOD_FILESET_BYTES {
+        bail!(
+            "this method's filesets total {inline_bytes} bytes, more than the {MAX_METHOD_FILESET_BYTES}-byte limit: a granted method's files are sent again on every policy change, and every connector a project grants shares one budget"
+        );
     }
     refuse_a_secret_shaped_file_carrying_no_declared_placeholder(method, path_files)
 }
@@ -558,6 +573,36 @@ mod tests {
             format!("{err:#}").contains("must start with `~/`"),
             "a document does not choose whose files it writes; got: {err:#}"
         );
+    }
+
+    #[test]
+    fn a_methods_filesets_are_counted_together_against_one_ceiling() {
+        let chunk = "a".repeat(120 * 1024);
+        let files = (0..5)
+            .map(|i| format!(r#""f{i}.txt":"{chunk}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = parse(&with_methods(&format!(
+            r#"[{{"name":"token","auth":{{"kind":"token"}},"filesets":[{{"guestPath":"~/.a","inline":{{{files}}}}},{{"guestPath":"~/.b","inline":{{{files}}}}}]}}]"#
+        )))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("this method's filesets total"),
+            "each fileset clears the per-fileset limit on its own, so counting them apart would let one method write more than a method may; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_method_writing_exactly_the_ceiling_is_kept() {
+        let chunk = "a".repeat(MAX_METHOD_FILESET_BYTES / 8);
+        let files = (0..8)
+            .map(|i| format!(r#""f{i}.txt":"{chunk}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        parse(&with_methods(&format!(
+            r#"[{{"name":"token","auth":{{"kind":"token"}},"filesets":[{{"guestPath":"~/.a","inline":{{{files}}}}}]}}]"#
+        )))
+        .expect("the rule is MUST NOT exceed, so the ceiling itself is a size a method may write");
     }
 
     #[test]
