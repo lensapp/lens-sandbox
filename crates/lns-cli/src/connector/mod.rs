@@ -516,35 +516,32 @@ fn grants(
         .load()
         .with_context(|| format!("reading grants from {}", grants_path.display()))?;
     let project = project_key(&project_decisions_path(args.policy.as_deref(), cwd));
-    let rows: Vec<&GrantRecord> = if args.all {
+    let records: Vec<&GrantRecord> = if args.all {
         file.grants.iter().collect()
     } else {
         file.for_project(&project).collect()
     };
-    if args.output.format == crate::output::Format::Json {
-        let json: Vec<GrantRow> = rows.iter().map(|g| GrantRow::new(g)).collect();
-        crate::output::emit_object(&json, writer)?;
-        return Ok(0);
-    }
-    if rows.is_empty() {
-        let scope = if args.all { "" } else { " for this project" };
-        writeln!(writer, "No connector grants{scope}.")?;
-        return Ok(0);
-    }
-    for g in rows {
-        let verdict = match g.verdict {
-            GrantVerdict::Allow => "allow",
-            GrantVerdict::Deny => "deny",
-        };
-        if args.all {
-            writeln!(
-                writer,
-                "{}\t{}\t{}\t{verdict}",
-                g.project, g.workload, g.connector
-            )?;
-        } else {
-            writeln!(writer, "{}\t{}\t{verdict}", g.workload, g.connector)?;
-        }
+    let rows: Vec<GrantRow> = records.iter().map(|g| GrantRow::new(g)).collect();
+    let scope = if args.all { "" } else { " for this project" };
+    let empty_note = format!("No connector grants{scope}.");
+    if args.all {
+        crate::output::emit_scoped(
+            args.output.format,
+            &["PROJECT", "WORKLOAD", "CONNECTOR", "VERDICT"],
+            &rows,
+            GrantRow::cells_with_project,
+            &empty_note,
+            writer,
+        )?;
+    } else {
+        crate::output::emit_scoped(
+            args.output.format,
+            &["WORKLOAD", "CONNECTOR", "VERDICT"],
+            &rows,
+            GrantRow::cells,
+            &empty_note,
+            writer,
+        )?;
     }
     Ok(0)
 }
@@ -572,6 +569,25 @@ impl GrantRow {
             },
             env_var: grant.env_var.clone(),
         }
+    }
+
+    /// The columns `--all` does not add. The workload reads as the composition it is: the stored key
+    /// joins a workload to each `--mixin` with a NUL, which the renderer would otherwise show as an
+    /// escape — correct, but not what the user typed. The json keeps the key verbatim, since that is
+    /// the string another command matches on.
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.workload
+                .replace(lns_policy::grants::MIXIN_SEPARATOR, " + "),
+            self.connector.clone(),
+            self.verdict.to_string(),
+        ]
+    }
+
+    fn cells_with_project(&self) -> Vec<String> {
+        let mut cells = vec![self.project.clone()];
+        cells.extend(self.cells());
+        cells
     }
 }
 

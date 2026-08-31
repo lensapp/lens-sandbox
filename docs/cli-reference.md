@@ -97,6 +97,10 @@ What the JSON gives you:
   adds the whole digest, the raw byte count, the layer count, and the pull time.
 - The empty-list sentences (`No rules in …`) become `[]`. Warnings go to stderr in both
   formats, so stdout stays parseable either way.
+- **Both formats survive a pipe.** A table escapes any control character a cell holds as
+  `\xNN`, so `grep` never mistakes the output for binary and a value cannot smuggle an
+  escape sequence to your terminal; JSON escapes them as `\u0000`. The JSON is the format
+  to parse, but `| grep` on a table works.
 
 > **The JSON shape is experimental until v1.0.** Field names and shapes may change in a
 > minor release, so pin your `lns` version in scripts that depend on them. Table output
@@ -425,7 +429,7 @@ lns connector revoke <ID> [--policy <PATH>]
 | `remove`     | Remove a user-declared connector; bundled ones cannot be removed.           |
 | `connect`    | Bind a connector's per-machine value decision: a credential connector prompts in the approval window (use the host value, store one, or deny) and an `oauth` connector signs in. Also records the id in this directory's policy — the bind path for ids a definition declares. |
 | `disconnect` | Disconnect a connector from this directory's policy, forgetting its per-workload grants here. The grants go first, so a run that cannot update them leaves the connector connected to retry rather than stranding grants a later reconnect would inherit. |
-| `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. |
+| `grants`     | List the per-workload grants remembered for this project as `workload  connector  verdict`; `--all` adds a project column and covers every project on this machine. A workload run with `--mixin` reads as the composition it is, `workload + mixin`; the JSON carries the stored key instead, which is what another command matches on. |
 | `revoke`     | Forget one connector's per-workload grants in this project, so its next use asks again; exits `1` when there is nothing to forget. |
 
 `--inject KIND:DOMAIN` is repeatable; `KIND` is `bearer_header`, `uri_placeholder`,

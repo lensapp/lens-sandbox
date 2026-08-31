@@ -125,11 +125,79 @@ fn listing_shows(world: &mut BehaviourWorld, workload: String, verdict: String, 
         .lines()
         .find(|l| l.starts_with(&workload))
         .unwrap_or_else(|| panic!("no listing line for {workload} in:\n{out}"));
-    let fields: Vec<&str> = line.split('\t').collect();
     assert_eq!(
-        fields,
+        columns(line),
         [workload.as_str(), id.as_str(), verdict.as_str()],
         "got line: {line}"
+    );
+}
+
+/// The columns a reader sees, split on the padding the shared table renderer puts between them — a
+/// cell's own single spaces (a composed key reads `a + b`) stay part of the cell.
+fn columns(line: &str) -> Vec<&str> {
+    line.split("  ")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+#[given(regex = r#"^the workload "([^"]+)" composed with mixin "([^"]+)" was granted "([^"]+)"$"#)]
+fn composed_workload_granted(
+    world: &mut BehaviourWorld,
+    workload: String,
+    mixin: String,
+    id: String,
+) {
+    let project = this_project(world);
+    let identity = workload_of(&workload).composed_with(vec![mixin]);
+    seed(
+        world,
+        GrantRecord::allow(
+            project,
+            &identity,
+            id,
+            "SOME_TOKEN",
+            vec!["api.some-provider.example".into()],
+        ),
+    );
+}
+
+#[then(regex = r#"^the listing is headed "([^"]+)"$"#)]
+fn listing_is_headed(world: &mut BehaviourWorld, headers: String) {
+    let out = output(world);
+    let first = out.lines().next().unwrap_or_default();
+    assert_eq!(
+        columns(first),
+        columns(&headers),
+        "a table names its columns like every other list verb, got: {out}"
+    );
+}
+
+/// A composed workload key holds a NUL, and one of those reaching the stream is what makes `grep`
+/// call the output binary and refuse to match the line the user asked for.
+#[then("the output survives a pipe")]
+fn output_survives_a_pipe(world: &mut BehaviourWorld) {
+    let out = output(world);
+    let offending: Vec<char> = out
+        .chars()
+        .filter(|c| c.is_control() && *c != '\n')
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "a tool that filters lines treats these as binary: {offending:?} in {out:?}"
+    );
+}
+
+/// The table is for reading; the key a script matches on is the stored one, NUL and all.
+#[then(regex = r#"^the json keeps the composed key of "([^"]+)" and "([^"]+)" verbatim$"#)]
+fn json_keeps_composed_key(world: &mut BehaviourWorld, workload: String, mixin: String) {
+    let out = output(world);
+    let rows: serde_json::Value = serde_json::from_str(out).expect("json output parses");
+    let expected = workload_of(&workload).composed_with(vec![mixin]).key();
+    assert_eq!(
+        rows[0]["workload"],
+        serde_json::Value::String(expected),
+        "got: {out}"
     );
 }
 

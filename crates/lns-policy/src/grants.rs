@@ -7,8 +7,8 @@ use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-/// Separates a composed mixin from what precedes it; a NUL, because neither a path nor an OCI reference may contain one, so no directory name can spell a key that belongs to another composition.
-const MIXIN: char = '\0';
+/// Separates a composed mixin from what precedes it; a NUL, because neither a path nor an OCI reference may contain one, so no directory name can spell a key that belongs to another composition. Public because a key composed this way is a thing users read: a renderer needs the separator to show one as a composition rather than as an escaped byte.
+pub const MIXIN_SEPARATOR: char = '\0';
 
 /// What a sandbox run is, for the purpose of remembering a connector grant against it: the workload, and the mixins the user composed onto it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,9 +52,9 @@ impl WorkloadIdentity {
             Workload::Definition { dir } => format!("def:{dir}"),
             Workload::Reference { repo, digest } => format!("ref:{repo}@{digest}"),
         };
-        self.mixins
-            .iter()
-            .fold(workload, |key, mixin| format!("{key}{MIXIN}{mixin}"))
+        self.mixins.iter().fold(workload, |key, mixin| {
+            format!("{key}{MIXIN_SEPARATOR}{mixin}")
+        })
     }
 }
 

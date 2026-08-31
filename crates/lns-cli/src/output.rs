@@ -34,13 +34,29 @@ pub fn emit<T: TableRow + serde::Serialize>(
     empty_note: &str,
     out: &mut dyn Write,
 ) -> Result<()> {
+    emit_scoped(format, T::HEADERS, rows, TableRow::cells, empty_note, out)
+}
+
+/// A list whose columns the invocation chooses rather than the row type: `TableRow::HEADERS` is one
+/// set per type, and a verb that widens its table under a flag needs two. Narrowing the table never
+/// narrows what a script reads — the row still serializes whole under `--format json` — and a verb
+/// that reaches for this keeps the escaping and alignment every other table gets, which is the
+/// reason to have it rather than a hand-rolled `writeln!`.
+pub fn emit_scoped<T: serde::Serialize>(
+    format: Format,
+    headers: &[&str],
+    rows: &[T],
+    cells: impl Fn(&T) -> Vec<String>,
+    empty_note: &str,
+    out: &mut dyn Write,
+) -> Result<()> {
     match format {
         Format::Table if rows.is_empty() => {
             writeln!(out, "{empty_note}").context("writing the empty-list note")
         }
         Format::Table => {
-            let cells: Vec<Vec<String>> = rows.iter().map(TableRow::cells).collect();
-            render_table(out, T::HEADERS, &cells).context("writing the table")
+            let cells: Vec<Vec<String>> = rows.iter().map(cells).collect();
+            render_table(out, headers, &cells).context("writing the table")
         }
         Format::Json => emit_object(&rows, out),
     }
