@@ -19,6 +19,8 @@ pub type ReadmeLayer = (String, Vec<u8>);
 pub struct BehaviourWorld {
     pub result: Option<CliRun>,
     pub split_streams: Option<(String, String)>,
+    /// The warnings the verb logged, which the developer reads on stderr but no writer a step passes in collects.
+    pub warnings: Vec<String>,
     /// The stopped run a start scenario targets.
     pub start_target: Option<String>,
     pub argv: Vec<String>,
