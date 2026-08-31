@@ -149,8 +149,13 @@ spec:
 ```
 
 Every `spec` field is present with its default so editing is filling in a blank,
-not learning a schema. Edit `spec.image` (and the fields you need), then check it
-offline —
+not learning a schema. `spec.image` is used exactly as written: a bare reference
+like `alpine:3.20` resolves the way every OCI client reads it, to
+`docker.io/library/alpine:3.20`. That differs from a bare reference typed as a
+command operand — `lns run alpine:3.20` qualifies it against your `run.registry`
+default, else the Lens hub (`hub.lns.run`) — so write the registry host into
+`spec.image` when you mean a different one. Edit `spec.image` (and the fields
+you need), then check it offline —
 `validate` runs schema, cross-field, and secret checks without touching the
 network or the service, and a target-less `lns inspect` renders the effective
 definition:
