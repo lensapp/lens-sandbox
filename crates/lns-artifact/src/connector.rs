@@ -576,6 +576,18 @@ mod tests {
     }
 
     #[test]
+    fn a_connectors_dotted_credentials_file_still_has_to_carry_a_placeholder() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"guestPath":"~/.claude","inline":{".credentials.json":"{\"accessToken\":\"sk-live-real\"}"}}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("carries no placeholder"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
     fn a_connector_fileset_writes_under_the_guests_home() {
         let def = parse(&with_methods(
             r#"[{"name":"token","auth":{"kind":"token"},"filesets":[{"guestPath":"~/.some-provider","inline":{"config.json":"{}"}}]}]"#,
