@@ -84,6 +84,24 @@ fn validate_placeholder(placeholder: &str, owner: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The §5 rule that one source's plain `env` and its credentials do not claim one variable.
+pub fn refuse_a_variable_a_credential_also_fills<'a>(
+    env_keys: impl IntoIterator<Item = &'a String>,
+    credentials: &[Credential],
+) -> Result<(), String> {
+    for key in env_keys {
+        if credentials
+            .iter()
+            .any(|credential| credential.env_var.as_ref() == Some(key))
+        {
+            return Err(format!(
+                "a source that sets {key} also fills it from a credential: one variable holds one value, so drop the env entry or the credential's envVar"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate one source's whole `credentials` block: every entry on its own, plus the per-source rule that no two claim one variable and no two claim one marker.
 pub fn validate_all(credentials: &[Credential], source: Source) -> Result<(), String> {
     let mut variables = std::collections::BTreeSet::new();
@@ -501,6 +519,24 @@ mod tests {
             Ok(()),
             "a fileset-delivered credential serves a client that never reads the environment"
         );
+    }
+
+    #[test]
+    fn a_source_may_not_set_a_variable_its_own_credential_fills() {
+        // §5: one variable holds one value, and nothing downstream decides between the plain value and the placeholder the workload is meant to read.
+        let credentials = [Credential {
+            env_var: Some("SOME_TOKEN".into()),
+            placeholder: "some_LNSPLACEHOLDER0000000000".into(),
+            field: None,
+            injections: Vec::new(),
+        }];
+        let clashing = ["SOME_TOKEN".to_string()];
+        let error = refuse_a_variable_a_credential_also_fills(&clashing, &credentials)
+            .expect_err("one variable claimed twice");
+        assert!(error.contains("SOME_TOKEN"), "got: {error}");
+
+        let separate = ["SOME_REGION".to_string()];
+        assert!(refuse_a_variable_a_credential_also_fills(&separate, &credentials).is_ok());
     }
 
     #[test]

@@ -217,11 +217,21 @@ pub enum FilesetOwner {
 /// Parse and cross-field-validate a `lns.run/v1` sandbox definition as its author wrote it, offline.
 pub fn parse(config_json: &[u8]) -> Result<Definition> {
     let doc = parse_resolved(config_json)?;
-    refuse_scripts_past_what_one_document_may_declare(&doc.spec.scripts)?;
+    refuse_what_only_an_author_could_correct(&doc)?;
     Ok(doc)
 }
 
-/// Parse the document resolution produced (§3.3.2). Every rule an authored sandbox is held to applies, except the ceilings on how many scripts one document may declare: appending across sources is the merge rule, so the sum is not an authoring mistake anyone could correct.
+/// The rules a resolution is not held to: their subject is what one author wrote, and a merge that broke one leaves nobody an edit that would fix it (§3.3.2).
+fn refuse_what_only_an_author_could_correct(doc: &Definition) -> Result<()> {
+    refuse_scripts_past_what_one_document_may_declare(&doc.spec.scripts)?;
+    lns_spec::credential::refuse_a_variable_a_credential_also_fills(
+        doc.spec.env.keys(),
+        &doc.spec.credentials,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+/// Parse the document resolution produced (§3.3.2). Every rule an authored sandbox is held to applies, except those [`refuse_what_only_an_author_could_correct`] holds back.
 pub fn parse_resolved(config_json: &[u8]) -> Result<Definition> {
     let doc = parse_of_kind(config_json, spec::Kind::Sandbox)?;
     if doc.spec.image.trim().is_empty() {
@@ -233,7 +243,7 @@ pub fn parse_resolved(config_json: &[u8]) -> Result<Definition> {
 /// Parse and cross-field-validate a `lns.run/v1` mixin, offline. Its blocks follow the same rules as a sandbox's; what differs is that the five describing one launch are forbidden, and there is no image to require.
 pub fn parse_mixin(config_json: &[u8]) -> Result<Definition> {
     let doc = parse_of_kind(config_json, spec::Kind::Mixin)?;
-    refuse_scripts_past_what_one_document_may_declare(&doc.spec.scripts)?;
+    refuse_what_only_an_author_could_correct(&doc)?;
     Ok(doc)
 }
 
@@ -1532,6 +1542,17 @@ mod tests {
                 "expected {expected:?}, got: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn a_document_may_not_set_a_variable_its_own_credential_fills() {
+        // §5: one variable holds one value, and nothing downstream decides between the plain value and the placeholder the workload is meant to read.
+        let spec = r#"{"image":"x:1","env":{"SOME_TOKEN":"plain"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}"#;
+        let err = parse(&def_json(spec)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SOME_TOKEN"),
+            "the refusal must name the variable claimed twice; got: {err:#}"
+        );
     }
 
     #[test]
