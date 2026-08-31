@@ -923,7 +923,7 @@ mod tests {
             JsonDecisionStore::new(home.join("connector-grants.json"));
         crate::connector::store::ConnectorStore::new(&installed, &values, &grants)
             .decide(
-                run_id,
+                &crate::connector::store::GrantHolder::Run(run_id.to_string()),
                 "some-provider",
                 crate::connector::store::RunDecision::Declined,
             )
@@ -995,7 +995,7 @@ mod tests {
             JsonDecisionStore::new(home.join("connector-grants.json"));
         crate::connector::store::ConnectorStore::new(&installed, &values, &grants)
             .decide(
-                run_id,
+                &crate::connector::store::GrantHolder::Run(run_id.to_string()),
                 "some-provider",
                 crate::connector::store::RunDecision::Granted {
                     digest: "sha256:abc".to_string(),

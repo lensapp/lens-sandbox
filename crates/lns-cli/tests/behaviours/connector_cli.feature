@@ -176,6 +176,24 @@ Feature: lns connector, on this machine
     Then the connector command succeeds
     And the disclosure names the run "reviewer"
 
+  Scenario: granting a name no run holds says so before it asks
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And no run answers to that name
+    And the service grants "some-provider" the method "token"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --run revieweer --method token"
+    Then the connector command succeeds
+    And the disclosure says no run is named "revieweer"
+    And the output says it reserved the decision
+
+  Scenario: forgetting clears a reservation and says which it cleared
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And no run answers to that name
+    And the service forgets a decision about "some-provider"
+    When the user runs connector command "forget some-provider --run revieweer"
+    Then the connector command succeeds
+    And the output says it forgot the reservation
+
   Scenario: granting again names the method it replaced
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "token" replacing "session"

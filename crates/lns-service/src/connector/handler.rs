@@ -4,7 +4,7 @@ use anyhow::Result;
 use lns_ipc::{ConnectorConnectionView, ConnectorMethodView, ConnectorView};
 
 use super::source::{ConnectorSource, Source};
-use super::store::{Connection, ConnectorStore, Installed};
+use super::store::{Connection, ConnectorStore, GrantHolder, Installed};
 use std::collections::BTreeMap;
 
 /// Resolve `<REF|PATH>` and install what it names. The digest comes from the resolver, never from a caller, because a grant binds to it.
@@ -122,7 +122,7 @@ fn connection_views(connections: &BTreeMap<String, Connection>) -> Vec<Connector
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connected {
     pub connection: String,
-    pub invalidated: Vec<String>,
+    pub invalidated: Vec<GrantHolder>,
 }
 
 /// What one grant recorded, and the method it displaced — a run holds one grant per connector (§3.2.4).
@@ -181,14 +181,14 @@ pub fn disconnect(
 pub fn grant(
     store: &ConnectorStore<'_>,
     name: &str,
-    run_id: &str,
+    holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
 ) -> Result<Granted> {
     let entry = installed_entry(store, name)?;
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
-    refuse_a_path_another_connector_writes(store, run_id, name, &entry, &method.name)?;
+    refuse_a_path_another_connector_writes(store, holder, name, &entry, &method.name)?;
     let connection = behind_the_method(store, name, method, connection)?;
     let authority = match &connection {
         Some(label) => store
@@ -204,7 +204,7 @@ pub fn grant(
         connection: connection.clone(),
         authority,
     };
-    let held = store.decision(run_id, name)?;
+    let held = store.decision(holder, name)?;
     if held.as_ref() == Some(&decision) {
         return Ok(Granted {
             method: method.name.clone(),
@@ -213,7 +213,7 @@ pub fn grant(
             unchanged: true,
         });
     }
-    let displaced = store.decide(run_id, name, decision)?;
+    let displaced = store.decide(holder, name, decision)?;
     Ok(Granted {
         method: method.name.clone(),
         connection,
@@ -222,8 +222,8 @@ pub fn grant(
     })
 }
 
-pub fn forget(store: &ConnectorStore<'_>, name: &str, run_id: &str) -> Result<bool> {
-    Ok(store.forget(run_id, name)?)
+pub fn forget(store: &ConnectorStore<'_>, name: &str, holder: &GrantHolder) -> Result<bool> {
+    Ok(store.forget(holder, name)?)
 }
 
 /// Grants a method from the card, refusing bytes other than the ones the card disclosed, and answers with what the guest is to be given (§3.2.4).
@@ -231,7 +231,7 @@ pub fn grant_disclosed(
     store: &ConnectorStore<'_>,
     name: &str,
     disclosed_digest: &str,
-    run_id: &str,
+    holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
@@ -242,23 +242,23 @@ pub fn grant_disclosed(
         );
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
-    let settled = grant(store, name, run_id, method, connection)?;
+    let settled = grant(store, name, holder, method, connection)?;
     supplied_by(store, &entry, method, settled.connection.as_deref())
 }
 
 /// Two grants claiming one guest path reach the guest as two creates: the second fails, the batch rolls back, and every granted file for the run goes with it. So the collision is refused where a user can still answer it.
 fn refuse_a_path_another_connector_writes(
     store: &ConnectorStore<'_>,
-    run_id: &str,
+    holder: &GrantHolder,
     name: &str,
     entry: &Installed,
     method: &str,
 ) -> Result<()> {
-    let taken = paths_written_by_other_connectors(store, run_id, name)?;
+    let taken = paths_written_by_other_connectors(store, holder, name)?;
     for path in written_paths(&supplied_by(store, entry, method, None)?) {
-        if let Some(holder) = taken.get(&path) {
+        if let Some(writer) = taken.get(&path) {
             anyhow::bail!(
-                "{holder} already writes {path} in this run: two connectors writing one file would leave the guest with neither, so disconnect {holder} from this run first"
+                "{writer} already writes {path} in this run: two connectors writing one file would leave the guest with neither, so disconnect {writer} from this run first"
             );
         }
     }
@@ -267,11 +267,11 @@ fn refuse_a_path_another_connector_writes(
 
 fn paths_written_by_other_connectors(
     store: &ConnectorStore<'_>,
-    run_id: &str,
+    holder: &GrantHolder,
     granting: &str,
 ) -> Result<BTreeMap<String, String>> {
     let mut taken = BTreeMap::new();
-    for (connector, payload) in granted_supply(store, run_id)? {
+    for (connector, payload) in granted_supply(store, holder)? {
         if connector == granting {
             continue;
         }
@@ -289,7 +289,7 @@ fn written_paths(payload: &crate::approval_flow::protocol::GrantedPayload) -> Ve
 /// What every recorded grant gives this run, by connector, so a run that granted yesterday is not asked again and is not left empty-handed (§7.1).
 pub fn granted_supply(
     store: &ConnectorStore<'_>,
-    run_id: &str,
+    holder: &GrantHolder,
 ) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
     let mut supplied = BTreeMap::new();
     for entry in store.installed()? {
@@ -298,7 +298,7 @@ pub fn granted_supply(
             method,
             connection,
             ..
-        }) = store.decision(run_id, &entry.name)?
+        }) = store.decision(holder, &entry.name)?
         else {
             continue;
         };
@@ -362,11 +362,11 @@ fn supplied_by(
 }
 
 /// Every connector this run has not decided, as the card and `lns connector grant` both disclose it, so a run holds what they serve and can offer them (§3.2.1).
-pub fn offerable(store: &ConnectorStore<'_>, run_id: &str) -> Result<Vec<ConnectorView>> {
+pub fn offerable(store: &ConnectorStore<'_>, holder: &GrantHolder) -> Result<Vec<ConnectorView>> {
     let mut offers = Vec::new();
     let mut unreadable = Vec::new();
     for entry in store.installed()? {
-        if decided_here(store, run_id, &entry) {
+        if decided_here(store, holder, &entry) {
             continue;
         }
         match lns_artifact::connector::parse(&entry.document) {
@@ -388,8 +388,8 @@ pub fn offerable(store: &ConnectorStore<'_>, run_id: &str) -> Result<Vec<Connect
 }
 
 /// A decision this run cannot read is not one: holding asks, which a grant then answers, where letting the destination through cannot be taken back (§3.2.1).
-fn decided_here(store: &ConnectorStore<'_>, run_id: &str, entry: &Installed) -> bool {
-    match store.decision(run_id, &entry.name) {
+fn decided_here(store: &ConnectorStore<'_>, holder: &GrantHolder, entry: &Installed) -> bool {
+    match store.decision(holder, &entry.name) {
         Ok(decision) => decision.is_some_and(|decision| decision.decides(&entry.digest)),
         Err(e) => {
             crate::log::warn!(
@@ -496,9 +496,17 @@ fn offerable_method<'a>(
 mod tests {
     use super::*;
     use crate::connector::source::FetchedConnector;
-    use crate::connector::store::{Authority, InstalledSet, RunDecision};
+    use crate::connector::store::{Authority, GrantHolder, InstalledSet, RunDecision};
     use lns_policy::decision_store::{DecisionFile, DecisionStore};
     use std::sync::Mutex;
+
+    fn a_run() -> GrantHolder {
+        GrantHolder::Run("1a2b3c4d0000000000000000000000aa".to_string())
+    }
+
+    fn another_run() -> GrantHolder {
+        GrantHolder::Run("9f8e7d6c0000000000000000000000bb".to_string())
+    }
 
     struct FakeMap<T> {
         state: Mutex<DecisionFile<T>>,
@@ -959,7 +967,7 @@ mod tests {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
-        let granted = grant(&rig.store(), "some-provider", "/work", "token", None).expect("grant");
+        let granted = grant(&rig.store(), "some-provider", &a_run(), "token", None).expect("grant");
         assert_eq!(granted.method, "token");
         assert_eq!(granted.connection.as_deref(), Some("work"));
         assert_eq!(granted.displaced, None);
@@ -970,10 +978,10 @@ mod tests {
         // §7.1: a grant bound to other bytes is not one, so the grant has to record the digest it consented to.
         let rig = Rig::new();
         installed(&rig).await;
-        grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        grant(&rig.store(), "some-provider", &a_run(), "open", None).expect("grant");
         assert!(
             rig.store()
-                .grant_for("/work", "some-provider", "sha256:abc")
+                .grant_for(&a_run(), "some-provider", "sha256:abc")
                 .unwrap()
                 .is_some()
         );
@@ -983,7 +991,7 @@ mod tests {
     async fn granting_a_method_that_authenticates_with_no_connection_held_says_to_connect_first() {
         let rig = Rig::new();
         installed(&rig).await;
-        let err = grant(&rig.store(), "some-provider", "/work", "token", None)
+        let err = grant(&rig.store(), "some-provider", &a_run(), "token", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("connector connect"), "{err}");
@@ -996,7 +1004,7 @@ mod tests {
         for label in ["work", "personal"] {
             connect(&rig.store(), "some-provider", "token", label, values()).unwrap();
         }
-        let err = grant(&rig.store(), "some-provider", "/work", "token", None)
+        let err = grant(&rig.store(), "some-provider", &a_run(), "token", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("--connection"), "{err}");
@@ -1010,7 +1018,7 @@ mod tests {
         let err = grant(
             &rig.store(),
             "some-provider",
-            "/work",
+            &a_run(),
             "token",
             Some("other"),
         )
@@ -1023,11 +1031,17 @@ mod tests {
     async fn granting_a_method_that_does_not_authenticate_takes_no_connection() {
         let rig = Rig::new();
         installed(&rig).await;
-        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        let granted = grant(&rig.store(), "some-provider", &a_run(), "open", None).expect("grant");
         assert_eq!(granted.connection, None);
-        let err = grant(&rig.store(), "some-provider", "/work", "open", Some("work"))
-            .unwrap_err()
-            .to_string();
+        let err = grant(
+            &rig.store(),
+            "some-provider",
+            &a_run(),
+            "open",
+            Some("work"),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("takes no connection"), "{err}");
     }
 
@@ -1037,8 +1051,8 @@ mod tests {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
-        grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
-        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        grant(&rig.store(), "some-provider", &a_run(), "token", None).unwrap();
+        let granted = grant(&rig.store(), "some-provider", &a_run(), "open", None).expect("grant");
         assert_eq!(granted.displaced.as_deref(), Some("token"));
     }
 
@@ -1048,12 +1062,12 @@ mod tests {
         installed(&rig).await;
         rig.store()
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 super::super::store::RunDecision::Declined,
             )
             .unwrap();
-        let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
+        let granted = grant(&rig.store(), "some-provider", &a_run(), "open", None).expect("grant");
         assert_eq!(granted.displaced, None, "a decline is not a method");
     }
 
@@ -1074,7 +1088,7 @@ mod tests {
         rig.set
             .put("some-provider", "sha256:abc", &doc, &[])
             .unwrap();
-        let err = grant(&rig.store(), "some-provider", "/work", "future", None)
+        let err = grant(&rig.store(), "some-provider", &a_run(), "future", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("needs a newer lns"), "{err}");
@@ -1084,11 +1098,11 @@ mod tests {
     async fn forgetting_clears_what_the_run_decided() {
         let rig = Rig::new();
         installed(&rig).await;
-        grant(&rig.store(), "some-provider", "/work", "open", None).unwrap();
-        assert!(forget(&rig.store(), "some-provider", "/work").unwrap());
-        assert!(!forget(&rig.store(), "some-provider", "/work").unwrap());
+        grant(&rig.store(), "some-provider", &a_run(), "open", None).unwrap();
+        assert!(forget(&rig.store(), "some-provider", &a_run()).unwrap());
+        assert!(!forget(&rig.store(), "some-provider", &a_run()).unwrap());
         assert_eq!(
-            rig.store().decision("/work", "some-provider").unwrap(),
+            rig.store().decision(&a_run(), "some-provider").unwrap(),
             None
         );
     }
@@ -1123,12 +1137,12 @@ mod tests {
             .unwrap();
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
 
-        let err = grant(&rig.store(), "some-provider", "/work", "token-org", None)
+        let err = grant(&rig.store(), "some-provider", &a_run(), "token-org", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("connector connect"), "{err}");
         assert_eq!(
-            rig.store().decision("/work", "some-provider").unwrap(),
+            rig.store().decision(&a_run(), "some-provider").unwrap(),
             None,
             "nothing may be recorded when the connection does not belong to the method"
         );
@@ -1149,7 +1163,7 @@ mod tests {
         let err = grant(
             &rig.store(),
             "some-provider",
-            "/work",
+            &a_run(),
             "token-org",
             Some("personal"),
         )
@@ -1164,10 +1178,10 @@ mod tests {
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
-        let first = grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
+        let first = grant(&rig.store(), "some-provider", &a_run(), "token", None).unwrap();
         assert!(!first.unchanged);
 
-        let again = grant(&rig.store(), "some-provider", "/work", "token", None).unwrap();
+        let again = grant(&rig.store(), "some-provider", &a_run(), "token", None).unwrap();
         assert!(again.unchanged, "the same grant twice is not a change");
         assert_eq!(again.displaced, None, "it replaced nothing");
     }
@@ -1301,7 +1315,7 @@ mod tests {
             "sha256:abc",
         );
         assert_eq!(
-            served_by(offerable(&rig.store(), "/work").unwrap()),
+            served_by(offerable(&rig.store(), &a_run()).unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1317,7 +1331,7 @@ mod tests {
         );
         rig.store()
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 RunDecision::Granted {
                     digest: "sha256:abc".to_string(),
@@ -1327,7 +1341,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
+        assert!(served_by(offerable(&rig.store(), &a_run()).unwrap()).is_empty());
     }
 
     #[test]
@@ -1340,9 +1354,9 @@ mod tests {
             "sha256:abc",
         );
         rig.store()
-            .decide("/work", "some-provider", RunDecision::Declined)
+            .decide(&a_run(), "some-provider", RunDecision::Declined)
             .unwrap();
-        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
+        assert!(served_by(offerable(&rig.store(), &a_run()).unwrap()).is_empty());
     }
 
     #[test]
@@ -1357,7 +1371,7 @@ mod tests {
         );
         rig.store()
             .decide(
-                "/work",
+                &a_run(),
                 "some-provider",
                 RunDecision::Granted {
                     digest: "sha256:old".to_string(),
@@ -1368,7 +1382,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            served_by(offerable(&rig.store(), "/work").unwrap()),
+            served_by(offerable(&rig.store(), &a_run()).unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1383,10 +1397,10 @@ mod tests {
             "sha256:abc",
         );
         rig.store()
-            .decide("/work", "some-provider", RunDecision::Declined)
+            .decide(&a_run(), "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
-            served_by(offerable(&rig.store(), "/elsewhere").unwrap()),
+            served_by(offerable(&rig.store(), &another_run()).unwrap()),
             ["api.some-provider.example"]
         );
     }
@@ -1406,7 +1420,7 @@ mod tests {
         );
         let messages = crate::test_env::captured_messages(|| {
             assert_eq!(
-                served_by(offerable(&rig.store(), "/work").unwrap()),
+                served_by(offerable(&rig.store(), &a_run()).unwrap()),
                 ["api.some-provider.example"],
                 "the readable connector still holds what it serves"
             );
@@ -1431,7 +1445,7 @@ mod tests {
 
         let messages = crate::test_env::captured_messages(|| {
             assert_eq!(
-                served_by(offerable(&rig.store(), "/work").unwrap()),
+                served_by(offerable(&rig.store(), &a_run()).unwrap()),
                 ["api.some-provider.example"]
             );
         });
@@ -1449,11 +1463,11 @@ mod tests {
             .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
             .unwrap();
         rig.store()
-            .decide("/work", "broken", RunDecision::Declined)
+            .decide(&a_run(), "broken", RunDecision::Declined)
             .unwrap();
 
         let messages = crate::test_env::captured_messages(|| {
-            assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
+            assert!(served_by(offerable(&rig.store(), &a_run()).unwrap()).is_empty());
         });
         assert!(
             messages.is_empty(),
@@ -1487,7 +1501,7 @@ mod tests {
             &rig.store(),
             "some-provider",
             "sha256:abc",
-            "/work",
+            &a_run(),
             "open",
             None,
         )
@@ -1498,7 +1512,7 @@ mod tests {
             "api.some-provider.example"
         );
         assert_eq!(payload.env.get("SOME_REGION"), Some(&"eu".to_string()));
-        let recorded = rig.store().decision("/work", "some-provider").unwrap();
+        let recorded = rig.store().decision(&a_run(), "some-provider").unwrap();
         assert!(
             matches!(recorded, Some(RunDecision::Granted { .. })),
             "the run's answer is recorded, not just returned: {recorded:?}"
@@ -1541,7 +1555,7 @@ mod tests {
             )
             .unwrap();
 
-        let offered = offerable(&rig.store(), "/work").expect("offerable");
+        let offered = offerable(&rig.store(), &a_run()).expect("offerable");
         assert!(
             offered[0].methods[0].offerable,
             "an inline fileset's content is inside the document install already keeps, so nothing is missing"
@@ -1551,7 +1565,7 @@ mod tests {
             &rig.store(),
             "some-provider",
             "sha256:abc",
-            "/work",
+            &a_run(),
             "open",
             None,
         )
@@ -1576,9 +1590,9 @@ mod tests {
         rig.set
             .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
             .unwrap();
-        grant_disclosed(&rig.store(), "alpha", "sha256:a", "/work", "open", None).expect("first");
+        grant_disclosed(&rig.store(), "alpha", "sha256:a", &a_run(), "open", None).expect("first");
 
-        let err = grant_disclosed(&rig.store(), "beta", "sha256:b", "/work", "open", None)
+        let err = grant_disclosed(&rig.store(), "beta", "sha256:b", &a_run(), "open", None)
             .expect_err("the second grant claims a path the first already writes");
 
         assert!(
@@ -1586,7 +1600,7 @@ mod tests {
             "the refusal must name the connector that holds the path and the path itself; got: {err:#}"
         );
         assert!(
-            rig.store().decision("/work", "beta").unwrap().is_none(),
+            rig.store().decision(&a_run(), "beta").unwrap().is_none(),
             "a refused grant must not be recorded, or the next run restores the collision"
         );
     }
@@ -1601,9 +1615,9 @@ mod tests {
         rig.set
             .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
             .unwrap();
-        grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
+        grant(&rig.store(), "alpha", &a_run(), "open", None).expect("first");
 
-        let err = grant(&rig.store(), "beta", "/work", "open", None)
+        let err = grant(&rig.store(), "beta", &a_run(), "open", None)
             .expect_err("the second grant claims a path the first already writes");
 
         assert!(
@@ -1611,7 +1625,7 @@ mod tests {
             "got: {err:#}"
         );
         assert!(
-            rig.store().decision("/work", "beta").unwrap().is_none(),
+            rig.store().decision(&a_run(), "beta").unwrap().is_none(),
             "a refused grant must not be recorded, or the next run restores the collision"
         );
     }
@@ -1629,7 +1643,7 @@ mod tests {
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.store()
                 .decide(
-                    "/work",
+                    &a_run(),
                     name,
                     RunDecision::Granted {
                         digest: digest.to_string(),
@@ -1643,7 +1657,8 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), "/work").expect("the store itself is readable");
+            supplied =
+                granted_supply(&rig.store(), &a_run()).expect("the store itself is readable");
         });
 
         assert_eq!(
@@ -1667,9 +1682,9 @@ mod tests {
         rig.set
             .put("beta", "sha256:b", &writing("beta", "~/shared/./x"), &[])
             .unwrap();
-        grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
+        grant(&rig.store(), "alpha", &a_run(), "open", None).expect("first");
 
-        let err = grant(&rig.store(), "beta", "/work", "open", None)
+        let err = grant(&rig.store(), "beta", &a_run(), "open", None)
             .expect_err("the same file, spelled around a dot");
 
         assert!(
@@ -1692,7 +1707,7 @@ mod tests {
                 .unwrap();
             rig.store()
                 .decide(
-                    "/work",
+                    &a_run(),
                     name,
                     RunDecision::Granted {
                         digest: digest.to_string(),
@@ -1706,7 +1721,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), "/work").unwrap();
+            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
         });
 
         assert_eq!(
@@ -1730,7 +1745,7 @@ mod tests {
                 .unwrap();
             rig.store()
                 .decide(
-                    "/work",
+                    &a_run(),
                     name,
                     RunDecision::Granted {
                         digest: digest.to_string(),
@@ -1744,7 +1759,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), "/work").unwrap();
+            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
         });
 
         assert_eq!(
@@ -1783,7 +1798,7 @@ mod tests {
             .put("some-provider", "sha256:abc", &doc, &[])
             .unwrap();
 
-        let offered = offerable(&rig.store(), "/work").expect("offerable");
+        let offered = offerable(&rig.store(), &a_run()).expect("offerable");
         assert!(
             !offered[0].methods[0].offerable,
             "the card must not promise a file it cannot write"
@@ -1793,7 +1808,7 @@ mod tests {
             &rig.store(),
             "some-provider",
             "sha256:abc",
-            "/work",
+            &a_run(),
             "token",
             None,
         )
@@ -1816,7 +1831,7 @@ mod tests {
             &rig.store(),
             "some-provider",
             "sha256:the-one-the-card-showed",
-            "/work",
+            &a_run(),
             "open",
             None,
         )
@@ -1825,7 +1840,7 @@ mod tests {
         assert!(format!("{err:#}").contains("replaced"), "{err:#}");
         assert!(
             rig.store()
-                .decision("/work", "some-provider")
+                .decision(&a_run(), "some-provider")
                 .unwrap()
                 .is_none(),
             "nothing was recorded for bytes the user never saw"
@@ -1872,7 +1887,7 @@ mod tests {
             &rig.store(),
             "some-provider",
             "sha256:abc",
-            "/work",
+            &a_run(),
             "token",
             Some("work"),
         )
@@ -1888,6 +1903,6 @@ mod tests {
     #[test]
     fn nothing_installed_holds_nothing() {
         let rig = Rig::new();
-        assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
+        assert!(served_by(offerable(&rig.store(), &a_run()).unwrap()).is_empty());
     }
 }

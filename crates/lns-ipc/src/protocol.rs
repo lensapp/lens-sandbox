@@ -335,10 +335,14 @@ pub enum Response {
         connection: Option<String>,
         displaced: Option<String>,
         unchanged: bool,
+        /// Which row this wrote. The service decides it, because a run may appear between the caller's probe and the write.
+        reserved: bool,
     },
     ConnectorForgotten {
         name: String,
         had_decision: bool,
+        /// Whether what it cleared was a reservation rather than a run's own decision.
+        reserved: bool,
     },
 }
 

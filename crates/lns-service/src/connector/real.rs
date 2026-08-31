@@ -10,7 +10,7 @@ use lns_policy::decision_store::JsonDecisionStore;
 
 use super::handler;
 use super::registry::RegistryConnectors;
-use super::store::{Connection, ConnectorStore, RunDecision};
+use super::store::{Connection, ConnectorStore, GrantHolder, RunDecision};
 use crate::approval_flow::protocol::GrantedPayload;
 
 /// One machine verb, named without the wire type so the dispatcher hands over no store of its own.
@@ -40,17 +40,28 @@ pub enum Call {
     },
 }
 
-/// The run a `--run` handle names. The service resolves it because only the service holds the registry.
-fn resolve_run(handle: &str) -> Result<String> {
-    crate::run_registry::resolve(handle).map_err(|e| anyhow::anyhow!("{e}"))
+/// Who a `--run` handle names: the run it resolves to, or — where it is a name no run holds — the reservation waiting for it (§3.2.4). The service decides this because only the service holds the registry.
+fn holder_of(handle: &str) -> Result<GrantHolder> {
+    match crate::run_registry::resolve(handle) {
+        Ok(id) => Ok(GrantHolder::Run(id)),
+        // An id, or a prefix of one, either resolves or is nothing; only a name can name a run that does not exist yet.
+        Err(crate::run_registry::ResolveError::Unknown { .. })
+            if lns_ipc::validate_run_name(handle).is_ok() =>
+        {
+            Ok(GrantHolder::Reservation(handle.to_string()))
+        }
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    }
 }
 
-/// The runs an authentication invalidated the grant of, named as the user typed them. A run the machine no longer holds is reported by its short id rather than dropped.
-fn named_runs(ids: Vec<String>) -> Vec<String> {
-    ids.into_iter()
-        .map(|id| {
-            crate::run_registry::name_of(&id)
-                .unwrap_or_else(|| lns_ipc::short_run_id(&id).to_string())
+/// The holders an authentication invalidated the grant of, named as the user typed them. A run the machine no longer holds is reported by its short id rather than dropped.
+fn named_holders(holders: Vec<GrantHolder>) -> Vec<String> {
+    holders
+        .into_iter()
+        .map(|holder| match holder {
+            GrantHolder::Run(id) => crate::run_registry::name_of(&id)
+                .unwrap_or_else(|| lns_ipc::short_run_id(&id).to_string()),
+            GrantHolder::Reservation(name) => name,
         })
         .collect()
 }
@@ -75,7 +86,7 @@ impl Paths {
 
 /// The connectors one run can be offered (§3.2.1). Unreadable connector state offers none, because a run must still launch beside it.
 pub fn offers_for_run(run_id: &str) -> Vec<lns_ipc::ConnectorView> {
-    match read_offers(run_id) {
+    match read_offers(&GrantHolder::Run(run_id.to_string())) {
         Ok(patterns) => patterns,
         Err(e) => {
             crate::log::warn!(
@@ -86,18 +97,20 @@ pub fn offers_for_run(run_id: &str) -> Vec<lns_ipc::ConnectorView> {
     }
 }
 
-fn read_offers(run_id: &str) -> Result<Vec<lns_ipc::ConnectorView>> {
-    with_run_store(run_id, handler::offerable)
+fn read_offers(holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>> {
+    with_run_store(holder, handler::offerable)
 }
 
 /// The connector store as the approval session reaches it: every method opens the three stores itself, because a card outlives no lock.
 pub struct RealConnectorPort {
-    run_id: String,
+    holder: GrantHolder,
 }
 
 impl RealConnectorPort {
     pub fn new(run_id: String) -> Self {
-        Self { run_id }
+        Self {
+            holder: GrantHolder::Run(run_id),
+        }
     }
 
     fn with_store<T>(&self, f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T, String> {
@@ -118,7 +131,7 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         values: lns_ipc::SecretValues,
     ) -> Result<Vec<String>, String> {
         self.with_store(|store| {
-            Ok(named_runs(
+            Ok(named_holders(
                 handler::connect(store, name, method, label, values.0)?.invalidated,
             ))
         })
@@ -132,13 +145,13 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         connection: Option<&str>,
     ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
         self.with_store(|store| {
-            handler::grant_disclosed(store, name, digest, &self.run_id, method, connection)
+            handler::grant_disclosed(store, name, digest, &self.holder, method, connection)
         })
     }
 
     fn decline(&self, name: &str) -> Result<(), String> {
         self.with_store(|store| {
-            store.decide(&self.run_id, name, RunDecision::Declined)?;
+            store.decide(&self.holder, name, RunDecision::Declined)?;
             Ok(())
         })
     }
@@ -146,7 +159,7 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
 
 /// What the grants this run already made supply to it as it starts, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
 pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
-    match read_granted_supply(run_id) {
+    match read_granted_supply(&GrantHolder::Run(run_id.to_string())) {
         Ok(supply) => supply,
         Err(e) => {
             crate::log::warn!("cannot read what this run granted, so it starts without it: {e:#}");
@@ -155,20 +168,20 @@ pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
     }
 }
 
-fn read_granted_supply(run_id: &str) -> Result<BTreeMap<String, GrantedPayload>> {
-    with_run_store(run_id, handler::granted_supply)
+fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
+    with_run_store(holder, handler::granted_supply)
 }
 
-/// Opens the three stores against the run a grant is keyed by.
+/// Opens the three stores against the holder a grant is keyed by.
 fn with_run_store<T>(
-    run_id: &str,
-    f: impl FnOnce(&ConnectorStore<'_>, &str) -> Result<T>,
+    holder: &GrantHolder,
+    f: impl FnOnce(&ConnectorStore<'_>, &GrantHolder) -> Result<T>,
 ) -> Result<T> {
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
     let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
     let grants: JsonDecisionStore<RunDecision> = JsonDecisionStore::new(paths.grants);
-    f(&ConnectorStore::new(&installed, &values, &grants), run_id)
+    f(&ConnectorStore::new(&installed, &values, &grants), holder)
 }
 
 pub async fn answer(call: Call) -> Result<Response> {
@@ -201,7 +214,7 @@ pub async fn answer(call: Call) -> Result<Response> {
             Ok(Response::ConnectorConnected {
                 name,
                 connection: connected.connection,
-                invalidated: named_runs(connected.invalidated),
+                invalidated: named_holders(connected.invalidated),
             })
         }
         Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
@@ -214,20 +227,25 @@ pub async fn answer(call: Call) -> Result<Response> {
             method,
             connection,
         } => {
-            let run_id = resolve_run(&run)?;
-            let granted = handler::grant(&store, &name, &run_id, &method, connection.as_deref())?;
+            let holder = holder_of(&run)?;
+            let granted = handler::grant(&store, &name, &holder, &method, connection.as_deref())?;
             Ok(Response::ConnectorGranted {
                 name,
                 method: granted.method,
                 connection: granted.connection,
                 displaced: granted.displaced,
                 unchanged: granted.unchanged,
+                reserved: matches!(holder, GrantHolder::Reservation(_)),
             })
         }
-        Call::Forget { name, run } => Ok(Response::ConnectorForgotten {
-            had_decision: handler::forget(&store, &name, &resolve_run(&run)?)?,
-            name,
-        }),
+        Call::Forget { name, run } => {
+            let holder = holder_of(&run)?;
+            Ok(Response::ConnectorForgotten {
+                had_decision: handler::forget(&store, &name, &holder)?,
+                reserved: matches!(holder, GrantHolder::Reservation(_)),
+                name,
+            })
+        }
     }
 }
 
@@ -354,13 +372,14 @@ mod tests {
 
     /// Through the store rather than hand-written json, so the file this reads back is the shape a real decline writes.
     fn decline(home: &Path, run_id: &str) {
+        let holder = GrantHolder::Run(run_id.to_string());
         let installed = super::super::dir::ConnectorDir::new(home.join("connectors"));
         let values: JsonDecisionStore<Connection> =
             JsonDecisionStore::new(home.join("connector-values.json"));
         let grants: JsonDecisionStore<RunDecision> =
             JsonDecisionStore::new(home.join("connector-grants.json"));
         ConnectorStore::new(&installed, &values, &grants)
-            .decide(run_id, "some-provider", RunDecision::Declined)
+            .decide(&holder, "some-provider", RunDecision::Declined)
             .expect("record a decline");
     }
 
@@ -429,7 +448,11 @@ mod tests {
     }
 
     /// The grant an earlier start of `run_id` would have recorded, naming connection `work` at the authority given.
-    fn grant_naming_work(home: &Path, run_id: &str, authority: crate::connector::store::Authority) {
+    fn grant_naming_work(
+        home: &Path,
+        holder: &GrantHolder,
+        authority: crate::connector::store::Authority,
+    ) {
         let installed = super::super::dir::ConnectorDir::new(home.join("connectors"));
         let values: JsonDecisionStore<Connection> =
             JsonDecisionStore::new(home.join("connector-values.json"));
@@ -437,7 +460,7 @@ mod tests {
             JsonDecisionStore::new(home.join("connector-grants.json"));
         ConnectorStore::new(&installed, &values, &grants)
             .decide(
-                run_id,
+                holder,
                 "some-provider",
                 RunDecision::Granted {
                     digest: "sha256:abc".to_string(),
@@ -465,6 +488,47 @@ mod tests {
             .unwrap_or_else(|e| panic!("re-authenticating against {}: {e}", home.display()))
     }
 
+    #[test]
+    fn a_name_no_run_holds_is_a_reservation_and_an_unresolvable_id_is_an_error() {
+        // §2.4: a name is never all lowercase hex, so an id that resolves to nothing cannot be read as a name a run may later take.
+        assert_eq!(
+            holder_of("revieweer").expect("a name no run holds"),
+            GrantHolder::Reservation("revieweer".to_string())
+        );
+        let err = holder_of("1a2b").expect_err("an id prefix that resolves to nothing");
+        assert!(err.to_string().contains("no such run"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_handle_that_resolves_names_the_run_it_resolved_to() {
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(RUN.to_string(), Some("reviewer".into()), handle)
+            .expect("register");
+        let resolved = holder_of("reviewer");
+        crate::run_registry::deregister(RUN);
+        assert_eq!(
+            resolved.expect("reviewer resolves"),
+            GrantHolder::Run(RUN.to_string()),
+            "the store never sees a name for a run that exists"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn an_invalidated_reservation_is_reported_by_the_name_it_waits_for() {
+        // A reservation has no run to look up, so it is its own name — never a run id run through the registry.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        grant_naming_work(
+            home.path(),
+            &GrantHolder::Reservation("revieweer".to_string()),
+            crate::connector::store::Authority::of(["repo:read"]),
+        );
+
+        assert_eq!(reconnect_reporting_admin(home.path()), ["revieweer"]);
+    }
+
     #[tokio::test]
     #[serial(env)]
     async fn an_invalidated_grant_is_reported_by_the_name_its_run_holds() {
@@ -474,7 +538,7 @@ mod tests {
         install_connectable(home.path());
         grant_naming_work(
             home.path(),
-            RUN,
+            &GrantHolder::Run(RUN.to_string()),
             crate::connector::store::Authority::of(["repo:read"]),
         );
         let (handle, _cancel) = crate::run_registry::test_handle();
@@ -500,7 +564,7 @@ mod tests {
         install_connectable(home.path());
         grant_naming_work(
             home.path(),
-            RUN,
+            &GrantHolder::Run(RUN.to_string()),
             crate::connector::store::Authority::of(["repo:read"]),
         );
 
@@ -603,10 +667,10 @@ mod tests {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
         install_named(home.path(), "other-provider", "api.other-provider.example");
-        with_run_store(RUN, |store, dir| {
+        with_run_store(&GrantHolder::Run(RUN.to_string()), |store, holder| {
             for name in ["some-provider", "other-provider"] {
                 store.decide(
-                    dir,
+                    holder,
                     name,
                     RunDecision::Granted {
                         digest: "sha256:abc".to_string(),
@@ -636,9 +700,9 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
-        with_run_store(RUN, |store, dir| {
+        with_run_store(&GrantHolder::Run(RUN.to_string()), |store, holder| {
             store.decide(
-                dir,
+                holder,
                 "some-provider",
                 RunDecision::Granted {
                     digest: "sha256:the-version-they-agreed-to".to_string(),
