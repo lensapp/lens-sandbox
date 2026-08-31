@@ -2621,6 +2621,11 @@ pub(crate) mod tests {
                 env: [("SOME_REGION".to_string(), "eu".to_string())]
                     .into_iter()
                     .collect(),
+                files: vec![crate::approval_flow::protocol::WireFile::text(
+                    "~/.some-provider/config.json",
+                    "{}",
+                    None,
+                )],
             },
         );
         let _ = policy_frame(&mut rx);
@@ -2639,6 +2644,14 @@ pub(crate) mod tests {
                 .and_then(|env| env.get("SOME_REGION").cloned()),
             Some("eu".to_string())
         );
+        assert_eq!(
+            republished
+                .files
+                .as_deref()
+                .map(|files| files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>()),
+            Some(vec!["~/.some-provider/config.json"]),
+            "a frame that omits files deletes the ones the last frame wrote, so an unrelated reload would take the granted file back"
+        );
     }
 
     #[test]
@@ -2653,6 +2666,7 @@ pub(crate) mod tests {
                 env: [("ALPHA_REGION".to_string(), "eu".to_string())]
                     .into_iter()
                     .collect(),
+                ..GrantedPayload::default()
             },
         );
         let _ = policy_frame(&mut rx);
@@ -2665,6 +2679,7 @@ pub(crate) mod tests {
                 env: [("BETA_REGION".to_string(), "us".to_string())]
                     .into_iter()
                     .collect(),
+                ..GrantedPayload::default()
             },
         );
 
