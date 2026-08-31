@@ -29,11 +29,14 @@ connectors:
     routes:
       - match: api.github.com
       - match: github.com
+      - match: npm.pkg.github.com
+      - match: maven.pkg.github.com
     oauth:
       clientId: "${LNS_OAUTH_CLIENT_ID_GITHUB}"
       scopes:
         - repo
         - read:org
+        - read:packages
       deviceAuthorizationEndpoint: https://github.com/login/device/code
       tokenEndpoint: https://github.com/login/oauth/access_token
       userinfoEndpoint: https://api.github.com/user
@@ -45,6 +48,10 @@ connectors:
           domain: api.github.com
         - kind: basic_x_access_token
           domain: github.com
+        - kind: bearer_header
+          domain: npm.pkg.github.com
+        - kind: bearer_header
+          domain: maven.pkg.github.com
     tokenFallback:
       help: https://github.com/settings/personal-access-tokens/new
   - id: google

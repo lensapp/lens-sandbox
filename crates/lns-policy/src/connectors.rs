@@ -987,6 +987,35 @@ mod tests {
     }
 
     #[test]
+    fn bundled_github_reaches_the_npm_and_maven_package_registries() {
+        let gh = bundled_connectors()
+            .iter()
+            .find(|i| i.id == "github")
+            .expect("github is bundled");
+        let oauth = gh.oauth.as_ref().expect("oauth block present");
+        assert!(
+            oauth.scopes.iter().any(|s| s == "read:packages"),
+            "the package registries reject a token without read:packages, got: {:?}",
+            oauth.scopes
+        );
+        for domain in ["npm.pkg.github.com", "maven.pkg.github.com"] {
+            assert!(
+                gh.routes.iter().any(|r| r.match_pattern == domain),
+                "the workload cannot reach {domain} without a route, got: {:?}",
+                gh.routes
+            );
+            assert!(
+                oauth
+                    .injections
+                    .iter()
+                    .any(|i| i.kind == InjectionKind::BearerHeader && i.domain == domain),
+                "{domain} authenticates with Authorization: Bearer, got: {:?}",
+                oauth.injections
+            );
+        }
+    }
+
+    #[test]
     fn bundled_catalog_ships_openrouter_as_a_pkce_connector() {
         let or = bundled_connectors()
             .iter()
