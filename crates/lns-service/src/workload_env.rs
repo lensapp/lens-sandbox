@@ -14,6 +14,8 @@ pub enum EnvSource {
     Flag,
     /// The sandbox definition's own `spec.env`.
     Definition,
+    /// The run's own environment, as an exec joining it finds it — settled when the run started, and not this caller's to change.
+    Run,
     /// The image's `ENV`.
     Image,
 }
@@ -37,6 +39,9 @@ pub fn refusal_warning(refused: &Refused) -> String {
         ),
         EnvSource::Definition => format!(
             "{key} not set: {connector} fills it for this run — run {retract}, or drop {key} from spec.env"
+        ),
+        EnvSource::Run => format!(
+            "{key} not set: {connector} fills it for this run — run {retract} and start the run again"
         ),
         EnvSource::Image => format!(
             "{key} not set from the image: {connector} fills it for this run — run {retract} to use the image's value"
@@ -222,6 +227,12 @@ pub fn exec_session_env(
         .cloned()
         .collect();
     let mut composed = compose_workload_env(Some(&joined), &caller, filled_by_a_grant);
+    // The composer's image slot here is the run's own environment, and telling this caller to edit an image that set nothing sends them nowhere.
+    for refused in &mut composed.refused {
+        if refused.source == EnvSource::Image {
+            refused.source = EnvSource::Run;
+        }
+    }
     compose_guest_tool_env(&mut composed.env, &exec_environment.tools);
     for (key, value) in proxy_env().into_iter().chain(ca_bundle_env()) {
         overwrite(&mut composed.env, key, value);
@@ -707,6 +718,30 @@ mod tests {
             joining.refused,
             [flag("SOME_TOKEN")],
             "and it says so, or the caller reads it as their own typo"
+        );
+    }
+
+    #[test]
+    fn an_exec_names_the_run_for_a_variable_the_run_itself_set() {
+        // The run's own environment reaches the composer through its image slot, and no image set this: an exec caller sent to look at one finds nothing there.
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["SOME_TOKEN=set-before-any-grant".into()],
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(
+            &run,
+            &[],
+            &[("SOME_TOKEN".to_string(), "some-provider".to_string())].into(),
+        );
+
+        assert_eq!(
+            joining.refused,
+            [refused_from("SOME_TOKEN", EnvSource::Run)]
+        );
+        assert_eq!(
+            refusal_warning(&joining.refused[0]),
+            "SOME_TOKEN not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>` and start the run again"
         );
     }
 
