@@ -697,6 +697,7 @@ async fn remove_run_request(run: &str, force: bool) -> anyhow::Result<Response> 
             forward_session_input(&id, session_input_from_signal(sig), "RemoveRun").await
         },
         |id, forced| {
+            crate::connector::real::forget_what_a_run_decided(id);
             if let Err(e) =
                 crate::audit::record_run_removed(id, forced, false, &crate::clock::RealClock)
             {
@@ -715,6 +716,7 @@ async fn prune_runs_request() -> anyhow::Result<Response> {
         &root,
         |removed| {
             for id in removed {
+                crate::connector::real::forget_what_a_run_decided(id);
                 if let Err(e) =
                     crate::audit::record_runs_pruned(id, removed, &crate::clock::RealClock)
                 {
@@ -724,6 +726,18 @@ async fn prune_runs_request() -> anyhow::Result<Response> {
         },
     )
     .await)
+}
+
+/// The run ids a boot's connector sweep leaves alone: every run it rebuilt, and every run whose record it could not trust — a record the user is told to repair is not a removal (§3.2.4).
+pub fn ids_a_boot_keeps(
+    rebuilt: Vec<lns_ipc::RunSummary>,
+    damaged: &[crate::run_record::DamagedRecord],
+) -> std::collections::BTreeSet<String> {
+    rebuilt
+        .into_iter()
+        .map(|run| run.id)
+        .chain(damaged.iter().map(|record| record.run_id.clone()))
+        .collect()
 }
 
 /// Serve one `RemoveRun`: an exited run's registry entry and run dir go together; a running one is refused unless forced, and force is a stop first, not a shortcut around one.
@@ -3323,6 +3337,32 @@ mod tests {
             matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
             "an unreadable entry is skipped, never swept blind: {resp:?}"
         );
+    }
+
+    #[test]
+    fn a_boot_sweep_keeps_a_damaged_run_and_takes_only_what_no_record_names() {
+        // run_record.rs: a damaged run's files must outlive every sweep, and §3.2.4 gives up a grant only when its run is removed. A record the user is told to repair is not a removal.
+        let rebuilt = vec![lns_ipc::RunSummary {
+            id: "1a2b3c4d0000000000000000000000aa".into(),
+            name: "reviewer".into(),
+            image: "someimage".into(),
+            command: "sh".into(),
+            status: lns_ipc::RunStatus::Running,
+            started: "2026-08-31T00:00:00Z".into(),
+        }];
+        let damaged = [crate::run_record::DamagedRecord {
+            run_id: "9f8e7d6c0000000000000000000000bb".into(),
+            reason: "record.json is not json".into(),
+        }];
+
+        let kept = ids_a_boot_keeps(rebuilt, &damaged);
+
+        assert!(kept.contains("1a2b3c4d0000000000000000000000aa"));
+        assert!(
+            kept.contains("9f8e7d6c0000000000000000000000bb"),
+            "a run the boot refused to prune must not lose what it was granted"
+        );
+        assert!(!kept.contains("cccccccc0000000000000000000000cc"));
     }
 
     #[tokio::test]

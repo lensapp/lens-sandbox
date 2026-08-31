@@ -402,6 +402,10 @@ async fn rebuild_stopped_runs() {
                     crate::run::reclaim_run_dir(&crate::run::RealRemoveDir, &root, &id);
                 }
             }
+            crate::connector::real::forget_runs_except(&super::ids_a_boot_keeps(
+                crate::run_registry::snapshot(),
+                &scan.damaged,
+            ));
         }
         Err(e) => log::warn!("stopped runs not rebuilt; they stay invisible until restart: {e:#}"),
     }

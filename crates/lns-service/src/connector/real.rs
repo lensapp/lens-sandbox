@@ -207,6 +207,22 @@ pub fn take_reservations_for(
     }
 }
 
+/// What one removed run decided, removed with it — and where the store is unreadable, left for a later sweep, because a row nobody can read answers for nobody (§8.4).
+pub fn forget_what_a_run_decided(run_id: &str) -> usize {
+    with_stores(|store| Ok(store.forget_run(run_id)?)).unwrap_or_else(|e| {
+        crate::log::warn!("cannot drop what run {run_id} decided: {e:#}");
+        0
+    })
+}
+
+/// The rows of runs this machine no longer records, dropped at boot — hygiene, because a run id is never reused and so a missed row is dead weight rather than consent (§7.1).
+pub fn forget_runs_except(recorded: &std::collections::BTreeSet<String>) -> usize {
+    with_stores(|store| Ok(store.forget_runs_except(recorded)?)).unwrap_or_else(|e| {
+        crate::log::warn!("cannot sweep the grants of runs this machine no longer records: {e:#}");
+        0
+    })
+}
+
 /// The names an unclaimed reservation waits for. Unreadable state reserves none: a collision is a confusion, and the discard is what keeps it from being a leak (§3.2.4).
 pub fn reserved_names() -> std::collections::BTreeSet<String> {
     with_stores(|store| Ok(store.reserved_names()?)).unwrap_or_else(|e| {
@@ -629,6 +645,58 @@ mod tests {
             take_reservations_for("amber_otter", RUN, true, None),
             Reservations::Discarded(0)
         );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn removing_a_run_removes_what_it_granted_so_the_next_run_of_that_name_is_asked() {
+        // §8.4: the grant goes with the run, and the name is then free of it.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        grant_naming_work(
+            home.path(),
+            &GrantHolder::Run(RUN.to_string()),
+            crate::connector::store::Authority::default(),
+        );
+        assert!(granted_supply_for(RUN).contains_key("some-provider"));
+
+        assert_eq!(forget_what_a_run_decided(RUN), 1);
+
+        assert!(granted_supply_for(RUN).is_empty());
+        assert_eq!(
+            served_by(offers_for_run(RUN)),
+            ["api.some-provider.example"],
+            "with nothing decided, the connector is offered again"
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn the_boot_sweep_keeps_a_recorded_run_and_drops_the_rest() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        for run_id in [RUN, OTHER_RUN] {
+            grant_naming_work(
+                home.path(),
+                &GrantHolder::Run(run_id.to_string()),
+                crate::connector::store::Authority::default(),
+            );
+        }
+
+        assert_eq!(forget_runs_except(&[RUN.to_string()].into()), 1);
+
+        assert!(granted_supply_for(RUN).contains_key("some-provider"));
+        assert!(granted_supply_for(OTHER_RUN).is_empty());
+    }
+
+    #[test]
+    #[serial(env)]
+    fn connector_state_this_build_cannot_reach_forgets_nothing_rather_than_failing_a_removal() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        assert_eq!(forget_what_a_run_decided(RUN), 0);
+        assert_eq!(forget_runs_except(&Default::default()), 0);
     }
 
     #[test]
