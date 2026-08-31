@@ -2,7 +2,7 @@ apiVersion: lns.run/v1
 kind: sandbox
 name: claude-code
 spec:
-  image: debian:bookworm-slim
+  image: docker.io/library/debian:bookworm-slim
   tools:
     - node@22
   # Not a login shell: debian's /etc/profile resets PATH unconditionally, which would discard the declared tools' bin dirs before this line runs.
