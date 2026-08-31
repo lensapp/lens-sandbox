@@ -587,6 +587,7 @@ mod tests {
     struct FakeSource {
         digest: String,
         document: Vec<u8>,
+        filesets: Vec<Vec<u8>>,
         asked: Mutex<Vec<Source>>,
     }
 
@@ -596,7 +597,7 @@ mod tests {
             Ok(FetchedConnector {
                 digest: self.digest.clone(),
                 document: self.document.clone(),
-                filesets: Vec::new(),
+                filesets: self.filesets.clone(),
             })
         }
     }
@@ -641,8 +642,50 @@ mod tests {
         FakeSource {
             digest: "sha256:abc".to_string(),
             document: document(name, host),
+            filesets: Vec::new(),
             asked: Mutex::new(Vec::new()),
         }
+    }
+
+    #[tokio::test]
+    async fn installing_keeps_the_packed_fileset_the_source_brought() {
+        // The digest binds a grant to these bytes, so the bytes have to be here when a later run grants the method that writes them.
+        let rig = Rig::new();
+        let layer = crate::connector::layer::fixtures::raw_layer("config.json", b"{}");
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "open",
+                    "filesets": [{ "path": "./seed", "guestPath": "~/.some-provider" }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let src = FakeSource {
+            digest: "sha256:abc".to_string(),
+            document: doc,
+            filesets: vec![layer.clone()],
+            asked: Mutex::new(Vec::new()),
+        };
+
+        install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .expect("install accepts a connector that packs one directory");
+
+        assert_eq!(
+            rig.store().fileset_layer("some-provider", 0).unwrap(),
+            layer,
+            "install passes the source's layers to the store, or a grant has nothing to write"
+        );
+        assert!(
+            rig.store().fileset_layer("some-provider", 1).is_err(),
+            "an index nothing packed is not a layer"
+        );
     }
 
     #[tokio::test]
