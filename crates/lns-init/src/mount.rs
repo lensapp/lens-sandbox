@@ -19,6 +19,8 @@ const DEV: &str = "/dev";
 const DEV_NULL: &str = "/dev/null";
 const DEV_PTS: &str = "/dev/pts";
 const DEV_PTMX: &str = "/dev/ptmx";
+const DEV_SHM: &str = "/dev/shm";
+const DEV_SHM_TMPFS_OPTS: &str = "mode=1777";
 const CONTENT: &str = "/content";
 const COMPOSEFS_META: &str = "/composefs-meta";
 const UPPER_MOUNTPOINT: &str = "/mnt/upper";
@@ -786,6 +788,19 @@ fn ensure_dev_ptmx(sys: &dyn Syscalls) -> Result<(), MountError> {
     }
 }
 
+/// No `size=`: the kernel's tmpfs default is half of guest RAM, which the run already bounds — Docker's 64M cap is the footgun `--disable-dev-shm-usage` exists for.
+fn mount_dev_shm(sys: &dyn Syscalls) -> Result<(), MountError> {
+    do_mkdir(sys, DEV_SHM, 0o1777)?;
+    do_mount(
+        sys,
+        "tmpfs",
+        DEV_SHM,
+        "tmpfs",
+        MountFlags::none().nosuid().nodev().noexec(),
+        Some(DEV_SHM_TMPFS_OPTS),
+    )
+}
+
 fn do_chdir(sys: &dyn Syscalls, path: &str) -> Result<(), MountError> {
     let c = cstring(path, "chdir-path")?;
     sys.chdir(&c).map_err(|err| MountError::Syscall {
@@ -846,6 +861,11 @@ fn mount_composefs_and_exec_broker_inner(
         ensure_dev_ptmx(sys)?;
     }
     ensure_dev_fd_links(sys)?;
+
+    // Shared memory is a convenience, not a boot requirement, so a kernel without it degrades instead of refusing the run.
+    if let Err(err) = mount_dev_shm(sys) {
+        eprintln!("lns-init: {DEV_SHM} unavailable, POSIX shared memory will fail: {err}");
+    }
 
     let content_tag = params.content_tag.as_deref().unwrap();
     do_mount(
@@ -2956,6 +2976,89 @@ mod tests {
             .unwrap();
         assert!(overlay < vol_mount, "volume mounts after the overlay root");
         assert!(vol_mount < chroot, "volume mounts before the pivot/chroot");
+    }
+
+    #[test]
+    fn boot_mounts_dev_shm_as_a_world_writable_tmpfs() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(
+                |c| matches!(c, Call::Mkdir { path, mode } if path == DEV_SHM && *mode == 0o1777)
+            ),
+            "devtmpfs ships no shm directory, so the mountpoint has to be created 1777"
+        );
+        let (flags, data) = calls
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount {
+                    target,
+                    fstype,
+                    flags,
+                    data,
+                    ..
+                } if target == DEV_SHM && fstype == "tmpfs" => Some((flags, data)),
+                _ => None,
+            })
+            .expect("/dev/shm is a tmpfs so shm_open and sem_open work");
+        assert_eq!(flags, MountFlags::none().nosuid().nodev().noexec());
+        assert_eq!(
+            data.as_deref(),
+            Some("mode=1777"),
+            "mode 1777 lets any uid create shm files, and no size= means the kernel default \
+             (half of guest RAM) instead of Docker's 64M footgun"
+        );
+    }
+
+    #[test]
+    fn boot_mounts_dev_shm_before_moving_dev_into_the_new_root() {
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        let calls = sys.calls();
+        let shm = calls
+            .iter()
+            .position(|c| matches!(c, Call::Mount { target, .. } if target == DEV_SHM))
+            .expect("/dev/shm is mounted");
+        let dev_move = calls
+            .iter()
+            .position(|c| matches!(c, Call::MoveMount { from, .. } if from == DEV))
+            .expect("/dev is moved into the new root");
+        assert!(
+            shm < dev_move,
+            "/dev/shm rides into the new root as a child of the moved /dev subtree, like /dev/pts"
+        );
+    }
+
+    #[test]
+    fn boot_survives_a_dev_shm_mount_failure() {
+        let sys = FakeSyscalls::new().fail_when(|c| match c {
+            Call::Mount { target, .. } if target == DEV_SHM => Some(ErrorKind::InvalidInput),
+            _ => None,
+        });
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            "/newroot",
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert!(
+            sys.calls().iter().any(|c| matches!(c, Call::Fexecve(_))),
+            "shared memory is a convenience, not a boot requirement: the run still starts"
+        );
     }
 
     #[test]
