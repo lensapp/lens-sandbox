@@ -132,7 +132,7 @@ destinations the connector is worth offering for — and detection grants nothin
 the guest is already running, so it may carry only blocks that a booted guest can
 still be given — egress, credentials, filesets, and env — and no others
 ([§3.2.3](#323-what-a-method-may-carry)). What it carries merges by the ordinary
-rules in [§3.3.2](#332-merge-rules), so a profile granted at the gate and one
+rules in [§3.3.2](#332-merge-rules), so a method granted at the gate and one
 already granted at boot produce the same run.
 
 **Nothing applies until the user grants a method.** Installing is not a merge and
@@ -1073,8 +1073,8 @@ Three stored facts, each about a different scope:
 | State | Means | Scope |
 |---|---|---|
 | **installed** | the document is on this machine, so it can be offered | the machine |
-| **connected** | at least one **profile** exists — one successful connect, holding what its `auth` produced | the machine |
-| **granted** | this project may use a named method, and the profile behind it where that method authenticates | the project directory |
+| **connected** | at least one **connection** exists — one successful connect, holding what its `auth` produced | the machine |
+| **granted** | this project may use a named method, and the connection behind it where that method authenticates | the project directory |
 
 A run has a granted method's payload **applied**: in force in the guest. That is
 not a fourth stored fact, only what a run does with the three above.
@@ -1147,8 +1147,8 @@ producing two values.
 
 | Field | Type | Rules |
 |---|---|---|
-| `name` | string | REQUIRED. A DNS label ([§2](#2-common-top-level-fields)), unique within the document. The stored identity: what a profile records as the method that produced it, and what `lns connector connect --method` names. |
-| `label` | string | optional. Display text for the card; defaults to `name`. It MAY be rewritten between versions without signing the machine out, because a profile records the method's `name` ([§7.1](#71-connectors)). |
+| `name` | string | REQUIRED. A DNS label ([§2](#2-common-top-level-fields)), unique within the document. The stored identity: what a connection records as the method that produced it, and what `lns connector connect --method` names. |
+| `label` | string | optional. Display text for the card; defaults to `name`. It MAY be rewritten between versions without signing the machine out, because a connection records the method's `name` ([§7.1](#71-connectors)). |
 | `auth` | map | optional. How the user proves they may use this method. Absent means there is nothing to prove. |
 | [`egress`](#42-the-egress-definition) | map | optional. Opened when this method applies. |
 | [`credentials`](#41-the-credential-definition) | list | optional. Armed when this method applies. |
@@ -1210,7 +1210,7 @@ which is where a user meets the refusal.
 | Block | Method | Why |
 |---|---|---|
 | [`egress`](#42-the-egress-definition) | MAY | The gate reads a fresh table on every policy change. |
-| [`credentials`](#41-the-credential-definition) | MAY | Injection is domain-keyed and re-read per policy change, so a grant arms a value mid-connection. |
+| [`credentials`](#41-the-credential-definition) | MAY | Injection is domain-keyed and re-read per policy change, so a grant arms a value mid-run. |
 | [`filesets`](#3111-filesets) | MAY — `inline` or `path` | Written into the running guest at the path the entry names. |
 | [`env`](#314-env) | MAY | Applies to workloads that start afterwards, which is the only moment a variable can be given. |
 | `tools` | MUST NOT | Provisioned into the image layer before boot, and contributes to `PATH`. |
@@ -1267,17 +1267,17 @@ only makes its destinations ask ([§3.2.1](#321-serves)).
 
 **Granting has three parts, in this order:**
 
-1. **Choose a method**, and where it authenticates, a profile — one this machine
+1. **Choose a method**, and where it authenticates, a connection — one this machine
    already holds, or a new one. The card offers each, labelled with what applying
    it will do: the destinations it opens, the variables it sets, the files it
    writes.
-2. **Satisfy the method's `auth`**, where it has one and a new profile is being
+2. **Satisfy the method's `auth`**, where it has one and a new connection is being
    made. This happens on the host, outside the guest, and produces the values the
    method's `credentials` draw from. A method with no `auth`, and an existing
-   profile, both skip this part.
+   connection, both skip this part.
 3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
    running guest, and a grant is recorded for this project — the method, and the
-   profile behind it where one exists
+   connection behind it where one exists
    ([§8.4](#84-where-a-connector-grant-goes)).
 
 Authentication that fails or is abandoned grants nothing and leaves the offer
@@ -1287,11 +1287,11 @@ standing.
 
 | Prompt | Asks | Fires on |
 |---|---|---|
-| The **consent** card | choose a method — and a profile, where it authenticates — and use it in this project | a destination `serves` covers that the run's own egress does not **deny** |
-| The **connect** prompt | re-authenticate the profile this project granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
+| The **consent** card | choose a method — and a connection, where it authenticates — and use it in this project | a destination `serves` covers that the run's own egress does not **deny** |
+| The **connect** prompt | re-authenticate the connection this project granted | a request held because it carries an unarmed `placeholder` ([§4.1](#41-the-credential-definition)) |
 
 A grant MAY also be given ahead of any request, with the same disclosure and no
-held connection (`lns connector grant`). The trigger decides when the card
+held request (`lns connector grant`). The trigger decides when the card
 appears, never whether consent must be informed.
 
 **A `deny` is the only verdict that silences the card.** Everything else asks —
@@ -1316,11 +1316,11 @@ it. The [local mixin](#8-the-local-mixin) is unaffected: it is source 5, so a
 `deny` the developer typed still wins.
 
 **The held request waits, and applying does not depend on it.** The request that
-triggered the offer stays held while the user chooses a profile and satisfies any
-`auth`; when the profile applies, the hold is released and the request proceeds.
+triggered the offer stays held while the user chooses a connection and satisfies any
+`auth`; when the connection applies, the hold is released and the request proceeds.
 The deadline is the workload's, not the run's, and a mechanism that sends the user
 to a browser can outlast it — then that request fails as any refused request does.
-**An expired hold does not cancel the connect:** the user finishes, the profile
+**An expired hold does not cancel the connect:** the user finishes, the connection
 applies, and the next request succeeds.
 
 **`env` reaches the next run.** The granted method's `env`, and the `placeholder`
@@ -1332,13 +1332,13 @@ a variable works from the next `lns run`.
 **Declining is a per-project standing no**, remembered outside every document
 ([§8.4](#84-where-a-connector-grant-goes)) and retractable there.
 
-**A machine MAY hold several profiles of one connector**, including several of
+**A machine MAY hold several connections of one connector**, including several of
 one method. Two tokens for two accounts, or two sign-ins at different scopes, are
-two profiles. Each records the method that produced it, and each is connected
-independently.
+two connections. Each records the method that produced it, and each is
+authenticated independently.
 
-A profile's **authority** is what its `auth` exchange reported about what the
-profile may do — OAuth scopes, in that mechanism's terms. It is opaque to this
+A connection's **authority** is what its `auth` exchange reported about what the
+connection may do — OAuth scopes, in that mechanism's terms. It is opaque to this
 format: the mechanism produces it, and `lns` stores and compares it without
 interpreting it. A `kind: token` exchange reports none.
 
@@ -1346,17 +1346,17 @@ interpreting it. A `kind: token` exchange reports none.
 report identically, and anything that varies between exchanges — an expiry, a
 token id, an issue time, the order of a set — MUST NOT be part of it.
 
-**A grant names a method, and — where that method has `auth` — the profile that
-supplies its values.** Two profiles of one method may hold different authority, so
+**A grant names a method, and — where that method has `auth` — the connection that
+supplies its values.** Two connections of one method may hold different authority, so
 a project that granted one has not granted its sibling.
 
-A method with no `auth` produces no profile. Its grant names the method alone, and
+A method with no `auth` produces no connection. Its grant names the method alone, and
 it is granted like any other: **a connector is never applied without a grant, with
 or without authentication.**
 
-**The card discloses the profile** — its label and its authority — not just
+**The card discloses the connection** — its label and its authority — not just
 the method. This is the one thing on the card that no document contains, so it is
-read from the profile rather than derived from the connector.
+read from the connection rather than derived from the connector.
 
 `lns` MUST ask again in two cases, for the same reason and with the same force:
 
@@ -1364,9 +1364,9 @@ read from the profile rather than derived from the connector.
   to the old bytes does not carry over ([§7.1](#71-connectors)) — the whole digest,
   because any list of fields that can widen a grant is a list that can be missing
   one.
-- **A profile whose authority changed.** A grant records the authority it
+- **A connection whose authority changed.** A grant records the authority it
   consented to. Where a re-authentication returns anything different, every grant
-  naming that profile MUST be invalidated. Difference is the test, not widening.
+  naming that connection MUST be invalidated. Difference is the test, not widening.
 
 So the **connect** prompt escalates: it re-authenticates in place while the
 authority comes back unchanged, and raises the consent card when it does not.
@@ -1378,10 +1378,10 @@ method.** Granting again replaces the prior grant: that method's payload is
 retracted — egress closes, injections disarm, filesets are removed — and the new
 one's applies. That is what keeps a connector one merge source
 ([§3.3.2](#332-merge-rules)), and it is how a project moves between methods and
-between profiles of one method.
+between connections of one method.
 
 **Granted is not connected.** The combination is reachable: `lns connector
-disconnect` drops a profile and keeps the grants naming it, and reinstalling a
+disconnect` drops a connection and keeps the grants naming it, and reinstalling a
 connector restores the document without restoring what it held
 ([§7.1](#71-connectors)). In that state:
 
@@ -1393,7 +1393,7 @@ connector restores the document without restoring what it held
   relayed ([§4.1](#41-the-credential-definition)), and that hold raises the
   **connect** prompt.
 
-A granted profile whose method has an `auth` but no `credentials` raises no prompt
+A granted connection whose method has an `auth` but no `credentials` raises no prompt
 and needs none — nothing holds, and nothing is missing. `lns connector connect` is
 the only way to restore it.
 
@@ -1589,7 +1589,7 @@ silently taking no effect.
 **A connector contributes one source, not one per method.** Methods are
 alternatives ([§3.2.2](#322-methods)), so the source is the granted method, and
 the others are not in the list at all. A grant is what puts it here; whether the
-machine still holds that profile decides only whether its credentials are armed
+machine still holds that connection decides only whether its credentials are armed
 ([§3.2.4](#324-installing-connecting-and-applying)).
 
 Two properties fall out of the shape:
@@ -1687,7 +1687,7 @@ injection contract, and it is identical wherever it appears:
 |---|---|
 | [`sandbox`](#317-credentials) | `spec.credentials[]` — the secrets its workload needs. |
 | [`mixin`](#33-kind-mixin) | `spec.credentials[]` — the same, contributed to whatever sandbox resolves it. |
-| [`connector`](#32-kind-connector) | `spec.methods[].credentials[]` — the same, supplied to whatever run grants a profile of that method. |
+| [`connector`](#32-kind-connector) | `spec.methods[].credentials[]` — the same, supplied to whatever run grants a connection of that method. |
 
 A connector uses this shape rather than defining one of its own, because it is a
 higher-level way to *supply* a credential — the injection mechanism is here.
@@ -1745,7 +1745,7 @@ Injection kinds come in two families, and the family decides which
 
 | Family | Kinds | Works on |
 |---|---|---|
-| **Header** — the proxy sets or rewrites an HTTP header | `bearer_header`, `token_header`, `basic_x_access_token`, `api_key_header` | An `http` destination. The request has to be readable, so the connection is TLS-terminated. |
+| **Header** — the proxy sets or rewrites an HTTP header | `bearer_header`, `token_header`, `basic_x_access_token`, `api_key_header` | An `http` destination. The request has to be readable, so the traffic is TLS-terminated. |
 | **Placeholder** — the proxy finds the placeholder in the outbound bytes and replaces it | `uri_placeholder` | Either table. A `tcp` destination is served this way: a database password, an SSH key passphrase, or a broker token reaches the wire without the workload ever holding the real value. |
 
 The family also decides what a placeholder the injection did not reach means, and
@@ -1757,7 +1757,7 @@ injection covered the request proceeds untouched by this rule.
 What survives is a real mismatch, and there are two:
 
 - The injection is **unarmed** — declared, with no value behind it. One state
-  produces this: a [connector](#32-kind-connector) profile a project granted, on
+  produces this: a [connector](#32-kind-connector) connection a project granted, on
   a machine that no longer holds it
   ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
   own credential cannot reach it, because [§3.1.7](#317-credentials) resolves
@@ -1950,7 +1950,7 @@ there, because they depend on state no document carries — they run at launch:
 | Check | Depends on |
 |---|---|
 | Whether a declared credential has a value bound ([§3.1.7](#317-credentials)) | Per-machine credential values. |
-| Which connector method this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the profiles it holds, and the project's own grants. |
+| Which connector method this project has granted ([§3.2.4](#324-installing-connecting-and-applying)) | The machine's installed set, the connections it holds, and the project's own grants. |
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
@@ -2087,23 +2087,23 @@ Four things live per machine, none of them in any document:
 | What | Keyed by | Scope |
 |---|---|---|
 | The installed set — each connector's document, stored verbatim at the digest it came from | name | The machine |
-| Each **profile** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then profile | The machine |
-| Which method a project granted, the profile behind it where the method authenticates, and the authority it consented to | directory, then name, digest | The project directory |
+| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then connection | The machine |
+| Which method a project granted, the connection behind it where the method authenticates, and the authority it consented to | directory, then name, digest | The project directory |
 | Which connectors a project declined | directory, then name | The project directory |
 
-The second row admits many profiles per connector, including many of one method
+The second row admits many connections per connector, including many of one method
 ([§3.2.4](#324-installing-connecting-and-applying)). The third names the method a
-project consented to, and the profile behind it where one exists — a method with
+project consented to, and the connection behind it where one exists — a method with
 no `auth` has none.
 
 A connector that is installed and neither granted nor declined here holds no row
 of its own, and still changes the run: its `serves` destinations ask
 ([§3.2.1](#321-serves)).
 
-**The two keys differ deliberately.** A profile's key starts with the connector
+**The two keys differ deliberately.** A connection's key starts with the connector
 name and survives an update; a grant is keyed by the digest too and does not. So
 a connector republished with a changed `egress` is offered again — the user is
-asked to consent to the new bytes — while every profile stays signed in.
+asked to consent to the new bytes — while every connection stays signed in.
 Re-consenting is cheap; signing in again is not, and making an update log the
 user out would teach them to avoid updates.
 
@@ -2138,11 +2138,11 @@ on the machine, and withdrawing consent is a decision about a project. A project
 retracts its own grant, or its decline, through the store that holds it
 ([§8.4](#84-where-a-connector-grant-goes)).
 
-**Uninstalling does drop every profile**, because they are machine state and the
+**Uninstalling does drop every connection**, because they are machine state and the
 machine is what is being cleaned. So a reinstall resumes the grant and **not** the
 connection: the project's consent stands, the machine is asked to connect again,
 and the run behaves as [§3.2.4](#324-installing-connecting-and-applying) describes
-for a granted profile the machine no longer holds.
+for a granted connection the machine no longer holds.
 
 See [Distributing a sandbox](running-workloads.md#distributing-a-sandbox) for
 the `lns push` / `lns pull` / `lns tag` workflow.
@@ -2263,7 +2263,7 @@ exactly why it is tempting, and exactly why it is wrong.
 destination ([§7.1](#71-connectors)), given by one person on one machine, and
 consent does not travel in a git clone. A teammate is asked on their own machine
 rather than inheriting an answer. Worse, the answer would not even work there:
-where a grant names a profile, that profile is this machine's and no other
+where a grant names a connection, that connection is this machine's and no other
 machine holds it.
 
 So a grant lives in the per-project store the machine already keeps
