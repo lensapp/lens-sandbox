@@ -2077,11 +2077,11 @@ mod tests {
             let spec = format!(
                 r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","guestPath":"/s"}}]}}"#
             );
-            parse(&def_json(&spec)).unwrap_or_else(|e| {
-                panic!(
-                    "a hostPath is read off the running machine and never packed, so its name refuses nothing — {source}: {e:#}"
-                )
-            });
+            let parsed = parse(&def_json(&spec));
+            assert!(
+                parsed.is_ok(),
+                "a hostPath is read off the running machine and never packed, so its name refuses nothing — {source}: {parsed:?}"
+            );
             assert_eq!(
                 secret_shaped_segment(source),
                 Some(segment),
