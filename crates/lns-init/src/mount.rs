@@ -394,6 +394,13 @@ fn land_writes_the_mounts_would_have_hidden(
     Ok(())
 }
 
+/// Runs on the assembled rootfs — after every mount and after the staged writes land — so image, volume, bind, and fileset all keep their own hosts file, and every session reads the one this boot leaves behind.
+fn seed_loopback_names(newroot: &str) {
+    if let Err(err) = crate::hosts::seed_if_absent(newroot) {
+        eprintln!("lns-init: could not seed the guest hosts file: {err}");
+    }
+}
+
 /// One place converts a path for `lchown` and logs what went wrong, so a path the syscall cannot take or a failure on one entry never abandons the rest of the walk.
 fn lchown_logged(sys: &dyn Syscalls, path: &str, uid: u32, gid: u32) {
     match CString::new(path) {
@@ -912,6 +919,8 @@ fn mount_composefs_and_exec_broker_inner(
     mount_binds(sys, &params.binds, newroot)?;
 
     land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, run_ids)?;
+
+    seed_loopback_names(newroot);
 
     mount_run_tmpfs(sys, newroot, run_ids)?;
 
@@ -2110,6 +2119,44 @@ mod tests {
             sys.calls()
                 .iter()
                 .any(|c| matches!(c, Call::Lchown { uid: 4242, .. }))
+        );
+    }
+
+    #[test]
+    fn boot_leaves_a_hosts_file_in_the_rootfs_every_session_shares() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+        let _ = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        );
+        assert_eq!(
+            std::fs::read_to_string(format!("{newroot}/etc/hosts")).unwrap(),
+            "127.0.0.1\tlocalhost\n::1\tlocalhost\n"
+        );
+    }
+
+    #[test]
+    fn a_rootfs_that_refuses_the_hosts_file_still_reaches_the_broker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("etc"), b"not a directory").unwrap();
+        let sys = FakeSyscalls::new();
+        let err = mount_composefs_and_exec_broker_inner(
+            &full_params(),
+            None,
+            newroot,
+            FULL_CMDLINE,
+            &sys,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, MountError::Syscall { op, .. } if op.contains("fexecve")),
+            "a name the guest can still reach by address is not worth refusing the boot: {err:?}"
         );
     }
 
