@@ -769,21 +769,26 @@ fn validate_bind_source(source: &str) -> Result<()> {
         bail!("bind source {source:?} must not contain a `..` path segment");
     }
     if source.starts_with("~/") {
-        refuse_secret_shaped_segment("bind source", source)?;
+        refuse_secret_shaped_bind_source(source)?;
     }
     Ok(())
 }
 
-fn refuse_secret_shaped_segment(kind: &str, source: &str) -> Result<()> {
-    if let Some(secret) = source.split('/').find(|s| looks_like_secret_name(s)) {
+fn refuse_secret_shaped_bind_source(source: &str) -> Result<()> {
+    if let Some(secret) = secret_shaped_segment(source) {
         bail!(
-            "{kind} {source} is secret-shaped ({secret}) — real secrets stay outside the workload"
+            "bind source {source} is secret-shaped ({secret}) — real secrets stay outside the workload"
         );
     }
     Ok(())
 }
 
-/// A hostPath names one file on the machine that runs the definition; it must anchor somewhere portable, stay inside what it anchors to, and never be secret-shaped — a hostPath file gets no KEEP/DROP prompt, so its name is the only guard it has.
+/// The first segment of a path that reads as a credential, for a caller that refuses one and for a caller that only warns.
+pub fn secret_shaped_segment(source: &str) -> Option<&str> {
+    source.split('/').find(|s| looks_like_secret_name(s))
+}
+
+/// A hostPath names one file on the machine that runs the definition, so it must anchor somewhere portable and stay inside what it anchors to; a credential-shaped name is warned about elsewhere rather than refused here, since nothing about a hostPath is packed and the guard is the running machine's own decision to allow it.
 pub fn validate_host_source(source: &str) -> Result<()> {
     if source.starts_with('~') && !source.starts_with("~/") {
         bail!("invalid hostPath {source:?}: only `~/` is supported, not another user's home");
@@ -802,7 +807,7 @@ pub fn validate_host_source(source: &str) -> Result<()> {
             "invalid hostPath {source:?}: must be free of whitespace, quotes, and control characters"
         );
     }
-    refuse_secret_shaped_segment("hostPath", source)
+    Ok(())
 }
 
 fn validate_volume_name(name: &str) -> Result<()> {
@@ -2062,15 +2067,25 @@ mod tests {
     }
 
     #[test]
-    fn a_host_path_naming_a_secret_shaped_file_is_refused() {
-        for source in ["~/.npmrc", "~/.ssh/id_rsa", "~/.aws/credentials", "/x/.env"] {
+    fn a_host_path_naming_a_secret_shaped_file_parses_and_names_the_segment() {
+        for (source, segment) in [
+            ("~/.npmrc", ".npmrc"),
+            ("~/.ssh/id_rsa", ".ssh"),
+            ("~/.aws/credentials", ".aws"),
+            ("/x/.env", ".env"),
+        ] {
             let spec = format!(
                 r#"{{"image":"x:1","filesets":[{{"hostPath":"{source}","guestPath":"/s"}}]}}"#
             );
-            let err = parse(&def_json(&spec)).unwrap_err();
-            assert!(
-                format!("{err:#}").contains("secret-shaped"),
-                "a hostPath file gets no KEEP/DROP prompt, so the name check is its only guard — {source}: got {err:#}"
+            parse(&def_json(&spec)).unwrap_or_else(|e| {
+                panic!(
+                    "a hostPath is read off the running machine and never packed, so its name refuses nothing — {source}: {e:#}"
+                )
+            });
+            assert_eq!(
+                secret_shaped_segment(source),
+                Some(segment),
+                "the run and the author still have to be told which segment matched — {source}"
             );
         }
     }
