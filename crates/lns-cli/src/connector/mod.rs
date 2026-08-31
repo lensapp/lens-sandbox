@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use lns_ipc::{ConnectorView, Request, Response};
 
 use crate::command::{CommandSpec, subcommand};
@@ -39,12 +39,10 @@ pub enum ConnectorCommand {
     #[command(about = "Drop one connection, or every connection of a connector. Grants stay.")]
     Disconnect(DisconnectArgs),
     #[command(
-        about = "Let this project use one of a connector's methods. Discloses what it applies, then asks."
+        about = "Let one run use one of a connector's methods. Discloses what it applies, then asks."
     )]
     Grant(GrantArgs),
-    #[command(
-        about = "Clear this project's decision about a connector, so the next run asks again."
-    )]
+    #[command(about = "Clear one run's decision about a connector, so its next start asks again.")]
     Forget(ForgetArgs),
 }
 
@@ -80,16 +78,22 @@ pub struct GrantArgs {
         help = "Which connection stands behind it, where the method authenticates."
     )]
     pub connection: Option<String>,
-    #[arg(long, help = "Act on another directory instead of this one.")]
-    pub project: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        help = "Which run this grants. Its id, its name, or a unique id prefix."
+    )]
+    pub run: String,
 }
 
 #[derive(clap::Args)]
 pub struct ForgetArgs {
     #[arg(help = "The connector's name.")]
     pub name: String,
-    #[arg(long, help = "Act on another directory instead of this one.")]
-    pub project: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        help = "Which run to clear. Its id, its name, or a unique id prefix."
+    )]
+    pub run: String,
 }
 
 #[derive(clap::Args)]
@@ -151,18 +155,9 @@ pub async fn run(
         ConnectorCommand::List(args) => list(svc, args.output.format, writer).await,
         ConnectorCommand::Connect(args) => connect(svc, args, terminal, writer, prompt).await,
         ConnectorCommand::Disconnect(args) => disconnect(svc, args, writer).await,
-        ConnectorCommand::Grant(args) => grant(svc, args, terminal, cwd, writer, prompt).await,
-        ConnectorCommand::Forget(args) => forget(svc, args, cwd, writer).await,
+        ConnectorCommand::Grant(args) => grant(svc, args, terminal, writer, prompt).await,
+        ConnectorCommand::Forget(args) => forget(svc, args, writer).await,
     }
-}
-
-/// The project a verb acts on: this directory, or the one `--project` names.
-fn project_dir(explicit: Option<&std::path::Path>, cwd: &Path) -> Result<String> {
-    let dir = explicit.map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
-    lns_artifact::sandbox::fold_path(&dir)
-        .to_str()
-        .map(str::to_string)
-        .with_context(|| format!("project directory {} is not utf-8", dir.display()))
 }
 
 /// The installed connector by name, so a verb reads its methods without guessing what it declares.
@@ -235,7 +230,7 @@ async fn connect(
             report_invalidated(&invalidated, writer)?;
             writeln!(
                 writer,
-                "  this grants nothing: a project still decides whether to use it"
+                "  this grants nothing: a run still decides whether to use it"
             )?;
             Ok(0)
         }
@@ -320,14 +315,14 @@ fn ask_for_each(
     Ok(values)
 }
 
-/// A re-authentication that reports different authority invalidates the grants naming that connection, so the projects that must decide again are named (§3.2.4).
+/// A re-authentication that reports different authority invalidates the grants naming that connection, so the runs that must decide again are named (§3.2.4).
 fn report_invalidated(invalidated: &[String], writer: &mut impl Write) -> std::io::Result<()> {
     if invalidated.is_empty() {
         return Ok(());
     }
     writeln!(
         writer,
-        "  these projects must decide again, because this sign-in reported different authority: {}",
+        "  these runs must decide again, because this sign-in reported different authority: {}",
         invalidated.join(", ")
     )
 }
@@ -354,7 +349,7 @@ async fn disconnect(
             )?;
             writeln!(
                 writer,
-                "  {name} stays installed, and a project that granted a dropped connection keeps its grant"
+                "  {name} stays installed, and a run that granted a dropped connection keeps its grant"
             )?;
             Ok(0)
         }
@@ -366,7 +361,6 @@ async fn grant(
     svc: &dyn ConnectorService,
     args: &GrantArgs,
     terminal: &mut dyn Terminal,
-    cwd: &Path,
     writer: &mut impl Write,
     prompt: &mut impl Write,
 ) -> Result<i32> {
@@ -396,8 +390,7 @@ async fn grant(
             why_unofferable(&method)
         );
     }
-    let dir = project_dir(args.project.as_deref(), cwd)?;
-    disclose(&connector, &method, &dir, prompt)?;
+    disclose(&connector, &method, &args.run, prompt)?;
     write!(prompt, "grant it? [y/N] ")?;
     prompt.flush()?;
     let answer = terminal.read_answer()?;
@@ -408,7 +401,7 @@ async fn grant(
     }
     let req = Request::GrantConnector {
         name: args.name.clone(),
-        project_dir: dir,
+        run: args.run.clone(),
         method: method.name.clone(),
         connection: args.connection.clone(),
     };
@@ -419,7 +412,11 @@ async fn grant(
             unchanged: true,
             ..
         } => {
-            writeln!(writer, "this project already grants {name} with {method}")?;
+            writeln!(
+                writer,
+                "{run} already grants {name} with {method}",
+                run = args.run
+            )?;
             Ok(1)
         }
         Response::ConnectorGranted {
@@ -451,12 +448,12 @@ async fn grant(
 fn disclose(
     connector: &ConnectorView,
     method: &lns_ipc::ConnectorMethodView,
-    dir: &str,
+    run: &str,
     prompt: &mut impl Write,
 ) -> Result<()> {
     writeln!(
         prompt,
-        "granting {} to {dir} would give it:",
+        "granting {} to {run} would give it:",
         connector.name
     )?;
     labelled(prompt, "method", &method.label)?;
@@ -502,23 +499,30 @@ fn labelled(writer: &mut impl Write, noun: &str, value: &str) -> std::io::Result
 async fn forget(
     svc: &dyn ConnectorService,
     args: &ForgetArgs,
-    cwd: &Path,
     writer: &mut impl Write,
 ) -> Result<i32> {
     let req = Request::ForgetConnector {
         name: args.name.clone(),
-        project_dir: project_dir(args.project.as_deref(), cwd)?,
+        run: args.run.clone(),
     };
     match send(svc, req).await? {
         Response::ConnectorForgotten {
             name,
             had_decision: false,
         } => {
-            writeln!(writer, "this project has decided nothing about {name}")?;
+            writeln!(
+                writer,
+                "{run} has decided nothing about {name}",
+                run = args.run
+            )?;
             Ok(1)
         }
         Response::ConnectorForgotten { name, .. } => {
-            writeln!(writer, "cleared this project's decision about {name}")?;
+            writeln!(
+                writer,
+                "cleared {run}'s decision about {name}",
+                run = args.run
+            )?;
             Ok(0)
         }
         other => bail!("unexpected response from daemon: {other:?}"),
@@ -588,7 +592,7 @@ fn report_installed(connector: &ConnectorView, writer: &mut impl Write) -> std::
     )
 }
 
-/// What a method needs before a project can use it, so both `install` and `list` answer "what do I do next" rather than only naming it.
+/// What a method needs before a run can use it, so both `install` and `list` answer "what do I do next" rather than only naming it.
 fn method_summary(method: &lns_ipc::ConnectorMethodView) -> String {
     let state = match (method.offerable, method.needs_connect) {
         (false, _) => why_unofferable(method),
@@ -622,7 +626,7 @@ async fn uninstall(svc: &dyn ConnectorService, name: &str, writer: &mut impl Wri
             }
             writeln!(
                 writer,
-                "  a project that granted it keeps that decision, and reinstalling the same bytes resumes it"
+                "  a run that granted it keeps that decision, and reinstalling the same bytes resumes it"
             )?;
             Ok(0)
         }
@@ -1044,15 +1048,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reauthentication_that_invalidates_grants_names_the_projects_that_must_decide_again()
-    {
-        // §3.2.4: where a re-authentication reports different authority, every grant naming that connection is invalidated.
+    async fn a_reauthentication_that_invalidates_grants_names_the_runs_that_must_decide_again() {
+        // §3.2.4: where a re-authentication reports different authority, every grant naming that connection is invalidated. The service sends run names, never store keys.
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![method("token", true)])])),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
                 connection: "work".into(),
-                invalidated: vec!["/work".into(), "/other".into()],
+                invalidated: vec!["reviewer".into(), "billing".into()],
             }),
         ]);
         let (_, seen) = drive(
@@ -1068,8 +1071,8 @@ mod tests {
         .await
         .expect("connect");
         assert!(
-            seen.contains("/work, /other"),
-            "the projects are named: {seen}"
+            seen.contains("reviewer, billing"),
+            "the runs are named: {seen}"
         );
     }
 
@@ -1105,7 +1108,7 @@ mod tests {
                     name: "some-provider".into(),
                     method: Some("token".into()),
                     connection: None,
-                    project: None,
+                    run: "reviewer".into(),
                 }),
                 &svc,
                 &["y"],
@@ -1122,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn granting_in_another_directory_names_that_directory() {
+    async fn granting_names_the_run_it_grants() {
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![method("token", true)])])),
             Some(Response::ConnectorGranted {
@@ -1138,7 +1141,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: Some("token".into()),
                 connection: None,
-                project: Some(std::path::PathBuf::from("../elsewhere")),
+                run: "reviewer".into(),
             }),
             &svc,
             &["y"],
@@ -1146,34 +1149,14 @@ mod tests {
         )
         .await
         .expect("grant");
-        assert!(seen.contains("/elsewhere"), "got: {seen}");
+        assert!(
+            seen.contains("granting some-provider to reviewer"),
+            "the disclosure names the run being granted: {seen}"
+        );
     }
 
     #[tokio::test]
-    async fn a_project_directory_that_is_not_utf8_is_refused() {
-        use std::os::unix::ffi::OsStrExt;
-        let odd = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/\xff"));
-        let svc = CannedService::with([]);
-        let mut out = Vec::new();
-        let err = run(
-            &ConnectorCommand::Forget(ForgetArgs {
-                name: "some-provider".into(),
-                project: None,
-            }),
-            &svc,
-            &mut asking(&["y"]),
-            &odd,
-            None,
-            &mut out,
-            &mut Vec::new(),
-        )
-        .await
-        .expect_err("a non-utf8 project directory must be refused");
-        assert!(format!("{err:#}").contains("utf-8"), "{err:#}");
-    }
-
-    #[tokio::test]
-    async fn every_project_verb_refuses_a_response_meant_for_another() {
+    async fn every_run_scoped_verb_refuses_a_response_meant_for_another() {
         let cases: Vec<ConnectorCommand> = vec![
             ConnectorCommand::Connect(ConnectArgs {
                 name: "some-provider".into(),
@@ -1186,7 +1169,7 @@ mod tests {
             }),
             ConnectorCommand::Forget(ForgetArgs {
                 name: "some-provider".into(),
-                project: None,
+                run: "reviewer".into(),
             }),
         ];
         for cmd in cases {
@@ -1223,7 +1206,7 @@ mod tests {
                     name: "some-provider".into(),
                     method: Some("token".into()),
                     connection: None,
-                    project: None,
+                    run: "reviewer".into(),
                 }),
                 &svc,
                 &mut asking(&["y"]),
@@ -1278,7 +1261,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: Some("token".into()),
                 connection: None,
-                project: None,
+                run: "reviewer".into(),
             }),
             &svc,
             &mut asking(&["y"]),
@@ -1327,7 +1310,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: Some("token".into()),
                 connection: None,
-                project: None,
+                run: "reviewer".into(),
             }),
             &svc,
             &["y"],
@@ -1354,7 +1337,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: Some("future".into()),
                 connection: None,
-                project: None,
+                run: "reviewer".into(),
             }),
         ] {
             // No fileset on this one, so the only thing this version cannot honour is its auth kind.
@@ -1381,7 +1364,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: Some("seeded".into()),
                 connection: None,
-                project: None,
+                run: "reviewer".into(),
             }),
             &svc,
             &["y"],
@@ -1415,7 +1398,7 @@ mod tests {
                 name: "some-provider".into(),
                 method: None,
                 connection: None,
-                project: None,
+                run: "reviewer".into(),
             }),
             &svc,
             &["y"],

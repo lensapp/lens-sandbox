@@ -118,20 +118,20 @@ fn connection_views(connections: &BTreeMap<String, Connection>) -> Vec<Connector
         .collect()
 }
 
-/// What one connect produced: the connection it stored, and the project directories whose grant its authority no longer matches (§3.2.4).
+/// What one connect produced: the connection it stored, and the runs whose grant its authority no longer matches (§3.2.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connected {
     pub connection: String,
     pub invalidated: Vec<String>,
 }
 
-/// What one grant recorded, and the method it displaced — a project holds one grant per connector (§3.2.4).
+/// What one grant recorded, and the method it displaced — a run holds one grant per connector (§3.2.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Granted {
     pub method: String,
     pub connection: Option<String>,
     pub displaced: Option<String>,
-    /// True when the project already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
+    /// True when the run already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
     pub unchanged: bool,
 }
 
@@ -177,18 +177,18 @@ pub fn disconnect(
     Ok(store.drop_connections(name, connection)?)
 }
 
-/// Record this project's grant of one method, replacing whatever it decided before.
+/// Record one run's grant of one method, replacing whatever it decided before.
 pub fn grant(
     store: &ConnectorStore<'_>,
     name: &str,
-    project_dir: &str,
+    run_id: &str,
     method: &str,
     connection: Option<&str>,
 ) -> Result<Granted> {
     let entry = installed_entry(store, name)?;
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
-    refuse_a_path_another_connector_writes(store, project_dir, name, &entry, &method.name)?;
+    refuse_a_path_another_connector_writes(store, run_id, name, &entry, &method.name)?;
     let connection = behind_the_method(store, name, method, connection)?;
     let authority = match &connection {
         Some(label) => store
@@ -198,13 +198,13 @@ pub fn grant(
             .unwrap_or_default(),
         None => super::store::Authority::default(),
     };
-    let decision = super::store::ProjectDecision::Granted {
+    let decision = super::store::RunDecision::Granted {
         digest: entry.digest.clone(),
         method: method.name.clone(),
         connection: connection.clone(),
         authority,
     };
-    let held = store.decision(project_dir, name)?;
+    let held = store.decision(run_id, name)?;
     if held.as_ref() == Some(&decision) {
         return Ok(Granted {
             method: method.name.clone(),
@@ -213,7 +213,7 @@ pub fn grant(
             unchanged: true,
         });
     }
-    let displaced = store.decide(project_dir, name, decision)?;
+    let displaced = store.decide(run_id, name, decision)?;
     Ok(Granted {
         method: method.name.clone(),
         connection,
@@ -222,8 +222,8 @@ pub fn grant(
     })
 }
 
-pub fn forget(store: &ConnectorStore<'_>, name: &str, project_dir: &str) -> Result<bool> {
-    Ok(store.forget(project_dir, name)?)
+pub fn forget(store: &ConnectorStore<'_>, name: &str, run_id: &str) -> Result<bool> {
+    Ok(store.forget(run_id, name)?)
 }
 
 /// Grants a method from the card, refusing bytes other than the ones the card disclosed, and answers with what the guest is to be given (§3.2.4).
@@ -231,7 +231,7 @@ pub fn grant_disclosed(
     store: &ConnectorStore<'_>,
     name: &str,
     disclosed_digest: &str,
-    project_dir: &str,
+    run_id: &str,
     method: &str,
     connection: Option<&str>,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
@@ -242,23 +242,23 @@ pub fn grant_disclosed(
         );
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
-    let settled = grant(store, name, project_dir, method, connection)?;
+    let settled = grant(store, name, run_id, method, connection)?;
     supplied_by(store, &entry, method, settled.connection.as_deref())
 }
 
 /// Two grants claiming one guest path reach the guest as two creates: the second fails, the batch rolls back, and every granted file for the run goes with it. So the collision is refused where a user can still answer it.
 fn refuse_a_path_another_connector_writes(
     store: &ConnectorStore<'_>,
-    project_dir: &str,
+    run_id: &str,
     name: &str,
     entry: &Installed,
     method: &str,
 ) -> Result<()> {
-    let taken = paths_written_by_other_connectors(store, project_dir, name)?;
+    let taken = paths_written_by_other_connectors(store, run_id, name)?;
     for path in written_paths(&supplied_by(store, entry, method, None)?) {
         if let Some(holder) = taken.get(&path) {
             anyhow::bail!(
-                "{holder} already writes {path} in this project: two connectors writing one file would leave the guest with neither, so disconnect {holder} here first"
+                "{holder} already writes {path} in this run: two connectors writing one file would leave the guest with neither, so disconnect {holder} from this run first"
             );
         }
     }
@@ -267,11 +267,11 @@ fn refuse_a_path_another_connector_writes(
 
 fn paths_written_by_other_connectors(
     store: &ConnectorStore<'_>,
-    project_dir: &str,
+    run_id: &str,
     granting: &str,
 ) -> Result<BTreeMap<String, String>> {
     let mut taken = BTreeMap::new();
-    for (connector, payload) in granted_supply(store, project_dir)? {
+    for (connector, payload) in granted_supply(store, run_id)? {
         if connector == granting {
             continue;
         }
@@ -286,19 +286,19 @@ fn written_paths(payload: &crate::approval_flow::protocol::GrantedPayload) -> Ve
     payload.files.iter().map(|file| file.path.clone()).collect()
 }
 
-/// What every recorded grant gives this run, by connector, so a project that granted yesterday is not asked again and is not left empty-handed (§7.1).
+/// What every recorded grant gives this run, by connector, so a run that granted yesterday is not asked again and is not left empty-handed (§7.1).
 pub fn granted_supply(
     store: &ConnectorStore<'_>,
-    project_dir: &str,
+    run_id: &str,
 ) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
     let mut supplied = BTreeMap::new();
     for entry in store.installed()? {
-        let Some(super::store::ProjectDecision::Granted {
+        let Some(super::store::RunDecision::Granted {
             digest,
             method,
             connection,
             ..
-        }) = store.decision(project_dir, &entry.name)?
+        }) = store.decision(run_id, &entry.name)?
         else {
             continue;
         };
@@ -361,12 +361,12 @@ fn supplied_by(
     Ok(super::payload::granted_payload(method, &values))
 }
 
-/// Every connector this project has not decided, as the card and `lns connector grant` both disclose it, so a run holds what they serve and can offer them (§3.2.1).
-pub fn offerable(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<ConnectorView>> {
+/// Every connector this run has not decided, as the card and `lns connector grant` both disclose it, so a run holds what they serve and can offer them (§3.2.1).
+pub fn offerable(store: &ConnectorStore<'_>, run_id: &str) -> Result<Vec<ConnectorView>> {
     let mut offers = Vec::new();
     let mut unreadable = Vec::new();
     for entry in store.installed()? {
-        if decided_here(store, project_dir, &entry) {
+        if decided_here(store, run_id, &entry) {
             continue;
         }
         match lns_artifact::connector::parse(&entry.document) {
@@ -388,12 +388,12 @@ pub fn offerable(store: &ConnectorStore<'_>, project_dir: &str) -> Result<Vec<Co
 }
 
 /// A decision this run cannot read is not one: holding asks, which a grant then answers, where letting the destination through cannot be taken back (§3.2.1).
-fn decided_here(store: &ConnectorStore<'_>, project_dir: &str, entry: &Installed) -> bool {
-    match store.decision(project_dir, &entry.name) {
+fn decided_here(store: &ConnectorStore<'_>, run_id: &str, entry: &Installed) -> bool {
+    match store.decision(run_id, &entry.name) {
         Ok(decision) => decision.is_some_and(|decision| decision.decides(&entry.digest)),
         Err(e) => {
             crate::log::warn!(
-                "cannot read what this project decided about {}, so its destinations are held: {e}",
+                "cannot read what this run decided about {}, so its destinations are held: {e}",
                 entry.name
             );
             false
@@ -443,10 +443,10 @@ fn behind_the_method(
     }
 }
 
-fn displaced_method(decision: super::store::ProjectDecision) -> Option<String> {
+fn displaced_method(decision: super::store::RunDecision) -> Option<String> {
     match decision {
-        super::store::ProjectDecision::Granted { method, .. } => Some(method),
-        super::store::ProjectDecision::Declined => None,
+        super::store::RunDecision::Granted { method, .. } => Some(method),
+        super::store::RunDecision::Declined => None,
     }
 }
 
@@ -496,7 +496,7 @@ fn offerable_method<'a>(
 mod tests {
     use super::*;
     use crate::connector::source::FetchedConnector;
-    use crate::connector::store::{Authority, InstalledSet, ProjectDecision};
+    use crate::connector::store::{Authority, InstalledSet, RunDecision};
     use lns_policy::decision_store::{DecisionFile, DecisionStore};
     use std::sync::Mutex;
 
@@ -626,7 +626,7 @@ mod tests {
     struct Rig {
         set: FakeSet,
         values: FakeMap<Connection>,
-        grants: FakeMap<super::super::store::ProjectDecision>,
+        grants: FakeMap<super::super::store::RunDecision>,
     }
 
     impl Rig {
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[tokio::test]
     async fn granting_again_names_the_method_it_displaces() {
-        // §3.2.4: a project holds one grant per connector, so what it prints names what it replaced.
+        // §3.2.4: a run holds one grant per connector, so what it prints names what it replaced.
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
@@ -1050,7 +1050,7 @@ mod tests {
             .decide(
                 "/work",
                 "some-provider",
-                super::super::store::ProjectDecision::Declined,
+                super::super::store::RunDecision::Declined,
             )
             .unwrap();
         let granted = grant(&rig.store(), "some-provider", "/work", "open", None).expect("grant");
@@ -1081,7 +1081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forgetting_clears_what_the_project_decided() {
+    async fn forgetting_clears_what_the_run_decided() {
         let rig = Rig::new();
         installed(&rig).await;
         grant(&rig.store(), "some-provider", "/work", "open", None).unwrap();
@@ -1159,8 +1159,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_grant_the_project_already_holds_is_unchanged_rather_than_a_replacement() {
-        // cli-spec §3.3: exits 1 when the project already granted that method and connection — and "replaced" would be false.
+    async fn a_grant_the_run_already_holds_is_unchanged_rather_than_a_replacement() {
+        // cli-spec §3.3: exits 1 when the run already granted that method and connection — and "replaced" would be false.
         let rig = Rig::new();
         installed(&rig).await;
         connect(&rig.store(), "some-provider", "token", "work", values()).unwrap();
@@ -1319,7 +1319,7 @@ mod tests {
             .decide(
                 "/work",
                 "some-provider",
-                ProjectDecision::Granted {
+                RunDecision::Granted {
                     digest: "sha256:abc".to_string(),
                     method: "open".to_string(),
                     connection: None,
@@ -1340,7 +1340,7 @@ mod tests {
             "sha256:abc",
         );
         rig.store()
-            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .decide("/work", "some-provider", RunDecision::Declined)
             .unwrap();
         assert!(served_by(offerable(&rig.store(), "/work").unwrap()).is_empty());
     }
@@ -1359,7 +1359,7 @@ mod tests {
             .decide(
                 "/work",
                 "some-provider",
-                ProjectDecision::Granted {
+                RunDecision::Granted {
                     digest: "sha256:old".to_string(),
                     method: "open".to_string(),
                     connection: None,
@@ -1374,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn one_project_s_decision_does_not_release_the_hold_in_another() {
+    fn one_runs_decision_does_not_release_the_hold_in_another() {
         let rig = Rig::new();
         installed_as(
             &rig,
@@ -1383,7 +1383,7 @@ mod tests {
             "sha256:abc",
         );
         rig.store()
-            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .decide("/work", "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
             served_by(offerable(&rig.store(), "/elsewhere").unwrap()),
@@ -1442,14 +1442,14 @@ mod tests {
     }
 
     #[test]
-    fn a_connector_this_project_declined_raises_no_unreadable_warning() {
+    fn a_connector_this_run_declined_raises_no_unreadable_warning() {
         // Deciding before parsing keeps the warning true: a declined connector is not one this run failed to read.
         let rig = Rig::new();
         rig.set
             .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
             .unwrap();
         rig.store()
-            .decide("/work", "broken", ProjectDecision::Declined)
+            .decide("/work", "broken", RunDecision::Declined)
             .unwrap();
 
         let messages = crate::test_env::captured_messages(|| {
@@ -1500,8 +1500,8 @@ mod tests {
         assert_eq!(payload.env.get("SOME_REGION"), Some(&"eu".to_string()));
         let recorded = rig.store().decision("/work", "some-provider").unwrap();
         assert!(
-            matches!(recorded, Some(ProjectDecision::Granted { .. })),
-            "the project's answer is recorded, not just returned: {recorded:?}"
+            matches!(recorded, Some(RunDecision::Granted { .. })),
+            "the run's answer is recorded, not just returned: {recorded:?}"
         );
     }
 
@@ -1618,7 +1618,7 @@ mod tests {
 
     #[test]
     fn one_connector_this_run_cannot_supply_costs_only_its_own_grant() {
-        // A grant is per connector, so one unreadable connector must not take the rest of the project's grants with it — the run would start with no egress it was promised and no card to ask again.
+        // A grant is per connector, so one unreadable connector must not take the rest of the run's grants with it — the run would start with no egress it was promised and no card to ask again.
         let rig = Rig::new();
         rig.set
             .put("alpha", "sha256:a", b"not a document", &[])
@@ -1631,7 +1631,7 @@ mod tests {
                 .decide(
                     "/work",
                     name,
-                    ProjectDecision::Granted {
+                    RunDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
                         connection: None,
@@ -1694,7 +1694,7 @@ mod tests {
                 .decide(
                     "/work",
                     name,
-                    ProjectDecision::Granted {
+                    RunDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
                         connection: None,
@@ -1732,7 +1732,7 @@ mod tests {
                 .decide(
                     "/work",
                     name,
-                    ProjectDecision::Granted {
+                    RunDecision::Granted {
                         digest: digest.to_string(),
                         method: "open".to_string(),
                         connection: None,

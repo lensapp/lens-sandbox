@@ -371,7 +371,7 @@ fn says_none_installed(world: &mut BehaviourWorld) {
     );
 }
 
-#[then(expr = "the output says projects keep what they granted")]
+#[then(expr = "the output says runs keep what they granted")]
 fn says_grants_outlive(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
@@ -538,7 +538,7 @@ fn says_stays_installed(world: &mut BehaviourWorld) {
 fn says_forgot(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(
-        run.output.contains("cleared this project's decision"),
+        run.output.contains("cleared reviewer's decision"),
         "got: {}",
         run.output
     );
@@ -574,6 +574,17 @@ fn discloses_sets(world: &mut BehaviourWorld) {
             run.output
         );
     }
+}
+
+#[then(expr = "the disclosure names the run {string}")]
+fn discloses_the_run(world: &mut BehaviourWorld, run_name: String) {
+    let run = run_of(world);
+    assert!(
+        run.output
+            .contains(&format!("granting some-provider to {run_name}")),
+        "a grant belongs to a run, so the disclosure has to name which: {}",
+        run.output
+    );
 }
 
 #[then(expr = "the disclosure says the method carries nothing to disclose")]

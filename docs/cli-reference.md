@@ -310,19 +310,19 @@ lns connector uninstall <ID>
 lns connector list [--format <table|json>]
 lns connector connect <ID> [--method <NAME>] [--as <CONNECTION>]
 lns connector disconnect <ID> [--connection <CONNECTION>]
-lns connector grant <ID> [--method <NAME>] [--connection <CONNECTION>] [--project <PATH>]
-lns connector forget <ID> [--project <PATH>]
+lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>]
+lns connector forget <ID> --run <RUN>
 ```
 
 | Subcommand            | Meaning                                                                              |
 | --------------------- | ------------------------------------------------------------------------------------ |
 | `install <REF\|PATH>` | Make a published or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. Refused when a method carries a block a connector may not, when the document's `serves` overlaps an installed connector's, or when it claims a variable one already claims. |
-| `uninstall <ID>`      | Remove it from this machine, with every connection it held. A project that already granted a method keeps that decision, and reinstalling the same bytes resumes it. |
+| `uninstall <ID>`      | Remove it from this machine, with every connection it held. A run that already granted a method keeps that decision, and reinstalling the same bytes resumes it. |
 | `list`                | List what is installed: what each connector serves, each method and what it still needs (`ready to grant`, `connect first`, or that this `lns` cannot offer it), and the connections this machine holds. |
-| `connect <ID>`        | Ask for the value each of the method's credentials needs, at the terminal and without echoing it, and keep the result as a named connection. `--as` names it; otherwise `lns` suggests the first free name and you confirm, so a suggested name never replaces a connection you already hold. A name you give yourself — with `--as` or at the prompt — that a connection already uses re-authenticates that connection in place. Grants nothing: a project still decides whether to use it. Refused for a method with no `auth` — grant that instead. |
-| `disconnect <ID>`     | Drop one connection, or every connection of the connector when `--connection` is absent. Exits `1` when it holds none. The connector stays installed, and projects that granted a dropped connection keep their grants. |
-| `grant <ID>`          | Let this project use one method. Prints what that method opens, writes and sets, and the authority of each connection held, then asks. Exits `1` when you decline, and `1` when this project already granted that method and connection. `--project <PATH>` acts on another directory. |
-| `forget <ID>`         | Clear this project's decision about one connector, granted or declined, so the next run asks again. Exits `1` when this project had decided nothing. `--project <PATH>` acts on another directory. |
+| `connect <ID>`        | Ask for the value each of the method's credentials needs, at the terminal and without echoing it, and keep the result as a named connection. `--as` names it; otherwise `lns` suggests the first free name and you confirm, so a suggested name never replaces a connection you already hold. A name you give yourself — with `--as` or at the prompt — that a connection already uses re-authenticates that connection in place. Grants nothing: a run still decides whether to use it. Refused for a method with no `auth` — grant that instead. |
+| `disconnect <ID>`     | Drop one connection, or every connection of the connector when `--connection` is absent. Exits `1` when it holds none. The connector stays installed, and runs that granted a dropped connection keep their grants. |
+| `grant <ID>`          | Let one run use one method. `--run` names it — its id, its name, or a unique id prefix — and is required. Prints what that method opens, writes and sets, and the authority of each connection held, then asks. Exits `1` when you decline, and `1` when that run already granted that method and connection. |
+| `forget <ID>`         | Clear one run's decision about one connector, granted or declined, so its next start asks again. Exits `1` when that run had decided nothing. |
 
 `install` takes either a published reference or a local path — a directory
 holding the connector's `lns.yaml`, or the document itself under any name. A path
@@ -339,13 +339,13 @@ when a connector declares more than one method this version can offer — `lns`
 refuses rather than choosing for you.
 
 You do not have to grant anything ahead of time. When a run reaches a destination
-an installed connector serves, and this project has neither granted nor declined
+an installed connector serves, and that run has neither granted nor declined
 that connector, the run is held and a card asks. The card names the run, shows
 what the method opens, sets and writes, and lets you choose which connection to
 use or connect a new one. Answering it applies the method to the
 running sandbox: the destination opens and the credential is injected on the
-wire. The variables the method sets reach the next `lns run`, not the workload
-already running, and the grant applies on every later run of that project.
+wire. The variables the method sets reach the next workload of that run, not the
+workload already running, and the grant applies on every later start of it.
 
 A method that packs a directory into a fileset is not offered yet, and neither
 the card nor `grant` will apply one: install keeps the document, not the

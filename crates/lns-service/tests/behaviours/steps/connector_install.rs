@@ -45,13 +45,14 @@ fn the_machine_installs_the_connector(w: &mut BehaviourWorld) {
     rig(w).install();
 }
 
-#[given(regex = r#"^the project "([^"]+)" granted the method "([^"]+)"$"#)]
-fn the_project_granted_the_method(w: &mut BehaviourWorld, dir: String, method: String) {
+#[given(regex = r#"^the run "([^"]+)" granted the method "([^"]+)"$"#)]
+#[when(regex = r#"^the run "([^"]+)" grants the method "([^"]+)"$"#)]
+fn the_run_granted_the_method(w: &mut BehaviourWorld, run: String, method: String) {
     let rig = rig(w);
     let name = rig
         .last_declared_name()
-        .expect("a connector must be described before a project grants it");
-    rig.grant(&dir, &name, &method);
+        .expect("a connector must be described before a run grants it");
+    rig.grant(&run, &name, &method);
 }
 
 #[when(regex = r#"^the machine uninstalls the connector "([^"]+)"$"#)]
@@ -121,15 +122,35 @@ fn the_refusal_names_the_variable(w: &mut BehaviourWorld, variable: String) {
     assert!(refusal.contains(&variable), "{refusal}");
 }
 
-#[then(regex = r#"^the project "([^"]+)" still grants the method "([^"]+)"$"#)]
-fn the_project_still_grants_the_method(w: &mut BehaviourWorld, dir: String, method: String) {
+#[then(regex = r#"^the run "([^"]+)" still grants the method "([^"]+)"$"#)]
+fn the_run_still_grants_the_method(w: &mut BehaviourWorld, run: String, method: String) {
     let name = rig(w)
         .last_declared_name()
         .expect("a connector was declared");
     assert_eq!(
-        rig(w).granted_method(&dir, &name),
+        rig(w).granted_method(&run, &name),
         Some(method),
         "uninstalling stops the offer; it does not retract a grant"
+    );
+}
+
+#[then(regex = r#"^the run "([^"]+)" is offered nothing$"#)]
+fn the_run_is_offered_nothing(w: &mut BehaviourWorld, run: String) {
+    assert!(
+        rig(w).offered_to(&run).is_empty(),
+        "this run granted the connector, so it is not offered again"
+    );
+}
+
+#[then(regex = r#"^the run "([^"]+)" is still offered the connector$"#)]
+fn the_run_is_still_offered(w: &mut BehaviourWorld, run: String) {
+    let name = rig(w)
+        .last_declared_name()
+        .expect("a connector was declared");
+    assert_eq!(
+        rig(w).offered_to(&run),
+        vec![name],
+        "a grant belongs to one run, so another run is still asked"
     );
 }
 

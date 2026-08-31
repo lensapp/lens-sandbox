@@ -55,14 +55,22 @@ Feature: installing a connector on this machine
     When the machine installs the connector
     Then the install succeeds
 
-  Scenario: uninstalling stops the offer and keeps what a project granted
+  Scenario: uninstalling stops the offer and keeps what a run granted
     Given the connector "some-provider" serves "api.some-provider.example"
     And its method "token" allows "api.some-provider.example" and sets "SOME_TOKEN"
     And the machine installs the connector
-    And the project "/work" granted the method "token"
+    And the run "1a2b3c4d" granted the method "token"
     When the machine uninstalls the connector "some-provider"
     Then the machine holds no connector "some-provider"
-    And the project "/work" still grants the method "token"
+    And the run "1a2b3c4d" still grants the method "token"
+
+  Scenario: a grant belongs to one run, so a second run answers for itself
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "token" allows "api.some-provider.example" and sets "SOME_TOKEN"
+    And the machine installs the connector
+    When the run "1a2b3c4d" grants the method "token"
+    Then the run "9f8e7d6c" is still offered the connector
+    And the run "1a2b3c4d" is offered nothing
 
   Scenario: the list names what each connector serves
     Given the connector "some-provider" serves "api.some-provider.example"

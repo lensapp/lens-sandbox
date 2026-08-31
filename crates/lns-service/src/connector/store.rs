@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::conflicts::refuse_a_conflict;
 
-/// The separator in a composite key: no path, OCI reference, or connection label may contain one, so no composed key is ambiguous.
+/// The separator in a composite key: no run id, OCI reference, or connection label may contain one, so no composed key is ambiguous.
 const SEP: char = '\0';
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +72,10 @@ impl std::fmt::Debug for Connection {
     }
 }
 
-/// A project's one answer about one connector (§8.4).
+/// A run's one answer about one connector (§8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ProjectDecision {
+pub enum RunDecision {
     Granted {
         /// The bytes consented to. A grant does not carry to a different digest, so any update offers again (§7.1).
         digest: String,
@@ -85,11 +85,11 @@ pub enum ProjectDecision {
         #[serde(default)]
         authority: Authority,
     },
-    /// Keyed without a digest, deliberately: an update does not re-offer what a project turned down (§7.1).
+    /// Keyed without a digest, deliberately: an update does not re-offer what a run turned down (§7.1).
     Declined,
 }
 
-impl ProjectDecision {
+impl RunDecision {
     /// Whether this answers for the bytes installed now. A grant bound to other bytes does not, so any update offers again; a decline answers for every version (§7.1).
     pub fn decides(&self, installed_digest: &str) -> bool {
         match self {
@@ -161,40 +161,51 @@ fn connection_key(name: &str, label: &str) -> String {
     format!("{name}{SEP}{label}")
 }
 
-fn project_key(dir: &str, name: &str) -> String {
-    format!("{dir}{SEP}{name}")
+fn run_key(run: &str, name: &str) -> String {
+    format!("{run}{SEP}{name}")
 }
 
 fn splits(key: &str) -> Option<(&str, &str)> {
     key.split_once(SEP)
 }
 
-/// The grant keys a re-authentication of `name`'s `connection` invalidates: every grant naming that connection whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
+/// The runs a re-authentication of `name`'s `connection` invalidates the grant of: every grant naming that connection whose consented authority differs from what came back. Difference is the test, not widening (§3.2.4).
+///
+/// Runs, not keys: these are reported to the user, and a key carries the separator.
 pub fn grants_invalidated_by(
-    grants: &DecisionFile<ProjectDecision>,
+    grants: &DecisionFile<RunDecision>,
     name: &str,
     connection: &str,
     reported: &Authority,
 ) -> Vec<String> {
     let mut invalidated: Vec<String> = grants
         .iter()
-        .filter(|(key, decision)| {
-            splits(key).is_some_and(|(_, keyed)| keyed == name)
-                && names_connection_with_other_authority(decision, connection, reported)
-        })
-        .map(|(key, _)| key.clone())
+        .filter(|(key, decision)| invalidates(key, decision, name, connection, reported))
+        .filter_map(|(key, _)| splits(key).map(|(run, _)| run.to_string()))
         .collect();
     invalidated.sort();
     invalidated
 }
 
+/// One row's own answer, so what is reported and what is dropped cannot drift apart — a run may hold grants of several connectors, and only this one's is invalidated.
+fn invalidates(
+    key: &str,
+    decision: &RunDecision,
+    name: &str,
+    connection: &str,
+    reported: &Authority,
+) -> bool {
+    splits(key).is_some_and(|(_, keyed)| keyed == name)
+        && names_connection_with_other_authority(decision, connection, reported)
+}
+
 fn names_connection_with_other_authority(
-    decision: &ProjectDecision,
+    decision: &RunDecision,
     connection: &str,
     reported: &Authority,
 ) -> bool {
     match decision {
-        ProjectDecision::Granted {
+        RunDecision::Granted {
             connection: Some(named),
             authority,
             ..
@@ -206,7 +217,7 @@ fn names_connection_with_other_authority(
 pub struct ConnectorStore<'a> {
     installed: &'a dyn InstalledSet,
     values: &'a dyn DecisionStore<Connection>,
-    grants: &'a dyn DecisionStore<ProjectDecision>,
+    grants: &'a dyn DecisionStore<RunDecision>,
     write: Mutex<()>,
 }
 
@@ -214,7 +225,7 @@ impl<'a> ConnectorStore<'a> {
     pub fn new(
         installed: &'a dyn InstalledSet,
         values: &'a dyn DecisionStore<Connection>,
-        grants: &'a dyn DecisionStore<ProjectDecision>,
+        grants: &'a dyn DecisionStore<RunDecision>,
     ) -> Self {
         Self {
             installed,
@@ -273,7 +284,7 @@ impl<'a> ConnectorStore<'a> {
         self.installed.fileset_layer(name, index)
     }
 
-    /// Removes every connection the connector held, then the connector, and leaves what projects granted untouched (§7.1).
+    /// Removes every connection the connector held, then the connector, and leaves what runs granted untouched (§7.1).
     ///
     /// Connections go first so a failed write cannot leave real values behind under a name nothing installed.
     pub fn uninstall(&self, name: &str) -> io::Result<bool> {
@@ -307,7 +318,9 @@ impl<'a> ConnectorStore<'a> {
         let mut grants = self.grants.load()?;
         let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
         if !invalidated.is_empty() {
-            grants.retain(|key, _| !invalidated.contains(key));
+            grants.retain(|key, decision| {
+                !invalidates(key, decision, name, label, &connection.authority)
+            });
             self.grants.save(&grants)?;
         }
 
@@ -330,42 +343,41 @@ impl<'a> ConnectorStore<'a> {
         Ok(before - self.values.load()?.len())
     }
 
-    pub fn decision(&self, dir: &str, name: &str) -> io::Result<Option<ProjectDecision>> {
-        Ok(self.grants.load()?.remove(&project_key(dir, name)))
+    pub fn decision(&self, run: &str, name: &str) -> io::Result<Option<RunDecision>> {
+        Ok(self.grants.load()?.remove(&run_key(run, name)))
     }
 
     /// The grant that applies to the digest installed right now. A grant bound to other bytes is not one, so any update offers again (§7.1).
     pub fn grant_for(
         &self,
-        dir: &str,
+        run: &str,
         name: &str,
         installed_digest: &str,
-    ) -> io::Result<Option<ProjectDecision>> {
-        Ok(self.decision(dir, name)?.filter(|decision| {
-            matches!(decision, ProjectDecision::Granted { .. })
-                && decision.decides(installed_digest)
+    ) -> io::Result<Option<RunDecision>> {
+        Ok(self.decision(run, name)?.filter(|decision| {
+            matches!(decision, RunDecision::Granted { .. }) && decision.decides(installed_digest)
         }))
     }
 
-    /// Records a project's answer, returning whatever it displaces. A project holds one answer per connector, so granting again replaces the prior one (§3.2.4).
+    /// Records a run's answer, returning whatever it displaces. A run holds one answer per connector, so granting again replaces the prior one (§3.2.4).
     pub fn decide(
         &self,
-        dir: &str,
+        run: &str,
         name: &str,
-        decision: ProjectDecision,
-    ) -> io::Result<Option<ProjectDecision>> {
+        decision: RunDecision,
+    ) -> io::Result<Option<RunDecision>> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
-        let displaced = grants.insert(project_key(dir, name), decision);
+        let displaced = grants.insert(run_key(run, name), decision);
         self.grants.save(&grants)?;
         Ok(displaced)
     }
 
-    /// Clears what a project decided, granted or declined, so the next run asks again (§8.4).
-    pub fn forget(&self, dir: &str, name: &str) -> io::Result<bool> {
+    /// Clears what a run decided, granted or declined, so its next start asks again (§8.4).
+    pub fn forget(&self, run: &str, name: &str) -> io::Result<bool> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
-        let removed = grants.remove(&project_key(dir, name)).is_some();
+        let removed = grants.remove(&run_key(run, name)).is_some();
         if removed {
             self.grants.save(&grants)?;
         }
@@ -481,7 +493,7 @@ mod tests {
     struct Rig {
         set: FakeSet,
         values: FakeMap<Connection>,
-        grants: FakeMap<ProjectDecision>,
+        grants: FakeMap<RunDecision>,
     }
 
     impl Rig {
@@ -750,8 +762,8 @@ mod tests {
         }
     }
 
-    fn granted(digest: &str, connection: Option<&str>, authority: Authority) -> ProjectDecision {
-        ProjectDecision::Granted {
+    fn granted(digest: &str, connection: Option<&str>, authority: Authority) -> RunDecision {
+        RunDecision::Granted {
             digest: digest.to_string(),
             method: "token".to_string(),
             connection: connection.map(str::to_string),
@@ -1032,11 +1044,11 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .decide("/work", "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
             store.decision("/work", "some-provider").unwrap(),
-            Some(ProjectDecision::Declined)
+            Some(RunDecision::Declined)
         );
         store
             .decide(
@@ -1047,7 +1059,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.decision("/work", "some-provider").unwrap(),
-            Some(ProjectDecision::Granted { .. })
+            Some(RunDecision::Granted { .. })
         ));
     }
 
@@ -1097,7 +1109,7 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .decide("/work", "some-provider", RunDecision::Declined)
             .unwrap();
         assert_eq!(
             store
@@ -1113,7 +1125,7 @@ mod tests {
         let store = rig.store();
         for decision in [
             granted("sha256:abc", None, Authority::default()),
-            ProjectDecision::Declined,
+            RunDecision::Declined,
         ] {
             store.decide("/work", "some-provider", decision).unwrap();
             assert!(store.forget("/work", "some-provider").unwrap());
@@ -1268,7 +1280,7 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         store
-            .decide("/work", "some-provider", ProjectDecision::Declined)
+            .decide("/work", "some-provider", RunDecision::Declined)
             .unwrap();
         assert!(
             store
@@ -1282,7 +1294,7 @@ mod tests {
         );
         assert_eq!(
             store.decision("/work", "some-provider").unwrap(),
-            Some(ProjectDecision::Declined)
+            Some(RunDecision::Declined)
         );
     }
 
@@ -1303,7 +1315,7 @@ mod tests {
         // A grant that survives beside a re-authenticated connection is a grant silently widened: the run would apply the method backed by authority the project never consented to.
         let rig = Rig::new();
         rig.grants.state.lock().unwrap().insert(
-            project_key("/work", "some-provider"),
+            run_key("/work", "some-provider"),
             granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
         );
         *rig.grants.fail_save.lock().unwrap() = true;
@@ -1347,10 +1359,11 @@ mod tests {
                 )
                 .is_err()
         );
-        rig.grants.state.lock().unwrap().insert(
-            project_key("/work", "some-provider"),
-            ProjectDecision::Declined,
-        );
+        rig.grants
+            .state
+            .lock()
+            .unwrap()
+            .insert(run_key("/work", "some-provider"), RunDecision::Declined);
         assert!(rig.store().forget("/work", "some-provider").is_err());
     }
 
@@ -1424,7 +1437,7 @@ mod tests {
             .state
             .lock()
             .unwrap()
-            .insert("handwritten".to_string(), ProjectDecision::Declined);
+            .insert("handwritten".to_string(), RunDecision::Declined);
         let store = rig.store();
         assert!(store.connections_of("handwritten").unwrap().is_empty());
         assert_eq!(store.drop_connections("handwritten", None).unwrap(), 0);
@@ -1440,12 +1453,26 @@ mod tests {
     }
 
     #[test]
+    fn an_invalidated_grant_names_the_run_that_holds_it_and_not_the_store_key() {
+        // These reach the user through `lns connector connect`, and a store key carries the NUL separator.
+        let mut grants = DecisionFile::new();
+        grants.insert(
+            run_key("1a2b3c4d", "some-provider"),
+            granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+        );
+        assert_eq!(
+            grants_invalidated_by(&grants, "some-provider", "work", &Authority::of(["admin"])),
+            vec!["1a2b3c4d".to_string()]
+        );
+    }
+
+    #[test]
     fn the_invalidated_keys_come_back_in_a_stable_order() {
         // They are reported to the user, so two runs must not shuffle them.
         let mut grants = DecisionFile::new();
         for dir in ["/z-project", "/a-project", "/m-project"] {
             grants.insert(
-                project_key(dir, "some-provider"),
+                run_key(dir, "some-provider"),
                 granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
             );
         }

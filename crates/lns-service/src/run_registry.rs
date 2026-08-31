@@ -255,6 +255,16 @@ impl std::fmt::Display for ResolveError {
     }
 }
 
+/// The name a run holds, for reporting a run this machine's records name by id.
+pub fn name_of(id: &str) -> Option<String> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    name_in(g.as_ref(), id)
+}
+
+fn name_in(map: Option<&HashMap<String, RunEntry>>, id: &str) -> Option<String> {
+    map?.get(id).map(|entry| entry.name().to_string())
+}
+
 pub fn resolve(handle: &str) -> Result<String, ResolveError> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     resolve_in(g.as_ref(), handle)
@@ -805,6 +815,19 @@ mod tests {
                 .to_string()
                 .contains("no such run")
         );
+    }
+
+    #[tokio::test]
+    async fn a_run_this_machine_records_by_id_is_named_back_and_a_removed_one_is_not() {
+        // A grant is keyed by run id, and the user is told which run must decide again — by name.
+        let mut map = HashMap::new();
+        named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
+        assert_eq!(
+            name_in(Some(&map), "1a2b3c4d0000000000000000000000aa"),
+            Some("reviewer".to_string())
+        );
+        assert_eq!(name_in(Some(&map), "0000"), None);
+        assert_eq!(name_in(None, "1a2b3c4d0000000000000000000000aa"), None);
     }
 
     #[tokio::test]

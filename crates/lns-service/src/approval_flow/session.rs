@@ -108,7 +108,7 @@ pub enum ConnectionChoice {
 
 /// The connector store's side of a card decision. Every method writes to disk, so the session takes it as a port (§3.2.4).
 pub trait ConnectorPort: Send + Sync {
-    /// Stores what an authentication returned, answering with the project directories whose grant its authority no longer matches.
+    /// Stores what an authentication returned, answering with the runs whose grant its authority no longer matches.
     fn connect(
         &self,
         name: &str,
@@ -117,7 +117,7 @@ pub trait ConnectorPort: Send + Sync {
         values: lns_ipc::SecretValues,
     ) -> Result<Vec<String>, String>;
 
-    /// Records this project's grant against the bytes the card disclosed, answering with the egress the method opens.
+    /// Records this run's grant against the bytes the card disclosed, answering with the egress the method opens.
     fn grant(
         &self,
         name: &str,
@@ -145,7 +145,7 @@ pub struct ApprovalSession {
     /// What has already been said once, so a misconfiguration every request trips does not fill the window.
     said: Mutex<std::collections::HashSet<String>>,
     connectors: OnceLock<Arc<dyn ConnectorPort>>,
-    /// The connectors this project has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
+    /// The connectors this run has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
     offers: Mutex<Vec<ConnectorView>>,
     run: Option<String>,
 }
@@ -236,7 +236,7 @@ impl ApprovalSession {
         }
     }
 
-    /// Records a standing no for this project, then lets the ordinary card ask what the hold was standing in for (§3.2.4).
+    /// Records a standing no for this run, then lets the ordinary card ask what the hold was standing in for (§3.2.4).
     pub fn decline_offer(&self, id: &str) -> DecisionOutcome {
         let Some(offer) = self.offer_of(id) else {
             return DecisionOutcome::UnknownId;
@@ -349,7 +349,7 @@ impl ApprovalSession {
         self.policy.lock().expect("policy mutex poisoned").clone()
     }
 
-    /// The connectors this project has not decided; every destination they serve is held so the run asks rather than proceeds (§3.2.1).
+    /// The connectors this run has not decided; every destination they serve is held so the run asks rather than proceeds (§3.2.1).
     pub fn hold_for_offers(&self, offers: Vec<ConnectorView>) {
         *self.offers.lock().expect("offers mutex poisoned") = offers;
     }
@@ -1740,10 +1740,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_connection_that_invalidates_another_projects_grant_says_so() {
-        // §3.2.4: those projects must decide again, and nothing in this run can do it for them.
+    fn a_connection_that_invalidates_another_runs_grant_says_so() {
+        // §3.2.4: those runs must decide again, and nothing in this run can do it for them.
         let port = Arc::new(FakeConnectorPort {
-            invalidated: vec!["/other/project".to_string()],
+            invalidated: vec!["billing".to_string()],
             ..FakeConnectorPort::default()
         });
         let (s, n, _store, _rx) = offered(port);
@@ -1762,8 +1762,8 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.contains("/other/project")),
-            "a silent invalidation is a project that stops working with no explanation"
+                .any(|line| line.contains("billing")),
+            "a silent invalidation is a run that stops working with no explanation"
         );
     }
 
@@ -1891,7 +1891,7 @@ pub(crate) mod tests {
 
         assert!(
             n.presented.lock().unwrap().last().unwrap().offer.is_none(),
-            "a decline is a standing no for this project (§3.2.4)"
+            "a decline is a standing no for this run (§3.2.4)"
         );
     }
 
@@ -2700,7 +2700,7 @@ pub(crate) mod tests {
         assert!(
             allowed.contains(&"api.alpha.example".to_string())
                 && allowed.contains(&"api.beta.example".to_string()),
-            "both grants are the project's; neither answer undid the other: {allowed:?}"
+            "both grants are the run's; neither answer undid the other: {allowed:?}"
         );
         let armed: Vec<String> = published
             .credentials
@@ -2760,7 +2760,7 @@ pub(crate) mod tests {
         };
 
         let relaunched = {
-            // A fresh run of the same project: the grant is already recorded, so nothing is held and the opened egress is in place from the first frame.
+            // A later start of the same run: the grant is already recorded, so nothing is held and the opened egress is in place from the first frame.
             let (s, _n, _store, _rx) = fixture();
             s.set_shipped_policy(shipped);
             s.apply_external_policy(own);
