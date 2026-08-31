@@ -72,7 +72,7 @@ fn view_of(
                 writes: method
                     .filesets
                     .iter()
-                    .map(|fileset| fileset.guest_path.clone())
+                    .map(|fileset| lns_artifact::connector::guest_directory(&fileset.guest_path))
                     .collect(),
                 env: method.env.keys().cloned().collect(),
                 credentials: method
@@ -184,6 +184,7 @@ pub fn grant(
     let entry = installed_entry(store, name)?;
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
+    refuse_a_path_another_connector_writes(store, project_dir, name, &entry, &method.name)?;
     let profile = behind_the_method(store, name, method, profile)?;
     let authority = match &profile {
         Some(label) => store
@@ -241,6 +242,46 @@ pub fn grant_disclosed(
     supplied_by(store, &entry, method, settled.profile.as_deref())
 }
 
+/// Two grants claiming one guest path reach the guest as two creates: the second fails, the batch rolls back, and every granted file for the run goes with it. So the collision is refused where a user can still answer it.
+fn refuse_a_path_another_connector_writes(
+    store: &ConnectorStore<'_>,
+    project_dir: &str,
+    name: &str,
+    entry: &Installed,
+    method: &str,
+) -> Result<()> {
+    let taken = paths_written_by_other_connectors(store, project_dir, name)?;
+    for path in written_paths(&supplied_by(store, entry, method, None)?) {
+        if let Some(holder) = taken.get(&path) {
+            anyhow::bail!(
+                "{holder} already writes {path} in this project: two connectors writing one file would leave the guest with neither, so disconnect {holder} here first"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn paths_written_by_other_connectors(
+    store: &ConnectorStore<'_>,
+    project_dir: &str,
+    granting: &str,
+) -> Result<BTreeMap<String, String>> {
+    let mut taken = BTreeMap::new();
+    for (connector, payload) in granted_supply(store, project_dir)? {
+        if connector == granting {
+            continue;
+        }
+        for path in written_paths(&payload) {
+            taken.insert(path, connector.clone());
+        }
+    }
+    Ok(taken)
+}
+
+fn written_paths(payload: &crate::approval_flow::protocol::GrantedPayload) -> Vec<String> {
+    payload.files.iter().map(|file| file.path.clone()).collect()
+}
+
 /// What every recorded grant gives this run, by connector, so a project that granted yesterday is not asked again and is not left empty-handed (§7.1).
 pub fn granted_supply(
     store: &ConnectorStore<'_>,
@@ -266,7 +307,31 @@ pub fn granted_supply(
             supplied_by(store, &entry, &method, profile.as_deref())?,
         );
     }
+    drop_a_connector_writing_a_path_another_already_holds(&mut supplied);
     Ok(supplied)
+}
+
+/// Decided per connector, not per path: a dropped connector writes nothing, so the paths it claimed are free again and must not cost a third connector its grant.
+fn drop_a_connector_writing_a_path_another_already_holds(
+    supplied: &mut BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>,
+) {
+    let mut held: BTreeMap<String, String> = BTreeMap::new();
+    let mut dropped = Vec::new();
+    for (connector, payload) in supplied.iter() {
+        let paths = written_paths(payload);
+        match paths.iter().find_map(|path| held.get_key_value(path)) {
+            Some((path, holder)) => {
+                crate::log::error!(
+                    "{connector} does not supply anything to this run: it writes {path}, which {holder} already writes here — disconnect one of them"
+                );
+                dropped.push(connector.clone());
+            }
+            None => held.extend(paths.into_iter().map(|path| (path, connector.clone()))),
+        }
+    }
+    for connector in dropped {
+        supplied.remove(&connector);
+    }
 }
 
 /// The egress, credentials, `env` and files one granted method contributes, armed with the values the named profile holds.
@@ -394,9 +459,13 @@ fn definition_of(
     lns_artifact::connector::parse(&entry.document)
 }
 
-/// What this version can deliver, which is narrower than what a document may declare: a fileset's bytes are not kept at install, so a method writing one cannot be applied yet (§3.2.2).
+/// What this version can deliver, which is narrower than what a document may declare: a packed fileset's bytes are not kept at install, so a method writing one cannot be applied yet (§3.2.2).
 fn can_apply(method: &lns_artifact::connector::Method) -> bool {
-    method.is_offerable() && method.filesets.is_empty()
+    method.is_offerable()
+        && method
+            .filesets
+            .iter()
+            .all(|fileset| fileset.inline.is_some())
 }
 
 /// The named method, refused when this version cannot deliver it — the card could not either (§3.2.2).
@@ -1349,9 +1418,222 @@ mod tests {
         );
     }
 
+    fn writing(name: &str, guest_path: &str) -> Vec<u8> {
+        writing_all(name, &[guest_path])
+    }
+
+    fn writing_all(name: &str, guest_paths: &[&str]) -> Vec<u8> {
+        let filesets = guest_paths
+            .iter()
+            .map(|guest_path| {
+                serde_json::json!({ "guestPath": guest_path, "inline": { "config.json": "{}" } })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": name,
+            "spec": {
+                "serves": [format!("api.{name}.example")],
+                "methods": [{ "name": "open", "filesets": filesets }],
+            },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
     #[test]
-    fn a_method_writing_a_fileset_is_not_offered_because_its_bytes_are_not_kept() {
-        // Install stores the document alone, so the file's content is not on this machine. Offering it would disclose a write that never happens.
+    fn a_method_writing_an_inline_fileset_is_offered_and_supplies_it() {
+        let rig = Rig::new();
+        rig.set
+            .put(
+                "some-provider",
+                "sha256:abc",
+                &writing("some-provider", "~/.some-provider"),
+            )
+            .unwrap();
+
+        let offered = offerable(&rig.store(), "/work").expect("offerable");
+        assert!(
+            offered[0].methods[0].offerable,
+            "an inline fileset's content is inside the document install already keeps, so nothing is missing"
+        );
+
+        let payload = grant_disclosed(
+            &rig.store(),
+            "some-provider",
+            "sha256:abc",
+            "/work",
+            "open",
+            None,
+        )
+        .expect("grant");
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["~/.some-provider/config.json"]
+        );
+    }
+
+    #[test]
+    fn a_grant_is_refused_when_another_connector_already_writes_that_file() {
+        // Two entries claiming one path reach the guest as two creates. The second fails, the batch rolls back, and every granted file for the run goes with it.
+        let rig = Rig::new();
+        rig.set
+            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"))
+            .unwrap();
+        rig.set
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"))
+            .unwrap();
+        grant_disclosed(&rig.store(), "alpha", "sha256:a", "/work", "open", None).expect("first");
+
+        let err = grant_disclosed(&rig.store(), "beta", "sha256:b", "/work", "open", None)
+            .expect_err("the second grant claims a path the first already writes");
+
+        assert!(
+            format!("{err:#}").contains("alpha") && format!("{err:#}").contains("~/.shared"),
+            "the refusal must name the connector that holds the path and the path itself; got: {err:#}"
+        );
+        assert!(
+            rig.store().decision("/work", "beta").unwrap().is_none(),
+            "a refused grant must not be recorded, or the next run restores the collision"
+        );
+    }
+
+    #[test]
+    fn the_cli_verb_refuses_a_path_another_connector_writes_too() {
+        // `lns connector grant` reaches `grant` without passing the card, so a check only the card ran would let the CLI record what the card refuses.
+        let rig = Rig::new();
+        rig.set
+            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"))
+            .unwrap();
+        rig.set
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"))
+            .unwrap();
+        grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
+
+        let err = grant(&rig.store(), "beta", "/work", "open", None)
+            .expect_err("the second grant claims a path the first already writes");
+
+        assert!(
+            format!("{err:#}").contains("alpha") && format!("{err:#}").contains("~/.shared"),
+            "got: {err:#}"
+        );
+        assert!(
+            rig.store().decision("/work", "beta").unwrap().is_none(),
+            "a refused grant must not be recorded, or the next run restores the collision"
+        );
+    }
+
+    #[test]
+    fn a_path_spelled_around_a_dot_segment_is_the_same_path() {
+        // `.` is a legal guestPath segment, so a second connector could name a file the first already writes and be refused by neither guard.
+        let rig = Rig::new();
+        rig.set
+            .put("alpha", "sha256:a", &writing("alpha", "~/shared/x"))
+            .unwrap();
+        rig.set
+            .put("beta", "sha256:b", &writing("beta", "~/shared/./x"))
+            .unwrap();
+        grant(&rig.store(), "alpha", "/work", "open", None).expect("first");
+
+        let err = grant(&rig.store(), "beta", "/work", "open", None)
+            .expect_err("the same file, spelled around a dot");
+
+        assert!(
+            format!("{err:#}").contains("alpha") && format!("{err:#}").contains("~/shared/x"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_connector_dropped_for_a_collision_stops_claiming_the_paths_it_will_not_write() {
+        // Dropping beta frees every path beta held, so gamma collides with nothing. Charging gamma for a conflict that no longer exists would cost a third connector its files and name a holder that supplies none.
+        let rig = Rig::new();
+        for (name, digest, paths) in [
+            ("alpha", "sha256:a", vec!["~/.shared"]),
+            ("beta", "sha256:b", vec!["~/.shared", "~/.own"]),
+            ("gamma", "sha256:g", vec!["~/.own"]),
+        ] {
+            rig.set
+                .put(name, digest, &writing_all(name, &paths))
+                .unwrap();
+            rig.store()
+                .decide(
+                    "/work",
+                    name,
+                    ProjectDecision::Granted {
+                        digest: digest.to_string(),
+                        method: "open".to_string(),
+                        profile: None,
+                        authority: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let mut supplied = BTreeMap::new();
+        let messages = crate::test_env::captured_messages(|| {
+            supplied = granted_supply(&rig.store(), "/work").unwrap();
+        });
+
+        assert_eq!(
+            supplied.keys().collect::<Vec<_>>(),
+            ["alpha", "gamma"],
+            "only the connector that actually collides loses its grant"
+        );
+        assert!(
+            messages.iter().all(|m| !m.contains("gamma")),
+            "gamma writes nothing another connector writes, so accusing it would send the user to disconnect the wrong pair; got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_collision_between_two_recorded_grants_costs_the_later_connector_and_says_so() {
+        // An older lns could record what grant now refuses. Restoring both would take the whole run's files away, so one connector loses its grant rather than every connector losing its files.
+        let rig = Rig::new();
+        for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
+            rig.set
+                .put(name, digest, &writing(name, "~/.shared"))
+                .unwrap();
+            rig.store()
+                .decide(
+                    "/work",
+                    name,
+                    ProjectDecision::Granted {
+                        digest: digest.to_string(),
+                        method: "open".to_string(),
+                        profile: None,
+                        authority: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let mut supplied = BTreeMap::new();
+        let messages = crate::test_env::captured_messages(|| {
+            supplied = granted_supply(&rig.store(), "/work").unwrap();
+        });
+
+        assert_eq!(
+            supplied.keys().collect::<Vec<_>>(),
+            ["alpha"],
+            "one connector keeps the path, and it is the same one on every run"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("beta") && m.contains("alpha") && m.contains("~/.shared")),
+            "a connector that stops supplying must say which path it lost and to whom; got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_method_packing_a_directory_is_not_offered_because_its_bytes_are_not_kept() {
+        // Install stores the document alone, so a packed layer's content is not on this machine. Offering it would disclose a write that never happens.
         let rig = Rig::new();
         let doc = serde_json::json!({
             "apiVersion": "lns.run/v1",

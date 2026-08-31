@@ -347,8 +347,10 @@ running sandbox: the destination opens and the credential is injected on the
 wire. The variables the method sets reach the next `lns run`, not the workload
 already running, and the grant applies on every later run of that project.
 
-A method that writes a fileset is not offered yet, and neither the card nor
-`grant` will apply one.
+A method that packs a directory into a fileset is not offered yet, and neither
+the card nor `grant` will apply one: install keeps the document, not the
+directory. A method whose filesets are written inline is offered and applied
+like any other.
 
 `Never here` on that card is the same standing no `lns connector forget` clears.
 Closing the card answers nothing, so the next run asks again. A `deny` you wrote

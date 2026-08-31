@@ -254,6 +254,9 @@ pub struct WireFile {
     pub content: WireFileContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
+    /// Absent is core's own default of `workload`, so only a document withholding a file from it says anything here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<WireFileOwner>,
 }
 
 /// An entry carrying both spellings, or neither, is one core refuses, so neither state is representable here.
@@ -264,12 +267,40 @@ pub enum WireFileContent {
     ContentB64(String),
 }
 
+/// The content itself never renders, for the reason [`WireFile`]'s own `Debug` does not print it.
+impl std::fmt::Debug for WireFileContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let spelling = match self {
+            Self::Content(_) => "Content",
+            Self::ContentB64(_) => "ContentB64",
+        };
+        write!(f, "{spelling}(<redacted>)")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireFileOwner {
+    Root,
+}
+
+impl WireFileOwner {
+    /// `None` for the workload, which core defaults to, so only a document withholding a file says anything.
+    fn declared_by(owner: lns_artifact::sandbox::FilesetOwner) -> Option<Self> {
+        match owner {
+            lns_artifact::sandbox::FilesetOwner::Workload => None,
+            lns_artifact::sandbox::FilesetOwner::Root => Some(Self::Root),
+        }
+    }
+}
+
 impl WireFile {
     pub fn text(path: &str, content: &str, mode: Option<u32>) -> Self {
         Self {
             path: path.to_string(),
             content: WireFileContent::Content(content.to_string()),
             mode,
+            owner: None,
         }
     }
 
@@ -279,7 +310,13 @@ impl WireFile {
             path: path.to_string(),
             content: WireFileContent::ContentB64(BASE64.encode(content)),
             mode,
+            owner: None,
         }
+    }
+
+    pub fn owned_by(mut self, owner: lns_artifact::sandbox::FilesetOwner) -> Self {
+        self.owner = WireFileOwner::declared_by(owner);
+        self
     }
 }
 
@@ -493,6 +530,20 @@ mod tests {
             rendered.contains("~/.some-provider/credentials.json") && !rendered.contains("sk-live"),
             "a fileset carries a placeholder by rule, but a document that breaks the rule must not put its content on the trace stream; got: {rendered}"
         );
+    }
+
+    #[test]
+    fn neither_spelling_of_file_content_renders_what_it_holds() {
+        for content in [
+            WireFileContent::Content("sk-live-real".to_string()),
+            WireFileContent::ContentB64(BASE64.encode(b"sk-live-real")),
+        ] {
+            let rendered = format!("{content:?}");
+            assert!(
+                rendered.contains("<redacted>") && !rendered.contains("sk-live"),
+                "base64 is an encoding, not a secret, so the encoded spelling must redact for the same reason the plain one does; got: {rendered}"
+            );
+        }
     }
 
     #[test]
