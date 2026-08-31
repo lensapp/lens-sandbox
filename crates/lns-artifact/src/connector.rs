@@ -136,7 +136,7 @@ pub fn parse(config_json: &[u8]) -> Result<ConnectorDefinition> {
 /// [`parse`], plus the §3.2.5 read of every `path` fileset the caller could read beside the document, keyed by the `path` the entry writes.
 pub fn parse_with_path_files(
     config_json: &[u8],
-    path_files: &BTreeMap<String, BTreeMap<String, String>>,
+    path_files: &BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 ) -> Result<ConnectorDefinition> {
     let doc = spec::parse_envelope(config_json, spec::Kind::Connector)?;
     let connector: ConnectorSpec =
@@ -150,7 +150,7 @@ pub fn parse_with_path_files(
 
 fn validate(
     connector: &ConnectorSpec,
-    path_files: &BTreeMap<String, BTreeMap<String, String>>,
+    path_files: &BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 ) -> Result<()> {
     refuse_a_payload_block_outside_a_method(connector)?;
     validate_serves(&connector.serves)?;
@@ -208,7 +208,7 @@ fn validate_serves(serves: &[String]) -> Result<()> {
 
 fn validate_method(
     method: &Method,
-    path_files: &BTreeMap<String, BTreeMap<String, String>>,
+    path_files: &BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 ) -> Result<()> {
     if !spec::is_valid_name(&method.name) {
         bail!("invalid method name {:?}", method.name);
@@ -248,7 +248,7 @@ fn validate_method(
         .context("connector policy")?;
     let mut written = BTreeSet::new();
     let mut files = BTreeSet::new();
-    let mut inline_bytes = 0usize;
+    let mut fileset_bytes = 0usize;
     for fileset in &method.filesets {
         crate::sandbox::validate_fileset(fileset, crate::spec::GuestAnchor::Home)?;
         if fileset.host_path.is_some() {
@@ -268,16 +268,22 @@ fn validate_method(
                 );
             }
         }
-        inline_bytes += fileset
+        fileset_bytes += fileset
             .inline
             .iter()
             .flat_map(|files| files.values())
             .map(String::len)
             .sum::<usize>();
+        fileset_bytes += fileset
+            .path
+            .as_ref()
+            .and_then(|path| path_files.get(path))
+            .map(|files| files.values().map(Vec::len).sum::<usize>())
+            .unwrap_or_default();
     }
-    if inline_bytes > MAX_METHOD_FILESET_BYTES {
+    if fileset_bytes > MAX_METHOD_FILESET_BYTES {
         bail!(
-            "this method's filesets total {inline_bytes} bytes, more than the {MAX_METHOD_FILESET_BYTES}-byte limit: a granted method's files are sent again on every policy change, and every connector a project grants shares one budget"
+            "this method's filesets total {fileset_bytes} bytes, more than the {MAX_METHOD_FILESET_BYTES}-byte limit: a granted method's files are sent again on every policy change, and every connector a project grants shares one budget"
         );
     }
     refuse_a_secret_shaped_file_carrying_no_declared_placeholder(method, path_files)
@@ -320,32 +326,34 @@ fn validate_auth(auth: &Auth) -> Result<()> {
 /// §3.2.5's checkable half: a secret-shaped name earns its exception only by carrying a placeholder **this method** declares.
 pub fn refuse_a_secret_shaped_file_carrying_no_declared_placeholder(
     method: &Method,
-    path_files: &BTreeMap<String, BTreeMap<String, String>>,
+    path_files: &BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 ) -> Result<()> {
     let declared: Vec<&str> = method
         .credentials
         .iter()
         .map(|credential| credential.placeholder.as_str())
         .collect();
-    let readable = method.filesets.iter().flat_map(|fileset| {
-        fileset
-            .inline
-            .iter()
-            .chain(fileset.path.as_ref().and_then(|path| path_files.get(path)))
-    });
-    for files in readable {
-        for (name, content) in files {
-            if !name.split('/').any(crate::sandbox::looks_like_secret_name) {
-                continue;
-            }
-            if !declared
+    let inline = method
+        .filesets
+        .iter()
+        .flat_map(|fileset| fileset.inline.iter().flatten())
+        .map(|(name, content)| (name, std::borrow::Cow::Borrowed(content.as_str())));
+    let packed = method
+        .filesets
+        .iter()
+        .filter_map(|fileset| fileset.path.as_ref())
+        .filter_map(|path| path_files.get(path))
+        .flatten()
+        .map(|(name, bytes)| (name, String::from_utf8_lossy(bytes)));
+    for (name, content) in inline.chain(packed) {
+        if name.split('/').any(crate::sandbox::looks_like_secret_name)
+            && !declared
                 .iter()
                 .any(|placeholder| content.contains(placeholder))
-            {
-                bail!(
-                    "connector fileset file {name} is secret-shaped and carries no placeholder this method declares; a connector writes the placeholder and the real value stays on the host"
-                );
-            }
+        {
+            bail!(
+                "connector fileset file {name} is secret-shaped and carries no placeholder this method declares; a connector writes the placeholder and the real value stays on the host"
+            );
         }
     }
     Ok(())
@@ -759,7 +767,7 @@ mod tests {
             "./some-provider".to_string(),
             BTreeMap::from([(
                 "credentials.json".to_string(),
-                r#"{"token":"sk-live-real"}"#.to_string(),
+                br#"{"token":"sk-live-real"}"#.to_vec(),
             )]),
         )]);
         let err = parse_with_path_files(&json, &beside).unwrap_err();

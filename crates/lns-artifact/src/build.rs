@@ -173,24 +173,19 @@ pub fn build_artifact(
 fn files_by_path(
     packing: &[&str],
     filesets: &[Vec<FileEntry>],
-) -> BTreeMap<String, BTreeMap<String, String>> {
+) -> BTreeMap<String, BTreeMap<String, Vec<u8>>> {
     packing
         .iter()
         .zip(filesets)
-        .map(|(path, entries)| ((*path).to_string(), text_by_name(entries)))
+        .map(|(path, entries)| ((*path).to_string(), bytes_by_name(entries)))
         .collect()
 }
 
-/// One directory's entries as text keyed by name, the shape the §3.2.3 read of a `path` fileset takes wherever the bytes are in hand.
-pub fn text_by_name(entries: &[FileEntry]) -> BTreeMap<String, String> {
+/// One directory's entries keyed by name, the shape the §3.2.3 read of a `path` fileset takes wherever the bytes are in hand.
+pub fn bytes_by_name(entries: &[FileEntry]) -> BTreeMap<String, Vec<u8>> {
     entries
         .iter()
-        .map(|entry| {
-            (
-                entry.path.clone(),
-                String::from_utf8_lossy(&entry.data).into_owned(),
-            )
-        })
+        .map(|entry| (entry.path.clone(), entry.data.clone()))
         .collect()
 }
 
@@ -551,6 +546,46 @@ mod tests {
             None,
         )
         .expect("a connector's fileset exists to write exactly this file");
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_connector_packing_more_than_a_method_may_write() {
+        // The ceiling covers what a grant sends, so a directory has to count against it too — and a validator that never reads the directory cannot see it.
+        let err = build_artifact(
+            &connector_packing_one_directory(),
+            &[vec![entry(
+                "config.json",
+                &"a".repeat(crate::connector::MAX_METHOD_FILESET_BYTES + 1),
+            )]],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("this method's filesets total"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_packed_file_counts_the_bytes_it_holds_not_the_text_it_prints_as() {
+        // from_utf8_lossy turns one invalid byte into three, so counting the lossy text would charge a document for bytes it does not ship.
+        let mut data = vec![b'a'; crate::connector::MAX_METHOD_FILESET_BYTES - 1];
+        data.push(0x80);
+        let built = build_artifact(
+            &connector_packing_one_directory(),
+            &[vec![FileEntry {
+                path: "config.json".to_string(),
+                data,
+                mode: 0o600,
+            }]],
+            None,
+        );
+        assert!(
+            built.is_ok(),
+            "a directory of exactly the ceiling still builds: {:#}",
+            built.unwrap_err()
+        );
     }
 
     fn unpacked(layer: &Blob) -> std::collections::BTreeMap<String, (u32, Vec<u8>)> {

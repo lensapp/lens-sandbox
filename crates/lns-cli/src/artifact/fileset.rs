@@ -16,13 +16,13 @@ pub fn path_fileset_problems<F: Fs + ?Sized>(
     kind: Kind,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    let mut read: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut read: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
     for path in paths {
         match walk(fs, &project_dir.join(path), kind) {
             Ok(entries) => {
                 read.insert(
                     (*path).to_string(),
-                    lns_artifact::build::text_by_name(&entries),
+                    lns_artifact::build::bytes_by_name(&entries),
                 );
             }
             Err(e) => problems.push(format!("fileset {path}: {e:#}")),
