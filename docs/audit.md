@@ -97,8 +97,9 @@ readable:
 ~/.lns/audit/<run-id>/audit.anchor
 ```
 
-The connection ledger sits alongside them at `~/.lns/ledger.jsonl`. `LNS_HOME`
-moves the whole directory, the audit trail with it.
+The durable ledger sits alongside them at `~/.lns/ledger.jsonl` — approvals,
+connector decisions, and what a `lns pull` acquired, none of which belongs to one
+run's chain. `LNS_HOME` moves the whole directory, the audit trail with it.
 
 ## See also
 
