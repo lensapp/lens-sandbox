@@ -489,6 +489,9 @@ pub struct MixinView {
     pub filesets: Vec<SandboxFileset>,
     #[serde(default)]
     pub env: Vec<String>,
+    /// A mixin may declare credentials of its own, and the merge unions them into the sandbox, so an inspect of the mixin alone has to show them.
+    #[serde(default)]
+    pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
@@ -566,6 +569,9 @@ pub struct SandboxView {
     pub filesets: Vec<SandboxFileset>,
     #[serde(default)]
     pub env: Vec<String>,
+    /// The secrets the sandbox declares and the domains they may travel to: §1.5 approves a resolved sandbox, and a secret path nobody sees is one nobody approved.
+    #[serde(default)]
+    pub credentials: Vec<lns_spec::Credential>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
@@ -1990,6 +1996,7 @@ mod tests {
                 guest_path: "/root/.agent/skills".into(),
                 owner: SandboxFilesetOwner::Workload,
             }],
+            credentials: Vec::new(),
             env: vec!["SHELL=/bin/sh".into()],
             tools: vec!["node@22.11.0".into()],
             scripts: vec![SandboxScript {

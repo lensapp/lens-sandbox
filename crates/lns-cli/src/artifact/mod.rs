@@ -677,6 +677,18 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
             render_filesets(out, &view.filesets, attributed)?;
+            for credential in &view.credentials {
+                writeln!(
+                    out,
+                    "credential: {}{}",
+                    credential_disclosure(credential),
+                    crate::run::summary::contribution_attribution(
+                        attributed,
+                        lns_ipc::ContributionBlock::Credential,
+                        credential.owner()
+                    )
+                )?;
+            }
             for tool in &view.tools {
                 writeln!(
                     out,
@@ -708,6 +720,9 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "ports: {}", declared_ports_line(&view.ports))?;
             }
             render_filesets(out, &view.filesets, &[])?;
+            for credential in &view.credentials {
+                writeln!(out, "credential: {}", credential_disclosure(credential))?;
+            }
             for tool in &view.tools {
                 writeln!(out, "tool: {tool}")?;
             }
@@ -748,6 +763,19 @@ fn render_mounts<W: std::io::Write>(
         )?;
     }
     Ok(())
+}
+
+/// A credential named by where it travels, because the domains are what a reader is approving (§1.5).
+pub(crate) fn credential_disclosure(credential: &lns_spec::Credential) -> String {
+    if credential.injections.is_empty() {
+        return format!("{} (travels nowhere)", credential.owner());
+    }
+    let domains: Vec<&str> = credential
+        .injections
+        .iter()
+        .map(|injection| injection.domain.as_str())
+        .collect();
+    format!("{} -> {}", credential.owner(), domains.join(", "))
 }
 
 fn render_filesets<W: std::io::Write>(
@@ -1269,6 +1297,7 @@ mod tests {
                     ports: Vec::new(),
                     filesets: Vec::new(),
                     env: Vec::new(),
+                    credentials: Vec::new(),
                     tools: vec!["node@22.11.0".into()],
                     scripts: vec![
                         lns_ipc::SandboxScript {
@@ -1376,6 +1405,16 @@ mod tests {
                         optional: false,
                     }],
                     env: Vec::new(),
+                    credentials: vec![lns_spec::Credential {
+                        env_var: Some("SOME_TOKEN".into()),
+                        placeholder: "some_LNSPLACEHOLDER0000000000".into(),
+                        field: None,
+                        injections: vec![lns_spec::InjectionDef {
+                            kind: lns_spec::InjectionKind::BearerHeader,
+                            domain: "api.some-provider.example".into(),
+                            header: None,
+                        }],
+                    }],
                     tools: vec!["node@22".into()],
                     scripts: Vec::new(),
                     policy_flags: Vec::new(),
@@ -1392,6 +1431,7 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         for line in [
             "tool: node@22  [from ghcr.io/acme/obs:2, replaced node@20 from the sandbox]",
+            "credential: SOME_TOKEN -> api.some-provider.example  [from ghcr.io/acme/obs:2]",
             "mount: volume obs-cache -> /cache  [from ghcr.io/acme/obs:2]",
             "fileset: inline -> /root/.agent/settings (owner: workload)  [from ghcr.io/acme/obs:2]",
         ] {

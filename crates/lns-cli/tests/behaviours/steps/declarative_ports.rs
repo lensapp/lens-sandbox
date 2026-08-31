@@ -58,6 +58,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
             })
             .collect(),
         filesets: Vec::new(),
+        credentials: Vec::new(),
         env: Vec::new(),
         tools: Vec::new(),
         scripts: Vec::new(),

@@ -19,6 +19,7 @@ Feature: inspecting a typed artifact before running it
     And the output contains "mixin: ghcr.io/acme/base@sha256:"
     And the output contains "env: MODE=research"
     And the output contains "ports: 9090"
+    And the output contains "credential: SOME_TOKEN -> api.some-provider.example"
 
   Scenario: inspecting a plain image labels it image
     Given the service inspects "registry.example.test/some-image:1.0" as a plain image

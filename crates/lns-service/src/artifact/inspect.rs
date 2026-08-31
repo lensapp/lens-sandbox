@@ -116,6 +116,7 @@ pub(crate) fn project_inspection(
                 ports: declared_view_ports(&mixin.spec.ports)?,
                 filesets: declared_view_filesets(&mixin.spec),
                 env: declared_view_env(&mixin.spec),
+                credentials: mixin.spec.credentials.clone(),
                 tools: mixin.spec.tools.clone(),
                 scripts: declared_view_scripts(&mixin.spec),
                 policy_flags: declared_policy_flags(&lns_policy::Policy {
@@ -150,6 +151,7 @@ pub(crate) fn project_inspection(
                     mounts: declared_view_mounts(&def.spec),
                     ports: declared_view_ports(&def.spec.ports)?,
                     filesets: declared_view_filesets(&def.spec),
+                    credentials: def.spec.credentials.clone(),
                     env: declared_view_env(&def.spec),
                     tools: def.spec.tools.clone(),
                     scripts: declared_view_scripts(&def.spec),
@@ -356,6 +358,7 @@ mod tests {
             mounts,
             ports: Vec::new(),
             filesets: Vec::new(),
+            credentials: Vec::new(),
             env: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
@@ -363,6 +366,31 @@ mod tests {
             cpus,
             mem_mib,
             disk_bytes,
+        }))
+    }
+
+    /// The bare projection with declared credentials, so a test compares a whole value rather than reaching into the enum.
+    fn sandbox_view_with_credentials(credentials: Vec<lns_spec::Credential>) -> ArtifactInspection {
+        ArtifactInspection::Sandbox(Box::new(SandboxView {
+            credentials,
+            mixins: Vec::new(),
+            pinned_mixins: Vec::new(),
+            contributions: Vec::new(),
+            reference: "registry.example.test/team/sandbox:latest".into(),
+            digest: digest(),
+            image: "registry.example.test/runtime:1".into(),
+            workdir: None,
+            user: None,
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            filesets: Vec::new(),
+            env: Vec::new(),
+            tools: Vec::new(),
+            scripts: Vec::new(),
+            policy_flags: Vec::new(),
+            cpus: None,
+            mem_mib: None,
+            disk_bytes: None,
         }))
     }
 
@@ -379,6 +407,7 @@ mod tests {
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets: Vec::new(),
+            credentials: Vec::new(),
             env: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
@@ -402,6 +431,7 @@ mod tests {
             mounts: Vec::new(),
             ports: Vec::new(),
             filesets,
+            credentials: Vec::new(),
             env: Vec::new(),
             tools: Vec::new(),
             scripts: Vec::new(),
@@ -413,10 +443,39 @@ mod tests {
     }
 
     #[test]
+    fn a_projected_sandbox_carries_the_credentials_it_declared() {
+        // §1.5: the disclosure is of the resolved sandbox, so a secret path the document wrote down has to reach the reader — with the domains, which are what they approve.
+        assert_eq!(
+            project_inspection(
+                "registry.example.test/team/sandbox:latest",
+                digest(),
+                Some(&lns_artifact::spec::Kind::Sandbox.artifact_type()),
+                &lns_artifact::spec::Kind::Sandbox.config_media_type(),
+                &resolution(
+                    r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{"image":"registry.example.test/runtime:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.some-provider.example"}]}]}}"#,
+                    &[],
+                ),
+                None,
+            )
+            .unwrap(),
+            sandbox_view_with_credentials(vec![lns_spec::Credential {
+                env_var: Some("SOME_TOKEN".into()),
+                placeholder: "some_LNSPLACEHOLDER0000000000".into(),
+                field: None,
+                injections: vec![lns_spec::InjectionDef {
+                    kind: lns_spec::InjectionKind::BearerHeader,
+                    domain: "api.some-provider.example".into(),
+                    header: None,
+                }],
+            }])
+        );
+    }
+
+    #[test]
     fn a_published_mixin_projects_as_the_document_its_author_wrote() {
         let pinned = format!("ghcr.io/acme/base@sha256:{}", "a".repeat(64));
         let document = format!(
-            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs-tools","spec":{{"mixins":["{pinned}"],"tools":["node@22"],"env":{{"MODE":"research"}}}}}}"#
+            r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"obs-tools","spec":{{"mixins":["{pinned}"],"tools":["node@22"],"env":{{"MODE":"research"}},"credentials":[{{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","injections":[{{"kind":"bearer_header","domain":"api.some-provider.example"}}]}}]}}}}"#
         );
         let projected = project_inspection(
             "ghcr.io/acme/obs-tools:2",
@@ -436,6 +495,17 @@ mod tests {
                 mounts: Vec::new(),
                 ports: Vec::new(),
                 filesets: Vec::new(),
+                // A mixin's own credentials merge into the sandbox, so an inspect of the mixin alone has to carry them (§3.1.7).
+                credentials: vec![lns_spec::Credential {
+                    env_var: Some("SOME_TOKEN".into()),
+                    placeholder: "some_LNSPLACEHOLDER0000000000".into(),
+                    field: None,
+                    injections: vec![lns_spec::InjectionDef {
+                        kind: lns_spec::InjectionKind::BearerHeader,
+                        domain: "api.some-provider.example".into(),
+                        header: None,
+                    }],
+                }],
                 env: vec!["MODE=research".into()],
                 tools: vec!["node@22".into()],
                 scripts: Vec::new(),
@@ -745,6 +815,7 @@ mod tests {
                         owner: lns_ipc::SandboxFilesetOwner::Root,
                     },
                 ],
+                credentials: Vec::new(),
                 env: vec![],
                 tools: vec![],
                 scripts: Vec::new(),
@@ -778,6 +849,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
+                credentials: Vec::new(),
                 env: vec![],
                 tools: vec!["node@22.11.0".into(), "python@3.12.6".into()],
                 scripts: Vec::new(),
@@ -809,6 +881,7 @@ mod tests {
                 mounts: vec![],
                 ports: vec![],
                 filesets: vec![],
+                credentials: Vec::new(),
                 env: vec!["FOO=bar".into(), "SHELL=/bin/sh".into()],
                 tools: vec![],
                 scripts: Vec::new(),
