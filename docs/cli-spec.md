@@ -436,10 +436,11 @@ lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 `sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
 `approval`, `credential`, `connector`, or `tool`. Filters compose.
 `credential` covers binding and injecting a value, with or without a connector;
-`connector` covers granting, declining, and forgetting one.
+`connector` covers granting, declining, and forgetting one. `--connector <ID>`
+keeps only what was decided about that one.
 
-**Connecting is not a connector decision the timeline holds.** `SANDBOX` is a
-`RUN`, and every line the timeline carries answers for one — but a connection is
+**Connecting is not a connector decision the timeline holds.** Every line the
+timeline carries answers for one run — but a connection is
 the machine's, held by no run and offered to every one of them
 ([sandbox-spec §7.1](sandbox-spec.md#71-connectors)), so no run's
 timeline could account for it. `disconnect` is the same.

@@ -52,7 +52,7 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/audit/` | Each sandbox's own audit chain, which outlives the sandbox that wrote it. |
 | `~/.lns/runs/` | A live or stopped sandbox's writable layer and scratch, removed with the sandbox. |
-| `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the connection ledger, and the kernel. |
+| `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the durable ledger, and the kernel. |
 
 One directory, one thing to back up, one thing `lns uninstall --purge` removes.
 
