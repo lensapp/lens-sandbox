@@ -530,11 +530,11 @@ fn do_move_mount(sys: &dyn Syscalls, from: &str, to: &str) -> Result<(), MountEr
         })
 }
 
-fn do_mkdir(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<(), MountError> {
+fn do_mkdir(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<bool, MountError> {
     let c = cstring(path, "mkdir-path")?;
     match sys.mkdir(&c, mode) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(false),
         Err(err) => Err(MountError::Syscall {
             op: format!("mkdir({path})"),
             err,
@@ -543,13 +543,21 @@ fn do_mkdir(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<(), MountError>
 }
 
 fn do_mkdir_p(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<(), MountError> {
+    made_by_mkdir_p(sys, path, mode).map(|_| ())
+}
+
+/// Every component this call brought into being, so a caller can hand them to whoever will use them; one the image already shipped is not this boot's to give away.
+fn made_by_mkdir_p(sys: &dyn Syscalls, path: &str, mode: u32) -> Result<Vec<String>, MountError> {
     let mut acc = String::with_capacity(path.len());
+    let mut made = Vec::new();
     for component in path.split('/').filter(|c| !c.is_empty()) {
         acc.push('/');
         acc.push_str(component);
-        do_mkdir(sys, &acc, mode)?;
+        if do_mkdir(sys, &acc, mode)? {
+            made.push(acc.clone());
+        }
     }
-    Ok(())
+    Ok(made)
 }
 
 fn allow_unprivileged_low_ports(sys: &dyn Syscalls) -> Result<(), MountError> {
@@ -640,10 +648,13 @@ fn mount_binds(
     sys: &dyn Syscalls,
     binds: &[crate::cmdline::BindParam],
     newroot: &str,
+    run_ids: Option<(u32, u32)>,
+    home: Option<&str>,
 ) -> Result<(), MountError> {
     for bind in binds {
         let target = format!("{newroot}{}", bind.target);
-        do_mkdir_p(sys, &target, 0o755)?;
+        let made = made_by_mkdir_p(sys, &target, 0o755)?;
+        hand_new_home_dirs_to_workload(sys, newroot, home, run_ids, &made);
         let flags = match bind.read_only {
             true => MountFlags::read_only().nosuid().nodev(),
             false => MountFlags::none().nosuid().nodev(),
@@ -654,6 +665,31 @@ fn mount_binds(
         }
     }
     Ok(())
+}
+
+/// A mount point this boot created at or under the home belongs to the workload, or it can traverse the directory and write nothing beside what the mount put there.
+fn hand_new_home_dirs_to_workload(
+    sys: &dyn Syscalls,
+    newroot: &str,
+    home: Option<&str>,
+    run_ids: Option<(u32, u32)>,
+    made: &[String],
+) {
+    let (Some((uid, gid)), Some(home)) = (run_ids, home) else {
+        return;
+    };
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return;
+    }
+    let at_home = format!("{newroot}{home}");
+    let under_home = format!("{at_home}/");
+    for path in made
+        .iter()
+        .filter(|p| **p == at_home || p.starts_with(&under_home))
+    {
+        lchown_logged(sys, path, uid, gid);
+    }
 }
 
 /// Hides a dropped secret from the workload without deleting it from the live share: an empty tmpfs over a directory, a `/dev/null` bind over a file.
@@ -936,7 +972,13 @@ fn mount_composefs_and_exec_broker_inner(
 
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
-    mount_binds(sys, &params.binds, newroot)?;
+    mount_binds(
+        sys,
+        &params.binds,
+        newroot,
+        run_ids,
+        identity.as_ref().and_then(|i| i.home.as_deref()),
+    )?;
 
     land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, run_ids)?;
 
@@ -2862,12 +2904,106 @@ mod tests {
     }
 
     #[test]
+    fn mount_binds_hands_the_workload_every_home_directory_it_had_to_create() {
+        // A component left root-owned means the workload can traverse it and write nothing beside what the mount put there.
+        let chowned = homes_handed_over("/home/agent", "/home/agent/.claude/projects");
+        assert_eq!(
+            chowned,
+            [
+                "/newroot/home/agent",
+                "/newroot/home/agent/.claude",
+                "/newroot/home/agent/.claude/projects",
+            ],
+            "the home this boot had to make, and everything it made under it"
+        );
+    }
+
+    #[test]
+    fn a_home_component_the_image_shipped_is_not_this_boots_to_give_away() {
+        let sys = FakeSyscalls::new().fail_when(|c| match c {
+            Call::Mkdir { path, .. } if path == "/newroot/home/agent" => {
+                Some(ErrorKind::AlreadyExists)
+            }
+            _ => None,
+        });
+        mount_binds(
+            &sys,
+            &[bind_param(
+                "lns-bind-0",
+                "/home/agent/.claude/projects",
+                false,
+                &[],
+            )],
+            "/newroot",
+            Some((1000, 1000)),
+            Some("/home/agent"),
+        )
+        .unwrap();
+
+        let calls = sys.calls();
+        let chowned: Vec<&str> = calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::Lchown { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !chowned.contains(&"/newroot/home/agent"),
+            "a directory the image already had keeps the owner the image gave it: {chowned:?}"
+        );
+        assert!(
+            chowned.contains(&"/newroot/home/agent/.claude"),
+            "and what this boot did make is still handed over: {chowned:?}"
+        );
+    }
+
+    fn homes_handed_over(home: &str, target: &str) -> Vec<String> {
+        let sys = FakeSyscalls::new();
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", target, false, &[])],
+            "/newroot",
+            Some((1000, 1000)),
+            Some(home),
+        )
+        .unwrap();
+        sys.calls()
+            .iter()
+            .filter_map(|c| match c {
+                Call::Lchown { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_home_of_slash_names_no_home_so_nothing_is_handed_over() {
+        // `nobody` resolves home `/` on some images. Every directory a boot creates is under it, and none of them is that user's home.
+        assert!(
+            homes_handed_over("/", "/srv/app").is_empty(),
+            "a boot-created directory anywhere is not a home"
+        );
+    }
+
+    #[test]
+    fn a_home_written_with_a_trailing_slash_is_the_same_home() {
+        // The passwd field is the image's to spell, and a spelling that handed the workload nothing would look exactly like the defect this fixes.
+        assert!(
+            homes_handed_over("/home/agent/", "/home/agent/.claude/projects")
+                .contains(&"/newroot/home/agent".to_string())
+        );
+    }
+
+    #[test]
     fn mount_binds_mounts_each_tag_as_virtiofs_under_newroot() {
         let sys = FakeSyscalls::new();
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[])],
             "/newroot",
+            None,
+            None,
         )
         .unwrap();
         let calls = sys.calls();
@@ -2888,6 +3024,8 @@ mod tests {
             &sys,
             &[bind_param("lns-bind-0", "/cfg", true, &[])],
             "/newroot",
+            None,
+            None,
         )
         .unwrap();
         assert!(
@@ -2905,6 +3043,8 @@ mod tests {
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[".env"])],
             "/newroot",
+            None,
+            None,
         )
         .unwrap();
         let calls = sys.calls();
@@ -2924,6 +3064,8 @@ mod tests {
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[".ssh"])],
             "/newroot",
+            None,
+            None,
         )
         .unwrap();
         let calls = sys.calls();
