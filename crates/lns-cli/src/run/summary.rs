@@ -362,10 +362,13 @@ pub fn format_summary(
             .tools
             .iter()
             .map(|tool| {
-                let key = tool.split_once('@').map_or(tool.as_str(), |(name, _)| name);
                 format!(
                     "{tool}{}",
-                    attribution(args, lns_ipc::ContributionBlock::Tool, key)
+                    attribution(
+                        args,
+                        lns_ipc::ContributionBlock::Tool,
+                        lns_artifact::merge::tool_name(tool)
+                    )
                 )
             })
             .collect();
