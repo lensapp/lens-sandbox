@@ -154,7 +154,7 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
 | `RUN` | A sandbox's numeric id (`7`), its name (`reviewer`), or a unique id prefix. |
 | `PATTERN` | A destination: host, wildcard host (`*.github.com`), CIDR, or `host:port`. |
 | `NAME` | A volume name, a connector id, or a registry host. |
-| `PROFILE` | A connector profile's label, unique per connector. |
+| `CONNECTION` | A connector connection's label, unique per connector. |
 | `KEY` | A dotted config key (`run.mem`). |
 
 - A command takes a `REF` or a `RUN`, never either. Given the wrong kind, it says
@@ -323,29 +323,29 @@ not the document: whether it is available on **this machine**.
 lns connector install <REF|PATH>
 lns connector uninstall <ID>
 lns connector list [--format <table|json>]
-lns connector connect <ID> [--method <NAME>] [--as <PROFILE>]
-lns connector disconnect <ID> [--profile <PROFILE>]
-lns connector grant <ID> [--method <NAME>] [--profile <PROFILE>] [--project <PATH>]
+lns connector connect <ID> [--method <NAME>] [--as <CONNECTION>]
+lns connector disconnect <ID> [--connection <CONNECTION>]
+lns connector grant <ID> [--method <NAME>] [--connection <CONNECTION>] [--project <PATH>]
 lns connector forget <ID> [--project <PATH>]
 ```
 
 | Verb | What it does |
 |---|---|
 | `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no variable is set, no file is written. It does make the connector's destinations ask, in every project that has neither granted nor declined it. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
-| `uninstall` | Removes it from this machine, with every profile it held. A project that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
-| `list` | Lists what is installed: what each connector serves, its methods — marking those that need no connect — and the profiles this machine holds for it. |
-| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **profile**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several profiles of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a project still decides which profile to use. |
-| `disconnect` | Drops one profile, or every profile of a connector when `--profile` is absent. Exits `1` when the connector holds none — a connector whose methods all lack `auth` never holds one. The connector stays installed, projects that granted a dropped profile keep their grants, and you are asked to connect again the next time a request needs a value. |
-| `grant` | Grants this project a method before a run asks for it. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the profile's authority where it authenticates — and asks. `--method` names the method; omitted, you choose when more than one is offerable. `--profile` names the profile behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no profile, `grant` says to `connect` first rather than starting an authentication of its own. A project holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. `--project <PATH>` acts on another directory. Exits `1` when the project already granted that method and profile. |
+| `uninstall` | Removes it from this machine, with every connection it held. A project that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
+| `list` | Lists what is installed: what each connector serves, its methods — marking those that need no connect — and the connections this machine holds for it. |
+| `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **connection**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several connections of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a project still decides which connection to use. |
+| `disconnect` | Drops one connection, or every connection of a connector when `--connection` is absent. Exits `1` when the connector holds none — a connector whose methods all lack `auth` never holds one. The connector stays installed, projects that granted a dropped connection keep their grants, and you are asked to connect again the next time a request needs a value. |
+| `grant` | Grants this project a method before a run asks for it. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the connection's authority where it authenticates — and asks. `--method` names the method; omitted, you choose when more than one is offerable. `--connection` names the connection behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no connection, `grant` says to `connect` first rather than starting an authentication of its own. A project holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. `--project <PATH>` acts on another directory. Exits `1` when the project already granted that method and connection. |
 | `forget` | Clears this project's decision about one connector, granted or declined, so the next run asks again. The inverse of `grant`. `--project <PATH>` acts on another directory. Exits `1` when there was nothing to forget. |
 
 Four verbs bound the decision, across two scopes. On the machine: `install`
-makes a connector offerable, and `connect` signs in and stores a profile. In a
+makes a connector offerable, and `connect` signs in and stores a connection. In a
 project: `grant` lets it use one method, and `forget` takes that back.
 
-**`--as` naming a profile that already exists re-authenticates that one in
+**`--as` naming a connection that already exists re-authenticates that one in
 place.** Where the authentication comes back with different authority, the grants
-naming that profile are invalidated and asked again
+naming that connection are invalidated and asked again
 ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
 
 **`grant` is the card in a terminal, not a shortcut past it.** It discloses
@@ -356,18 +356,18 @@ no terminal to ask at, `grant` refuses like any other prompt
 ([§7.2](#72-answering)), so a script cannot consent on a person's behalf.
 
 **The card is the normal path.** It offers every method the connector declares,
-and for one that authenticates, every profile this machine holds plus the option
+and for one that authenticates, every connection this machine holds plus the option
 of a new one — so choosing there is what most people ever do. `connect` and
 `grant` are for deciding ahead of time: signing in on a new machine, adding a
-second profile, or pointing a fresh clone at the method and profile you know it
-needs. Either way the sequence is the same: choose a method, and a profile where
+second connection, or pointing a fresh clone at the method and connection you know it
+needs. Either way the sequence is the same: choose a method, and a connection where
 it authenticates; satisfy the authentication where there is one; and only then do
 its egress, its files, and its injections apply.
 
 **The request that raised the card waits while you do it.** How long it waits is
 not something `lns` controls — the workload set that deadline. A slow sign-in can
 outlast it, and then that one request fails. It does not cancel the connect: you
-finish, the profile applies, and the next request works.
+finish, the connection applies, and the next request works.
 
 ### 3.4 `lns volume`
 
@@ -424,7 +424,7 @@ lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 
 `SANDBOX` is a `RUN`. `--kind` takes one of `launch`, `exit`, `restart`,
 `sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
-`approval`, `connection`, `credential`, `connector`, or `tool`. Filters compose.
+`approval`, `credential`, `connector`, or `tool`. Filters compose.
 `credential` covers binding and injecting a value, with or without a connector;
 `connector` covers connecting, granting, declining, and forgetting one.
 
@@ -675,8 +675,8 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 |---|---|
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
 | `~/.lns/connectors/` | The connectors installed on this machine, each stored verbatim at the digest it came from. |
-| `~/.lns/connector-grants.json` | Which connector method a project granted, the profile behind it where it authenticates, the authority it consented to, and which connectors it declined. |
-| `~/.lns/connector-values.json` | The profiles this machine holds — each one's authority and the values its `auth` returned, mode `0600`. |
+| `~/.lns/connector-grants.json` | Which connector method a project granted, the connection behind it where it authenticates, the authority it consented to, and which connectors it declined. |
+| `~/.lns/connector-values.json` | The connections this machine holds — each one's authority and the values its `auth` returned, mode `0600`. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the audit trail, and the kernel. |
 
