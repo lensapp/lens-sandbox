@@ -18,10 +18,10 @@ Feature: managing running sandboxes from the CLI
   Scenario: the sandbox help describes the verbs in the product's own words
     When I run "lns sandbox --help"
     Then the exit code is 0
-    And the output does not contain "docker"
+    And the output does not contain "docker" in any casing
     When I run "lns sandbox attach --help"
     Then the exit code is 0
-    And the output does not contain "docker"
+    And the output does not contain "docker" in any casing
 
   Scenario: the flat exec and kill verbs stay usable but leave the front page
     When I run "lns --help"
