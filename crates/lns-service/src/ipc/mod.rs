@@ -1864,7 +1864,7 @@ mod tests {
             installed["connector"]["serves"][0],
             "api.some-provider.example"
         );
-        assert_eq!(installed["connector"]["methods"][0]["needs_connect"], true);
+        assert_eq!(installed["connector"]["methods"][0]["auth_label"], "token");
 
         let listed = as_json(handle_request(&Request::ListConnectors, now).await);
         assert_eq!(listed["type"], "ConnectorList", "got {listed}");

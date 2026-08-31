@@ -13,7 +13,7 @@ pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload
         credentials: method
             .credentials
             .iter()
-            .map(|credential| armed(credential, values))
+            .map(|credential| armed(method, credential, values))
             .collect(),
         env: method.env.clone(),
         files: inline_files(method),
@@ -42,8 +42,8 @@ fn policy_of(method: &Method) -> lns_policy::Policy {
 }
 
 /// One credential as the boundary receives it. A value this machine does not hold leaves every injection **unarmed** — the domain is declared so the placeholder's first use is gated, but no secret is substituted (§3.2.4).
-fn armed(credential: &Credential, values: &SecretValues) -> WireCredential {
-    let value = supplied(credential, values);
+fn armed(method: &Method, credential: &Credential, values: &SecretValues) -> WireCredential {
+    let value = supplied(method, credential, values);
     WireCredential {
         id: credential.owner().to_string(),
         env_var: credential.env_var.clone(),
@@ -56,10 +56,10 @@ fn armed(credential: &Credential, values: &SecretValues) -> WireCredential {
     }
 }
 
-/// The value behind a credential: the `field` its method's `auth` produced, or the one value a single-credential method collected.
-fn supplied(credential: &Credential, values: &SecretValues) -> Option<String> {
-    let key = credential.field.as_deref().unwrap_or(credential.owner());
-    values.0.get(key).cloned()
+/// The value behind a credential, read under the same `auth` output the connect asked for it under (§4.1).
+fn supplied(method: &Method, credential: &Credential, values: &SecretValues) -> Option<String> {
+    let key = lns_artifact::connector::input_of(method, credential)?;
+    values.0.get(&key).cloned()
 }
 
 fn one_injection(injection: &lns_spec::InjectionDef, value: Option<&str>) -> WireInjection {
@@ -228,7 +228,7 @@ mod tests {
     fn a_bearer_credential_carries_the_value_the_machine_holds() {
         let payload = granted_payload(
             &token_method("bearer_header"),
-            &values(&[("SOME_TOKEN", "sk-live")]),
+            &values(&[("token", "sk-live")]),
         );
         assert_eq!(
             *injection_of(&payload),
@@ -247,8 +247,7 @@ mod tests {
             ("bearer_header", "Bearer sk-live"),
             ("token_header", "token sk-live"),
         ] {
-            let payload =
-                granted_payload(&token_method(kind), &values(&[("SOME_TOKEN", "sk-live")]));
+            let payload = granted_payload(&token_method(kind), &values(&[("token", "sk-live")]));
             assert_eq!(
                 *injection_of(&payload),
                 header("Authorization", expected),
@@ -261,7 +260,7 @@ mod tests {
     fn a_basic_scheme_sends_the_token_as_the_password_of_a_fixed_user() {
         let payload = granted_payload(
             &token_method("basic_x_access_token"),
-            &values(&[("SOME_TOKEN", "sk-live")]),
+            &values(&[("token", "sk-live")]),
         );
         assert_eq!(
             *injection_of(&payload),
@@ -285,7 +284,7 @@ mod tests {
                 }],
             }],
         }));
-        let payload = granted_payload(&with_header, &values(&[("SOME_TOKEN", "sk-live")]));
+        let payload = granted_payload(&with_header, &values(&[("token", "sk-live")]));
         assert_eq!(
             *injection_of(&payload),
             header("x-api-key", "sk-live"),
@@ -297,7 +296,7 @@ mod tests {
     fn a_uri_credential_is_substituted_in_the_url_rather_than_a_header() {
         let payload = granted_payload(
             &token_method("uri_placeholder"),
-            &values(&[("SOME_TOKEN", "sk-live")]),
+            &values(&[("token", "sk-live")]),
         );
         assert_eq!(
             *injection_of(&payload),
@@ -313,7 +312,7 @@ mod tests {
         // One `log::debug!` of a policy frame would otherwise put a live credential on the trace stream.
         let payload = granted_payload(
             &token_method("bearer_header"),
-            &values(&[("SOME_TOKEN", "sk-live")]),
+            &values(&[("token", "sk-live")]),
         );
         let printed = format!("{:?}", injection_of(&payload));
         assert!(!printed.contains("sk-live"), "{printed}");
@@ -328,7 +327,7 @@ mod tests {
     fn a_uri_credential_is_redacted_too_and_it_is_the_one_that_would_leak_a_whole_url() {
         let payload = granted_payload(
             &token_method("uri_placeholder"),
-            &values(&[("SOME_TOKEN", "sk-live")]),
+            &values(&[("token", "sk-live")]),
         );
         let printed = format!("{:?}", injection_of(&payload));
         assert!(!printed.contains("sk-live"), "{printed}");

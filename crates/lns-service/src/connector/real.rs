@@ -550,6 +550,23 @@ mod tests {
             .expect("record a grant");
     }
 
+    /// One value under every key the method's own view asks for, so a test cannot connect under a key nothing reads back.
+    fn asked_for(name: &str, method: &str) -> std::collections::BTreeMap<String, String> {
+        with_stores(handler::list)
+            .expect("list the installed set")
+            .into_iter()
+            .find(|connector| connector.name == name)
+            .unwrap_or_else(|| panic!("{name} is not installed"))
+            .methods
+            .into_iter()
+            .find(|view| view.name == method)
+            .unwrap_or_else(|| panic!("{name} declares no method {method}"))
+            .asks
+            .into_iter()
+            .map(|ask| (ask, "sk-live".to_string()))
+            .collect()
+    }
+
     fn reconnect_reporting_admin(home: &Path) -> Vec<String> {
         use crate::approval_flow::session::ConnectorPort;
         RealConnectorPort::new(RUN.to_string())
@@ -557,11 +574,7 @@ mod tests {
                 "some-provider",
                 "token",
                 "work",
-                lns_ipc::SecretValues(
-                    [("SOME_TOKEN".to_string(), "sk-live".to_string())]
-                        .into_iter()
-                        .collect(),
-                ),
+                lns_ipc::SecretValues(asked_for("some-provider", "token")),
             )
             .unwrap_or_else(|e| panic!("re-authenticating against {}: {e}", home.display()))
     }
@@ -805,11 +818,7 @@ mod tests {
                 "some-provider",
                 "token",
                 "work",
-                lns_ipc::SecretValues(
-                    [("SOME_TOKEN".to_string(), "sk-live".to_string())]
-                        .into_iter()
-                        .collect(),
-                ),
+                lns_ipc::SecretValues(asked_for("some-provider", "token")),
             )
             .expect("connect");
         assert!(invalidated.is_empty(), "no run granted anything yet");
@@ -846,11 +855,7 @@ mod tests {
             "some-provider",
             "token",
             "work",
-            lns_ipc::SecretValues(
-                [("SOME_TOKEN".to_string(), "sk-live".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
+            lns_ipc::SecretValues(asked_for("some-provider", "token")),
         )
         .expect("connect");
         port.grant("some-provider", "sha256:abc", "token", Some("work"))

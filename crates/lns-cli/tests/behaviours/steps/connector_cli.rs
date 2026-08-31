@@ -21,23 +21,25 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
             ConnectorMethodView {
                 name: "token".to_string(),
                 label: "API token".to_string(),
-                needs_connect: true,
+                auth_label: Some("token".to_string()),
                 offerable: true,
                 opens: vec!["api.some-provider.example".to_string()],
                 writes: vec!["/home/agent/.some-provider".to_string()],
                 env: vec!["SOME_REGION".to_string()],
                 credentials: vec!["SOME_TOKEN".to_string()],
+                asks: vec!["token".to_string()],
                 help: Some("Create one under Settings then Tokens.".to_string()),
             },
             ConnectorMethodView {
                 name: "open".to_string(),
                 label: "open".to_string(),
-                needs_connect: false,
+                auth_label: None,
                 offerable: true,
                 opens: Vec::new(),
                 writes: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
+                asks: Vec::new(),
                 help: None,
             },
         ],
@@ -668,12 +670,12 @@ fn prompt_suggests_the_name(world: &mut BehaviourWorld, suggested: String) {
     );
 }
 
-#[then(expr = "the prompt names the variable {string}")]
-fn prompt_names_variable(world: &mut BehaviourWorld, variable: String) {
+#[then(expr = "the prompt names the authentication {string}")]
+fn prompt_names_the_authentication(world: &mut BehaviourWorld, authentication: String) {
     let run = run_of(world);
     assert!(
-        run.output.contains(&variable),
-        "the ask names the variable the value fills: {}",
+        run.output.contains(&authentication),
+        "the ask names the sign-in the value comes from, which is what the user pastes: {}",
         run.output
     );
 }

@@ -1557,12 +1557,13 @@ pub(crate) mod tests {
             methods: vec![lns_ipc::ConnectorMethodView {
                 name: method.to_string(),
                 label: method.to_string(),
-                needs_connect: !connections.is_empty(),
+                auth_label: (!connections.is_empty()).then(|| "token".to_string()),
                 offerable: true,
                 opens: vec!["api.some-provider.example".to_string()],
                 writes: Vec::new(),
                 env: Vec::new(),
                 credentials: Vec::new(),
+                asks: Vec::new(),
                 help: None,
             }],
             connections: connections

@@ -162,6 +162,61 @@ impl ConnectorRig {
         }
     }
 
+    /// Connects through the keys the method's own view asks for, because a connect that guessed the key would prove nothing about the grant that reads it.
+    pub fn connect(&mut self, method: &str, value: &str) {
+        let name = self.name.clone();
+        let values = self
+            .asks_of(&name, method)
+            .into_iter()
+            .map(|ask| (ask, value.to_string()))
+            .collect();
+        self.error =
+            lns_service::connector::handler::connect(&self.store(), &name, method, "work", values)
+                .err()
+                .map(|e| format!("{e:#}"));
+    }
+
+    fn asks_of(&self, name: &str, method: &str) -> Vec<String> {
+        lns_service::connector::handler::list(&self.store())
+            .expect("list the installed set")
+            .into_iter()
+            .find(|connector| connector.name == name)
+            .unwrap_or_else(|| panic!("{name} is not installed"))
+            .methods
+            .into_iter()
+            .find(|view| view.name == method)
+            .unwrap_or_else(|| panic!("{name} declares no method {method}"))
+            .asks
+    }
+
+    pub fn grant_through_the_connection(&mut self, run: &str, method: &str) {
+        let name = self.name.clone();
+        self.error = lns_service::connector::handler::grant(
+            &self.store(),
+            &name,
+            &holder(run),
+            method,
+            Some("work"),
+        )
+        .err()
+        .map(|e| format!("{e:#}"));
+    }
+
+    /// What the boundary is armed with for one variable, read through the same path a starting run reads (§7.1).
+    pub fn supplied_to(&self, run: &str, variable: &str) -> Option<String> {
+        lns_service::connector::handler::granted_supply(&self.store(), &holder(run))
+            .expect("read what this run granted")
+            .values()
+            .flat_map(|payload| payload.credentials.clone())
+            .find(|credential| credential.env_var.as_deref() == Some(variable))
+            .and_then(|credential| {
+                credential
+                    .injections
+                    .first()
+                    .map(|injection| injection.value().to_string())
+            })
+    }
+
     pub fn connections_of(&self, name: &str) -> BTreeMap<String, Connection> {
         self.store()
             .connections_of(name)

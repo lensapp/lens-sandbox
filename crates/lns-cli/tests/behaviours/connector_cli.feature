@@ -73,14 +73,14 @@ Feature: lns connector, on this machine
     Then the connector command fails
     And the connector error mentions lns-service
 
-  Scenario: connecting asks for each credential by the variable it fills
+  Scenario: connecting asks for the value the authentication produces, and names it
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service connects "some-provider" as "token"
     And the user types ""
     And the user types "sk-live-real"
     When the user runs connector command "connect some-provider --method token"
     Then the connector command succeeds
-    And the prompt names the variable "SOME_TOKEN"
+    And the prompt names the authentication "token"
     And the prompt says the value is not shown
     And the connector output does not contain "sk-live-real"
     And the output says connecting is not granting
