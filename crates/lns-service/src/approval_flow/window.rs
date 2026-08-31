@@ -16,12 +16,12 @@ pub struct DecisionDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     Decide(Decision),
-    /// Connect this project to the offered connector by the named method (§3.2.4).
+    /// Connect this run to the offered connector by the named method (§3.2.4).
     Grant {
         method: String,
         connection: ConnectionChoice,
     },
-    /// A standing no for this project; the ordinary card then asks what the hold stood in for.
+    /// A standing no for this run; the ordinary card then asks what the hold stood in for.
     Decline,
     /// A closed card: fail the held request, but record nothing — the developer made no decision.
     Dismiss,

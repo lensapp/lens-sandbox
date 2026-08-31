@@ -410,18 +410,18 @@ fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
         },
         Request::GrantConnector {
             name,
-            project_dir,
+            run,
             method,
             connection,
         } => Call::Grant {
             name: name.clone(),
-            project_dir: project_dir.clone(),
+            run: run.clone(),
             method: method.clone(),
             connection: connection.clone(),
         },
-        Request::ForgetConnector { name, project_dir } => Call::Forget {
+        Request::ForgetConnector { name, run } => Call::Forget {
             name: name.clone(),
-            project_dir: project_dir.clone(),
+            run: run.clone(),
         },
         _ => return None,
     })
@@ -1887,6 +1887,11 @@ mod tests {
         )
         .unwrap();
         let now = Instant::now();
+        // A grant is keyed by the run, so `--run` must name one this machine holds.
+        let run_id = crate::run_registry::allocate_run_id();
+        let (handle, _cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.clone(), Some("reviewer".into()), handle)
+            .expect("register");
         handle_request(
             &Request::InstallConnector {
                 source: project.path().display().to_string(),
@@ -1916,7 +1921,7 @@ mod tests {
             handle_request(
                 &Request::GrantConnector {
                     name: "some-provider".into(),
-                    project_dir: "/work".into(),
+                    run: "reviewer".into(),
                     method: "token".into(),
                     connection: None,
                 },
@@ -1934,7 +1939,7 @@ mod tests {
             handle_request(
                 &Request::ForgetConnector {
                     name: "some-provider".into(),
-                    project_dir: "/work".into(),
+                    run: "reviewer".into(),
                 },
                 now,
             )
@@ -1942,6 +1947,7 @@ mod tests {
         );
         assert_eq!(forgotten["type"], "ConnectorForgotten", "got {forgotten}");
         assert_eq!(forgotten["had_decision"], true);
+        crate::run_registry::deregister(&run_id);
 
         let disconnected = as_json(
             handle_request(

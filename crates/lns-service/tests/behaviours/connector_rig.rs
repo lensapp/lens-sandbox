@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use lns_policy::decision_store::JsonDecisionStore;
 use lns_service::connector::dir::ConnectorDir;
-use lns_service::connector::store::{Connection, ConnectorStore, Installed, ProjectDecision};
+use lns_service::connector::store::{Connection, ConnectorStore, Installed, RunDecision};
 
 /// The machine a connector scenario installs onto, plus the document it is building up.
 pub struct ConnectorRig {
     _tmp: tempfile::TempDir,
     dir: ConnectorDir,
     values: JsonDecisionStore<Connection>,
-    grants: JsonDecisionStore<ProjectDecision>,
+    grants: JsonDecisionStore<RunDecision>,
 
     name: String,
     serves: Vec<String>,
@@ -119,12 +119,12 @@ impl ConnectorRig {
             .methods
     }
 
-    pub fn grant(&self, dir: &str, name: &str, method: &str) {
+    pub fn grant(&self, run: &str, name: &str, method: &str) {
         self.store()
             .decide(
-                dir,
+                run,
                 name,
-                ProjectDecision::Granted {
+                RunDecision::Granted {
                     digest: self.digest(),
                     method: method.to_string(),
                     connection: None,
@@ -134,9 +134,18 @@ impl ConnectorRig {
             .expect("record the grant");
     }
 
-    pub fn granted_method(&self, dir: &str, name: &str) -> Option<String> {
-        match self.store().decision(dir, name).expect("read the decision") {
-            Some(ProjectDecision::Granted { method, .. }) => Some(method),
+    /// What one run is still offered, through the same path the card reads (§3.2.1).
+    pub fn offered_to(&self, run: &str) -> Vec<String> {
+        lns_service::connector::handler::offerable(&self.store(), run)
+            .expect("read what this run is offered")
+            .into_iter()
+            .map(|offer| offer.name)
+            .collect()
+    }
+
+    pub fn granted_method(&self, run: &str, name: &str) -> Option<String> {
+        match self.store().decision(run, name).expect("read the decision") {
+            Some(RunDecision::Granted { method, .. }) => Some(method),
             _ => None,
         }
     }

@@ -144,15 +144,16 @@ pub enum Request {
         name: String,
         connection: Option<String>,
     },
+    /// `run` is the handle the user typed: only the service holds the registry that resolves it.
     GrantConnector {
         name: String,
-        project_dir: String,
+        run: String,
         method: String,
         connection: Option<String>,
     },
     ForgetConnector {
         name: String,
-        project_dir: String,
+        run: String,
     },
 }
 

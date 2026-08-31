@@ -58,7 +58,7 @@ Feature: lns connector, on this machine
     Given the service uninstalls "some-provider" dropping 2 connections
     When the user runs connector command "uninstall some-provider"
     Then the connector command succeeds
-    And the output says projects keep what they granted
+    And the output says runs keep what they granted
     And the output says 2 connections were dropped
 
   Scenario: uninstalling something that is not installed exits 1
@@ -122,7 +122,7 @@ Feature: lns connector, on this machine
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "token"
     And the user types "y"
-    When the user runs connector command "grant some-provider --method token"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command succeeds
     And the disclosure names what the method opens
     And the disclosure names the file it writes
@@ -133,15 +133,15 @@ Feature: lns connector, on this machine
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "open"
     And the user types "y"
-    When the user runs connector command "grant some-provider --method open"
+    When the user runs connector command "grant some-provider --run reviewer --method open"
     Then the connector command succeeds
     And the disclosure says the method carries nothing to disclose
 
-  Scenario: a grant this project already holds exits 1 and says so
+  Scenario: a grant this run already holds exits 1 and says so
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service reports the grant unchanged for "some-provider"
     And the user types "y"
-    When the user runs connector command "grant some-provider --method token"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command exits 1
     And the output says it was already granted
 
@@ -149,23 +149,38 @@ Feature: lns connector, on this machine
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "token"
     And the user types "n"
-    When the user runs connector command "grant some-provider --method token"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command exits 1
     And the output says nothing was granted
 
   Scenario: granting with no terminal refuses, and no flag answers it
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And there is no terminal
-    When the user runs connector command "grant some-provider --method token"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command fails
     And the connector error says "granting"
     And the connector error says "No flag answers it"
+
+  Scenario: granting with no --run is a usage error, because there is no directory to fall back on
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --method token"
+    Then the connector command fails
+    And the connector error says "--run"
+
+  Scenario: the disclosure names the run being granted
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
+    Then the connector command succeeds
+    And the disclosure names the run "reviewer"
 
   Scenario: granting again names the method it replaced
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "token" replacing "session"
     And the user types "y"
-    When the user runs connector command "grant some-provider --method token"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command succeeds
     And the output says it replaced "session"
 
@@ -183,15 +198,15 @@ Feature: lns connector, on this machine
     Then the connector command succeeds
     And the output says it stays installed
 
-  Scenario: forgetting a project that decided nothing exits 1
+  Scenario: forgetting a run that decided nothing exits 1
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service forgets nothing about "some-provider"
-    When the user runs connector command "forget some-provider"
+    When the user runs connector command "forget some-provider --run reviewer"
     Then the connector command exits 1
 
-  Scenario: forgetting clears what the project decided
+  Scenario: forgetting clears what the run decided
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service forgets a decision about "some-provider"
-    When the user runs connector command "forget some-provider"
+    When the user runs connector command "forget some-provider --run reviewer"
     Then the connector command succeeds
     And the output says it forgot the decision
