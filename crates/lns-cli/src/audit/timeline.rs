@@ -40,6 +40,11 @@ pub(super) fn run(args: &AuditArgs, out: &mut dyn Write) -> Result<i32> {
 }
 
 fn matches_filter(row: &TimelineRow, args: &AuditArgs) -> bool {
+    if let Some(connector) = &args.connector
+        && row.connector.as_deref() != Some(connector.as_str())
+    {
+        return false;
+    }
     if let Some(kind) = args.kind
         && row.kind != kind.label()
     {
@@ -161,6 +166,18 @@ mod tests {
         .to_string()
     }
 
+    fn connector_decision(run: &str, ts: &str, name: &str) -> String {
+        lns_ocsf::connector(
+            &octx(run, ts),
+            name,
+            "granted",
+            Some("token"),
+            Some("work"),
+            Some("sha256:abc"),
+        )
+        .to_string()
+    }
+
     fn tool_provision(run: &str, ts: &str) -> String {
         lns_ocsf::tool_provision(
             &octx(run, ts),
@@ -263,6 +280,7 @@ mod tests {
         AuditArgs {
             sandbox: None,
             kind: None,
+            connector: None,
             format: None,
         }
     }
@@ -474,6 +492,43 @@ mod tests {
             fix.render(&scoped).trim(),
             "No audit events for sandbox nope."
         );
+    }
+
+    #[test]
+    fn the_connector_filter_keeps_only_the_decisions_naming_it() {
+        // §3.6: `--connector` answers "what has this run decided about this one", which a timeline of every connector cannot.
+        let fix = Fixture::new();
+        fix.write_ledger(&[
+            connector_decision(RUN, "2026-06-29T14:00:00Z", "some-provider"),
+            connector_decision(RUN, "2026-06-29T14:01:00Z", "other-provider"),
+            approval(RUN, "2026-06-29T14:02:00Z"),
+        ]);
+        let filtered = AuditArgs {
+            connector: Some("some-provider".into()),
+            ..args()
+        };
+        let rows = fix.collect(&filtered).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.detail.as_str()).collect::<Vec<_>>(),
+            ["granted some-provider token as work"],
+            "an approval names no connector, so it is not one this filter keeps"
+        );
+    }
+
+    #[test]
+    fn the_kind_filter_accepts_connector_for_a_connector_decision() {
+        let fix = Fixture::new();
+        fix.write_ledger(&[
+            connector_decision(RUN, "2026-06-29T14:00:00Z", "some-provider"),
+            approval(RUN, "2026-06-29T14:01:00Z"),
+        ]);
+        let filtered = AuditArgs {
+            kind: Some(KindArg::Connector),
+            ..args()
+        };
+        let rows = fix.collect(&filtered).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "connector");
     }
 
     #[test]

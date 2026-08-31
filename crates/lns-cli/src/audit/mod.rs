@@ -12,6 +12,8 @@ pub struct AuditArgs {
     pub sandbox: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]
     pub kind: Option<KindArg>,
+    #[arg(long, help = "Only show events for this connector.")]
+    pub connector: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -43,6 +45,7 @@ pub enum KindArg {
     Volume,
     Bind,
     Approval,
+    Connector,
     Tool,
 }
 
@@ -55,6 +58,7 @@ impl KindArg {
             KindArg::Volume => "volume",
             KindArg::Bind => "bind",
             KindArg::Approval => "approval",
+            KindArg::Connector => "connector",
             KindArg::Tool => "tool",
         }
     }
@@ -207,6 +211,8 @@ mod tests {
         assert_eq!(KindArg::Volume.label(), "volume");
         assert_eq!(KindArg::Bind.label(), "bind");
         assert_eq!(KindArg::Approval.label(), "approval");
+        assert_eq!(KindArg::Connector.label(), "connector");
+        assert_eq!(KindArg::Tool.label(), "tool");
     }
 
     #[tokio::test]

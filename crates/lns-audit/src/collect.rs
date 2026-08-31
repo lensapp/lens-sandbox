@@ -12,6 +12,8 @@ pub struct TimelineRow {
     pub run: String,
     pub kind: String,
     pub detail: String,
+    /// The connector this event concerns, so `lns audit --connector` can keep only what it names.
+    pub connector: Option<String>,
     pub raw: Value,
 }
 
@@ -75,6 +77,7 @@ fn read_ledger_row(
         run: row.run,
         kind: row.kind,
         detail: row.detail,
+        connector: row.connector,
         raw: Value::Object(event),
     })
 }
@@ -135,6 +138,7 @@ fn read_run_row(line: &str, run_id: &str) -> std::result::Result<TimelineRow, St
         run: run_id.to_string(),
         kind: row.kind,
         detail: row.detail,
+        connector: row.connector,
         raw: Value::Object(obj),
     })
 }
@@ -328,6 +332,7 @@ mod tests {
                 run: "bb".into(),
                 kind: "env".into(),
                 detail: String::new(),
+                connector: None,
                 raw: Value::Null,
             },
             TimelineRow {
@@ -336,6 +341,7 @@ mod tests {
                 run: "aa".into(),
                 kind: "volume".into(),
                 detail: String::new(),
+                connector: None,
                 raw: Value::Null,
             },
             TimelineRow {
@@ -344,6 +350,7 @@ mod tests {
                 run: "aa".into(),
                 kind: "env".into(),
                 detail: String::new(),
+                connector: None,
                 raw: Value::Null,
             },
         ];

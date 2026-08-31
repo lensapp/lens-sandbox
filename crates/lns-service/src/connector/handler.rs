@@ -142,6 +142,8 @@ pub struct Connected {
 pub struct Granted {
     pub method: String,
     pub connection: Option<String>,
+    /// The bytes this grant bound to, which is the whole of what the run consented to (§7.1).
+    pub digest: String,
     pub displaced: Option<String>,
     /// True when the run already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
     pub unchanged: bool,
@@ -221,6 +223,7 @@ pub fn grant(
         return Ok(Granted {
             method: method.name.clone(),
             connection,
+            digest: entry.digest.clone(),
             displaced: None,
             unchanged: true,
         });
@@ -229,6 +232,7 @@ pub fn grant(
     Ok(Granted {
         method: method.name.clone(),
         connection,
+        digest: entry.digest.clone(),
         displaced: displaced.and_then(displaced_method),
         unchanged: false,
     })
@@ -246,7 +250,7 @@ pub fn grant_disclosed(
     holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
-) -> Result<crate::approval_flow::protocol::GrantedPayload> {
+) -> Result<(Granted, crate::approval_flow::protocol::GrantedPayload)> {
     let entry = installed_entry(store, name)?;
     if entry.digest != disclosed_digest {
         anyhow::bail!(
@@ -255,7 +259,8 @@ pub fn grant_disclosed(
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
     let settled = grant(store, name, holder, method, connection)?;
-    supplied_by(store, &entry, method, settled.connection.as_deref())
+    let payload = supplied_by(store, &entry, method, settled.connection.as_deref())?;
+    Ok((settled, payload))
 }
 
 /// Two grants claiming one guest path reach the guest as two creates: the second fails, the batch rolls back, and every granted file for the run goes with it. So the collision is refused where a user can still answer it.
@@ -1509,7 +1514,7 @@ mod tests {
             .put("some-provider", "sha256:abc", &doc, &[])
             .unwrap();
 
-        let payload = grant_disclosed(
+        let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
             "sha256:abc",
@@ -1573,7 +1578,7 @@ mod tests {
             "an inline fileset's content is inside the document install already keeps, so nothing is missing"
         );
 
-        let payload = grant_disclosed(
+        let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
             "sha256:abc",
@@ -1898,7 +1903,7 @@ mod tests {
         )
         .expect("connect");
 
-        let payload = grant_disclosed(
+        let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
             "sha256:abc",

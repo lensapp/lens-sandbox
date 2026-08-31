@@ -5,6 +5,8 @@ use serde_json::{Map, Value};
 pub struct Row {
     pub kind: String,
     pub detail: String,
+    /// The connector an event concerns, which is what `lns audit --connector` filters on.
+    pub connector: Option<String>,
     pub run: String,
     pub ts: String,
 }
@@ -18,6 +20,7 @@ pub fn read(event: &Map<String, Value>) -> Result<Row> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        connector: opt(um, "lns_connector"),
         run: text(um, "lns_run"),
         ts: text(um, "lns_ts"),
     })
@@ -46,6 +49,10 @@ fn req<'a>(um: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     um.get(key)
         .and_then(Value::as_str)
         .with_context(|| format!("OCSF audit event missing string unmapped.{key}"))
+}
+
+fn opt(um: &Map<String, Value>, key: &str) -> Option<String> {
+    um.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 fn text(um: &Map<String, Value>, key: &str) -> String {

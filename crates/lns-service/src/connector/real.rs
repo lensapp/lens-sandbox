@@ -104,12 +104,14 @@ fn read_offers(holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>> {
 /// The connector store as the approval session reaches it: every method opens the three stores itself, because a card outlives no lock.
 pub struct RealConnectorPort {
     holder: GrantHolder,
+    microvm: String,
 }
 
 impl RealConnectorPort {
-    pub fn new(run_id: String) -> Self {
+    pub fn new(run_id: String, microvm: String) -> Self {
         Self {
             holder: GrantHolder::Run(run_id),
+            microvm,
         }
     }
 
@@ -144,16 +146,77 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         method: &str,
         connection: Option<&str>,
     ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
-        self.with_store(|store| {
+        let (granted, payload) = self.with_store(|store| {
             handler::grant_disclosed(store, name, digest, &self.holder, method, connection)
-        })
+        })?;
+        // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
+        if !granted.unchanged {
+            record_decision(&self.holder, &self.microvm, granted_event(name, &granted));
+        }
+        Ok(payload)
     }
 
     fn decline(&self, name: &str) -> Result<(), String> {
         self.with_store(|store| {
             store.decide(&self.holder, name, RunDecision::Declined)?;
             Ok(())
-        })
+        })?;
+        record_decision(&self.holder, &self.microvm, declined_event(name));
+        Ok(())
+    }
+}
+
+/// The ledger line one connector decision leaves. A connection is the machine's and no run holds it, so connecting writes none: no run's timeline could account for it (cli-spec §3.6).
+fn record_decision(holder: &GrantHolder, microvm: &str, event: lns_ipc::LedgerEvent) {
+    let record = lns_ipc::LedgerRecord {
+        ts: crate::ledger::now_rfc3339(&crate::clock::RealClock),
+        // A reservation is held by a name no run answers to yet, so it belongs to no run's timeline until one takes it.
+        run: match holder {
+            GrantHolder::Run(id) => id.clone(),
+            GrantHolder::Reservation(_) => String::new(),
+        },
+        microvm: microvm.to_string(),
+        event,
+    };
+    if let Err(e) = crate::ledger::append_ledger_record(&record) {
+        crate::log::warn!("could not record this connector decision: {e:#}");
+    }
+}
+
+/// The name the run answers to, so a line the CLI writes carries the same identity as one a run's own recorder stamps.
+fn microvm_of(holder: &GrantHolder) -> String {
+    match holder {
+        GrantHolder::Run(id) => crate::run_registry::name_of(id).unwrap_or_default(),
+        GrantHolder::Reservation(_) => String::new(),
+    }
+}
+
+fn granted_event(name: &str, granted: &handler::Granted) -> lns_ipc::LedgerEvent {
+    lns_ipc::LedgerEvent::Connector {
+        connector: name.to_string(),
+        verb: lns_ipc::ConnectorVerb::Granted,
+        method: Some(granted.method.clone()),
+        connection: granted.connection.clone(),
+        digest: Some(granted.digest.clone()),
+    }
+}
+
+fn declined_event(name: &str) -> lns_ipc::LedgerEvent {
+    connector_event(name, lns_ipc::ConnectorVerb::Declined)
+}
+
+fn forgotten_event(name: &str) -> lns_ipc::LedgerEvent {
+    connector_event(name, lns_ipc::ConnectorVerb::Forgotten)
+}
+
+/// A decline answers for every version of the bytes and a forget clears whatever was there, so neither names a method or a digest.
+fn connector_event(name: &str, verb: lns_ipc::ConnectorVerb) -> lns_ipc::LedgerEvent {
+    lns_ipc::LedgerEvent::Connector {
+        connector: name.to_string(),
+        verb,
+        method: None,
+        connection: None,
+        digest: None,
     }
 }
 
@@ -339,6 +402,13 @@ pub async fn answer(call: Call) -> Result<Response> {
         } => {
             let holder = holder_of(&run)?;
             let granted = handler::grant(&store, &name, &holder, &method, connection.as_deref())?;
+            if !granted.unchanged {
+                record_decision(
+                    &holder,
+                    &microvm_of(&holder),
+                    granted_event(&name, &granted),
+                );
+            }
             Ok(Response::ConnectorGranted {
                 name,
                 method: granted.method,
@@ -350,8 +420,12 @@ pub async fn answer(call: Call) -> Result<Response> {
         }
         Call::Forget { name, run } => {
             let holder = holder_of(&run)?;
+            let had_decision = handler::forget(&store, &name, &holder)?;
+            if had_decision {
+                record_decision(&holder, &microvm_of(&holder), forgotten_event(&name));
+            }
             Ok(Response::ConnectorForgotten {
-                had_decision: handler::forget(&store, &name, &holder)?,
+                had_decision,
                 reserved: matches!(holder, GrantHolder::Reservation(_)),
                 name,
             })
@@ -388,7 +462,7 @@ mod tests {
     const OTHER_RUN: &str = "9f8e7d6c0000000000000000000000bb";
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn the_three_stores_are_wired_to_the_paths_the_cli_specification_names() {
         // Construction reaches no disk, so this pins the wiring rather than the I/O.
         let home = tempfile::tempdir().expect("tempdir");
@@ -400,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn no_resolvable_home_refuses_rather_than_writing_beside_the_working_directory() {
         let _lns = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         let err = Paths::resolve().expect_err("a relative home must be refused");
@@ -555,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_run_holds_what_an_undecided_connector_on_this_machine_serves() {
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
@@ -567,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn one_runs_decline_reaches_that_run_and_no_other() {
         // §7.1: a decision is keyed by the run, so a second run — in the same directory or any other — is asked for itself.
         let home = tempfile::tempdir().expect("tempdir");
@@ -583,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn connector_state_this_build_cannot_reach_holds_nothing_rather_than_failing_the_run() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(offers_for_run(RUN).is_empty());
@@ -662,7 +736,7 @@ mod tests {
 
     fn reconnect_reporting_admin(home: &Path) -> Vec<String> {
         use crate::approval_flow::session::ConnectorPort;
-        RealConnectorPort::new(RUN.to_string())
+        RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
             .connect(
                 "some-provider",
                 "token",
@@ -698,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_run_the_user_named_takes_what_was_reserved_and_a_generated_name_discards_it() {
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
@@ -741,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_generated_name_no_reservation_waits_for_drops_nothing_and_says_nothing() {
         // The ordinary case: most runs are auto-named and no reservation is waiting, so the discard must be silent.
         let home = tempfile::tempdir().expect("tempdir");
@@ -754,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn removing_a_run_removes_what_it_granted_so_the_next_run_of_that_name_is_asked() {
         // §8.4: the grant goes with the run, and the name is then free of it.
         let home = tempfile::tempdir().expect("tempdir");
@@ -778,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn the_boot_sweep_keeps_a_recorded_run_and_drops_the_rest() {
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
@@ -798,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn connector_state_this_build_cannot_reach_forgets_nothing_rather_than_failing_a_removal() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert_eq!(forget_what_a_run_decided(RUN), 0);
@@ -806,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_restart_takes_nothing_because_it_carries_its_own_run_id() {
         // §3.2.4: a rename or a restart is not the creation of a run, so a reservation for that name stays waiting.
         let home = tempfile::tempdir().expect("tempdir");
@@ -826,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn connector_state_this_build_cannot_reach_reserves_nothing_and_takes_nothing() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(reserved_names().is_empty());
@@ -837,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn an_invalidated_reservation_is_reported_by_the_name_it_waits_for() {
         // A reservation has no run to look up, so it is its own name — never a run id run through the registry.
         let home = tempfile::tempdir().expect("tempdir");
@@ -853,7 +927,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     async fn an_invalidated_grant_is_reported_by_the_name_its_run_holds() {
         // A store key carries the NUL separator, so reporting one would print it at the user.
         let home = tempfile::tempdir().expect("tempdir");
@@ -879,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn an_invalidated_grant_of_a_run_this_machine_no_longer_holds_is_reported_by_its_short_id() {
         // The run was removed between the grant and the re-authentication; naming it by id still tells the user which decision went.
         let home = tempfile::tempdir().expect("tempdir");
@@ -898,13 +972,13 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_card_connects_then_grants_and_the_guest_is_given_what_the_method_supplies() {
         use crate::approval_flow::session::ConnectorPort;
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
-        let port = RealConnectorPort::new(RUN.to_string());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
 
         let invalidated = port
             .connect(
@@ -936,14 +1010,14 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_run_that_granted_yesterday_gets_what_it_granted_today() {
         // §7.1: the grant is recorded once and supplies every later run. Reading only the decision would leave the run with the destination closed and the credential absent.
         use crate::approval_flow::session::ConnectorPort;
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
-        let port = RealConnectorPort::new(RUN.to_string());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
         port.connect(
             "some-provider",
             "token",
@@ -974,8 +1048,237 @@ mod tests {
         );
     }
 
+    /// The one connection the grant tests settle on, so the grant has an account behind the method that authenticates.
+    fn connect_work() {
+        use crate::approval_flow::session::ConnectorPort;
+        RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
+            .connect(
+                "some-provider",
+                "token",
+                "work",
+                lns_ipc::SecretValues(asked_for("some-provider", "token")),
+            )
+            .expect("connect");
+    }
+
+    /// A run the registry answers for, because a `--run` handle is resolved before any decision is recorded against it. Deregisters itself, so a run one test needs is not a run another one finds.
+    struct RegisteredRun {
+        run_id: String,
+        _cancel: tokio::sync::oneshot::Receiver<i32>,
+    }
+
+    impl Drop for RegisteredRun {
+        fn drop(&mut self) {
+            crate::run_registry::deregister(&self.run_id);
+        }
+    }
+
+    fn a_registered_run(run_id: &str) -> RegisteredRun {
+        let (handle, cancel) = crate::run_registry::test_handle();
+        crate::run_registry::register_named(run_id.to_string(), None, handle).expect("register");
+        RegisteredRun {
+            run_id: run_id.to_string(),
+            _cancel: cancel,
+        }
+    }
+
+    /// Every ledger line this machine holds, read back the way `lns audit` reads it.
+    fn recorded() -> Vec<lns_audit::Row> {
+        let path = lns_ipc::connection_ledger().expect("the ledger path");
+        if !path.exists() {
+            return Vec::new();
+        }
+        lns_audit::stream_ledger(&path)
+            .expect("stream the ledger")
+            .map(|event| lns_audit::read(&event.expect("a ledger line")).expect("a readable row"))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_grant_is_written_to_the_chain_under_the_run_that_holds_it() {
+        // §3.6: the ledger holds the connector decisions, and a grant opens destinations and arms a credential — the decision the chain most needs.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let _run = a_registered_run(RUN);
+        connect_work();
+
+        answer(Call::Grant {
+            name: "some-provider".to_string(),
+            run: RUN.to_string(),
+            method: "token".to_string(),
+            connection: None,
+        })
+        .await
+        .expect("grant");
+
+        let rows = recorded();
+        assert_eq!(rows.len(), 1, "one decision, one line: {rows:?}");
+        assert_eq!(rows[0].kind, "connector");
+        assert_eq!(
+            rows[0].run, RUN,
+            "the run that holds the grant owns the line"
+        );
+        assert_eq!(rows[0].connector.as_deref(), Some("some-provider"));
+        assert_eq!(rows[0].detail, "granted some-provider token as work");
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn granting_again_what_a_run_already_grants_writes_no_second_line() {
+        // cli-spec §3.3 makes a repeat an exit-1 non-answer, so a line for it would let the chain count re-runs of a command as decisions.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let _run = a_registered_run(RUN);
+        connect_work();
+        let again = || {
+            answer(Call::Grant {
+                name: "some-provider".to_string(),
+                run: RUN.to_string(),
+                method: "token".to_string(),
+                connection: None,
+            })
+        };
+
+        again().await.expect("grant");
+        again().await.expect("grant the same thing again");
+
+        assert_eq!(
+            recorded().len(),
+            1,
+            "one decision was made, however many times it was asked for"
+        );
+    }
+
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
+    fn a_decision_whose_line_cannot_be_written_still_stands_and_says_so() {
+        // The chain is the weaker of the two: losing a line understates history, and refusing the grant over it would let a full disk take the user's answer away.
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        connect_work();
+        std::fs::create_dir_all(lns_ipc::connection_ledger().expect("the ledger path"))
+            .expect("a ledger path nothing can append to");
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
+
+        let mut granted = None;
+        let said = crate::test_env::captured_messages(|| {
+            granted = Some(port.grant("some-provider", "sha256:abc", "token", Some("work")));
+        });
+
+        assert!(
+            granted.expect("the grant was answered").is_ok(),
+            "a lost audit line must not take the user's answer with it"
+        );
+        assert!(
+            said.iter().any(|m| m.contains("connector decision")),
+            "the operator has to learn the record was lost: {said:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_forget_is_written_and_forgetting_nothing_writes_nothing() {
+        // A line for a forget that cleared nothing would say a decision was retracted where none was held.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let _run = a_registered_run(RUN);
+
+        answer(Call::Forget {
+            name: "some-provider".to_string(),
+            run: RUN.to_string(),
+        })
+        .await
+        .expect("forget nothing");
+        assert!(
+            recorded().is_empty(),
+            "nothing was cleared, so nothing happened"
+        );
+
+        grant_recorded(RUN, "some-provider");
+        answer(Call::Forget {
+            name: "some-provider".to_string(),
+            run: RUN.to_string(),
+        })
+        .await
+        .expect("forget");
+
+        let rows = recorded();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, "forgot some-provider");
+        assert_eq!(rows[0].run, RUN);
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_grant_reserved_for_a_name_no_run_holds_belongs_to_no_run_s_timeline() {
+        // §3.2.4: the reservation waits for a run that does not exist, so no run id could own the line and `lns audit <RUN>` must not claim it.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        connect_work();
+
+        answer(Call::Grant {
+            name: "some-provider".to_string(),
+            run: "audit-reservation".to_string(),
+            method: "token".to_string(),
+            connection: None,
+        })
+        .await
+        .expect("reserve a grant");
+
+        let rows = recorded();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, "granted some-provider token as work");
+        assert_eq!(rows[0].run, "", "no run holds it yet");
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn a_card_grant_and_a_card_decline_are_both_written_to_the_chain() {
+        use crate::approval_flow::session::ConnectorPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
+        port.connect(
+            "some-provider",
+            "token",
+            "work",
+            lns_ipc::SecretValues(asked_for("some-provider", "token")),
+        )
+        .expect("connect");
+        assert!(
+            recorded().is_empty(),
+            "a connection is the machine's and no run holds it, so no run's timeline accounts for it"
+        );
+
+        port.grant("some-provider", "sha256:abc", "token", Some("work"))
+            .expect("grant");
+        RealConnectorPort::new(OTHER_RUN.to_string(), "calm-finch".to_string())
+            .decline("some-provider")
+            .expect("decline");
+
+        let rows = recorded();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.detail.as_str(), row.run.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("granted some-provider token as work", RUN),
+                ("declined some-provider", OTHER_RUN),
+            ],
+            "the card's answer is the run's decision, and the account it settled on is part of it"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
     fn the_variables_a_grant_fills_are_the_ones_no_other_source_may_set() {
         // A variable missing from this map is one a `-e` can shadow, putting a real secret where the boundary substitutes a placeholder.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1003,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_run_that_granted_two_connectors_is_supplied_both() {
         // Stopping at the first recorded grant would leave the second connector's destination closed, chosen by whichever the store listed first.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1037,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_grant_made_against_bytes_that_have_since_changed_supplies_nothing() {
         // The connector was updated after the grant, so what it now opens is not what the run consented to.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1062,13 +1365,13 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_run_that_declined_is_supplied_nothing() {
         use crate::approval_flow::session::ConnectorPort;
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
-        RealConnectorPort::new(RUN.to_string())
+        RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
             .decline("some-provider")
             .expect("decline");
 
@@ -1076,21 +1379,21 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn connector_state_that_cannot_be_read_supplies_nothing_rather_than_failing_the_run() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(granted_supply_for(RUN).is_empty());
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_card_grant_against_bytes_that_changed_is_refused() {
         use crate::approval_flow::session::ConnectorPort;
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_connectable(home.path());
 
-        let refused = RealConnectorPort::new(RUN.to_string())
+        let refused = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
             .grant(
                 "some-provider",
                 "sha256:what-the-card-showed",
@@ -1103,14 +1406,14 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_card_decline_is_the_standing_no_the_next_run_reads() {
         use crate::approval_flow::session::ConnectorPort;
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_one(home.path(), "api.some-provider.example");
 
-        RealConnectorPort::new(RUN.to_string())
+        RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
             .decline("some-provider")
             .expect("decline");
 
@@ -1122,11 +1425,11 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial(env, global_runs)]
     fn a_card_answer_that_cannot_reach_the_store_says_so_rather_than_panicking() {
         use crate::approval_flow::session::ConnectorPort;
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
-        let port = RealConnectorPort::new(RUN.to_string());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
 
         assert!(
             port.decline("some-provider")

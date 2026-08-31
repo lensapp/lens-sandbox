@@ -1619,7 +1619,10 @@ pub(crate) mod tests {
             decision,
             reason,
             ..
-        } = opened[0];
+        } = opened[0]
+        else {
+            unreachable!("filtered to approvals above")
+        };
         assert_eq!(target, "api.some-provider.example");
         assert_eq!(*decision, LedgerDecision::AllowOnce);
         assert!(
