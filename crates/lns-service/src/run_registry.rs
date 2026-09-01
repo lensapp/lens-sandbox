@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn ensure_name_available_rejects_taken_or_invalid_names_and_accepts_free_ones() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn register_named_assigns_an_auto_name_and_resolves_by_name_and_id() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
@@ -983,7 +983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_runs_exec_environment_is_readable_for_the_life_of_the_run() {
         // `lns exec` enters the same guest later and has to compose the same env, the same PATH and the same tool vars.
         let id = allocate_run_id();
@@ -1016,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_run_never_becomes_exec_able_before_its_environment_is_readable() {
         // The connector is the gate `lns exec` passes; publishing it a moment before the environment would let an exec in that window run without it and with no error.
         let id = allocate_run_id();
@@ -1033,7 +1033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn rename_via_the_global_registry_updates_the_name() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
@@ -1056,11 +1056,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn cancel_unknown_run_returns_false() {
         assert!(!cancel("ffffffffffffffffffffffffffffffff"));
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn cancel_fires_oneshot_with_130() {
         let id = allocate_run_id();
         let (handle, cancel_rx) = make_handle();
@@ -1072,6 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn cancel_twice_only_fires_once() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1088,6 +1091,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn request_detach_fires_the_detach_signal_once() {
         let id = allocate_run_id();
         let (mut handle, _cancel_rx) = make_handle();
@@ -1106,6 +1110,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn request_detach_reports_not_attached_when_the_pump_has_gone() {
         let id = allocate_run_id();
         let (mut handle, _cancel_rx) = make_handle();
@@ -1123,6 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn deregister_clears_registry() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1144,12 +1150,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn input_sender_returns_none_for_unknown_id() {
         let id = "deadbeef00000000000000000000000a".to_string();
         assert!(input_sender(&id).is_none());
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn input_sender_returns_clone_when_handle_has_one() {
         let id = allocate_run_id();
         let (mut handle, _rx) = make_handle();
@@ -1164,6 +1172,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn two_exec_sessions_on_one_run_route_input_independently() {
         let run_id = allocate_run_id();
         let (mut handle, _cancel_rx) = make_handle();
@@ -1197,6 +1206,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn registering_an_exec_session_for_a_missing_run_is_refused() {
         let (input_tx, _input_rx) = mpsc::channel::<SessionInput>(1);
         assert!(!register_exec_session(
@@ -1207,6 +1217,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn deregistering_one_exec_session_leaves_the_primary_and_sibling_addressable() {
         let run_id = allocate_run_id();
         let (mut handle, _cancel_rx) = make_handle();
@@ -1253,12 +1264,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn connector_returns_none_for_unknown_id() {
         let id = "deadbeef00000000000000000000000b".to_string();
         assert!(connector(&id).is_none());
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn connector_returns_none_when_handle_has_no_connector() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1270,6 +1283,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn set_connector_populates_handle_field() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1291,6 +1305,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn set_connector_is_noop_when_run_not_registered() {
         let id = "deadbeef00000000000000000000000c".to_string();
         set_connector(&id, std::sync::Arc::new(StubTransport));
@@ -1299,7 +1314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn set_exit_code_flips_status_to_exited() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1314,6 +1329,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn set_exit_code_is_noop_when_run_not_registered() {
         let id = "deadbeef00000000000000000000000d".to_string();
         set_exit_code(&id, 17);
@@ -1321,7 +1337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn mark_exited_from_log_adopts_the_log_buffers_exit_code() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1335,7 +1351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn mark_exited_from_log_leaves_a_run_running_while_its_log_is_open() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1348,6 +1364,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn mark_exited_from_log_is_noop_when_run_not_registered() {
         let id = "deadbeef00000000000000000000000e".to_string();
         mark_exited_from_log(&id);
@@ -1355,7 +1372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_finished_run_stays_listed_with_readable_logs_until_it_is_removed() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1381,7 +1398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn status_reports_running_then_exited_and_none_when_unknown() {
         let id = allocate_run_id();
         assert_eq!(status(&id), None);
@@ -1402,6 +1419,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn inspect_returns_summary_and_launch_config_for_a_registered_run() {
         let id = allocate_run_id();
         let (mut handle, _rx) = make_handle();
@@ -1422,12 +1440,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn inspect_returns_none_for_unknown_run() {
         let id = "deadbeef00000000000000000000000f".to_string();
         assert!(inspect(&id).is_none());
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn set_resolved_size_updates_the_inspected_config() {
         let id = allocate_run_id();
         let (mut handle, _rx) = make_handle();
@@ -1446,6 +1466,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn set_resolved_command_and_env_updates_the_inspected_launch_config() {
         let id = allocate_run_id();
         let (mut handle, _rx) = make_handle();
@@ -1475,6 +1496,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn log_buffer_returns_the_registered_runs_buffer() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1490,12 +1512,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn log_buffer_returns_none_for_unknown_run() {
         let id = "deadbeef000000000000000000000010".to_string();
         assert!(log_buffer(&id).is_none());
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn snapshot_lists_registered_handles_with_running_status() {
         let id = allocate_run_id();
         let (mut handle, _rx) = make_handle();
@@ -1586,6 +1610,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn remove_if_exited_removes_an_exited_run_from_the_live_registry() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1597,6 +1622,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn remove_if_exited_refuses_a_running_run_in_the_live_registry() {
         let id = allocate_run_id();
         let (handle, _rx) = make_handle();
@@ -1609,6 +1635,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn remove_if_exited_reports_not_found_for_an_unknown_run() {
         let id = "deadbeef000000000000000000000011".to_string();
         assert!(matches!(remove_if_exited(&id), RemoveOutcome::NotFound));
@@ -1705,7 +1732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_stopped_entry_has_no_session_to_cancel_detach_or_feed() {
         let id = allocate_run_id();
         register_stopped(StoppedRun {
@@ -1724,7 +1751,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn transition_to_live_boots_a_stopped_entry_under_its_reserved_name() {
         let id = allocate_run_id();
         register_stopped(StoppedRun {
@@ -1738,7 +1765,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn transition_to_live_replaces_a_run_that_exited_in_this_session() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
@@ -1752,7 +1779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn transition_to_live_refuses_a_running_run_and_an_unknown_one() {
         let id = allocate_run_id();
         let (h, _rx) = make_handle();
@@ -1792,7 +1819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn inspect_of_a_stopped_run_reports_its_recorded_launch_config() {
         let id = allocate_run_id();
         let mut record = stopped_record(&id, &format!("rev-{id}"));
@@ -1814,7 +1841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn resolve_status_answers_handle_and_state_in_one_step() {
         let id = allocate_run_id();
         register_stopped(StoppedRun {
@@ -1833,7 +1860,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn rebuild_from_records_populates_the_live_registry() {
         let id = allocate_run_id();
         rebuild_from_records(vec![stopped_record(&id, &format!("rev-{id}"))]);
@@ -1842,7 +1869,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn cancel_of_a_stopped_run_is_a_no_op_that_keeps_the_entry() {
         let id = allocate_run_id();
         register_stopped(StoppedRun {

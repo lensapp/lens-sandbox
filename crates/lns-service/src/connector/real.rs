@@ -747,6 +747,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env, global_runs)]
     fn a_name_no_run_holds_is_a_reservation_and_an_unresolvable_id_is_an_error() {
         // §2.4: a name is never all lowercase hex, so an id that resolves to nothing cannot be read as a name a run may later take.
         assert_eq!(
@@ -758,6 +759,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn a_handle_that_resolves_names_the_run_it_resolved_to() {
         let (handle, _cancel) = crate::run_registry::test_handle();
         crate::run_registry::register_named(RUN.to_string(), Some("reviewer".into()), handle)
