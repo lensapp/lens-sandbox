@@ -12,6 +12,7 @@ use lns_session::{ClientFrame, Winsize, decode_frame, decode_length_prefix};
 mod real;
 #[cfg(target_os = "linux")]
 pub use real::handle_session;
+mod workdir;
 
 pub(crate) fn close(fd: RawFd) {
     // SAFETY: caller owns fd.
@@ -31,10 +32,13 @@ pub(crate) struct WorkloadSpec {
     pub(crate) scrub: Vec<String>,
 }
 
-/// A declared workdir keeps `-w`'s create-if-missing contract; the identity-home fallback is chdir-only, because creating it would run mkdir as guest root on a passwd-controlled path.
+/// A declared workdir keeps `-w`'s create-if-missing contract and hands what it creates to the run-as identity; the identity-home fallback is chdir-only, because creating it would run mkdir as guest root on a passwd-controlled path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionCwd {
-    Declared(String),
+    Declared {
+        dir: String,
+        owner: Option<(u32, u32)>,
+    },
     Fallback(String),
 }
 
@@ -107,7 +111,12 @@ pub(crate) fn build_workload_spec<'a>(
         .map(str::to_string);
     WorkloadSpec {
         argv,
-        cwd: session_cwd(cwd, &confinement, effective_home.as_deref()),
+        cwd: session_cwd(
+            cwd,
+            &confinement,
+            effective_home.as_deref(),
+            identity.uid.zip(identity.gid),
+        ),
         hostname,
         scrub: keys_to_scrub(inherited, &confinement),
         confinement,
@@ -148,9 +157,13 @@ pub(crate) fn session_cwd(
     cwd: Option<String>,
     confinement: &Confinement,
     home: Option<&str>,
+    run_ids: Option<(u32, u32)>,
 ) -> Option<SessionCwd> {
     if let Some(declared) = cwd.filter(|c| !c.is_empty()) {
-        return Some(SessionCwd::Declared(declared));
+        return Some(SessionCwd::Declared {
+            dir: declared,
+            owner: run_ids,
+        });
     }
     if matches!(confinement, Confinement::Inherit) {
         return None;
@@ -372,7 +385,12 @@ mod tests {
 
     #[test]
     fn a_confined_session_without_a_workdir_starts_in_the_effective_home_best_effort() {
-        let cwd = session_cwd(None, &Confinement::CapsOnly, Some("/home/node"));
+        let cwd = session_cwd(
+            None,
+            &Confinement::CapsOnly,
+            Some("/home/node"),
+            Some((1000, 1000)),
+        );
         assert_eq!(
             cwd,
             Some(SessionCwd::Fallback("/home/node".into())),
@@ -386,13 +404,43 @@ mod tests {
             Some("/app".into()),
             &Confinement::CapsOnly,
             Some("/home/node"),
+            Some((1000, 1000)),
         );
-        assert_eq!(cwd, Some(SessionCwd::Declared("/app".into())));
+        assert_eq!(
+            cwd,
+            Some(SessionCwd::Declared {
+                dir: "/app".into(),
+                owner: Some((1000, 1000)),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unconfined_sessions_declared_workdir_still_names_the_run_as_owner() {
+        let cwd = session_cwd(
+            Some("/home/node/task".into()),
+            &Confinement::Inherit,
+            Some("/home/node"),
+            Some((1000, 1000)),
+        );
+        assert_eq!(
+            cwd,
+            Some(SessionCwd::Declared {
+                dir: "/home/node/task".into(),
+                owner: Some((1000, 1000)),
+            }),
+            "the supervised workload runs the broker child as root and setuids its own agent later, so the workdir it creates must still land on the run-as identity"
+        );
     }
 
     #[test]
     fn an_empty_declared_workdir_is_treated_as_absent() {
-        let cwd = session_cwd(Some(String::new()), &Confinement::CapsOnly, Some("/home/n"));
+        let cwd = session_cwd(
+            Some(String::new()),
+            &Confinement::CapsOnly,
+            Some("/home/n"),
+            Some((1000, 1000)),
+        );
         assert_eq!(
             cwd,
             Some(SessionCwd::Fallback("/home/n".into())),
@@ -402,13 +450,13 @@ mod tests {
 
     #[test]
     fn the_primary_sessions_cwd_stays_the_supervisors_business() {
-        let cwd = session_cwd(None, &Confinement::Inherit, Some("/home/node"));
+        let cwd = session_cwd(None, &Confinement::Inherit, Some("/home/node"), None);
         assert_eq!(cwd, None);
     }
 
     #[test]
     fn a_confined_session_with_no_home_keeps_the_brokers_cwd() {
-        let cwd = session_cwd(None, &Confinement::CapsOnly, None);
+        let cwd = session_cwd(None, &Confinement::CapsOnly, None, None);
         assert_eq!(cwd, None);
     }
 

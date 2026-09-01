@@ -16,11 +16,12 @@ const HOST_DRAIN_GRACE: Duration = Duration::from_secs(2);
 use super::{
     Confinement, LoopAction, RunIdentity, SessionCwd, SessionError, SessionOutcome, SharedFd,
     WorkloadSpec, build_workload_spec, close, dispatch_frame, eof_action, read_client_frame,
-    signal_target, validate_argv, validate_open_session,
+    signal_target, validate_argv, validate_open_session, workdir,
 };
 use crate::forker::{Fork, Forker};
 use crate::pty;
 use crate::vsock;
+use workdir::WorkdirFs;
 
 fn dup(fd: RawFd) -> RawFd {
     // SAFETY: caller-owned fd.
@@ -607,13 +608,32 @@ fn set_guest_hostname(hostname: Option<&str>) {
     }
 }
 
+struct RealWorkdirFs;
+
+impl WorkdirFs for RealWorkdirFs {
+    fn is_dir(&self, path: &str) -> bool {
+        std::fs::metadata(path).is_ok_and(|md| md.is_dir())
+    }
+
+    fn create_dir(&self, path: &str) -> io::Result<()> {
+        std::fs::create_dir(path)
+    }
+
+    fn chown(&self, path: &str, uid: u32, gid: u32) -> io::Result<()> {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+    }
+
+    fn set_current_dir(&self, path: &str) -> io::Result<()> {
+        std::env::set_current_dir(path)
+    }
+}
+
+/// Runs before `apply_confinement`, so the mkdir still has root's write access to the parent and the chown is permitted.
 fn enter_workdir(cwd: Option<&SessionCwd>) {
     match cwd {
         None => {}
-        Some(SessionCwd::Declared(dir)) => {
-            let entered =
-                std::fs::create_dir_all(dir).and_then(|()| std::env::set_current_dir(dir));
-            if let Err(e) = entered {
+        Some(SessionCwd::Declared { dir, owner }) => {
+            if let Err(e) = workdir::enter(&RealWorkdirFs, dir, *owner) {
                 let _ = writeln_stderr(&format!("workdir {dir:?}: {e}"));
                 child_exit(126);
             }

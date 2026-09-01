@@ -239,7 +239,7 @@ keeping its `ENTRYPOINT`; `--` is accepted but not required.
 | `--cpus <N>` | `1` | vCPUs. Falls back to the `run.cpus` default. |
 | `-m`, `--mem <SIZE>` | `512` | RAM in MiB, or with a unit (`2g`, `512m`, `38Gi`; binary, rounded up to a whole MiB). Falls back to `run.mem`. Alias: `--memory`. |
 | `--mixin <REF>` | | Merge a mixin after the ones the document declares. Repeatable, in the order written; a later one wins. Takes a reference or a path, so this is also how you run with a mixin the project does not name. A tag is pinned before the run reports it. |
-| `-w`, `--workdir <DIR>` | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox. Absolute; created if missing. |
+| `-w`, `--workdir <DIR>` | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox. Absolute; created if missing, owned by the run-as user. |
 | `-e`, `--env <KEY=VALUE>` | | Set a non-secret environment variable. Repeatable. Secrets go through the credential flow, not `-e`. |
 | `--env-file <FILE>` | | Read `KEY=VALUE` lines into the workload env. Repeatable; later files and `-e` win. |
 | `-v`, `--volume <SPEC>` | | Mount into the workload: `name:/path[:ro]`, `/host/path:/path[:ro]`, or `type=bind\|volume,source=…,target=…[,readonly]`. Repeatable. Alias: `--mount`. |
