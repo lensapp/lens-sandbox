@@ -75,7 +75,8 @@ pub struct ToolRuntime {
     pub env: Vec<(String, String)>,
 }
 
-pub const SUPERVISOR_PTY_OPT_IN_TERM: &str = "xterm-256color";
+/// The terminal type a supervised workload is given; PTY-vs-pipes is decided by the run's own `-t` answer in the guest, never by this value.
+pub const WORKLOAD_TERM: &str = "xterm-256color";
 
 /// The vars the supervisor handshake owns; they describe the workload's own session, so replaying them into an exec would tell a piped command it has a colour terminal and hand it the workload's command line.
 fn is_session_only(entry: &str) -> bool {
@@ -83,7 +84,7 @@ fn is_session_only(entry: &str) -> bool {
     match key {
         "AGENT_COMMAND" | "WORKSPACE_PATH" => true,
         // Only the value we injected: a workload that declares its own TERM meant it.
-        "TERM" => value == SUPERVISOR_PTY_OPT_IN_TERM,
+        "TERM" => value == WORKLOAD_TERM,
         _ => key.starts_with("LENS_SANDBOX_"),
     }
 }
@@ -222,15 +223,12 @@ pub fn run_workload_env(
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
     compose_guest_tool_env(&mut composed.env, tools);
     if let Some(agent_command) = agent_command {
-        // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the supervisor PTY opt-in, the command, or the agent cwd.
+        // Internal vars go last: the broker's last-wins putenv means a user `-e TERM=…` can't clobber the terminal type, the command, or the agent cwd.
         composed.env.push(format!("AGENT_COMMAND={agent_command}"));
         if let Some(workdir) = workdir {
             composed.env.push(format!("WORKSPACE_PATH={workdir}"));
         }
-        // nexus-agent-sandbox treats TERM unset or "linux" as "no PTY"; xterm-256color opts it into the PTY path needed for `lns run -it --policy`.
-        composed
-            .env
-            .push(format!("TERM={SUPERVISOR_PTY_OPT_IN_TERM}"));
+        composed.env.push(format!("TERM={WORKLOAD_TERM}"));
         // Only what the author declared: an image's own ENV HOME must not outrank the run-as identity, or an unprivileged workload inherits a home it cannot write.
         for key in ["HOME", "USER"] {
             if let Some(value) = declared(user_env, key) {
@@ -615,7 +613,7 @@ mod tests {
             session_env: vec![
                 "AGENT_COMMAND=agent --serve".into(),
                 "WORKSPACE_PATH=/workspace".into(),
-                format!("TERM={SUPERVISOR_PTY_OPT_IN_TERM}"),
+                format!("TERM={WORKLOAD_TERM}"),
                 "LENS_SANDBOX_TOKEN=a-relay-token".into(),
                 // A malformed entry still names an internal var, so the prefix decides, not the shape.
                 "LENS_SANDBOX_BARE".into(),

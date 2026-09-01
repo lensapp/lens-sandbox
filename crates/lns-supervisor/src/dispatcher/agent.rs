@@ -270,14 +270,15 @@ impl SessionHandler for AgentSession {
 }
 
 /// What the agent process gets for its stdio.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum AgentIo {
     Pty,
     Pipes,
 }
 
-pub(crate) fn agent_io(_session_has_terminal: bool, devpts_mounted: bool) -> AgentIo {
-    if devpts_mounted {
+/// The broker hands this supervisor the PTY slave for a run that asked for a terminal and pipes for one that did not, so our own stdio is the run's `-t` answer: a workload that could detect a terminal the run declined stalls the run on the first pager it spawns.
+pub(crate) fn agent_io(session_has_terminal: bool, devpts_mounted: bool) -> AgentIo {
+    if session_has_terminal && devpts_mounted {
         AgentIo::Pty
     } else {
         AgentIo::Pipes
@@ -402,6 +403,21 @@ pub(crate) fn build_agent_command(
     env: &HashMap<String, String>,
 ) -> Command {
     child_spawner::build_command(&agent_child_spec(config, creds, env))
+}
+
+/// Relay a headless workload's stream as it arrives: its bytes are the run's output, so nothing here prefixes, splits, or re-terminates them.
+pub(crate) async fn relay_verbatim(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    activity: ActivityStream,
+) {
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        activity.emit(String::from_utf8_lossy(&chunk[..n]).into_owned());
+    }
 }
 
 const MAX_LINE_LEN: usize = 4096;
@@ -987,6 +1003,27 @@ mod tests {
             event.summary.ends_with("\r\n"),
             "activity event must end with CRLF, got: {:?}",
             &event.summary[event.summary.len().saturating_sub(4)..]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_headless_workloads_output_is_relayed_byte_for_byte() {
+        let activity = ActivityStream::new();
+        let (writer, mut reader) = tokio::io::duplex(256);
+        spawn_activity_forwarder(&activity, writer);
+
+        relay_verbatim("commit abc\ndiff --git\n".as_bytes(), activity.clone()).await;
+        drop(activity);
+
+        let mut relayed = Vec::new();
+        reader
+            .read_to_end(&mut relayed)
+            .await
+            .expect("relayed bytes");
+        assert_eq!(
+            String::from_utf8(relayed).expect("utf8"),
+            "commit abc\ndiff --git\n",
+            "a headless run relays the workload's own bytes: no stream prefix, no line rewriting"
         );
     }
 

@@ -12,7 +12,10 @@ use lens_sandbox_core::child_spawner;
 use lens_sandbox_core::lifecycle::{DEFAULT_GRACE, OrphanReaper, wait_with_signal_forwarding};
 use lens_sandbox_core::privilege::SandboxCredentials;
 
-use super::agent::{AgentRunner, agent_child_spec, build_agent_command, stream_output};
+use super::agent::{
+    AgentIo, AgentRunner, agent_child_spec, agent_io, build_agent_command, relay_verbatim,
+    stream_output,
+};
 use super::{CYAN, DIM, GREEN, RED, RESET};
 use crate::config::AgentConfig;
 use crate::scripts::{Abort, PreparedScript, ScriptFailure, StepRunner};
@@ -71,13 +74,9 @@ impl AgentRunner for RealAgentRunner {
     }
 }
 
-/// Whether the agent opted into PTY mode via `TERM` (`xterm-*` yes; unset, empty, or the `linux` console no).
-fn agent_wants_pty() -> bool {
-    match std::env::var("TERM") {
-        Ok(v) if v.is_empty() || v == "linux" => false,
-        Ok(_) => true,
-        Err(_) => false,
-    }
+/// Our own stdio: the broker gave us the PTY slave when the run asked for a terminal and pipes when it did not.
+fn session_has_terminal() -> bool {
+    std::io::stdout().is_terminal()
 }
 
 /// Whether devpts is mounted so `openpty()` can allocate a pair; the caller falls back to pipe mode otherwise.
@@ -110,10 +109,9 @@ async fn run_agent(
     activity: &ActivityStream,
     reaper: &OrphanReaper,
 ) {
-    if agent_wants_pty() && pty_available() {
-        run_agent_pty(config, creds, env, activity, reaper).await;
-    } else {
-        run_agent_piped(config, creds, env, activity, reaper).await;
+    match agent_io(session_has_terminal(), pty_available()) {
+        AgentIo::Pty => run_agent_pty(config, creds, env, activity, reaper).await,
+        AgentIo::Pipes => run_agent_piped(config, creds, env, activity, reaper).await,
     }
 }
 
@@ -306,7 +304,7 @@ async fn forward_sigwinch(master_fd: std::os::fd::RawFd) {
     }
 }
 
-/// Non-interactive pipe mode: stream stdout/stderr as activity events (current behavior).
+/// Pipe mode: the run declined a terminal, so the workload gets pipes it cannot mistake for one — a pager it would otherwise spawn never starts, and its output is relayed as it comes.
 async fn run_agent_piped(
     config: &AgentConfig,
     creds: Option<SandboxCredentials>,
@@ -318,7 +316,11 @@ async fn run_agent_piped(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    tracing::info!(command = %config.agent_command, "starting agent process");
+    tracing::info!(
+        command = %config.agent_command,
+        interactive = false,
+        "starting agent process (pipes)"
+    );
     activity.emit(format!(
         "{CYAN}[agent]{RESET} starting: {DIM}{}{RESET}\r\n",
         config.agent_command
@@ -344,14 +346,14 @@ async fn run_agent_piped(
     let stdout_task = stdout.map(|pipe| {
         let activity = activity.clone();
         tokio::spawn(async move {
-            stream_output(pipe, activity, "[stdout]", DIM).await;
+            relay_verbatim(pipe, activity).await;
         })
     });
 
     let stderr_task = stderr.map(|pipe| {
         let activity = activity.clone();
         tokio::spawn(async move {
-            stream_output(pipe, activity, "[stderr]", RED).await;
+            relay_verbatim(pipe, activity).await;
         })
     });
 
