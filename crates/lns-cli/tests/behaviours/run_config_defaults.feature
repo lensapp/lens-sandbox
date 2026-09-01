@@ -43,6 +43,13 @@ Feature: lns run falls back to configured defaults
     When the local run summary is composed against the configured defaults
     Then the run summary shows "3 vCPU · 6144 MiB"
 
+  Scenario: A document asking for more than the machine configured gets what it declared
+    Given the default "run.cpus" is "4"
+    And the default "run.mem" is "2048"
+    And an lns.yaml declaring 6 vCPU and 8Gi of memory
+    When the local run summary is composed against the configured defaults
+    Then the run summary shows "6 vCPU · 8192 MiB"
+
   Scenario: A per-run flag outranks both the document and a configured default
     Given the default "run.cpus" is "4"
     And an lns.yaml declaring 3 vCPU and 6Gi of memory

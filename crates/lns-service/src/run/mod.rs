@@ -398,6 +398,23 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_vm_size_grants_a_sandbox_that_asks_for_more_than_the_machine_configured() {
+        let res = resources(6, 8192);
+        assert_eq!(
+            {
+                let s = sandbox_vm_size(
+                    Some(&res),
+                    &configured(Some(4), Some(2048)),
+                    Some(TEST_HOST),
+                );
+                (s.cpus, s.mem_mib)
+            },
+            (6, 8192),
+            "the config is a gap-filler, so it neither raises nor lowers a size the document declared"
+        );
+    }
+
+    #[test]
     fn sandbox_vm_size_lets_a_flag_outrank_both_the_sandbox_and_a_config_default() {
         let res = resources(2, 1024);
         let request = RequestedSize {

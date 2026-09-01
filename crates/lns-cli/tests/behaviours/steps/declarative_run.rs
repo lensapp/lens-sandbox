@@ -104,6 +104,11 @@ fn declares_resources(world: &mut BehaviourWorld) {
     install_definition(world, "  resources:\n    cpu: 3\n    memory: 6Gi\n");
 }
 
+#[given(regex = r"^an lns.yaml declaring 6 vCPU and 8Gi of memory$")]
+fn declares_resources_above_the_machine_defaults(world: &mut BehaviourWorld) {
+    install_definition(world, "  resources:\n    cpu: 6\n    memory: 8Gi\n");
+}
+
 #[given(regex = r"^an lns.yaml declaring a volume sized 40Gi$")]
 fn declares_a_sized_volume(world: &mut BehaviourWorld) {
     install_definition(
