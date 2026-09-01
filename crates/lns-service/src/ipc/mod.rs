@@ -1733,6 +1733,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_cancel_unknown_run_returns_error() {
         let resp = handle_request(
             &Request::CancelRun {
@@ -1763,6 +1764,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn forward_session_input_awaits_back_pressure_instead_of_dropping() {
         use crate::vm::session_client::SessionInput;
         use tokio::sync::mpsc;
@@ -2125,6 +2127,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_list_runs_returns_snapshot() {
         let response = handle_request(&Request::ListRuns, Instant::now()).await;
         assert!(matches!(response, Response::RunList { .. }));
@@ -2162,6 +2165,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_routes_stdin_to_the_named_exec_session_only() {
         use crate::vm::session_client::SessionInput;
 
@@ -2200,6 +2204,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_closes_only_the_named_exec_sessions_stdin() {
         use crate::vm::session_client::SessionInput;
 
@@ -2234,6 +2239,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_detaches_only_the_named_exec_session() {
         use crate::vm::session_client::SessionInput;
 
@@ -2299,6 +2305,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn detaching_an_exec_with_a_closed_input_channel_cleans_up_and_reports_the_failure() {
         use crate::vm::session_client::SessionInput;
 
@@ -2381,6 +2388,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_kill_for_a_registered_run_passes_existence_and_forwards() {
         let id = "aa557799";
         register_running(id);
@@ -2405,7 +2413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_kill_of_an_already_exited_run_succeeds_without_forwarding() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -2427,7 +2435,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_addressing_an_unknown_name_reports_no_such_run() {
+        // Its own home: `remove_run_request` resolves the cache root before the name, so an ambient LNS_HOME answers before "no such run" can.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         for req in [
             Request::Kill {
                 run: "ghost".into(),
@@ -2459,6 +2471,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_inspect_run_keeps_an_ambiguous_prefix_an_error() {
         let first = "5417ab0000000000000000000000000a";
         let second = "5417ab0000000000000000000000000b";
@@ -2525,6 +2538,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_cancel_run_with_registered_run_returns_accepted() {
         use std::sync::Mutex;
         use tokio::sync::oneshot;
@@ -2560,6 +2574,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_detach_registered_run_accepts_and_fires_the_signal() {
         use std::sync::Mutex;
         use tokio::sync::oneshot;
@@ -2616,6 +2631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn forward_session_input_errors_when_input_channel_is_closed() {
         use std::sync::Mutex;
         use tokio::sync::{mpsc, oneshot};
@@ -2834,7 +2850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn an_attached_start_of_a_running_run_points_at_attach_instead_of_hanging_up() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -2863,7 +2879,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_detached_start_of_a_running_run_answers_run_started_unchanged() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -2883,7 +2899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn starting_a_stopped_run_whose_record_is_gone_answers_the_damage() {
         let record = crate::run_record::test_record(&crate::run_registry::allocate_run_id());
         let id = record.run_id.clone();
@@ -2903,7 +2919,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn starting_a_stopped_run_nothing_refuses_reaches_the_boot() {
         let record = crate::run_record::test_record(&crate::run_registry::allocate_run_id());
         let id = record.run_id.clone();
@@ -2936,6 +2952,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_inspect_run_for_unknown_run_answers_run_unknown() {
         let resp = handle_request(
             &Request::InspectRun {
@@ -2951,6 +2968,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_inspect_run_returns_details_for_a_registered_run() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -2975,8 +2993,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_prune_runs_removes_exited_runs_and_reports_their_ids() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
         crate::run_registry::set_exit_code(&id, 0);
@@ -2996,6 +3016,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_stop_run_for_unknown_run_returns_error() {
         let resp = handle_request(
             &Request::StopRun {
@@ -3077,7 +3098,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn removing_an_exited_run_reclaims_and_notes_it() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -3097,7 +3118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_removal_whose_files_survive_is_refused_and_forgets_nothing() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -3132,7 +3153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_forced_removal_kills_then_removes_in_one_step() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -3151,7 +3172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_forced_removal_whose_kill_fails_changes_nothing() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -3261,7 +3282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn prune_leaves_a_registered_runs_dir_alone() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -3272,14 +3293,14 @@ mod tests {
         let still_registered = crate::run_registry::status(&id).is_some();
         crate::run_registry::deregister(&id);
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            matches!(&resp, Response::RunsPruned { removed } if !removed.contains(&id)),
             "a registered run's dir is not an orphan: {resp:?}"
         );
         assert!(still_registered);
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn prune_spares_a_dir_whose_run_registers_mid_sweep() {
         use crate::image_store::Fs as _;
         let id = crate::run_registry::allocate_run_id();
@@ -3294,13 +3315,13 @@ mod tests {
         let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
         crate::run_registry::deregister(&id);
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            matches!(&resp, Response::RunsPruned { removed } if !removed.contains(&id)),
             "a run that registered after the snapshot must not be swept from under its boot: {resp:?}"
         );
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn prune_protects_a_dir_whose_record_is_damaged() {
         use crate::image_store::Fs as _;
         let root = std::path::Path::new("/cache");
@@ -3333,6 +3354,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn prune_skips_a_runs_dir_entry_with_no_readable_name() {
         use crate::image_store::Fs as _;
         let probe = ScriptedRunsDir(Vec::new());
@@ -3374,7 +3396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs, env)]
+    #[serial_test::serial(env, global_runs)]
     async fn the_request_wrappers_audit_what_they_remove() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
@@ -3404,7 +3426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs, env)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_forced_request_reaches_the_live_session_channel() {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
@@ -3423,7 +3445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs, env)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_homeless_service_answers_removal_and_prune_instead_of_panicking() {
         let _h = crate::test_env::EnvVarGuard::unset("HOME");
         let _c = crate::test_env::EnvVarGuard::unset("XDG_CACHE_HOME");
@@ -3438,7 +3460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs, env)]
+    #[serial_test::serial(env, global_runs)]
     async fn an_unwritable_audit_trail_warns_but_never_blocks_removal() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", file.path());
@@ -3482,7 +3504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_of_an_already_exited_run_succeeds_without_signalling() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3506,6 +3528,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_returns_unforced_when_the_workload_exits_on_term() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3519,6 +3542,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_escalates_to_kill_when_term_is_ignored() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3535,6 +3559,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_with_zero_timeout_skips_straight_to_kill() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3548,6 +3573,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_reports_failure_when_kill_does_not_end_the_run() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3569,6 +3595,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_propagates_a_term_send_error() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3595,6 +3622,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn stop_propagates_a_kill_send_error() {
         let id = crate::run_registry::allocate_run_id();
         register_running(&id);
@@ -3629,6 +3657,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_stop_run_sends_term_through_the_session_channel() {
         use crate::vm::session_client::SessionInput;
         use tokio::sync::mpsc;
@@ -3709,6 +3738,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn register_exec_input_publishes_an_addressable_session_id() {
         let run_id = crate::run_registry::allocate_run_id();
         let (handle, _cancel_rx) = crate::run_registry::test_handle();
@@ -3791,7 +3821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn exec_and_the_workload_compose_the_same_path_for_the_same_tools() {
         // Two copies of the PATH rule drift into "run finds node, exec does not"; this fails the moment they disagree.
         let tools = crate::workload_env::ToolRuntime {
@@ -3907,7 +3937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn an_exec_session_joins_the_runs_own_environment() {
         let run_id = crate::run_registry::allocate_run_id();
         let (mut handle, _cancel) = crate::run_registry::test_handle();
@@ -3959,7 +3989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn an_exec_carrying_no_env_still_puts_the_runs_tool_dirs_first() {
         // What `lns exec` actually sends is an empty env, so the composed PATH has to hold up on that input and not just on a hand-supplied one.
         let tools = crate::workload_env::ToolRuntime {
@@ -3987,7 +4017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn exec_by_name_sees_the_same_tools_as_exec_by_id() {
         // `lns ps` shows names and the docs use them, so a name that loses the tool PATH is the common path, not the edge case.
         let run_id = crate::run_registry::allocate_run_id();
@@ -4013,7 +4043,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_pull_of_an_invalid_reference_surfaces_the_parse_error() {
+        // Its own home: the pull resolves the cache root before it parses the reference, so an ambient LNS_HOME answers first.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let resp = as_json(
             handle_request(
                 &Request::PullImage {

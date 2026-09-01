@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn exit_is_published_only_after_the_vm_quiesce() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(global_runs)]
+    #[serial_test::serial(env, global_runs)]
     async fn a_failed_quiesce_still_publishes_the_exit() {
         let id = crate::run_registry::allocate_run_id();
         let (handle, _rx) = crate::run_registry::test_handle();
