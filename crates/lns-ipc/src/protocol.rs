@@ -389,6 +389,9 @@ pub struct ConnectorMethodView {
     /// The connector author's own words about where to get the value (§3.2.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    /// What this method opens that the sandbox document denies (§3.2.4), or `None` where no document was in hand, so "nothing is overridden" and "nobody could check" never render alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<Vec<String>>,
 }
 
 impl ConnectorMethodView {
@@ -1118,6 +1121,7 @@ mod tests {
             credentials: credentials.iter().map(|c| (*c).to_string()).collect(),
             asks: Vec::new(),
             help: None,
+            overrides: None,
         }
     }
 

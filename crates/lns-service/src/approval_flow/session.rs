@@ -425,7 +425,11 @@ impl ApprovalSession {
         let destination = offered_destination(req);
         let offers = self.offers.lock().expect("offers mutex poisoned");
         match crate::connector::offer::offers_for(destination, &offers) {
-            Offer::One(connector) => Some(connector.clone()),
+            Offer::One(connector) => {
+                let connector = connector.clone();
+                drop(offers);
+                Some(self.with_overrides(connector))
+            }
             Offer::None => None,
             Offer::Ambiguous(names) => {
                 let names = names.join(" and ");
@@ -436,6 +440,33 @@ impl ApprovalSession {
                 None
             }
         }
+    }
+
+    /// Answered when the card is raised, not when the offer is held, because this directory's decisions file changes under a running guest.
+    fn with_overrides(&self, mut connector: ConnectorView) -> ConnectorView {
+        for method in &mut connector.methods {
+            method.overrides = self.overridden_by(method);
+        }
+        connector
+    }
+
+    /// What a method opens that the shipped document denies and this directory has not denied itself, or `None` where no document is in hand to compare against (§3.2.4).
+    fn overridden_by(&self, method: &lns_ipc::ConnectorMethodView) -> Option<Vec<String>> {
+        let shipped = self.shipped.get()?;
+        let own = self
+            .persisted
+            .lock()
+            .expect("persisted mutex poisoned")
+            .clone();
+        Some(
+            method
+                .opens
+                .iter()
+                .filter_map(|pattern| shipped.network.first_denied_within(pattern))
+                // The overlay sits ahead of the connector layer, so a deny this directory decided is not overturned and is not an override.
+                .filter(|shared| !answered_here(&own, shared))
+                .collect(),
+        )
     }
 
     /// One message per misconfiguration, however many requests reach it.
@@ -742,6 +773,13 @@ fn tcp_rule_for_always_decision(destination: &str, decision: Decision) -> Option
 /// Whether the developer asked for a decision that outlives this request, and so is owed an explanation when none can be written.
 fn earns_a_rule(decision: Decision) -> bool {
     matches!(decision, Decision::AllowAlways | Decision::DenyAlways)
+}
+
+/// Whether this directory's own deny answers for every destination `shared` names; one that answers for only some of them leaves the rest overridden.
+fn answered_here(own: &Policy, shared: &str) -> bool {
+    own.network
+        .first_denied_within(shared)
+        .is_some_and(|denied| denied.eq_ignore_ascii_case(shared))
 }
 
 /// The gate's `CONNECT <destination>` taken verbatim, and `None` unless it names the frame's own host.
@@ -1429,6 +1467,115 @@ pub(crate) mod tests {
         );
     }
 
+    fn card_offer(n: &RecordingNotifier) -> ConnectorView {
+        n.presented
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a card")
+            .offer
+            .clone()
+            .expect("a connector card")
+    }
+
+    fn raising_a_card(shipped: Option<Policy>, own: Policy) -> Fixture {
+        let f = fixture_holding(own);
+        if let Some(shipped) = shipped {
+            f.0.set_shipped_policy(shipped);
+        }
+        f.0.hold_for_offers(vec![offering("token", &["work"])]);
+        f.0.submit_pending(pending("r1", "api.some-provider.example"), Instant::now());
+        f
+    }
+
+    fn denying(host: &str) -> Policy {
+        let mut policy = Policy::default();
+        policy.add_rule(RouteRule::deny_host(host));
+        policy
+    }
+
+    #[test]
+    fn a_method_opening_what_the_sandbox_document_denies_says_so_on_the_card() {
+        // §3.2.4: a granted method may override a document deny, and the card that introduces it must name the override.
+        let (_s, n, _store, _rx) = raising_a_card(
+            Some(denying("api.some-provider.example")),
+            Policy::default(),
+        );
+
+        assert_eq!(
+            card_offer(&n).methods[0].overrides.as_deref(),
+            Some(["api.some-provider.example".to_string()].as_slice()),
+            "consent is never given to something nobody saw"
+        );
+    }
+
+    #[test]
+    fn an_allow_pinned_to_one_port_does_not_hide_the_catch_all_deny_behind_it() {
+        // The idiomatic closed document is specific allows then `deny *`, and the grant overturns that deny on every other port of the host.
+        let mut shipped = Policy::default();
+        shipped.add_rule(RouteRule::allow_host("api.some-provider.example:443"));
+        shipped.add_rule(RouteRule::deny_host("*"));
+        let (_s, n, _store, _rx) = raising_a_card(Some(shipped), Policy::default());
+
+        assert_eq!(
+            card_offer(&n).methods[0].overrides.as_deref(),
+            Some(["api.some-provider.example".to_string()].as_slice()),
+            "an allow that answers for one port leaves the rest to the rules behind it"
+        );
+    }
+
+    #[test]
+    fn a_deny_this_directory_decided_is_not_an_override_because_it_still_wins() {
+        // The overlay sits ahead of the connector layer, so a deny the developer typed is not overturned and the card must not claim it is.
+        let (_s, n, _store, _rx) = raising_a_card(
+            Some(denying("api.some-provider.example")),
+            denying("api.some-provider.example"),
+        );
+
+        assert_eq!(
+            card_offer(&n).methods[0].overrides.as_deref(),
+            Some([].as_slice()),
+            "nothing is overridden, and that is a different answer from not knowing"
+        );
+    }
+
+    #[test]
+    fn a_deny_this_directory_spelled_in_another_case_still_answers() {
+        // Host comparison folds case everywhere else, so a shouted deny must not read as one the grant overturns.
+        let (_s, n, _store, _rx) = raising_a_card(
+            Some(denying("api.some-provider.example")),
+            denying("API.SOME-PROVIDER.EXAMPLE"),
+        );
+
+        assert_eq!(
+            card_offer(&n).methods[0].overrides.as_deref(),
+            Some([].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_run_that_ships_no_document_has_no_deny_to_overturn() {
+        let (_s, n, _store, _rx) = raising_a_card(None, Policy::default());
+
+        assert_eq!(card_offer(&n).methods[0].overrides, None);
+    }
+
+    #[test]
+    fn a_narrower_deny_of_this_directory_does_not_hide_the_rest_of_the_override() {
+        // A closed document plus one port this directory denied: the grant still overturns the deny on every other port, and §3.2.4 makes naming that a MUST.
+        let mut own = Policy::default();
+        own.network.egress.tcp.push(TcpEgressRule::deny_destination(
+            "api.some-provider.example:443",
+        ));
+        let (_s, n, _store, _rx) = raising_a_card(Some(denying("*")), own);
+
+        assert_eq!(
+            card_offer(&n).methods[0].overrides.as_deref(),
+            Some(["api.some-provider.example".to_string()].as_slice()),
+            "the overlay decided one port, so it is not the answer for the host"
+        );
+    }
+
     #[test]
     fn a_served_destination_raises_a_connector_card_rather_than_a_network_card() {
         // §3.2.1: the run reached something a connector serves, so the question is "connect it?", not "allow it?".
@@ -1612,6 +1759,7 @@ pub(crate) mod tests {
                 credentials: Vec::new(),
                 asks: Vec::new(),
                 help: None,
+                overrides: None,
             }],
             connections: connections
                 .iter()

@@ -44,6 +44,21 @@ impl NetworkPolicy {
             .find(|(_, existing)| tcp_shadows(existing, new))
     }
 
+    /// The destinations `pattern` shares with the first rule of either table that denies any of them, or `None` where nothing does.
+    pub fn first_denied_within(&self, pattern: &str) -> Option<String> {
+        let http = self
+            .egress
+            .http
+            .iter()
+            .map(|rule| (rule.match_pattern.as_str(), rule.verdict));
+        let tcp = self
+            .egress
+            .tcp
+            .iter()
+            .map(|rule| (rule.match_pattern.as_str(), rule.verdict));
+        first_denied(http, pattern).or_else(|| first_denied(tcp, pattern))
+    }
+
     /// The `egress.http` rules a raw rule pre-empts on its port: the raw table is the pre-filter, so those rules stop applying and the traffic is spliced unread.
     pub fn http_rules_pre_empted_by(&self, raw: &TcpEgressRule) -> Vec<&RouteRule> {
         if raw.verdict == Verdict::Deny {
@@ -64,6 +79,26 @@ impl NetworkPolicy {
             })
             .collect()
     }
+}
+
+/// Read first-match-wins like the gate: a rule covering `pattern` settles it, and one that only meets it leaves the rest to the rules behind it.
+fn first_denied<'a>(
+    rules: impl Iterator<Item = (&'a str, Verdict)>,
+    pattern: &str,
+) -> Option<String> {
+    for (match_pattern, verdict) in rules {
+        let Some(shared) = intersection(pattern, match_pattern) else {
+            continue;
+        };
+        if verdict == Verdict::Deny {
+            return Some(shared);
+        }
+        // Case-folded like every other host comparison here, so a rule that shouts a host still covers the pattern it names.
+        if shared.eq_ignore_ascii_case(pattern) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Whether two host patterns can name the same host; two mid-segment wildcards that share hosts are not detected, which costs a line of output rather than enforcement.
@@ -1025,6 +1060,94 @@ mod tests {
             Some(1),
             "the gate stops at the first match, so that is the rule to sit in front of"
         );
+    }
+
+    fn table(http: Vec<RouteRule>, tcp: Vec<TcpEgressRule>) -> NetworkPolicy {
+        NetworkPolicy {
+            egress: crate::Egress { http, tcp },
+        }
+    }
+
+    #[test]
+    fn the_first_deny_that_names_any_of_a_pattern_is_the_one_reported() {
+        let policy = table(
+            vec![
+                RouteRule::deny_host("api.example"),
+                RouteRule::deny_host("*.example"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            policy.first_denied_within("api.example"),
+            Some("api.example".to_string())
+        );
+    }
+
+    #[test]
+    fn an_allow_answering_for_the_whole_pattern_settles_it() {
+        // First-match-wins, so a deny behind an allow that already covers the pattern never fires.
+        let policy = table(
+            vec![
+                RouteRule::allow_host("*.example"),
+                RouteRule::deny_host("api.example"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(policy.first_denied_within("api.example"), None);
+    }
+
+    #[test]
+    fn an_allow_answering_for_part_of_it_leaves_the_rest_to_the_rules_behind() {
+        // The idiomatic closed document: a port-pinned allow, then a catch-all deny. The deny still decides every other port.
+        let policy = table(
+            vec![
+                RouteRule::allow_host("api.example:443"),
+                RouteRule::deny_host("*"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            policy.first_denied_within("api.example"),
+            Some("api.example".to_string())
+        );
+    }
+
+    #[test]
+    fn a_rule_spelled_in_another_case_still_answers_for_the_pattern() {
+        // Every other host comparison here folds case, so a document that shouts a host name must not make a covering allow stop covering.
+        let policy = table(
+            vec![
+                RouteRule::allow_host("API.example"),
+                RouteRule::deny_host("*"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(policy.first_denied_within("api.example"), None);
+    }
+
+    #[test]
+    fn a_pattern_no_rule_names_is_denied_by_none_of_them() {
+        let policy = table(
+            vec![RouteRule::deny_host("api.other.example")],
+            vec![TcpEgressRule::deny_destination("db.other.example:5432")],
+        );
+        assert_eq!(policy.first_denied_within("api.example"), None);
+    }
+
+    #[test]
+    fn the_raw_table_is_read_the_same_way() {
+        let policy = table(
+            Vec::new(),
+            vec![
+                TcpEgressRule::allow_destination("db.example:5432"),
+                TcpEgressRule::deny_destination("db.example:6379"),
+            ],
+        );
+        assert_eq!(
+            policy.first_denied_within("db.example:6379"),
+            Some("db.example:6379".to_string())
+        );
+        assert_eq!(policy.first_denied_within("db.example:5432"), None);
     }
 
     #[test]
