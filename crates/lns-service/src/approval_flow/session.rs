@@ -249,6 +249,8 @@ impl ApprovalSession {
         }
         let held = self.held_for(&offer.name);
         self.forget_offer(&offer.name);
+        // The hold is derived from `offers`, so only a frame lifts it — and §3.2.1 holds a destination only while the run has neither granted nor declined.
+        self.send_policy_frame();
         self.represent(&held);
         DecisionOutcome::Resolved
     }
@@ -1904,7 +1906,8 @@ pub(crate) mod tests {
         s.decline_offer("r1");
 
         assert!(
-            rx.try_recv().is_err(),
+            !std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|frame| matches!(frame, HostFrame::RequestDecision(_))),
             "no decision frame: the request is still the user's to answer"
         );
         let presented = n.presented.lock().unwrap();
@@ -2057,6 +2060,33 @@ pub(crate) mod tests {
                 WireVerdict::Allow
             )],
             "a machine with no undecided connector installed sends what it always sent"
+        );
+    }
+
+    #[test]
+    fn declining_lifts_the_hold_on_the_destinations_the_connector_served() {
+        // §3.2.1 holds a destination only while the run has neither granted nor declined it.
+        let (s, _n, _store, mut rx) = fixture_holding(allowing_one_raw_destination(
+            "db.some-provider.example:5432",
+        ));
+        s.set_connector_port(Arc::new(FakeConnectorPort::default()));
+        s.hold_for_offers(vec![serving("db.some-provider.example")]);
+        s.submit_pending(
+            raw_pending("r1", "db.some-provider.example:5432"),
+            Instant::now(),
+        );
+        while rx.try_recv().is_ok() {}
+
+        s.decline_offer("r1");
+
+        let published = policy_frame(&mut rx);
+        assert_eq!(
+            tcp_verdicts(&published),
+            [(
+                "db.some-provider.example:5432".to_string(),
+                WireVerdict::Allow
+            )],
+            "the run's own allow stands again once it has declined: {published:?}"
         );
     }
 
