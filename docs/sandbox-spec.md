@@ -328,7 +328,7 @@ consumer approved.
 | Field | Type | Rules |
 |---|---|---|
 | `command` | string | optional. Replaces the base image's default command. The image's `ENTRYPOINT` still applies. A per-run command after the reference wins. |
-| `workdir` | string | optional. MUST be absolute, MUST NOT contain a `..` segment, MUST NOT contain control characters. Created when missing. `-w` / `--workdir` wins per run. |
+| `workdir` | string | optional. MUST be absolute, MUST NOT contain a `..` segment, MUST NOT contain control characters. Created when missing, owned by the resolved run-as identity; a workdir the image already ships keeps its own ownership. `-w` / `--workdir` wins per run. |
 
 #### 3.1.3 `user`
 

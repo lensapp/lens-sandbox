@@ -65,7 +65,7 @@ The `spec` fields:
 | -------------- | --------------------------------------------------------------------------- |
 | `image`        | The base OCI image the sandbox runs (**required**). Pin it by digest before publishing. |
 | `command`      | Command to run in the workload, replacing the image's default command.       |
-| `workdir`      | Absolute guest working directory. It is created when missing.                 |
+| `workdir`      | Absolute guest working directory. It is created when missing, owned by the run-as user.                 |
 | `user`         | The run-as user the sandbox needs, `USER[:GROUP]` like `-u`, so a definition that needs root is runnable as published. A per-run `-u` still wins, and the image's own `USER` is the fallback when this is unset. |
 | `env`          | Non-secret environment variables seeded into the workload.                   |
 | `egress`       | Where the workload may reach — the `http` and `tcp` rule tables (see [Policy](policy.md)). |
