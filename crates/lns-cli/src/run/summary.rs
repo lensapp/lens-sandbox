@@ -543,6 +543,27 @@ pub fn tools_from_view(view: &lns_ipc::SandboxView) -> Vec<String> {
     view.tools.clone()
 }
 
+/// A hostPath whose name reads as a credential is not refused — nothing about it is packed, and whether a pulled document may read it is the running machine's own decision — so all that is owed is telling whoever is looking at the document which file the workload gets a copy of.
+pub fn warn_credential_shaped_host_paths<'a>(host_paths: impl Iterator<Item = &'a str>) {
+    for host_path in host_paths {
+        if let Some(segment) = lns_artifact::sandbox::secret_shaped_segment(host_path) {
+            crate::log::warn!(
+                "hostPath {host_path} is credential-shaped ({segment}) — the workload reads a copy of it, so run it only in a sandbox you trust with that credential"
+            );
+        }
+    }
+}
+
+/// The host files a definition declares, for the two callers that hold a parsed document rather than a run's disclosure lines.
+pub fn declared_host_paths(
+    def: &lns_artifact::sandbox::Definition,
+) -> impl Iterator<Item = &str> + '_ {
+    def.spec
+        .filesets
+        .iter()
+        .filter_map(|fileset| fileset.host_path.as_deref())
+}
+
 /// The summary shows a path verbatim, names embedded files as inline, and names a host file as one — the three sources a fileset entry can have.
 fn fileset_display(
     path: Option<&str>,
@@ -2110,5 +2131,81 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("lns run"));
         assert!(text.contains("Policy:"));
+    }
+
+    /// Collects the warn-level messages `emit` logs, so a test can assert on stderr-bound warnings.
+    fn capture_warn(emit: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer};
+        use tracing_subscriber::prelude::*;
+
+        type Sink = Arc<Mutex<Vec<String>>>;
+        struct CapturingLayer(Sink);
+        impl<S: tracing::Subscriber> Layer<S> for CapturingLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _: LayerContext<'_, S>) {
+                struct V<'a>(&'a mut String);
+                impl Visit for V<'_> {
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        if field.name() == "message" {
+                            *self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = String::new();
+                event.record(&mut V(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+        }
+
+        let sink: Sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer(sink.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        sink.lock().unwrap().clone()
+    }
+
+    fn document_declaring(host_paths: &[&str]) -> Vec<u8> {
+        let filesets = host_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(r#"{{"hostPath":"{p}","guestPath":"/seed/{i}","optional":true}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"seeder","spec":{{"image":"x:1","filesets":[{filesets}]}}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_credential_shaped_host_path_is_warned_about_by_name_and_by_segment() {
+        let doc = document_declaring(&["~/.some-tool/auth.json"]);
+        let def = lns_artifact::sandbox::parse_document(&doc)
+            .expect("a hostPath naming a credential-shaped file is a valid document");
+        let warnings =
+            capture_warn(|| warn_credential_shaped_host_paths(declared_host_paths(&def)));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("~/.some-tool/auth.json") && warnings[0].contains("auth.json"),
+            "whoever reads the warning has to be able to find the file and see what matched — got: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("reads a copy of it"),
+            "the consequence is what makes the warning actionable — got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_path_that_reads_as_nothing_in_particular_is_silent() {
+        let doc = document_declaring(&["~/.gitconfig", "/etc/hosts"]);
+        let def = lns_artifact::sandbox::parse_document(&doc).unwrap();
+        let warnings =
+            capture_warn(|| warn_credential_shaped_host_paths(declared_host_paths(&def)));
+        assert!(
+            warnings.is_empty(),
+            "a warning on every seeded file would train the developer to ignore the one that matters — got: {warnings:?}"
+        );
     }
 }

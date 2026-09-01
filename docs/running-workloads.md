@@ -468,7 +468,7 @@ is supported: a bare `~` and another user's home (`~alice/…`) are refused,
 because a definition that names one machine's account is not portable.
 
 A `~/` source that names a secret store — `~/.ssh`, `~/.aws`, `~/.gnupg`, or any
-other secret-shaped segment — is refused offline, exactly as a `hostPath` is.
+other secret-shaped segment — is refused offline.
 The keep/drop prompt reads the top-level names under a bind root only, so it
 cannot be the guard for a bind whose root *is* the key store. An absolute or
 project-relative source keeps the rules it always had, because it names the
@@ -572,6 +572,14 @@ spec:
   sandbox does, and `--yes` answers only where you have not already. Say no and
   an `optional` entry is skipped while a required one refuses the run. Your own
   `lns.yaml` is your own consent, so a local run never asks.
+  That ask, and not the file's name, is what governs a credential-shaped host
+  file. A `hostPath` whose name reads as a credential — `auth.json`,
+  `credentials`, anything under `~/.ssh` — is therefore reported rather than
+  refused: `validate`, `push`, and the launch each name the file and the segment
+  that matched, and the document is still valid. Seeding a tool's own login file
+  is what makes an agent inside the sandbox able to use that tool, so the
+  question is whether you trust the workload with the credential, not whether
+  the file has a suspicious name.
 - Each entry sets exactly one of `path`/`inline`/`hostPath`. `inline` must
   contain at least one file. Every inline key must be a relative path without empty, `.`,
   or `..` components. `guestPath` is an absolute
@@ -595,13 +603,15 @@ spec:
   MCP configs an agent must not rewrite mid-run. Either way the snapshot is
   ephemeral: changes die with the microVM.
 - A secret-shaped file (`.env`, keys, credential stores) anywhere in a `path`
-  fileset, as any path component in an `inline`
-  fileset, or as any segment of a `hostPath`
-  refuses `validate`, `run`, and `push` outright: a fileset is baked
-  into the artifact, so there is no keep/drop prompt to catch it later — real
-  secrets stay outside the workload. Ship the tool's *configuration* in a
-  fileset and bind its *credential* through `spec.credentials`, so the
-  published artifact stays secret-free on every machine that pulls it.
+  fileset, or as any path component in an `inline` fileset, refuses `validate`,
+  `run`, and `push` outright: those files are baked into the artifact and travel
+  to every machine that pulls it, so there is no keep/drop prompt to catch one
+  later — real secrets stay outside the workload. Ship the tool's
+  *configuration* in a fileset and bind its *credential* through
+  `spec.credentials`, so the published artifact stays secret-free.
+  A `hostPath` is packed into nothing and read off the machine that runs the
+  sandbox, so a credential-shaped one warns instead, and the machine's own
+  answer to the host-path ask decides it.
 
 The trust model is one digest plus disclosure: the files travel in the artifact
 you approved, so nothing a fileset mounts is fetched from anywhere else — and

@@ -472,23 +472,27 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
     };
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
-    let result = match cmd {
-        ArtifactCommand::Init(args) => {
-            author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut err)
-        }
-        ArtifactCommand::Validate(args) => {
-            author::validate(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
-        }
-        ArtifactCommand::Inspect(args) => author::inspect_local(
-            &fs,
-            cwd,
-            args.reference.as_deref(),
-            args.file.as_deref(),
-            &args.mixins,
-            &mut out,
-        ),
-        _ => unreachable!("run_author_verb is only called for the offline author verbs"),
-    };
+    let mut result = None;
+    w.warnings = crate::runner::capture_warnings(|| {
+        result = Some(match cmd {
+            ArtifactCommand::Init(args) => {
+                author::init(&fs, cwd, args.kind, args.file.as_deref(), &mut err)
+            }
+            ArtifactCommand::Validate(args) => {
+                author::validate(&fs, cwd, args.kind, args.file.as_deref(), &mut out)
+            }
+            ArtifactCommand::Inspect(args) => author::inspect_local(
+                &fs,
+                cwd,
+                args.reference.as_deref(),
+                args.file.as_deref(),
+                &args.mixins,
+                &mut out,
+            ),
+            _ => unreachable!("run_author_verb is only called for the offline author verbs"),
+        });
+    });
+    let result = result.expect("the author verb ran under the warning capture");
     w.author_files = fs.files.into_inner();
     w.split_streams = Some((
         String::from_utf8_lossy(&out).into_owned(),

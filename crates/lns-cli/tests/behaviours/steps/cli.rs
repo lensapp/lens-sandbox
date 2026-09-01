@@ -61,6 +61,18 @@ fn output_contains(world: &mut BehaviourWorld, needle: String) -> Result<(), Str
     }
 }
 
+#[then(regex = r#"^a warning names "([^"]*)"$"#)]
+fn a_warning_names(world: &mut BehaviourWorld, needle: String) -> Result<(), String> {
+    if world.warnings.iter().any(|w| w.contains(&needle)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a warning naming {needle:?}, got {:?}",
+            world.warnings
+        ))
+    }
+}
+
 #[when(regex = r#"^the user runs `([^`]*)`$"#)]
 fn the_user_runs(world: &mut BehaviourWorld, cmd_line: String) {
     let parsed = split_args(&cmd_line);

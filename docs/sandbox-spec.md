@@ -769,8 +769,16 @@ is live and two-way.
 | Anchored | MUST start with `/` or `~/`. `~/` is the running developer's home. Another user's home (`~alice/`) is refused — a document does not choose whose files it reads. |
 | Contained | MUST NOT contain a `..` segment. |
 | Literal | MUST be free of whitespace, quotes, and control characters. |
-| Not secret-shaped | The same name check as an inline path, below. A `hostPath` file is copied whole, so its name is the only guard it has. |
 | One file | It names a file, not a directory, so `guestPath` MUST NOT end in `/`. |
+
+A credential-shaped name is **reported, not refused**. A `hostPath` is read fresh
+off the machine that runs the document and never packed, so it carries nothing to
+anyone else: the copy the workload gets is of a file the running developer already
+has. Nor could a name be the guard even if one were wanted, since the check reads
+the string the document declared and a rename defeats it — the guard is the
+per-machine decision below. So a document naming `~/.some-tool/auth.json`
+validates, publishes, and runs, and each of those three says which segment matched
+and that the workload reads a copy of the file.
 
 A home-anchored `path` is refused and points here: `path` packs a directory
 beside the document at publish, and the publisher's home is not the consumer's.
@@ -787,9 +795,13 @@ Inline limits, all enforced offline:
 An inline path MUST be a safe relative path: non-empty, no leading `/`, no
 empty, `.`, or `..` segment, and no control characters.
 
-**Secret-shaped names are refused.** Real secrets stay outside the workload, so
-a path segment naming one fails the document — in a `path` directory, in an
-`inline` key, and in a `hostPath`. The check covers
+**Secret-shaped names are refused where the file would be published.** Real
+secrets stay outside the workload, so a path segment naming one fails the
+document in a `path` directory and in an `inline` key. Those are the two forms
+that are packed into the artifact this document publishes as, so a secret in one
+of them travels to every machine that pulls it — the refusal is about the copy
+that leaves the author's machine, not about the name. A `hostPath` is packed
+nowhere and is reported instead (above). The check covers
 names starting with `.env` or `credentials.`, names ending in `.pem`, `.key`,
 `.ppk`, or `.keystore`, and the exact names `.npmrc`, `.netrc`,
 `.git-credentials`, `.pgpass`, `.pypirc`, `.yarnrc.yml`, `auth.json`,
@@ -806,6 +818,12 @@ ask again and a different sandbox does not inherit the answer. A declined
 `hostPath` skips the fileset when it is `optional` and refuses the run when it is
 not. A document loaded from the developer's own directory is their own consent
 and is never asked about.
+
+This decision, and not the file's name, is what governs a credential-shaped host
+file: it names the artifact that asked, it is answered by the person whose file
+it is, and a rename cannot slip past it. A developer who wants an agent to sign
+in with the login file a tool on their own machine already wrote can say so; a
+sandbox from a registry cannot help itself to the same file.
 
 The decision is per machine, so it lives beside the other per-machine state and
 not in the [local mixin](#8-the-local-mixin): the local mixin is a rule the
@@ -1466,8 +1484,10 @@ Offline validation (`lns artifact validate`, and every load path including
   `optional` appears only on a bind; `size` appears only on a named volume and is
   a parsable byte size, at least `20Mi` and less than `16Ti`, and is not a share.
 - **filesets**: exactly one of `path`, `inline`, or `hostPath`; inline paths and
-  limits hold; no secret-shaped name; a `hostPath` is anchored, contained,
-  literal, and names one file; `optional` appears only on a `hostPath`;
+  limits hold; no secret-shaped name in a `path` directory or an `inline` key; a
+  `hostPath` is anchored, contained, literal, and names one file, and a
+  credential-shaped one is reported without failing the document;
+  `optional` appears only on a `hostPath`;
   `guestPath` unique across volumes and filesets.
 - **ports**: `container` and `host` in range and each unique.
 - **scripts**: every entry sets a `when` this grammar defines and a `run` that is

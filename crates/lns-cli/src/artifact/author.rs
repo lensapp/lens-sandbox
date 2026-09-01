@@ -195,6 +195,9 @@ pub fn validate<F: Fs, W: Write>(
     if problems.is_empty()
         && let Ok(def) = lns_artifact::sandbox::parse_document(&json)
     {
+        crate::run::summary::warn_credential_shaped_host_paths(
+            crate::run::summary::declared_host_paths(&def),
+        );
         problems.extend(super::fileset::path_fileset_problems(fs, project_dir, &def));
         problems.extend(super::fileset::directory_mixin_problems(
             fs,

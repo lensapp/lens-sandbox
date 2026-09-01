@@ -259,6 +259,13 @@ Feature: authoring a document
     Then the command fails with an exit code other than 0
     And the output contains ".env"
 
+  Scenario: validate reports a credential-shaped hostPath without failing the document
+    Given an lns.yaml declaring a hostPath fileset "~/.some-tool/auth.json" mounted at "/home/agent/.some-tool/auth.json" and optional
+    When the user runs artifact command "validate"
+    Then the exit code is 0
+    And a warning names "~/.some-tool/auth.json"
+    And a warning names "reads a copy of it"
+
   Scenario: validate accepts a small inline UTF-8 fileset
     Given an lns.yaml declaring an inline fileset with ".claude/settings.json" at "/home/sandbox" owned by the workload
     And the inline file contains `{"permissions":{"defaultMode":"bypassPermissions"}}`

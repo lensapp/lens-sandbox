@@ -49,6 +49,11 @@ Feature: declared filesets ship files inside the sandbox artifact
     When the local sandbox run is prepared
     Then the run summary shows a Fileset line `host file ~/.gitconfig (optional) -> /home/agent/.gitconfig`
 
+  Scenario: a local run seeds a credential-shaped host file rather than refusing it
+    Given an lns.yaml declaring a hostPath fileset "~/.some-tool/auth.json" mounted at "/home/agent/.some-tool/auth.json" and optional
+    When the local sandbox run is prepared
+    Then the run summary shows a Fileset line `host file ~/.some-tool/auth.json (optional) -> /home/agent/.some-tool/auth.json`
+
   Scenario: a pulled sandbox's host file is named in the disclosure before it boots
     Given a pulled sandbox whose view declares a hostPath fileset "~/.gitconfig" at "/home/agent/.gitconfig" and optional
     When the pulled sandbox effects are confirmed with no answer
