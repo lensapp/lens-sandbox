@@ -225,6 +225,11 @@ fn validate_serves(serves: &[String]) -> Result<()> {
         if pattern.chars().any(char::is_whitespace) {
             bail!("serves entry {pattern:?} must not contain whitespace");
         }
+        if let Some(why) = lns_policy::matching::unusable_port(pattern) {
+            bail!(
+                "serves entry {pattern:?}: {why}. lns reads the whole entry as one host name, so this connector is never offered"
+            );
+        }
     }
     Ok(())
 }
@@ -947,6 +952,42 @@ mod tests {
                 format!("{err:#}").contains("serves entry"),
                 "{serves}: got {err:#}"
             );
+        }
+    }
+
+    #[test]
+    fn a_serves_entry_whose_port_position_is_not_a_port_is_refused() {
+        // A tail that is not a port is read as part of one long host name, so the connector installs, lists, and is never offered — with no error at any point.
+        for serves in [
+            r#"["db.internal:notaport"]"#,
+            r#"["api.example:99999"]"#,
+            r#"["db.internal:"]"#,
+            r#"["[::1]:notaport"]"#,
+        ] {
+            let err = parse(&document(&format!(
+                r#"{{"serves":{serves},"methods":[{{"name":"token","auth":{{"kind":"token"}}}}]}}"#
+            )))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("is not a port number"),
+                "{serves}: got {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_serves_entry_that_names_a_port_or_none_at_all_is_kept() {
+        for serves in [
+            r#"["api.example"]"#,
+            r#"["api.example:443"]"#,
+            r#"["*.example:5432"]"#,
+            r#"["[2001:db8::1]:443"]"#,
+            r#"["2001:db8::1"]"#,
+        ] {
+            parse(&document(&format!(
+                r#"{{"serves":{serves},"methods":[{{"name":"token","auth":{{"kind":"token"}}}}]}}"#
+            )))
+            .unwrap_or_else(|e| panic!("{serves} names a destination this rule must keep: {e:#}"));
         }
     }
 

@@ -205,6 +205,20 @@ pub fn split_destination(destination: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Why a destination's port position holds no port — asked separately because [`split_destination`] reads an unparseable tail back into the host name.
+pub fn unusable_port(destination: &str) -> Option<String> {
+    let position = if let Some((_, port)) = destination.rsplit_once("]:") {
+        Some(port)
+    } else if destination.starts_with('[') || destination.matches(':').count() > 1 {
+        None
+    } else {
+        destination.rsplit_once(':').map(|(_, port)| port)
+    };
+    position
+        .filter(|port| port.parse::<u16>().is_err())
+        .map(|port| format!("{port:?} is not a port number"))
+}
+
 /// An IPv6 literal without the brackets a `host:port` pattern needs to carry it; every other host unchanged.
 pub fn unbracketed(host: &str) -> &str {
     host.strip_prefix('[')
@@ -1010,6 +1024,69 @@ mod tests {
             shadower_of(existing, &scoped("api.example.test", &["/usr/bin/curl"])),
             Some(1),
             "the gate stops at the first match, so that is the rule to sit in front of"
+        );
+    }
+
+    #[test]
+    fn a_port_position_holding_a_port_or_none_at_all_has_no_problem() {
+        for destination in [
+            "api.example",
+            "api.example:443",
+            "[2001:db8::1]:443",
+            "[2001:db8::1]",
+            "2001:db8::1",
+            "10.0.0.0/24:443",
+        ] {
+            assert_eq!(unusable_port(destination), None, "{destination}");
+        }
+    }
+
+    #[test]
+    fn where_both_readings_see_a_port_position_they_agree_on_whether_it_holds_a_port() {
+        // Outside this overlap the two deliberately differ: `split_destination` folds an unparseable tail back into the host, which is what `unusable_port` exists to catch.
+        for destination in [
+            "api.example",
+            "api.example:443",
+            "api.example:notaport",
+            "api.example:99999",
+            "api.example:",
+            "[2001:db8::1]",
+            "[2001:db8::1]:443",
+            "[::1]:notaport",
+            "2001:db8::1",
+            "10.0.0.0/24:443",
+            "*",
+        ] {
+            if let (_, Some(port)) = split_destination(destination) {
+                assert_eq!(
+                    unusable_port(destination).is_none(),
+                    port.parse::<u16>().is_ok(),
+                    "{destination}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_port_position_that_is_not_a_port_says_which_tail_is_wrong() {
+        // Each of these is read back into the host name by `split_destination`, so nothing downstream can tell it from a hostname nobody visits.
+        for (destination, tail) in [
+            ("db.internal:notaport", "notaport"),
+            ("api.example:99999", "99999"),
+            ("[::1]:notaport", "notaport"),
+        ] {
+            let why = unusable_port(destination).unwrap_or_else(|| panic!("{destination}"));
+            assert!(why.contains(tail), "{destination}: {why}");
+            assert!(why.contains("not a port number"), "{destination}: {why}");
+        }
+    }
+
+    #[test]
+    fn an_empty_port_position_is_refused_and_shows_that_it_is_empty() {
+        // Its own row in the corpus above would prove nothing: every message contains the empty string.
+        assert_eq!(
+            unusable_port("db.internal:").as_deref(),
+            Some("\"\" is not a port number")
         );
     }
 }
