@@ -269,6 +269,21 @@ impl SessionHandler for AgentSession {
     }
 }
 
+/// What the agent process gets for its stdio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentIo {
+    Pty,
+    Pipes,
+}
+
+pub(crate) fn agent_io(_session_has_terminal: bool, devpts_mounted: bool) -> AgentIo {
+    if devpts_mounted {
+        AgentIo::Pty
+    } else {
+        AgentIo::Pipes
+    }
+}
+
 /// Layer the agent env (parent → project → proxy → creds) then scrub internal vars; CA env is applied later at the Command level.
 fn build_agent_env(
     config: &AgentConfig,
@@ -496,6 +511,29 @@ mod tests {
             workspace_path: Some("/tmp".into()),
             scripts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_run_that_declined_a_terminal_gets_pipes_even_where_devpts_is_mounted() {
+        assert_eq!(
+            agent_io(false, true),
+            AgentIo::Pipes,
+            "the broker gave us pipes because the run asked for no terminal; a PTY here lets the workload detect one and a pager stalls the run forever"
+        );
+    }
+
+    #[test]
+    fn a_run_that_asked_for_a_terminal_gets_a_pty() {
+        assert_eq!(agent_io(true, true), AgentIo::Pty);
+    }
+
+    #[test]
+    fn a_terminal_run_falls_back_to_pipes_without_devpts() {
+        assert_eq!(
+            agent_io(true, false),
+            AgentIo::Pipes,
+            "openpty cannot allocate a pair without devpts, so the agent must still start"
+        );
     }
 
     #[test]
