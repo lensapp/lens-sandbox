@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.23.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.22.0...lns-v0.23.0) (2026-09-01)
+
+
+### Features
+
+* **inspect:** attribute each merged entry to the source that decided it ([13d61e1](https://github.com/lensapp/lens-sandbox/commit/13d61e126e53e5106e91560fce75fb97aa71008d))
+* **inspect:** merge a local mixin into a local document offline ([2db59b2](https://github.com/lensapp/lens-sandbox/commit/2db59b268840ec1f450f9c478fb89392d0f8f87f))
+* **inspect:** merge the local mixins a document declares ([0680746](https://github.com/lensapp/lens-sandbox/commit/0680746d7f3b2cfa28afc81bd8de524136a376e7))
+
+
+### Bug Fixes
+
+* a detached run is still asked at the controlling terminal ([1b42d43](https://github.com/lensapp/lens-sandbox/commit/1b42d43daf4b1e43e35a9729f9b1884c18a2b274))
+* **audit:** drop the hidden --json alias the spec forbids ([f613599](https://github.com/lensapp/lens-sandbox/commit/f6135992f49b25dbcbf5fe6e0889eb0326f8db5c))
+* **inspect:** list every mixin the offline render merged, in merge order ([5e39b40](https://github.com/lensapp/lens-sandbox/commit/5e39b400d29481619d0fbe3c5dadbc3f75e40d55))
+* keep Docker out of the CLI help and the scaffolded document ([a286f5a](https://github.com/lensapp/lens-sandbox/commit/a286f5a96a678ecafbe218aa9e57995cf317c528))
+* **lns-init:** mount a tmpfs at /dev/shm so POSIX shared memory works ([#351](https://github.com/lensapp/lens-sandbox/issues/351)) ([e3633b4](https://github.com/lensapp/lens-sandbox/commit/e3633b4fd80fecd1bc980ca6de0d498543c3fa92))
+* **lns-init:** seed /etc/hosts so localhost resolves in the guest ([#268](https://github.com/lensapp/lens-sandbox/issues/268)) ([f31efb9](https://github.com/lensapp/lens-sandbox/commit/f31efb9bf89b37d5c67c95ce21195f44ecfbb896))
+
 ## [0.22.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.21.0...lns-v0.22.0) (2026-08-28)
 
 
