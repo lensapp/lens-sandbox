@@ -911,6 +911,7 @@ mod tests {
                 writes: Vec::new(),
                 env: Vec::new(),
                 help: None,
+                overrides: None,
                 credentials: Vec::new(),
                 asks: Vec::new(),
             }],
@@ -1014,6 +1015,7 @@ mod tests {
             writes: vec!["/home/agent/.netrc".into()],
             env: vec!["SOME_REGION".into()],
             help: None,
+            overrides: None,
             credentials: vec!["SOME_TOKEN".into()],
             asks: vec!["token".into()],
         }
@@ -1601,6 +1603,7 @@ mod tests {
             writes: Vec::new(),
             env: Vec::new(),
             help: None,
+            overrides: None,
             credentials: Vec::new(),
             asks: Vec::new(),
         };
@@ -1784,6 +1787,7 @@ mod tests {
             writes: Vec::new(),
             env: Vec::new(),
             help: None,
+            overrides: None,
             credentials: vec!["SOME_TOKEN".into(), "SOME_SECRET".into()],
             asks: vec!["token".into()],
         };

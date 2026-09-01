@@ -29,6 +29,7 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
                 credentials: vec!["SOME_TOKEN".to_string()],
                 asks: vec!["token".to_string()],
                 help: Some("Create one under Settings then Tokens.".to_string()),
+                overrides: None,
             },
             ConnectorMethodView {
                 name: "open".to_string(),
@@ -41,6 +42,7 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
                 credentials: Vec::new(),
                 asks: Vec::new(),
                 help: None,
+                overrides: None,
             },
         ],
         connections: connections

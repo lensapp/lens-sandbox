@@ -1491,6 +1491,15 @@ fn disclosure_lines(method: &lns_ipc::ConnectorMethodView) -> Vec<String> {
     .collect()
 }
 
+/// The deny this method would overturn, which §3.2.4 makes the card name. Absent where it overturns none, and where the run ships no document to overturn one in.
+fn override_line(method: &lns_ipc::ConnectorMethodView) -> Option<String> {
+    let overridden = method.overrides.as_deref().filter(|it| !it.is_empty())?;
+    Some(format!(
+        "Overrides what your sandbox document denies: {}",
+        overridden.join(", ")
+    ))
+}
+
 fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
     for line in disclosure_lines(method) {
         ui.add_space(6.0);
@@ -1498,6 +1507,14 @@ fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
             egui::RichText::new(line)
                 .size(theme::FONT_CAPTION)
                 .color(window::TEXT_MUTED),
+        );
+    }
+    if let Some(line) = override_line(method) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(line)
+                .size(theme::FONT_CAPTION)
+                .color(window::TEXT_WARN),
         );
     }
 }
@@ -1975,6 +1992,7 @@ mod tests {
                         credentials: credentials.iter().map(|c| c.to_string()).collect(),
                         asks: credentials.iter().map(|c| c.to_string()).collect(),
                         help: None,
+                        overrides: None,
                     }],
                     connections: connections
                         .iter()
@@ -2322,6 +2340,7 @@ mod tests {
             credentials: vec!["SOME_TOKEN".into()],
             asks: vec!["SOME_TOKEN".into()],
             help: None,
+            overrides: None,
         };
         assert!(
             !ready_to_grant(&method, &waiting),
@@ -2351,12 +2370,45 @@ mod tests {
             credentials: vec!["SOME_TOKEN".into()],
             asks: vec!["token".into()],
             help: None,
+            overrides: None,
         };
         assert_eq!(
             disclosure_lines(&method),
             ["Sets: SOME_REGION, SOME_TOKEN"],
             "the secret field is labelled by the sign-in now, so the disclosure is the only place the variable is named"
         );
+    }
+
+    fn opening(overrides: Option<Vec<String>>) -> lns_ipc::ConnectorMethodView {
+        lns_ipc::ConnectorMethodView {
+            name: "token".into(),
+            label: "token".into(),
+            auth_label: Some("token".into()),
+            offerable: true,
+            opens: vec!["api.some-provider.example".into()],
+            writes: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            asks: Vec::new(),
+            help: None,
+            overrides,
+        }
+    }
+
+    #[test]
+    fn the_card_names_the_deny_a_grant_would_overturn() {
+        // §3.2.4: an override must be named on the card that introduces it, or consent is given to something nobody saw.
+        let line = override_line(&opening(Some(vec!["api.some-provider.example".into()])))
+            .expect("an override is disclosed");
+        assert!(line.contains("api.some-provider.example"), "{line}");
+        assert!(line.contains("Overrides"), "{line}");
+    }
+
+    #[test]
+    fn a_method_overturning_nothing_adds_no_line() {
+        // A run that ships no document reports `None`, and one whose document denies nothing this method opens reports an empty list; neither overturns anything.
+        assert_eq!(override_line(&opening(Some(Vec::new()))), None);
+        assert_eq!(override_line(&opening(None)), None);
     }
 
     #[test]
@@ -2373,6 +2425,7 @@ mod tests {
             credentials: Vec::new(),
             asks: Vec::new(),
             help: None,
+            overrides: None,
         };
         let mut first = OfferDraft::default();
         begin_connecting(&method, &mut first, &holding(&[]));
