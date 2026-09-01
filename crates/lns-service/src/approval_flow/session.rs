@@ -1330,6 +1330,18 @@ pub(crate) mod tests {
         }
     }
 
+    fn http_verdicts(message: &PolicyMessage) -> Vec<(String, WireVerdict)> {
+        message
+            .network
+            .as_ref()
+            .expect("a network section")
+            .egress
+            .http
+            .iter()
+            .map(|rule| (rule.match_pattern.clone(), rule.verdict))
+            .collect()
+    }
+
     fn tcp_verdicts(message: &PolicyMessage) -> Vec<(String, WireVerdict)> {
         message
             .network
@@ -1388,6 +1400,32 @@ pub(crate) mod tests {
                 ),
             ],
             "the hold must lead the allow it narrows, because the guest gate is first-match-wins"
+        );
+    }
+
+    #[test]
+    fn two_mid_segment_wildcards_leave_a_served_destination_unheld() {
+        // No pattern names what `api.*.example` and `*.eu.example` share, so no hold is written and the run's own allow lets the traffic leave unauthenticated — delete this test when `intersection` can name that shared set.
+        let mut own = Policy::default();
+        own.add_rule(RouteRule::allow_host("*.eu.example"));
+        let (s, n, _store, _rx) = fixture_holding(own);
+        s.hold_for_offers(vec![serving("api.*.example")]);
+
+        assert_eq!(
+            http_verdicts(&s.policy_message()),
+            [("*.eu.example".to_string(), WireVerdict::Allow)],
+            "no ask is published, so the guest answers this request itself and the host never sees it"
+        );
+        s.submit_pending(pending("r1", "api.eu.example"), Instant::now());
+        assert!(
+            n.presented
+                .lock()
+                .unwrap()
+                .last()
+                .expect("a card")
+                .offer
+                .is_some(),
+            "no card appears in the real flow, because no ask is published; this submit is the test's own, and it shows the session matches a connector to the very host the hold skipped"
         );
     }
 
