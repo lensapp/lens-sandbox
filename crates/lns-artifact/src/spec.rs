@@ -20,11 +20,11 @@ impl Kind {
     }
 
     pub fn artifact_type(self) -> String {
-        format!("application/vnd.lens.{}.v1+json", self.as_str())
+        format!("application/vnd.lns.{}.v1+json", self.as_str())
     }
 
     pub fn config_media_type(self) -> String {
-        format!("application/vnd.lens.{}.config.v1+json", self.as_str())
+        format!("application/vnd.lns.{}.config.v1+json", self.as_str())
     }
 
     pub fn from_artifact_type(media_type: &str) -> Option<Kind> {
@@ -220,20 +220,20 @@ mod tests {
             (
                 Kind::Sandbox,
                 "sandbox",
-                "application/vnd.lens.sandbox.v1+json",
-                "application/vnd.lens.sandbox.config.v1+json",
+                "application/vnd.lns.sandbox.v1+json",
+                "application/vnd.lns.sandbox.config.v1+json",
             ),
             (
                 Kind::Mixin,
                 "mixin",
-                "application/vnd.lens.mixin.v1+json",
-                "application/vnd.lens.mixin.config.v1+json",
+                "application/vnd.lns.mixin.v1+json",
+                "application/vnd.lns.mixin.config.v1+json",
             ),
             (
                 Kind::Connector,
                 "connector",
-                "application/vnd.lens.connector.v1+json",
-                "application/vnd.lens.connector.config.v1+json",
+                "application/vnd.lns.connector.v1+json",
+                "application/vnd.lns.connector.config.v1+json",
             ),
         ] {
             assert_eq!(kind.as_str(), name);
@@ -377,12 +377,12 @@ mod tests {
                 "docs/sandbox-spec.md §7: nothing but an artifact is addressable on its own"
             );
             assert_eq!(
-                Kind::from_artifact_type(&format!("application/vnd.lens.{retired}.v1+json")),
+                Kind::from_artifact_type(&format!("application/vnd.lns.{retired}.v1+json")),
                 None
             );
             assert_eq!(
                 Kind::from_config_media_type(&format!(
-                    "application/vnd.lens.{retired}.config.v1+json"
+                    "application/vnd.lns.{retired}.config.v1+json"
                 )),
                 None
             );

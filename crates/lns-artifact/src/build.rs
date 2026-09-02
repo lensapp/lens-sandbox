@@ -369,10 +369,10 @@ mod tests {
     fn a_mixin_publishes_under_its_own_artifact_type() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"tools":["node@22"]}}"#;
         let built = build(doc).expect("a mixin is an artifact, published like any other");
-        assert_eq!(built.artifact_type, "application/vnd.lens.mixin.v1+json");
+        assert_eq!(built.artifact_type, "application/vnd.lns.mixin.v1+json");
         let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
         assert_eq!(
-            manifest["config"]["mediaType"], "application/vnd.lens.mixin.config.v1+json",
+            manifest["config"]["mediaType"], "application/vnd.lns.mixin.config.v1+json",
             "the media type names the kind, so a puller knows what it fetched before reading it"
         );
     }
@@ -390,16 +390,16 @@ mod tests {
     #[test]
     fn build_artifact_produces_a_config_only_manifest_with_matching_digests() {
         let built = build(&sandbox()).unwrap();
-        assert_eq!(built.artifact_type, "application/vnd.lens.sandbox.v1+json");
+        assert_eq!(built.artifact_type, "application/vnd.lns.sandbox.v1+json");
 
         let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
         assert_eq!(
             manifest["artifactType"],
-            "application/vnd.lens.sandbox.v1+json"
+            "application/vnd.lns.sandbox.v1+json"
         );
         assert_eq!(
             manifest["config"]["mediaType"],
-            "application/vnd.lens.sandbox.config.v1+json"
+            "application/vnd.lns.sandbox.config.v1+json"
         );
 
         let config = built
@@ -611,7 +611,7 @@ mod tests {
             None,
         )
         .expect("a declared path fileset packs into this artifact");
-        assert_eq!(built.artifact_type, "application/vnd.lens.sandbox.v1+json");
+        assert_eq!(built.artifact_type, "application/vnd.lns.sandbox.v1+json");
 
         let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
         assert_eq!(manifest["layers"].as_array().unwrap().len(), 1);
