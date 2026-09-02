@@ -284,6 +284,8 @@ fn build_agent_env(
         full_env.insert("https_proxy".into(), local_proxy.clone());
         full_env.insert("HTTP_PROXY".into(), local_proxy.clone());
         full_env.insert("http_proxy".into(), local_proxy);
+        full_env.insert("NO_PROXY".into(), lns_session::GUEST_NO_PROXY.into());
+        full_env.insert("no_proxy".into(), lns_session::GUEST_NO_PROXY.into());
     }
 
     if let Some(home) = effective_home(env, creds) {
@@ -844,6 +846,36 @@ mod tests {
             env.get("HTTPS_PROXY").map(String::as_str),
             Some(lns_session::GUEST_PROXY_URL),
             "the service points an exec session at this spelling without asking the guest, so a change here that leaves the constant behind sends an exec around the gate"
+        );
+    }
+
+    #[test]
+    fn a_loopback_request_stays_in_the_guest_instead_of_going_to_the_proxy() {
+        let mut config = make_agent_config();
+        config.core.is_root = true;
+
+        let env = build_agent_env(&config, None, &HashMap::new());
+
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some("localhost,127.0.0.1,::1"),
+                "without {key} a curl or reqwest sends a request for a server the workload itself started to the egress proxy, which cannot connect back into the guest"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loopback_exclusions_the_workload_gets_are_the_ones_an_exec_session_gets() {
+        let mut config = make_agent_config();
+        config.core.is_root = true;
+
+        let env = build_agent_env(&config, None, &HashMap::new());
+
+        assert_eq!(
+            env.get("NO_PROXY").map(String::as_str),
+            Some(lns_session::GUEST_NO_PROXY),
+            "the service points an exec session at this spelling without asking the guest, so a change here that leaves the constant behind makes an exec fail on a loopback request the workload can make"
         );
     }
 
