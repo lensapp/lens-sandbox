@@ -36,6 +36,7 @@ const DEV_FD_LINKS: &[(&str, &str)] = &[
     ("/proc/self/fd/1", "/dev/stdout"),
     ("/proc/self/fd/2", "/dev/stderr"),
 ];
+const EXPLODED_BIND_SHARES: &str = "/.lens/binds";
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const TMP: &str = "/tmp";
@@ -47,6 +48,7 @@ const UNPRIV_PORT_START_SYSCTL: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MountFlags {
     bind: bool,
+    recursive: bool,
     read_only: bool,
     nosuid: bool,
     nodev: bool,
@@ -61,6 +63,13 @@ impl MountFlags {
         Self {
             bind: true,
             ..Self::default()
+        }
+    }
+    /// A plain bind copies one mount; the masks an exclude leaves are submounts, and only a recursive bind carries them onto the entry it lands.
+    fn bind_recursive() -> Self {
+        Self {
+            recursive: true,
+            ..Self::bind()
         }
     }
     fn read_only() -> Self {
@@ -81,6 +90,19 @@ impl MountFlags {
         self.noexec = true;
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    Dir,
+    File,
+    Symlink(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareEntry {
+    pub name: String,
+    pub kind: EntryKind,
 }
 
 pub(crate) struct SandboxUser {
@@ -106,6 +128,7 @@ pub(crate) trait Syscalls {
     fn chdir(&self, path: &CStr) -> std::io::Result<()>;
     fn path_exists(&self, path: &CStr) -> bool;
     fn is_dir(&self, path: &CStr) -> bool;
+    fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<ShareEntry>>;
     fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd>;
     fn fexecve(&self, fd: RawFd, argv0: &CStr) -> std::io::Error;
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
@@ -136,6 +159,7 @@ pub enum MountError {
     Syscall { op: String, err: std::io::Error },
     DescriptorDigestMismatch { expected: String, actual: String },
     DescriptorRead(std::io::Error),
+    SeededPathUnderSymlink(String),
     UnresolvableUser(String),
     UnresolvableGroup(String),
 }
@@ -157,6 +181,12 @@ impl fmt::Display for MountError {
                 "bind.{idx} on the kernel cmdline is missing its tag/target or a declared \
                  dropped path (likely a truncated cmdline); refusing to boot rather than \
                  risk exposing a secret the operator chose to drop"
+            ),
+            Self::SeededPathUnderSymlink(path) => write!(
+                f,
+                "the bind entry {path} on the way to a path a fileset writes is a symlink; \
+                 refusing to boot rather than follow it and write somewhere the document \
+                 did not name"
             ),
             Self::InteriorNul(field) => {
                 write!(f, "cmdline field {field} contained an interior NUL")
@@ -650,7 +680,7 @@ fn mount_binds(
     run_ids: Option<(u32, u32)>,
     home: Option<&str>,
 ) -> Result<(), MountError> {
-    for bind in binds {
+    for (index, bind) in binds.iter().enumerate() {
         let target = format!("{newroot}{}", bind.target);
         let made = made_by_mkdir_p(sys, &target, 0o755)?;
         hand_new_home_dirs_to_workload(sys, newroot, home, run_ids, &made);
@@ -658,12 +688,128 @@ fn mount_binds(
             true => MountFlags::read_only().nosuid().nodev(),
             false => MountFlags::none().nosuid().nodev(),
         };
-        do_mount(sys, &bind.tag, &target, "virtiofs", flags, None)?;
-        for dropped in &bind.dropped_paths {
-            mask_dropped_path(sys, &format!("{target}/{dropped}"))?;
+        if bind.seeded_paths.is_empty() {
+            do_mount(sys, &bind.tag, &target, "virtiofs", flags, None)?;
+            mask_each_dropped_path(sys, &target, &bind.dropped_paths)?;
+            continue;
+        }
+        explode_bind(sys, bind, index, newroot, &target, flags)?;
+    }
+    Ok(())
+}
+
+fn mask_each_dropped_path(
+    sys: &dyn Syscalls,
+    root: &str,
+    dropped_paths: &[String],
+) -> Result<(), MountError> {
+    for dropped in dropped_paths {
+        mask_dropped_path(sys, &format!("{root}/{dropped}"))?;
+    }
+    Ok(())
+}
+
+/// A fileset writes into a path this bind excludes, and that write must not reach the share, so the share is mounted out of the way and its entries are bound in one at a time — leaving the excluded path's parents as guest-local directories the write can land in (§3.1.11).
+fn explode_bind(
+    sys: &dyn Syscalls,
+    bind: &crate::cmdline::BindParam,
+    index: usize,
+    newroot: &str,
+    target: &str,
+    flags: MountFlags,
+) -> Result<(), MountError> {
+    let share = format!("{newroot}{EXPLODED_BIND_SHARES}/{index}");
+    made_by_mkdir_p(sys, &share, 0o700)?;
+    do_mount(sys, &bind.tag, &share, "virtiofs", flags, None)?;
+    mask_each_dropped_path(sys, &share, &bind.dropped_paths)?;
+    let spine: Vec<Vec<&str>> = bind
+        .seeded_paths
+        .iter()
+        .map(|path| path_segments(path))
+        .collect();
+    bind_the_entries_beside(sys, &share, target, &spine)
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+fn bind_the_entries_beside(
+    sys: &dyn Syscalls,
+    from: &str,
+    onto: &str,
+    spine: &[Vec<&str>],
+) -> Result<(), MountError> {
+    let from_c = cstring(from, "read-dir-path")?;
+    let entries = sys.read_dir(&from_c).map_err(|err| MountError::Syscall {
+        op: format!("read_dir({from})"),
+        err,
+    })?;
+    for entry in entries {
+        let deeper: Vec<Vec<&str>> = spine
+            .iter()
+            .filter(|path| path.first() == Some(&entry.name.as_str()))
+            .map(|path| path[1..].to_vec())
+            .collect();
+        let source = format!("{from}/{}", entry.name);
+        let landing = format!("{onto}/{}", entry.name);
+        if deeper.is_empty() {
+            place_one_entry(sys, &entry, &source, &landing)?;
+        } else if !deeper.iter().any(Vec::is_empty) {
+            if let EntryKind::Symlink(_) = entry.kind {
+                return Err(MountError::SeededPathUnderSymlink(source));
+            }
+            made_by_mkdir_p(sys, &landing, 0o755)?;
+            bind_the_entries_beside(sys, &source, &landing, &deeper)?;
         }
     }
     Ok(())
+}
+
+/// A whole bind shows a symlink as a symlink, so the split recreates one rather than binding what it resolves to in this namespace; a bind clones the flags of the mount it copies, so the share's own nosuid/nodev/read-only reach every entry without a remount.
+fn place_one_entry(
+    sys: &dyn Syscalls,
+    entry: &ShareEntry,
+    source: &str,
+    landing: &str,
+) -> Result<(), MountError> {
+    match &entry.kind {
+        EntryKind::Symlink(target) => {
+            let target_c = cstring(target, "symlink-target")?;
+            let landing_c = cstring(landing, "symlink-path")?;
+            sys.symlink(&target_c, &landing_c)
+                .map_err(|err| MountError::Syscall {
+                    op: format!("symlink({target} -> {landing})"),
+                    err,
+                })
+        }
+        EntryKind::Dir => {
+            do_mkdir(sys, landing, 0o755)?;
+            do_mount(
+                sys,
+                source,
+                landing,
+                "none",
+                MountFlags::bind_recursive(),
+                None,
+            )
+        }
+        EntryKind::File => {
+            sys.write_root_file(landing, b"", 0o644)
+                .map_err(|err| MountError::Syscall {
+                    op: format!("create bind mountpoint {landing}"),
+                    err,
+                })?;
+            do_mount(
+                sys,
+                source,
+                landing,
+                "none",
+                MountFlags::bind_recursive(),
+                None,
+            )
+        }
+    }
 }
 
 /// A mount point this boot created at or under the home belongs to the workload, or it can traverse the directory and write nothing beside what the mount put there.
@@ -1015,7 +1161,7 @@ mod tests {
     use super::*;
     use sha2::Digest;
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn make_descriptor_file(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
         let d = tempfile::TempDir::new().expect("tempdir");
@@ -1496,6 +1642,9 @@ mod tests {
             from: String,
             to: String,
         },
+        ReadDir {
+            path: String,
+        },
         Mkdir {
             path: String,
             mode: u32,
@@ -1552,6 +1701,7 @@ mod tests {
         calls: RefCell<Vec<Call>>,
         ptmx_exists: bool,
         dir_paths: Vec<String>,
+        dir_entries: BTreeMap<String, Vec<ShareEntry>>,
         fail_when: FailWhen,
         digest_result: RefCell<Option<Result<(), MountError>>>,
     }
@@ -1562,6 +1712,7 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 ptmx_exists: true,
                 dir_paths: Vec::new(),
+                dir_entries: BTreeMap::new(),
                 fail_when: Box::new(|_| None),
                 digest_result: RefCell::new(None),
             }
@@ -1569,6 +1720,11 @@ mod tests {
 
         fn with_dir(mut self, path: &str) -> Self {
             self.dir_paths.push(path.to_string());
+            self
+        }
+
+        fn with_entries(mut self, path: &str, entries: &[ShareEntry]) -> Self {
+            self.dir_entries.insert(path.to_string(), entries.to_vec());
             self
         }
 
@@ -1664,6 +1820,12 @@ mod tests {
         }
         fn is_dir(&self, path: &CStr) -> bool {
             self.dir_paths.iter().any(|p| p == path.to_str().unwrap())
+        }
+
+        fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<ShareEntry>> {
+            let path = path.to_string_lossy().into_owned();
+            self.record(Call::ReadDir { path: path.clone() })?;
+            Ok(self.dir_entries.get(&path).cloned().unwrap_or_default())
         }
         fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd> {
             self.record(Call::OpenRo(path.to_str().unwrap().to_string()))?;
@@ -2899,7 +3061,380 @@ mod tests {
             target: target.into(),
             read_only,
             dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+            seeded_paths: Vec::new(),
         }
+    }
+
+    fn bind_param_seeding(
+        tag: &str,
+        target: &str,
+        drops: &[&str],
+        seeds: &[&str],
+    ) -> crate::cmdline::BindParam {
+        crate::cmdline::BindParam {
+            seeded_paths: seeds.iter().map(|s| s.to_string()).collect(),
+            ..bind_param(tag, target, false, drops)
+        }
+    }
+
+    fn dir_entry(name: &str) -> ShareEntry {
+        ShareEntry {
+            name: name.into(),
+            kind: EntryKind::Dir,
+        }
+    }
+
+    fn file_entry(name: &str) -> ShareEntry {
+        ShareEntry {
+            name: name.into(),
+            kind: EntryKind::File,
+        }
+    }
+
+    fn mounts_of(sys: &FakeSyscalls) -> Vec<(String, String)> {
+        sys.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Mount { source, target, .. } => Some((source, target)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn exploded_claude_bind(seeds: &[&str]) -> FakeSyscalls {
+        let sys = FakeSyscalls::new()
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[
+                    dir_entry("projects"),
+                    file_entry("settings.json"),
+                    dir_entry("agent"),
+                ],
+            )
+            .with_entries(
+                "/newroot/.lens/binds/0/agent",
+                &[dir_entry("cache"), file_entry("token.json")],
+            );
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                seeds,
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the bind explodes rather than covering the seeded path");
+        sys
+    }
+
+    #[test]
+    fn a_seeded_bind_mounts_its_share_out_of_the_way_of_the_target() {
+        let sys = exploded_claude_bind(&["settings.json"]);
+        let mounts = mounts_of(&sys);
+        assert!(
+            mounts.contains(&("lns-bind-0".into(), "/newroot/.lens/binds/0".into())),
+            "the share lands on a private path, not on the target: {mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|(_, target)| target == "/newroot/root/.claude"),
+            "nothing may cover the target, or the fileset write would reach the share: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_seeded_bind_binds_every_entry_beside_the_seed_and_leaves_the_seed_alone() {
+        let sys = exploded_claude_bind(&["settings.json"]);
+        let mounts = mounts_of(&sys);
+        assert!(
+            mounts.contains(&(
+                "/newroot/.lens/binds/0/projects".into(),
+                "/newroot/root/.claude/projects".into()
+            )),
+            "a sibling of the seed still reaches the workload: {mounts:?}"
+        );
+        assert!(
+            mounts.contains(&(
+                "/newroot/.lens/binds/0/agent".into(),
+                "/newroot/root/.claude/agent".into()
+            )),
+            "a sibling directory is bound whole: {mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|(_, target)| target == "/newroot/root/.claude/settings.json"),
+            "the seeded path is left for the fileset to write: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_seed_below_the_top_level_splits_only_its_own_ancestors() {
+        let sys = exploded_claude_bind(&["agent/token.json"]);
+        let mounts = mounts_of(&sys);
+        assert!(
+            !mounts
+                .iter()
+                .any(|(_, target)| target == "/newroot/root/.claude/agent"),
+            "the seed's parent stays a guest-local directory: {mounts:?}"
+        );
+        assert!(
+            mounts.contains(&(
+                "/newroot/.lens/binds/0/agent/cache".into(),
+                "/newroot/root/.claude/agent/cache".into()
+            )),
+            "the seed's siblings one level down are bound in: {mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|(_, target)| target == "/newroot/root/.claude/agent/token.json"),
+            "the seed itself is left for the fileset: {mounts:?}"
+        );
+        assert!(
+            mounts.contains(&(
+                "/newroot/.lens/binds/0/projects".into(),
+                "/newroot/root/.claude/projects".into()
+            )),
+            "a top-level entry off the spine is still bound whole: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_seeded_bind_masks_its_drops_on_the_share_the_entries_come_from() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")])
+            .with_dir("/newroot/.lens/binds/0/.env");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[".env"],
+                &["settings.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("masks apply to the private share");
+        let mounts = mounts_of(&sys);
+        assert!(
+            mounts.contains(&("tmpfs".into(), "/newroot/.lens/binds/0/.env".into())),
+            "a dropped path is masked where the entries are read from: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_entry_carries_the_masks_under_it_because_a_plain_bind_would_leave_them_behind() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")])
+            .with_dir("/newroot/.lens/binds/0/projects/.env");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &["projects/.env"],
+                &["settings.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the drop is masked on the share and the entry carries the mask over");
+        let recursive = sys.calls().into_iter().any(|call| match call {
+            Call::Mount { target, flags, .. } => {
+                target == "/newroot/root/.claude/projects" && flags.recursive
+            }
+            _ => false,
+        });
+        assert!(
+            recursive,
+            "a non-recursive bind drops the mask and shows the workload the real secret"
+        );
+    }
+
+    #[test]
+    fn a_symlink_in_the_share_is_recreated_rather_than_followed_out_of_the_share() {
+        let sys = FakeSyscalls::new().with_entries(
+            "/newroot/.lens/binds/0",
+            &[ShareEntry {
+                name: "link".into(),
+                kind: EntryKind::Symlink("/etc".into()),
+            }],
+        );
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("a symlink entry is recreated");
+        assert!(
+            sys.calls().into_iter().any(|call| matches!(
+                call,
+                Call::Symlink { target, linkpath }
+                    if target == "/etc" && linkpath == "/newroot/root/.claude/link"
+            )),
+            "a whole bind shows a symlink as a symlink, and so must the split"
+        );
+        assert!(
+            !mounts_of(&sys)
+                .iter()
+                .any(|(source, _)| source == "/newroot/.lens/binds/0/link"),
+            "binding what the link resolves to would mount something the document never named"
+        );
+    }
+
+    #[test]
+    fn a_symlink_the_guest_cannot_recreate_refuses_the_boot_rather_than_dropping_it() {
+        let sys = FakeSyscalls::new()
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[ShareEntry {
+                    name: "link".into(),
+                    kind: EntryKind::Symlink("/etc".into()),
+                }],
+            )
+            .fail_when(|call| match call {
+                Call::Symlink { linkpath, .. } if linkpath == "/newroot/root/.claude/link" => {
+                    Some(ErrorKind::PermissionDenied)
+                }
+                _ => None,
+            });
+        let err = mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect_err("a link the workload would have seen must not silently vanish");
+        assert!(
+            format!("{err}").contains("symlink(/etc -> /newroot/root/.claude/link)"),
+            "the refusal names the link it could not recreate: {err}"
+        );
+    }
+
+    #[test]
+    fn a_seeded_path_reached_through_a_symlink_refuses_the_boot() {
+        let sys = FakeSyscalls::new().with_entries(
+            "/newroot/.lens/binds/0",
+            &[ShareEntry {
+                name: "agent".into(),
+                kind: EntryKind::Symlink("/elsewhere".into()),
+            }],
+        );
+        let err = mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent/token.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect_err("following it would write where the document did not name");
+        assert!(
+            format!("{err}").contains("/newroot/.lens/binds/0/agent"),
+            "the refusal names the link it will not follow: {err}"
+        );
+    }
+
+    #[test]
+    fn a_share_the_guest_cannot_read_refuses_the_boot_rather_than_binding_nothing() {
+        let sys = FakeSyscalls::new().fail_when(|call| match call {
+            Call::ReadDir { path } if path == "/newroot/.lens/binds/0" => {
+                Some(ErrorKind::PermissionDenied)
+            }
+            _ => None,
+        });
+        let err = mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect_err("an unreadable share must not read as an empty one");
+        assert!(
+            format!("{err}").contains("read_dir(/newroot/.lens/binds/0)"),
+            "the refusal names the share it could not read: {err}"
+        );
+    }
+
+    #[test]
+    fn a_mountpoint_the_guest_cannot_create_refuses_the_boot() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[file_entry("settings.json")])
+            .fail_when(|call| match call {
+                Call::WriteRootFile { path, .. }
+                    if path == "/newroot/root/.claude/settings.json" =>
+                {
+                    Some(ErrorKind::PermissionDenied)
+                }
+                _ => None,
+            });
+        let err = mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent"],
+            )],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect_err("a mountpoint that cannot be made means the entry never reaches the workload");
+        assert!(
+            format!("{err}").contains("create bind mountpoint /newroot/root/.claude/settings.json"),
+            "the refusal names the mountpoint: {err}"
+        );
+    }
+
+    #[test]
+    fn a_bind_with_no_seed_is_mounted_whole_as_one_mount() {
+        let sys = FakeSyscalls::new();
+        mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/work", false, &[])],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("an ordinary bind is untouched by the split");
+        assert_eq!(
+            mounts_of(&sys),
+            [("lns-bind-0".to_string(), "/newroot/work".to_string())],
+            "no seed means no private share and no per-entry binds"
+        );
     }
 
     #[test]

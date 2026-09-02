@@ -25,6 +25,8 @@ pub struct BindParam {
     pub target: String,
     pub read_only: bool,
     pub dropped_paths: Vec<String>,
+    /// Excluded paths a fileset writes into, so the share is exploded and these are left for the fileset (§3.1.11).
+    pub seeded_paths: Vec<String>,
 }
 
 #[derive(Default)]
@@ -34,6 +36,8 @@ struct PartialBind {
     read_only: bool,
     drops_count: Option<usize>,
     drops: BTreeMap<usize, String>,
+    seeds_count: Option<usize>,
+    seeds: BTreeMap<usize, String>,
 }
 
 enum BindOutcome {
@@ -48,7 +52,14 @@ impl PartialBind {
         match (self.tag, self.target) {
             (None, None) => BindOutcome::Skip,
             (Some(_), None) | (None, Some(_)) => BindOutcome::Incomplete,
-            (Some(_), Some(_)) if self.drops.len() != self.drops_count.unwrap_or(0) => {
+            (Some(_), Some(_))
+                if self.drops.len() != self.drops_count.unwrap_or(0)
+                    || self.seeds.len() != self.seeds_count.unwrap_or(0)
+                    || self
+                        .seeds
+                        .values()
+                        .any(|seed| seed.split('/').all(str::is_empty)) =>
+            {
                 BindOutcome::Incomplete
             }
             (Some(tag), Some(target)) if target_within_root(&target) => {
@@ -57,6 +68,7 @@ impl PartialBind {
                     target,
                     read_only,
                     dropped_paths: self.drops.into_values().collect(),
+                    seeded_paths: self.seeds.into_values().collect(),
                 })
             }
             (Some(_), Some(_)) => BindOutcome::Skip,
@@ -172,14 +184,22 @@ fn parse_bind_key(key: &str, value: &str, binds: &mut BTreeMap<usize, PartialBin
         "target" => entry.target = Some(value.to_string()),
         "ro" => entry.read_only = value == "1",
         "drops" => entry.drops_count = value.parse::<usize>().ok(),
-        _ => {
-            if let Some(j) = field
-                .strip_prefix("drop.")
-                .and_then(|j| j.parse::<usize>().ok())
-            {
-                entry.drops.insert(j, value.to_string());
-            }
-        }
+        "seeds" => entry.seeds_count = value.parse::<usize>().ok(),
+        _ => indexed_bind_path(entry, field, value),
+    }
+}
+
+fn indexed_bind_path(entry: &mut PartialBind, field: &str, value: &str) {
+    if let Some(j) = field
+        .strip_prefix("drop.")
+        .and_then(|j| j.parse::<usize>().ok())
+    {
+        entry.drops.insert(j, value.to_string());
+    } else if let Some(j) = field
+        .strip_prefix("seed.")
+        .and_then(|j| j.parse::<usize>().ok())
+    {
+        entry.seeds.insert(j, value.to_string());
     }
 }
 
@@ -460,9 +480,58 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![".env".into(), ".npmrc".into()],
+                seeded_paths: Vec::new(),
             }]
         );
         assert!(p.incomplete_binds.is_empty());
+    }
+
+    #[test]
+    fn a_bind_carries_the_paths_a_fileset_writes_into_in_index_order() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.seeds=2 bind.0.seed.1=agent/token.json bind.0.seed.0=settings.json",
+        );
+        assert_eq!(
+            p.binds[0].seeded_paths,
+            vec!["settings.json".to_string(), "agent/token.json".to_string()]
+        );
+        assert!(p.incomplete_binds.is_empty());
+    }
+
+    #[test]
+    fn a_bind_missing_one_of_its_declared_seeds_is_incomplete_rather_than_half_split() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.seeds=2 bind.0.seed.0=settings.json",
+        );
+        assert_eq!(p.incomplete_binds, vec![0]);
+    }
+
+    #[test]
+    fn a_bind_whose_seed_names_no_path_is_incomplete_rather_than_split_for_nothing() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.seeds=1 bind.0.seed.0=",
+        );
+        assert_eq!(
+            p.incomplete_binds,
+            vec![0],
+            "an empty seed would explode the bind and protect nothing"
+        );
+    }
+
+    #[test]
+    fn a_seed_of_only_separators_names_no_path_either() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.seeds=1 bind.0.seed.0=//",
+        );
+        assert_eq!(
+            p.incomplete_binds,
+            vec![0],
+            "a seed of separators has no segments, so it would split the bind for nothing"
+        );
     }
 
     #[test]
