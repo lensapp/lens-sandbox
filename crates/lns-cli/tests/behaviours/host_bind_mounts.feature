@@ -70,16 +70,16 @@ Feature: lns run mounts host directories into the sandbox (docker `-v host:guest
     And a per-machine DROP decision is recorded for "/Users/me/proj/.env"
     And a later run with the same bind shows no prompt
 
-  Scenario: A committed .lensignore drops matching paths with no prompt
+  Scenario: A committed .lnsignore drops matching paths with no prompt
     Given the host directory "/Users/me/proj" contains ".env"
-    And the host directory "/Users/me/proj" has a ".lensignore" listing ".env"
+    And the host directory "/Users/me/proj" has a ".lnsignore" listing ".env"
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then ".env" is dropped from the bind
     And no KEEP or DROP prompt is shown
 
-  Scenario: A .lensignore drops any listed file, even one that isn't secret-shaped
+  Scenario: A .lnsignore drops any listed file, even one that isn't secret-shaped
     Given the host directory "/Users/me/proj" contains "notes.txt"
-    And the host directory "/Users/me/proj" has a ".lensignore" listing "notes.txt"
+    And the host directory "/Users/me/proj" has a ".lnsignore" listing "notes.txt"
     When the user runs `lns run -v /Users/me/proj:/work alpine` interactively
     Then "notes.txt" is dropped from the bind
     And no KEEP or DROP prompt is shown

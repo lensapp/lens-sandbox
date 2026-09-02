@@ -237,7 +237,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
 
 struct FakeDir {
     entries: Vec<String>,
-    lensignore: Option<String>,
+    lnsignore: Option<String>,
     missing: bool,
 }
 
@@ -255,8 +255,8 @@ impl DirScan for FakeDir {
     }
 
     fn read_to_string(&self, path: &Path) -> Option<String> {
-        path.ends_with(".lensignore")
-            .then(|| self.lensignore.clone())
+        path.ends_with(".lnsignore")
+            .then(|| self.lnsignore.clone())
             .flatten()
     }
 }
@@ -291,7 +291,7 @@ fn resolve_binds_with(world: &mut BehaviourWorld, defaults: Defaults) {
     let bind_specs = lns_cli::cli::split_mounts(&resolved.mounts).1;
     let dir = FakeDir {
         entries: world.host_bind.entries.clone(),
-        lensignore: world.host_bind.lensignore.clone(),
+        lnsignore: world.host_bind.lnsignore.clone(),
         missing: world.host_bind.missing,
     };
     let store = FakeStore(std::sync::Mutex::new(world.host_bind.decisions.clone()));
