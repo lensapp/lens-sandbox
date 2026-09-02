@@ -105,6 +105,7 @@ pub async fn handle(
                     auto_remove,
                     finished_at: crate::time_fmt::rfc3339_now(),
                 },
+                crate::run_registry::log_buffer(&finished_run_id),
                 |id| {
                     if let Err(e) =
                         crate::audit::record_run_removed(id, false, true, &crate::clock::RealClock)

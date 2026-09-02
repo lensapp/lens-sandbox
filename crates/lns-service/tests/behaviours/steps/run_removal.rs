@@ -294,6 +294,7 @@ async fn a_run_whose_workload_exits(w: &mut BehaviourWorld, rm_flag: String) {
             auto_remove,
             finished_at: "2026-08-18T00:03:00Z".into(),
         },
+        run_registry::log_buffer(&id),
         |_| {},
     )
     .await;

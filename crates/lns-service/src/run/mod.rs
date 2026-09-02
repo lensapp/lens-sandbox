@@ -18,19 +18,28 @@ pub struct RunEnd {
     pub finished_at: String,
 }
 
-/// Everything a run's end owes the world: its record gets the exit stamped, and a --rm run takes its state with it.
+/// How long a run's end waits for the tee task to record the frames already in flight before it writes the log down.
+const LOG_QUIESCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Everything a run's end owes the world: its record gets the exit stamped, its output is written down, and a --rm run takes both with it.
 pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir, N: Fn(&str)>(
     fs: &F,
     remover: &R,
     cache_root: &std::path::Path,
     run_id: &str,
     end: RunEnd,
+    logs: Option<std::sync::Arc<crate::run_log::RunLogBuffer>>,
     note_removed: N,
 ) {
     if let Err(e) =
         crate::run_record::mark_exited_with(fs, cache_root, run_id, end.code, end.finished_at).await
     {
         crate::log::warn!("run record not updated at exit: {e:#}");
+    }
+    if !end.auto_remove
+        && let Some(buffer) = logs
+    {
+        write_the_log_down(fs, cache_root, run_id, &buffer, LOG_QUIESCE).await;
     }
     if end.auto_remove {
         crate::run_registry::set_exit_code(run_id, end.code);
@@ -40,6 +49,22 @@ pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir, N: Fn(&str)>(
             note_removed(run_id);
             reclaim_run_dir(remover, cache_root, run_id);
         }
+    }
+}
+
+/// The tee task may still be appending when a run ends, so the log waits for the buffer to close before it is written.
+async fn write_the_log_down<F: crate::image_store::Fs>(
+    fs: &F,
+    cache_root: &std::path::Path,
+    run_id: &str,
+    buffer: &crate::run_log::RunLogBuffer,
+    quiesce: std::time::Duration,
+) {
+    if !crate::run_log::await_close(buffer, quiesce).await {
+        crate::log::warn!("run log saved before its last frames arrived; the tail is missing");
+    }
+    if let Err(e) = crate::run_log::save_with(fs, cache_root, run_id, buffer).await {
+        crate::log::warn!("run log not saved; this boot's output ends with it: {e}");
     }
 }
 
@@ -899,6 +924,209 @@ mod launch_mode_tests {
         );
     }
 
+    #[derive(Default)]
+    struct RecordingFs(std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>);
+
+    impl crate::image_store::Fs for RecordingFs {
+        async fn read_dir(&self, _: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, p: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((p.to_path_buf(), bytes.to_vec()));
+            Ok(())
+        }
+        async fn remove_file(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn logs_with(line: &[u8]) -> std::sync::Arc<crate::run_log::RunLogBuffer> {
+        let buffer = std::sync::Arc::new(crate::run_log::RunLogBuffer::default());
+        buffer.append(crate::run_log::StreamKind::Stdout, line);
+        buffer.close(0);
+        buffer
+    }
+
+    async fn conclude<F: crate::image_store::Fs>(
+        fs: &F,
+        run_id: &str,
+        end: RunEnd,
+        logs: Option<std::sync::Arc<crate::run_log::RunLogBuffer>>,
+    ) -> Vec<String> {
+        let removed = std::sync::Mutex::new(Vec::new());
+        conclude_run(
+            fs,
+            &NoopRemover,
+            std::path::Path::new("/cache"),
+            run_id,
+            end,
+            logs,
+            |id| removed.lock().unwrap().push(id.to_string()),
+        )
+        .await;
+        removed.into_inner().unwrap()
+    }
+
+    fn ended(auto_remove: bool) -> RunEnd {
+        RunEnd {
+            code: 0,
+            auto_remove,
+            finished_at: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runs_output_is_written_beside_its_record_when_the_run_ends() {
+        let fs = RecordingFs::default();
+        conclude(&fs, "aa07", ended(false), Some(logs_with(b"hello"))).await;
+        let written = fs.0.lock().unwrap().clone();
+        let (_, bytes) = written
+            .iter()
+            .find(|(p, _)| p == &crate::run_log::log_path(std::path::Path::new("/cache"), "aa07"))
+            .expect("a stopped run's logs must outlive the boot that wrote them");
+        let restored = crate::run_log::hydrate(bytes, crate::run_log::DEFAULT_CAPACITY_BYTES);
+        assert_eq!(restored.read_from(0).chunks[0].bytes, b"hello".to_vec());
+    }
+
+    #[derive(Default)]
+    struct UnwritableFs(std::sync::Mutex<Vec<std::path::PathBuf>>);
+
+    impl crate::image_store::Fs for UnwritableFs {
+        async fn read_dir(&self, _: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, p: &std::path::Path, _: &[u8]) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(p.to_path_buf());
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+        async fn remove_file(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_log_write_waits_for_frames_the_tee_has_not_recorded_yet() {
+        let fs = RecordingFs::default();
+        let logs = std::sync::Arc::new(crate::run_log::RunLogBuffer::default());
+        logs.append(crate::run_log::StreamKind::Stdout, b"early");
+        let tee = logs.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tee.append(crate::run_log::StreamKind::Stdout, b"last line before exit");
+            tee.close(0);
+        });
+        write_the_log_down(
+            &fs,
+            std::path::Path::new("/cache"),
+            "aa07",
+            &logs,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let written = fs.0.lock().unwrap().clone();
+        let (_, bytes) = written
+            .iter()
+            .find(|(p, _)| p.ends_with("logs.wire"))
+            .expect("the log is written");
+        assert_eq!(
+            crate::run_log::hydrate(bytes, crate::run_log::DEFAULT_CAPACITY_BYTES)
+                .read_from(0)
+                .chunks
+                .iter()
+                .map(|c| c.bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![b"early".to_vec(), b"last line before exit".to_vec()],
+            "the write must wait for the tee, or a run's last output is lost at exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_log_still_open_when_the_run_ends_is_written_with_what_it_has() {
+        let fs = RecordingFs::default();
+        let logs = std::sync::Arc::new(crate::run_log::RunLogBuffer::default());
+        logs.append(crate::run_log::StreamKind::Stdout, b"partial");
+        write_the_log_down(
+            &fs,
+            std::path::Path::new("/cache"),
+            "aa07",
+            &logs,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        let written = fs.0.lock().unwrap().clone();
+        let (_, bytes) = written
+            .iter()
+            .find(|(p, _)| p.ends_with("logs.wire"))
+            .expect("a stalled tee must cost the tail, never the whole log");
+        let restored = crate::run_log::hydrate(bytes, crate::run_log::DEFAULT_CAPACITY_BYTES);
+        assert_eq!(restored.read_from(0).chunks[0].bytes, b"partial".to_vec());
+    }
+
+    #[tokio::test]
+    async fn a_log_that_cannot_be_written_does_not_stop_the_run_from_ending() {
+        let fs = UnwritableFs::default();
+        let removed = conclude(&fs, "aa07", ended(false), Some(logs_with(b"hello"))).await;
+        assert!(removed.is_empty(), "nothing is removed without --rm");
+        assert!(
+            fs.0.lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("logs.wire")),
+            "the write must be attempted, so this cannot pass by skipping the log entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_conclude_fakes_honour_their_whole_port_surface() {
+        use crate::image_store::Fs as _;
+        let fs = RecordingFs::default();
+        assert!(fs.read_dir(std::path::Path::new("/")).await.is_err());
+        assert!(fs.read(std::path::Path::new("/x")).await.is_err());
+        assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
+        let unwritable = UnwritableFs::default();
+        assert!(
+            unwritable
+                .read_dir(std::path::Path::new("/"))
+                .await
+                .is_err()
+        );
+        assert!(unwritable.read(std::path::Path::new("/x")).await.is_err());
+        assert!(
+            unwritable
+                .remove_file(std::path::Path::new("/x"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_run_that_takes_its_state_with_it_writes_no_log() {
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let fs = RecordingFs::default();
+        let removed = conclude(&fs, &id, ended(true), Some(logs_with(b"hello"))).await;
+        assert_eq!(removed, vec![id], "a --rm run is swept as it ends");
+        assert!(
+            !fs.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, _)| p.ends_with("logs.wire")),
+            "a --rm run's dir is about to go, so writing its log is only work"
+        );
+    }
+
     #[tokio::test]
     async fn a_recordless_exit_warns_and_still_concludes() {
         conclude_run(
@@ -911,6 +1139,7 @@ mod launch_mode_tests {
                 auto_remove: false,
                 finished_at: "t".into(),
             },
+            None,
             |_| panic!("nothing to remove without --rm"),
         )
         .await;

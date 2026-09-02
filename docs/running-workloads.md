@@ -1241,8 +1241,12 @@ A sandbox's audit chain is not part of what `rm` removes: it lives under
 
 The service keeps a rolling capture of every run's stdout and stderr — the most
 recent 2 MiB — for as long as the run is listed. `lns logs` prints what's buffered;
-`-f` streams new output until the run exits. Output of exec sessions is not
-captured, only the run's primary session.
+`-f` streams new output until the run exits. The capture belongs to the sandbox,
+not to one boot. It survives `lns stop`, and a later `lns start` appends to it.
+A stopped sandbox's capture also outlives a service restart. A sandbox that is
+still running when the service stops keeps only what it had written down when it
+last ended. `lns rm` takes the capture with the rest of the sandbox. Output of
+exec sessions is not captured, only the run's primary session.
 
 ### Attaching
 

@@ -113,6 +113,117 @@ impl RunLogBuffer {
     }
 }
 
+pub fn log_path(cache_root: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    crate::cache::run_dir(cache_root, run_id).join("logs.wire")
+}
+
+/// The capture is stored as the wire frames it was captured from, so the stdout/stderr split needs no second encoding.
+pub fn snapshot(buffer: &RunLogBuffer) -> Vec<u8> {
+    let mut out = Vec::new();
+    for chunk in buffer.read_from(0).chunks {
+        let frame = match chunk.kind {
+            StreamKind::Stdout => WireFrame::Stdout(chunk.bytes),
+            StreamKind::Stderr => WireFrame::Stderr(chunk.bytes),
+        };
+        match lns_ipc::encode_wire_frame(&frame) {
+            Ok(bytes) => out.extend_from_slice(&bytes),
+            Err(e) => crate::log::warn!("run log chunk not saved: {e}"),
+        }
+    }
+    out
+}
+
+/// Sequence numbers restart and the exit is left to the run record, so a restored log is what a fresh reader would see.
+pub fn hydrate(bytes: &[u8], capacity: usize) -> RunLogBuffer {
+    let buffer = RunLogBuffer::new(capacity);
+    let mut cursor = bytes;
+    while !cursor.is_empty() {
+        match lns_ipc::decode_wire_frame_sync(&mut cursor) {
+            Ok(frame) => record_frame(&buffer, &frame),
+            Err(e) => {
+                crate::log::warn!("run log truncated at a frame that does not decode: {e}");
+                break;
+            }
+        }
+    }
+    buffer
+}
+
+pub async fn save_with<F: crate::image_store::Fs>(
+    fs: &F,
+    cache_root: &std::path::Path,
+    run_id: &str,
+    buffer: &RunLogBuffer,
+) -> std::io::Result<()> {
+    fs.write(&log_path(cache_root, run_id), &snapshot(buffer))
+        .await
+}
+
+/// A log that cannot be read costs the user their output, never their run, so every failure restores an empty buffer.
+pub async fn load_with<F: crate::image_store::Fs>(
+    fs: &F,
+    cache_root: &std::path::Path,
+    run_id: &str,
+    capacity: usize,
+) -> RunLogBuffer {
+    match fs.read(&log_path(cache_root, run_id)).await {
+        Ok(bytes) => hydrate(&bytes, capacity),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RunLogBuffer::new(capacity),
+        Err(e) => {
+            crate::log::warn!("run log for {run_id} not read: {e}");
+            RunLogBuffer::new(capacity)
+        }
+    }
+}
+
+/// The tee task appends on its own schedule, so a snapshot taken before the buffer closes would drop the last lines the workload printed.
+pub async fn await_close(buffer: &RunLogBuffer, within: std::time::Duration) -> bool {
+    let mut version = buffer.subscribe();
+    let closed = async {
+        loop {
+            if buffer.exit().is_some() {
+                return;
+            }
+            version
+                .changed()
+                .await
+                .expect("version sender lives inside the borrowed buffer");
+        }
+    };
+    tokio::time::timeout(within, closed).await.is_ok()
+}
+
+/// Which buffer answers for a run: a live one has its own, a listed-but-exited one reads what its last boot wrote down, and an unlisted one has none.
+pub async fn buffer_for<F: crate::image_store::Fs>(
+    live: Option<Arc<RunLogBuffer>>,
+    status: Option<lns_ipc::RunStatus>,
+    fs: &F,
+    cache_root: &std::path::Path,
+    run_id: &str,
+) -> Option<Arc<RunLogBuffer>> {
+    if let Some(buffer) = live {
+        return Some(buffer);
+    }
+    match status {
+        Some(lns_ipc::RunStatus::Exited { code }) => Some(Arc::new(
+            stopped_buffer_with(fs, cache_root, run_id, code).await,
+        )),
+        _ => None,
+    }
+}
+
+/// A stopped run's output lives on disk and its exit code in its record, so a reader gets the same two things a live run's buffer holds.
+pub async fn stopped_buffer_with<F: crate::image_store::Fs>(
+    fs: &F,
+    cache_root: &std::path::Path,
+    run_id: &str,
+    exit_code: i32,
+) -> RunLogBuffer {
+    let buffer = load_with(fs, cache_root, run_id, DEFAULT_CAPACITY_BYTES).await;
+    buffer.close(exit_code);
+    buffer
+}
+
 pub async fn tee_frames(
     mut frames: mpsc::Receiver<WireFrame>,
     buffer: Arc<RunLogBuffer>,
@@ -176,6 +287,301 @@ where
             .changed()
             .await
             .expect("version sender lives inside the borrowed buffer");
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    fn filled(chunks: &[(StreamKind, &[u8])]) -> RunLogBuffer {
+        let buffer = RunLogBuffer::default();
+        for (kind, bytes) in chunks {
+            buffer.append(*kind, bytes);
+        }
+        buffer
+    }
+
+    #[test]
+    fn a_saved_log_comes_back_with_both_streams_in_order() {
+        let buffer = filled(&[
+            (StreamKind::Stdout, b"first"),
+            (StreamKind::Stderr, b"warning"),
+            (StreamKind::Stdout, b"second"),
+        ]);
+        let restored = hydrate(&snapshot(&buffer), DEFAULT_CAPACITY_BYTES);
+        let batch = restored.read_from(0);
+        assert_eq!(
+            batch
+                .chunks
+                .iter()
+                .map(|c| (c.kind, c.bytes.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (StreamKind::Stdout, b"first".to_vec()),
+                (StreamKind::Stderr, b"warning".to_vec()),
+                (StreamKind::Stdout, b"second".to_vec()),
+            ],
+            "a reader cannot tell stdout from stderr unless the split survives the disk"
+        );
+    }
+
+    #[test]
+    fn a_restored_log_is_read_from_the_beginning_again() {
+        let buffer = filled(&[(StreamKind::Stdout, b"a"), (StreamKind::Stdout, b"b")]);
+        let restored = hydrate(&snapshot(&buffer), DEFAULT_CAPACITY_BYTES);
+        assert_eq!(
+            restored.read_from(0).chunks.len(),
+            2,
+            "sequence numbers restart, so a fresh reader still sees everything"
+        );
+    }
+
+    #[test]
+    fn a_restored_log_keeps_only_what_fits_the_cap() {
+        let buffer = filled(&[
+            (StreamKind::Stdout, b"oldest"),
+            (StreamKind::Stdout, b"newest"),
+        ]);
+        let restored = hydrate(&snapshot(&buffer), 6);
+        let chunks = restored.read_from(0).chunks;
+        assert_eq!(
+            chunks.iter().map(|c| c.bytes.clone()).collect::<Vec<_>>(),
+            vec![b"newest".to_vec()],
+            "the cap is what the service keeps, so it binds a log that comes back from disk too"
+        );
+    }
+
+    #[test]
+    fn an_exit_is_not_stored_because_the_record_already_knows_it() {
+        let buffer = filled(&[(StreamKind::Stdout, b"out")]);
+        buffer.close(3);
+        assert_eq!(
+            hydrate(&snapshot(&buffer), DEFAULT_CAPACITY_BYTES).exit(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_damaged_log_file_yields_what_it_can_rather_than_failing() {
+        let buffer = filled(&[(StreamKind::Stdout, b"kept")]);
+        let mut bytes = snapshot(&buffer);
+        bytes.extend_from_slice(b"\xff\xff torn tail");
+        let restored = hydrate(&bytes, DEFAULT_CAPACITY_BYTES);
+        assert_eq!(
+            restored.read_from(0).chunks.len(),
+            1,
+            "a torn log must not cost the user the part that is intact"
+        );
+    }
+
+    struct StoredFs(Option<Vec<u8>>);
+
+    impl crate::image_store::Fs for StoredFs {
+        async fn read_dir(&self, _: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            self.0
+                .clone()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn write(&self, _: &std::path::Path, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_runs_logs_come_back_with_the_exit_code_its_record_kept() {
+        let buffer = filled(&[(StreamKind::Stdout, b"done")]);
+        let stored = StoredFs(Some(snapshot(&buffer)));
+        let restored =
+            stopped_buffer_with(&stored, std::path::Path::new("/cache"), "aa07", 3).await;
+        let batch = restored.read_from(0);
+        assert_eq!(batch.chunks[0].bytes, b"done".to_vec());
+        assert_eq!(
+            batch.exit,
+            Some(3),
+            "a reader must not hang waiting for a run that already ended"
+        );
+    }
+
+    struct DeniedFs;
+
+    impl crate::image_store::Fs for DeniedFs {
+        async fn read_dir(&self, _: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        async fn read(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+        async fn write(&self, _: &std::path::Path, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_save_waits_for_the_tee_to_finish_appending() {
+        let buffer = Arc::new(RunLogBuffer::default());
+        buffer.append(StreamKind::Stdout, b"early");
+        let late = buffer.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            late.append(StreamKind::Stdout, b"last line before exit");
+            late.close(0);
+        });
+        assert!(await_close(&buffer, std::time::Duration::from_secs(5)).await);
+        let saved = snapshot(&buffer);
+        let restored = hydrate(&saved, DEFAULT_CAPACITY_BYTES);
+        assert_eq!(
+            restored
+                .read_from(0)
+                .chunks
+                .iter()
+                .map(|c| c.bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![b"early".to_vec(), b"last line before exit".to_vec()],
+            "the lines just before exit are the ones a reader opens `lns logs` for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tee_that_never_closes_the_buffer_does_not_wedge_the_runs_end() {
+        let buffer = RunLogBuffer::default();
+        buffer.append(StreamKind::Stdout, b"partial");
+        assert!(
+            !await_close(&buffer, std::time::Duration::from_millis(20)).await,
+            "a stalled tee must cost the tail, never the run's end"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_run_answers_from_its_own_buffer() {
+        let live = Arc::new(RunLogBuffer::default());
+        live.append(StreamKind::Stdout, b"live");
+        let got = buffer_for(
+            Some(live),
+            Some(lns_ipc::RunStatus::Running),
+            &StoredFs(None),
+            std::path::Path::new("/cache"),
+            "aa07",
+        )
+        .await
+        .expect("a live run has a buffer");
+        assert_eq!(got.read_from(0).chunks[0].bytes, b"live".to_vec());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_answers_from_what_its_last_boot_wrote_down() {
+        let previous = filled(&[(StreamKind::Stdout, b"from disk")]);
+        let got = buffer_for(
+            None,
+            Some(lns_ipc::RunStatus::Exited { code: 2 }),
+            &StoredFs(Some(snapshot(&previous))),
+            std::path::Path::new("/cache"),
+            "aa07",
+        )
+        .await
+        .expect("a listed stopped run answers");
+        let batch = got.read_from(0);
+        assert_eq!(batch.chunks[0].bytes, b"from disk".to_vec());
+        assert_eq!(batch.exit, Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_run_nothing_lists_has_no_logs_to_answer_with() {
+        for status in [None, Some(lns_ipc::RunStatus::Running)] {
+            assert!(
+                buffer_for(
+                    None,
+                    status,
+                    &StoredFs(None),
+                    std::path::Path::new("/cache"),
+                    "aa07"
+                )
+                .await
+                .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_log_that_cannot_be_read_costs_the_output_and_not_the_run() {
+        let restored =
+            stopped_buffer_with(&DeniedFs, std::path::Path::new("/cache"), "aa07", 0).await;
+        assert!(restored.read_from(0).chunks.is_empty());
+        assert_eq!(
+            restored.read_from(0).exit,
+            Some(0),
+            "an unreadable log must still let a reader learn the run ended"
+        );
+    }
+
+    #[test]
+    fn a_chunk_too_large_to_frame_is_dropped_rather_than_costing_the_whole_log() {
+        let buffer = RunLogBuffer::new(8 * 1024 * 1024);
+        buffer.append(StreamKind::Stdout, b"kept");
+        buffer.append(
+            StreamKind::Stdout,
+            &vec![b'x'; lns_ipc::MAX_FRAME_SIZE as usize + 16],
+        );
+        let restored = hydrate(&snapshot(&buffer), DEFAULT_CAPACITY_BYTES);
+        assert_eq!(
+            restored
+                .read_from(0)
+                .chunks
+                .iter()
+                .map(|c| c.bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![b"kept".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_test_fakes_honour_their_whole_port_surface() {
+        use crate::image_store::Fs as _;
+        let stored = StoredFs(None);
+        assert!(stored.read_dir(std::path::Path::new("/")).await.is_err());
+        assert!(stored.write(std::path::Path::new("/x"), b"").await.is_ok());
+        assert!(stored.remove_file(std::path::Path::new("/x")).await.is_ok());
+        assert!(DeniedFs.read_dir(std::path::Path::new("/")).await.is_err());
+        assert!(
+            DeniedFs
+                .write(std::path::Path::new("/x"), b"")
+                .await
+                .is_ok()
+        );
+        assert!(
+            DeniedFs
+                .remove_file(std::path::Path::new("/x"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_with_no_saved_log_still_reports_its_exit() {
+        let restored =
+            stopped_buffer_with(&StoredFs(None), std::path::Path::new("/cache"), "aa07", 0).await;
+        let batch = restored.read_from(0);
+        assert!(batch.chunks.is_empty());
+        assert_eq!(batch.exit, Some(0));
+    }
+
+    #[test]
+    fn an_empty_log_restores_to_an_empty_buffer() {
+        assert!(
+            hydrate(&[], DEFAULT_CAPACITY_BYTES)
+                .read_from(0)
+                .chunks
+                .is_empty()
+        );
     }
 }
 
