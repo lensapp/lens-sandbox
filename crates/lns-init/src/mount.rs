@@ -4072,6 +4072,19 @@ mod tests {
     }
 
     #[test]
+    fn a_run_with_no_bind_and_no_volume_never_mounts_the_lower_view_at_all() {
+        let sys = FakeSyscalls::new();
+        mount_binds(&sys, &[], &[], "/newroot", None, Some("/root"))
+            .expect("a run with no mount of its own has nothing to decide");
+        assert!(
+            !mounts_of(&sys)
+                .iter()
+                .any(|(_, target)| target == LOWER_VIEW_MOUNT),
+            "no mount can bury a claim here, so the boot reads no manifest and mounts nothing to read it"
+        );
+    }
+
+    #[test]
     fn a_path_in_the_lower_view_that_cannot_be_a_c_string_refuses_the_boot() {
         let err = read_from_the_lower_stack(&FakeSyscalls::new(), "/.lens/clai\0ms")
             .expect_err("a path with an interior NUL reaches no file");
