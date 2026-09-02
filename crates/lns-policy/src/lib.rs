@@ -35,7 +35,7 @@ pub struct NetworkPolicy {
     pub egress: Egress,
 }
 
-/// The document format every artifact is written in (`docs/sandbox-spec.md` §2), which the directory's own decisions are written in too.
+/// The document format every artifact is written in (`docs/sandbox-spec.md` §2), which a run's own decisions are written in too.
 pub const API_VERSION: &str = "lns.run/v1";
 
 /// The kind §8.1 records a decision as, so it merges under the same rules as anything the developer pulled.
@@ -660,13 +660,11 @@ mod tests {
 
     /// Write a decisions file whose spec holds the given blocks, so a fixture states the one thing it is about.
     fn decisions_file(dir: &TempDir, spec: &str) -> PathBuf {
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         let body: String = spec.lines().map(|line| format!("  {line}\n")).collect();
         fs::write(
             &path,
-            format!(
-                "apiVersion: {API_VERSION}\nkind: {KIND}\nname: lns-local-mixin\nspec:\n{body}"
-            ),
+            format!("apiVersion: {API_VERSION}\nkind: {KIND}\nname: decisions\nspec:\n{body}"),
         )
         .unwrap();
         path
@@ -1547,7 +1545,7 @@ egress:
     #[test]
     fn save_atomic_writes_file_readable_by_load_or_default() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("api.linear.app"));
 
@@ -1559,7 +1557,7 @@ egress:
     #[test]
     fn save_atomic_creates_parent_directory() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("nested/dir/lns-local-mixin.yaml");
+        let path = dir.path().join("nested/dir/decisions.yaml");
         Policy::default().save_atomic(&path).unwrap();
         assert!(path.exists());
     }
@@ -1567,7 +1565,7 @@ egress:
     #[test]
     fn save_atomic_leaves_no_tmp_file_on_success() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         Policy::default().save_atomic(&path).unwrap();
         let tmp = path.with_extension("yaml.tmp");
         assert!(!tmp.exists(), "tmp file should be renamed away");
@@ -1618,7 +1616,7 @@ egress:
         let victim = dir.path().join("victim");
         let victim_contents = b"victim-data-must-survive";
         fs::write(&victim, victim_contents).unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         std::os::unix::fs::symlink(&victim, path.with_extension("yaml.tmp")).unwrap();
 
         let _ = Policy::default().save_atomic(&path);
@@ -1636,7 +1634,7 @@ egress:
         let dir = TempDir::new().unwrap();
         let reference = dir.path().join("reference");
         fs::write(&reference, b"").unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
 
         Policy::default().save_atomic(&path).unwrap();
 
@@ -1653,7 +1651,7 @@ egress:
     #[test]
     fn file_policy_store_save_writes_yaml_readable_by_load_or_default() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         let store = FilePolicyStore::new(path.clone());
 
         let mut p = Policy::default();
@@ -1669,7 +1667,7 @@ egress:
         let dir = TempDir::new().unwrap();
         let unwritable = dir.path().join("file-not-a-dir");
         fs::write(&unwritable, b"").unwrap();
-        let path = unwritable.join("nested/lns-local-mixin.yaml");
+        let path = unwritable.join("nested/decisions.yaml");
         let store = FilePolicyStore::new(path);
 
         let err = store.save(&Policy::default()).unwrap_err();
@@ -1722,7 +1720,7 @@ egress:
     #[test]
     fn the_decisions_file_is_the_mixin_the_specification_says_it_is() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         let mut p = Policy::default();
         p.add_rule(RouteRule::allow_host("docs.some-vendor.example"));
         p.save_atomic(&path).unwrap();
@@ -1746,12 +1744,12 @@ egress:
     #[test]
     fn the_document_is_named_for_the_file_it_is_written_to() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         Policy::default().save_atomic(&path).unwrap();
         assert!(
             fs::read_to_string(&path)
                 .unwrap()
-                .contains("name: lns-local-mixin"),
+                .contains("name: decisions"),
             "§2 requires a name on every document, and nobody is here to choose one"
         );
     }
@@ -1800,10 +1798,10 @@ egress:
     #[test]
     fn a_block_the_run_never_writes_survives_the_run_writing_one_it_does() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         fs::write(
             &path,
-            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  mixins:\n    - ghcr.io/team/base@sha256:abc\n  egress:\n    http: []\n",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  mixins:\n    - ghcr.io/team/base@sha256:abc\n  egress:\n    http: []\n",
         )
         .unwrap();
 
@@ -1822,7 +1820,7 @@ egress:
     #[test]
     fn a_document_of_another_kind_is_refused_rather_than_read_as_decisions() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         fs::write(
             &path,
             "apiVersion: lns.run/v1\nkind: sandbox\nname: something-else\nspec:\n  egress:\n    http: []\n",
@@ -1839,7 +1837,7 @@ egress:
     #[test]
     fn a_document_named_what_no_document_may_be_named_is_refused() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         fs::write(
             &path,
             "apiVersion: lns.run/v1\nkind: mixin\nname: Not_A_Label!\nspec:\n  egress:\n    http: []\n",
@@ -1855,7 +1853,7 @@ egress:
 
     #[test]
     fn a_name_is_a_label_or_it_is_not_a_name() {
-        for valid in ["a", "9", "lns-local-mixin", &"a".repeat(63)] {
+        for valid in ["a", "9", "team-egress", &"a".repeat(63)] {
             assert!(is_dns_label(valid), "{valid} is a label");
         }
         for invalid in ["", "-a", "a-", "aBc", "a_b", "a.b", &"a".repeat(64)] {
@@ -1866,7 +1864,7 @@ egress:
     #[test]
     fn a_document_of_another_api_version_is_refused() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         fs::write(
             &path,
             "apiVersion: lns.run/v2\nkind: mixin\nname: local\nspec:\n  egress:\n    http: []\n",
@@ -1880,7 +1878,7 @@ egress:
     #[test]
     fn an_empty_file_is_the_mixin_nobody_wrote() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("lns-local-mixin.yaml");
+        let path = dir.path().join("decisions.yaml");
         fs::write(&path, "  \n").unwrap();
         assert_eq!(
             Policy::load_or_default(&path).unwrap().network,

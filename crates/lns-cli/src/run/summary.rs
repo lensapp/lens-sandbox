@@ -1020,7 +1020,7 @@ mod tests {
         let contributions = vec![contributed(
             lns_ipc::ContributionBlock::Mount,
             "/home/agent/.gitconfig",
-            "lns-local-mixin.yaml",
+            "decisions.yaml",
             &[],
         )];
         assert_eq!(

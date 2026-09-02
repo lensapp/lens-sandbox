@@ -344,7 +344,7 @@ fn record_sandbox_run(
     }
 }
 
-/// Disclose the sandbox's shipped network policy at boot: name it as the source your own decisions layer over, warning if it is over-broad.
+/// Disclose the sandbox's shipped network policy at boot: name it as the source the run's own decisions layer over, warning if it is over-broad.
 fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     let Some(policy) = policy else {
         return;
@@ -352,7 +352,7 @@ fn disclose_effective_policy(policy: Option<&lns_policy::Policy>) {
     if policy.network != lns_policy::NetworkPolicy::default() {
         crate::log::info!(
             "policy",
-            "this sandbox ships a network policy; it governs the run except where your own lns-local-mixin.yaml decides otherwise"
+            "this sandbox ships a network policy; it governs the run except where this run's own decisions decide otherwise"
         );
         let summary =
             crate::artifact::policy::run_summary(&crate::artifact::policy::guardrail_flags(policy));

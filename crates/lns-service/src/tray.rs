@@ -189,7 +189,7 @@ pub fn run_headless(
     ipc_handle: JoinHandle<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     crate::log::warn!(
-        "no display detected — running headless without the tray; interactive approval prompts can't be shown, so pre-authorize access in lns-local-mixin.yaml"
+        "no display detected — running headless without the tray; interactive approval prompts can't be shown, so pre-authorize access in a mixin the run names"
     );
     shutdown.wait_sync();
     match ipc_handle.join() {
