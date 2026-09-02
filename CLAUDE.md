@@ -85,6 +85,22 @@ The **local pre-push gate** is `make lint && make complexity && make coverage-af
 
 `make install-hooks` wires the gate into pre-push. Bypass: `git push --no-verify`.
 
+### Build-cache rules the gate depends on
+
+Three separate cargo target dirs, because cargo fingerprints the flags each step uses. Mixing them makes every step recompile what the previous one just built.
+
+- `target/` — `make dev`, `make lint`, `make test`, raw cargo, rust-analyzer. These agree on flags, so switching between them is free. Do not add `CARGO_INCREMENTAL` or extra `RUSTFLAGS` to `lint` or `test`.
+- `target/complexity/` — `make complexity` only. It passes different clippy args than `lint`, so it gets its own dir.
+- `target/llvm-cov-target/` — `make coverage` only. It is instrumented.
+
+`crates/lns-service/build.rs` embeds the guest binaries (lns-init, session-broker, supervisor, static-nft) in **release** builds and skips them in **debug** builds. That keeps one fingerprint across every debug caller, so no gate step needs to export `LNS_*_BIN=skip`. Set `LNS_<NAME>_BIN=<path>` to point a build at a pre-built guest binary; a shipping artifact must be a release build.
+
+`make coverage` clears only the profraw counters between runs. It falls back to a full artifact clean when the toolchain or any manifest changes, because those shift the artifact hashes and leave superseded binaries behind for `llvm-cov report` to find. The stamp that decides this is `.gate/coverage-toolchain-stamp`, which also hashes every workspace `Cargo.toml`.
+
+### Gate telemetry
+
+`scripts/gate-timing.sh` records one row per gate step — the pre-push hook wraps each `make` call — plus the affected-crates verdict, in `.gate/timings.tsv`. That path is outside `target/`, so `cargo clean` keeps the history. Read it with `make gate-report`: runs, failures, and min/median/max seconds per step, then a count per coverage verdict (`__NONE__`, `__FULL__`, or the exact crate list). Set `LNS_GATE_TIMING=0` to stop recording. `scripts/gate-timing.test.sh` covers the script.
+
 Outside the gate: `make build` (shipping artifacts), `make test` (uninstrumented — coverage already runs the same tests instrumented), `make e2e` (real binaries — runs in CI's test job, manual locally). The live-microVM interactive-shell smoke test (`crates/lns-cli/tests/smoke/interactive-shell.exp`) is run manually via `expect -f` when touching `lns run -it` plumbing — no Makefile wrapper.
 
 ## Test layers
@@ -145,7 +161,12 @@ make coverage          full workspace coverage gate (all crates, 100% floor)
 make coverage-affected coverage gate narrowed to crates touched since origin/main
 make coverage-lcov     re-emit the last coverage run as target/llvm-cov-target/llvm-cov/lcov.info (no rerun)
 make e2e             Layer 1 cucumber harness against real lns + lns-service binaries
+make gate-report     per-step gate timings recorded by scripts/gate-timing.sh
 make clean           rm -rf bin/ + cargo clean (coverage artifacts live inside target/)
+
+# `make coverage` writes only the lcov the gate reads. Add the text summary
+# and the browsable HTML report when you need them:
+COVERAGE_HTML=1 make coverage
 
 # CI invokes the same gate targets with strictness toggled on:
 CARGO_LOCKED=--locked make lint

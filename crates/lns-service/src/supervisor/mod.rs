@@ -34,11 +34,11 @@ fn resolve_nft_bytes_inner(
     }
     if embedded.is_empty() {
         bail!(
-            "embedded static-nft is empty — build.rs saw LNS_NFT_BIN=<path> \
-             at compile time and skipped the embed, but the env var is now \
-             unset at runtime. Either set LNS_NFT_BIN again, or rebuild \
-             lns-service without it (`unset LNS_NFT_BIN && cargo build \
-             -p lns-service --release`)."
+            "embedded static-nft is empty — build.rs skipped the embed because \
+             this is a debug build, or because LNS_NFT_BIN was set at compile \
+             time. Either set LNS_NFT_BIN to a static nft, or rebuild \
+             lns-service as a release build without it (`unset LNS_NFT_BIN && \
+             cargo build -p lns-service --release`)."
         );
     }
     Ok(embedded.to_vec())

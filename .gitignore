@@ -5,6 +5,9 @@ dist
 coverage
 *.log
 
+# Gate bookkeeping: timing log and the coverage toolchain stamp
+.gate/
+
 # Per-package build artifacts
 bin/
 

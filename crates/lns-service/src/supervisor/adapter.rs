@@ -50,9 +50,10 @@ pub(super) async fn ensure_with(
 
     let Some(bytes) = embedded else {
         bail!(
-            "no embedded supervisor (lns-service was built with LNS_SUPERVISOR_BIN=skip) and no \
-             LNS_SUPERVISOR_BIN override set. Rebuild without LNS_SUPERVISOR_BIN=skip to embed the \
-             supervisor, or set LNS_SUPERVISOR_BIN=/path/to/static-musl/lns-supervisor."
+            "no embedded supervisor (a debug build, or built with LNS_SUPERVISOR_BIN set) and no \
+             LNS_SUPERVISOR_BIN override set. Rebuild as a release build without \
+             LNS_SUPERVISOR_BIN to embed the supervisor, or set \
+             LNS_SUPERVISOR_BIN=/path/to/static-musl/lns-supervisor."
         );
     };
     install_embedded_supervisor(&RealFs, &cache, bytes).await
