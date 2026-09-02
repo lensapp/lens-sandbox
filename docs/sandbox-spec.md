@@ -2080,9 +2080,9 @@ blob, and the media type names the kind:
 
 | Kind | `artifactType` | Config `mediaType` |
 |---|---|---|
-| `sandbox` | `application/vnd.lens.sandbox.v1+json` | `application/vnd.lens.sandbox.config.v1+json` |
-| `connector` | `application/vnd.lens.connector.v1+json` | `application/vnd.lens.connector.config.v1+json` |
-| `mixin` | `application/vnd.lens.mixin.v1+json` | `application/vnd.lens.mixin.config.v1+json` |
+| `sandbox` | `application/vnd.lns.sandbox.v1+json` | `application/vnd.lns.sandbox.config.v1+json` |
+| `connector` | `application/vnd.lns.connector.v1+json` | `application/vnd.lns.connector.config.v1+json` |
+| `mixin` | `application/vnd.lns.mixin.v1+json` | `application/vnd.lns.mixin.config.v1+json` |
 
 Every kind carries one layer per `filesets[].path` entry it declares
 ([§3.1.11](#3111-filesets)), plus at most one README layer
