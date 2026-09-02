@@ -293,8 +293,8 @@ contributed it. That summary is the one thing you approve.
 | `exec` | `lns exec` | Runs another command inside a running sandbox. `-i` and `-t` are spelled as on `run` but are off unless you ask for them ([§7.3](#73-terminals)), `--detach-keys` closes only this session, and `-q` silences the status lines. |
 | `logs` | `lns logs` | Prints the captured output. `-f`/`--follow` streams until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
 | `attach` | `lns attach` | Re-joins the live session, most useful after `run -d`. The detach chord leaves the sandbox running and returns you to your shell; no signal is sent. Stdin reaches the workload only if the sandbox was started with stdin open. |
-| `ls` | `lns ps` | Lists running sandboxes with their state, CPU, and memory. `-a` includes stopped ones. |
-| `inspect` | `lns inspect` | Prints one sandbox's live state and launch configuration, with its resolved mixin embedded. |
+| `ls` | `lns ps` | Lists running sandboxes with their state, when each was created, when it last booted, CPU, and memory. A sandbox is created once and boots as often as you start it, so the two times differ on anything restarted. `-a` includes stopped ones. |
+| `inspect` | `lns inspect` | Prints one sandbox's live state and launch configuration, with its resolved mixin embedded. It reports the same two times `ls` does, under the same names. |
 | `save` | | Writes one sandbox out as a document you keep ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--file` names the file and is required; `--kind mixin` writes what the run decided instead of the run as it resolved. Works on a running or a stopped sandbox. |
 | `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. What it granted, declined, and decided goes with it, so save anything worth keeping first ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--force` stops a running one first. |
 | `prune` | | Removes every stopped sandbox, writable layers included, and what each granted, declined, and decided. Lists them and asks, unless `-f`/`--force`. |
