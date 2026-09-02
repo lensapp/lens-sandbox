@@ -6,11 +6,17 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 pub fn run(lcov_path: &Path) -> Result<()> {
+    run_with(lcov_path, |path, output| std::fs::write(path, output))
+}
+
+fn run_with(
+    lcov_path: &Path,
+    write: impl FnOnce(&Path, String) -> std::io::Result<()>,
+) -> Result<()> {
     let content = std::fs::read_to_string(lcov_path)
         .with_context(|| format!("reading {}", lcov_path.display()))?;
     let output = strip(&content);
-    std::fs::write(lcov_path, output)
-        .with_context(|| format!("writing {}", lcov_path.display()))?;
+    write(lcov_path, output).with_context(|| format!("writing {}", lcov_path.display()))?;
     Ok(())
 }
 
@@ -452,7 +458,6 @@ fn block_diverges(block: &syn::Block) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn run_strips_in_place_and_recomputes_counts() {
@@ -548,11 +553,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lcov = dir.path().join("cov.info");
         std::fs::write(&lcov, "TN:\nend_of_record\n").unwrap();
-        let mut perms = std::fs::metadata(&lcov).unwrap().permissions();
-        perms.set_mode(0o444);
-        std::fs::set_permissions(&lcov, perms).unwrap();
 
-        let err = run(&lcov).unwrap_err();
+        let err = run_with(&lcov, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+
         assert!(format!("{err:#}").contains("writing"));
     }
 

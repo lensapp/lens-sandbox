@@ -137,6 +137,8 @@ pub(crate) trait Syscalls {
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
     /// Removes the path when it is a symlink, without following it.
     fn unlink_if_symlink(&self, path: &CStr) -> std::io::Result<()>;
+    fn subdirs_of(&self, path: &str) -> std::io::Result<Vec<std::path::PathBuf>>;
+    fn owner_of(&self, path: &str) -> std::io::Result<(u32, u32)>;
     fn umount(&self, target: &CStr) -> std::io::Result<()>;
     fn write_root_file(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
     fn write_sysctl(&self, path: &str, value: &str) -> std::io::Result<()>;
@@ -422,16 +424,20 @@ fn chown_tool_dirs(sys: &dyn Syscalls, newroot: &str, run_ids: Option<(u32, u32)
     while let Some(dir) = pending.pop() {
         lchown_logged(sys, &dir.to_string_lossy(), uid, gid);
         // A directory the walk cannot read costs its subtree, not the rest of the trees.
-        let Ok(listing) = std::fs::read_dir(&dir) else {
+        let Ok(children) = sys.subdirs_of(&dir.to_string_lossy()) else {
             continue;
         };
-        for entry in listing.flatten() {
-            // Symlinks are not followed: a link's own target is already an entry of this tree, and following one could walk out of it.
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                pending.push(entry.path());
-            }
-        }
+        pending.extend(children);
     }
+}
+
+/// Symlinks are not followed: a link's own target is already an entry of this tree, and following one could walk out of it.
+pub(crate) fn subdirs_on_disk(path: &str) -> std::io::Result<Vec<std::path::PathBuf>> {
+    Ok(std::fs::read_dir(path)?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect())
 }
 
 /// Transfer the fileset paths the definition marked `owner: workload` to the run-as ids; the host ships the list inside the runtime layer because only the guest can resolve a named image user.
@@ -704,7 +710,6 @@ fn mount_volumes(
 
 /// Runs after the mount, so it lands on the volume's own root inode rather than the ephemeral directory the mount covers.
 fn reconcile_volume_owner(sys: &dyn Syscalls, target: &str, run_ids: Option<(u32, u32)>) {
-    use std::os::unix::fs::MetadataExt;
     let Some((uid, gid)) = run_ids else {
         return;
     };
@@ -712,10 +717,10 @@ fn reconcile_volume_owner(sys: &dyn Syscalls, target: &str, run_ids: Option<(u32
     if uid == 0 {
         return;
     }
-    let Ok(md) = std::fs::metadata(target) else {
+    let Ok(owner) = sys.owner_of(target) else {
         return;
     };
-    if (md.uid(), md.gid()) == (uid, gid) {
+    if owner == (uid, gid) {
         return;
     }
     lchown_logged(sys, target, uid, gid);
@@ -1912,6 +1917,8 @@ mod tests {
         symlinks: RefCell<BTreeMap<String, String>>,
         fail_when: FailWhen,
         digest_result: RefCell<Option<Result<(), MountError>>>,
+        unlistable: Vec<String>,
+        owners: Vec<(String, (u32, u32))>,
     }
 
     impl FakeSyscalls {
@@ -1925,6 +1932,8 @@ mod tests {
                 symlinks: RefCell::new(BTreeMap::new()),
                 fail_when: Box::new(|_| None),
                 digest_result: RefCell::new(None),
+                unlistable: Vec::new(),
+                owners: Vec::new(),
             }
         }
 
@@ -1948,6 +1957,16 @@ mod tests {
             self.symlinks
                 .borrow_mut()
                 .insert(path.to_string(), points_to.to_string());
+            self
+        }
+
+        fn unlistable(mut self, path: &str) -> Self {
+            self.unlistable.push(path.to_string());
+            self
+        }
+
+        fn with_owner(mut self, path: &str, uid: u32, gid: u32) -> Self {
+            self.owners.push((path.to_string(), (uid, gid)));
             self
         }
 
@@ -2076,6 +2095,20 @@ mod tests {
             self.record(Call::UnlinkIfSymlink { path: path.clone() })?;
             self.symlinks.borrow_mut().remove(&path);
             Ok(())
+        }
+        // The trees are real tempdirs; only the denial is scripted, since root ignores modes.
+        fn subdirs_of(&self, path: &str) -> std::io::Result<Vec<std::path::PathBuf>> {
+            if self.unlistable.iter().any(|p| p == path) {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            subdirs_on_disk(path)
+        }
+        fn owner_of(&self, path: &str) -> std::io::Result<(u32, u32)> {
+            self.owners
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, owner)| *owner)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
         }
         fn umount(&self, target: &CStr) -> std::io::Result<()> {
             self.record(Call::Umount(target.to_str().unwrap().to_string()))
@@ -2722,12 +2755,10 @@ mod tests {
         let closed = format!("{newroot}{TOOLS_ROOT}/closed/1.0.0");
         std::fs::create_dir_all(format!("{closed}/inner")).unwrap();
         std::fs::create_dir_all(format!("{newroot}{TOOLS_ROOT}/open/1.0.0")).unwrap();
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let sys = FakeSyscalls::new();
+        let sys = FakeSyscalls::new().unlistable(&closed);
         chown_tool_dirs(&sys, &newroot, Some((65534, 65534)));
         let owned = sys.calls.borrow().clone();
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(owned.contains(&handed_over(&format!("{newroot}{TOOLS_ROOT}/open/1.0.0"))));
         assert!(
@@ -3030,16 +3061,16 @@ mod tests {
     }
 
     /// A real directory to mount a volume over, plus the ids that own it, so a test can ask for a run-as identity that differs from the first attacher's.
-    fn volume_target(newroot: &tempfile::TempDir) -> (String, u32, u32) {
-        use std::os::unix::fs::MetadataExt;
-        let target = newroot.path().join("data");
-        std::fs::create_dir_all(&target).unwrap();
-        let md = std::fs::metadata(&target).unwrap();
-        (
-            newroot.path().to_string_lossy().into_owned(),
-            md.uid(),
-            md.gid(),
-        )
+    /// The ids an image seeded the volume with, as the guest reads them back.
+    const SEEDED: (u32, u32) = (1000, 1000);
+
+    fn volume_target(newroot: &tempfile::TempDir) -> String {
+        std::fs::create_dir_all(newroot.path().join("data")).unwrap();
+        newroot.path().to_string_lossy().into_owned()
+    }
+
+    fn sys_owning_the_volume(newroot: &str) -> FakeSyscalls {
+        FakeSyscalls::new().with_owner(&format!("{newroot}/data"), SEEDED.0, SEEDED.1)
     }
 
     fn volume_chowns(calls: &[Call]) -> Vec<&Call> {
@@ -3052,21 +3083,21 @@ mod tests {
     #[test]
     fn a_volume_root_owned_by_another_uid_is_transferred_to_the_run_as_user() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, uid, gid) = volume_target(&dir);
-        let sys = FakeSyscalls::new();
+        let newroot = volume_target(&dir);
+        let sys = sys_owning_the_volume(&newroot);
 
         mount_volumes(
             &sys,
             &[volume("/dev/vdc", "/data", false)],
             &newroot,
-            Some((uid + 1, gid)),
+            Some((SEEDED.0 + 1, SEEDED.1)),
         )
         .unwrap();
 
         let calls = sys.calls();
         let target = format!("{newroot}/data");
         let chown = calls.iter().position(|c| {
-            matches!(c, Call::Lchown { path, uid: u, gid: g } if path == &target && *u == uid + 1 && *g == gid)
+            matches!(c, Call::Lchown { path, uid: u, gid: g } if path == &target && *u == SEEDED.0 + 1 && *g == SEEDED.1)
         });
         let mount = calls.iter().position(
             |c| matches!(c, Call::Mount { target: t, fstype, .. } if t == &target && fstype == "ext4"),
@@ -3084,14 +3115,14 @@ mod tests {
     #[test]
     fn a_volume_root_already_owned_by_the_run_as_user_is_not_rewritten() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, uid, gid) = volume_target(&dir);
-        let sys = FakeSyscalls::new();
+        let newroot = volume_target(&dir);
+        let sys = sys_owning_the_volume(&newroot);
 
         mount_volumes(
             &sys,
             &[volume("/dev/vdc", "/data", false)],
             &newroot,
-            Some((uid, gid)),
+            Some(SEEDED),
         )
         .unwrap();
 
@@ -3104,15 +3135,14 @@ mod tests {
     #[test]
     fn a_root_run_as_leaves_an_image_seeded_volumes_ownership_alone() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, uid, gid) = volume_target(&dir);
-        assert_ne!(uid, 0, "the fixture must not already be root-owned");
-        let sys = FakeSyscalls::new();
+        let newroot = volume_target(&dir);
+        let sys = sys_owning_the_volume(&newroot);
 
         mount_volumes(
             &sys,
             &[volume("/dev/vdc", "/data", false)],
             &newroot,
-            Some((0, gid)),
+            Some((0, SEEDED.1)),
         )
         .unwrap();
 
@@ -3125,14 +3155,14 @@ mod tests {
     #[test]
     fn a_read_only_volume_attach_never_writes_to_the_volume() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, uid, gid) = volume_target(&dir);
-        let sys = FakeSyscalls::new();
+        let newroot = volume_target(&dir);
+        let sys = sys_owning_the_volume(&newroot);
 
         mount_volumes(
             &sys,
             &[volume("/dev/vdc", "/data", true)],
             &newroot,
-            Some((uid + 1, gid)),
+            Some((SEEDED.0 + 1, SEEDED.1)),
         )
         .unwrap();
 
@@ -3145,7 +3175,7 @@ mod tests {
     #[test]
     fn a_volume_attach_without_a_resolved_run_as_user_chowns_nothing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, _uid, _gid) = volume_target(&dir);
+        let newroot = volume_target(&dir);
         let sys = FakeSyscalls::new();
 
         mount_volumes(&sys, &[volume("/dev/vdc", "/data", false)], &newroot, None).unwrap();
@@ -3173,8 +3203,8 @@ mod tests {
     #[test]
     fn a_failed_volume_chown_does_not_abort_the_boot() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (newroot, uid, gid) = volume_target(&dir);
-        let sys = FakeSyscalls::new().fail_when(|c| {
+        let newroot = volume_target(&dir);
+        let sys = sys_owning_the_volume(&newroot).fail_when(|c| {
             matches!(c, Call::Lchown { .. }).then_some(std::io::ErrorKind::PermissionDenied)
         });
 
@@ -3183,7 +3213,7 @@ mod tests {
                 &sys,
                 &[volume("/dev/vdc", "/data", false)],
                 &newroot,
-                Some((uid + 1, gid)),
+                Some((SEEDED.0 + 1, SEEDED.1)),
             )
             .is_ok(),
             "one ownership failure must warn, not strand the run"

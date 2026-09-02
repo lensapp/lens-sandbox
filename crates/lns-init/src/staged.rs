@@ -8,18 +8,28 @@ pub const STAGED_ROOT: &str = "/.lens/fileset-deferred";
 
 /// `boot_owned` names each mount root whose subtree this boot laid out itself — a volume target, and the target of a bind it split.
 pub fn land(newroot: &str, boot_owned: &[String]) -> io::Result<()> {
+    land_with(newroot, boot_owned, |staged| {
+        std::fs::remove_dir_all(staged)
+    })
+}
+
+fn land_with(
+    newroot: &str,
+    boot_owned: &[String],
+    remove: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let staged = Path::new(newroot).join(&STAGED_ROOT[1..]);
     if !staged.is_dir() {
         return Ok(());
     }
     land_tree(&staged, Path::new(newroot), "", boot_owned)?;
-    consume(&staged);
+    consume(&staged, remove);
     Ok(())
 }
 
 /// Leaving the landed tree behind would show the workload a root-owned duplicate of every file, and it has nothing left to do once the copies are in place.
-fn consume(staged: &Path) {
-    if let Err(err) = std::fs::remove_dir_all(staged) {
+fn consume(staged: &Path, remove: impl Fn(&Path) -> io::Result<()>) {
+    if let Err(err) = remove(staged) {
         eprintln!("lns-init: could not remove {}: {err}", staged.display());
     }
 }
@@ -248,12 +258,11 @@ mod tests {
     fn a_staged_tree_that_cannot_be_removed_does_not_fail_the_boot() {
         let root = tempfile::tempdir().unwrap();
         stage(root.path(), "/home/node/tool.md", b"x", 0o644);
-        let lens = root.path().join(".lens");
-        std::fs::set_permissions(&lens, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        let landed = land(root.path().to_str().unwrap(), &[]);
+        let landed = land_with(root.path().to_str().unwrap(), &[], |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
 
-        std::fs::set_permissions(&lens, std::fs::Permissions::from_mode(0o700)).unwrap();
         landed.expect("the copies are in place, so a leftover staging tree is not worth a refusal");
         assert_eq!(
             std::fs::read(root.path().join("home/node/tool.md")).unwrap(),

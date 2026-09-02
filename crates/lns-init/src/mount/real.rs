@@ -197,6 +197,16 @@ impl Syscalls for RealSyscalls {
         }
     }
 
+    fn subdirs_of(&self, path: &str) -> io::Result<Vec<std::path::PathBuf>> {
+        super::subdirs_on_disk(path)
+    }
+
+    fn owner_of(&self, path: &str) -> io::Result<(u32, u32)> {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(path)?;
+        Ok((md.uid(), md.gid()))
+    }
+
     fn umount(&self, target: &CStr) -> io::Result<()> {
         // SAFETY: target is a valid NUL-terminated C string; umount reads it only.
         let rc = unsafe { libc::umount(target.as_ptr()) };
