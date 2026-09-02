@@ -439,12 +439,14 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![],
+                seeded_paths: Vec::new(),
             },
             BindAttachment {
                 host_source: "/host/data".into(),
                 target: "/data".into(),
                 read_only: true,
                 dropped_paths: vec![],
+                seeded_paths: Vec::new(),
             },
         ];
         let args = cloud_hypervisor_args(&s, &layout());

@@ -28,6 +28,17 @@ impl BindRig {
             target: target.into(),
             read_only,
             dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+            seeded_paths: Vec::new(),
+        });
+    }
+
+    pub fn request_seeding(&mut self, source: &str, target: &str, drops: &[&str], seeds: &[&str]) {
+        self.binds.push(BindAttachment {
+            host_source: source.into(),
+            target: target.into(),
+            read_only: false,
+            dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+            seeded_paths: seeds.iter().map(|s| s.to_string()).collect(),
         });
     }
 

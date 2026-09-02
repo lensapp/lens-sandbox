@@ -52,6 +52,8 @@ pub struct BindAttachment {
     pub target: String,
     pub read_only: bool,
     pub dropped_paths: Vec<String>,
+    /// Excluded paths a fileset writes into, so the guest leaves each one for the fileset instead of mounting the share over it.
+    pub seeded_paths: Vec<String>,
 }
 
 /// The virtio-fs tag the host shares a bind under and the guest mounts it by; one per bind, distinct from the content share.
@@ -312,6 +314,10 @@ pub fn build_kernel_cmdline(
         for (j, dropped) in b.dropped_paths.iter().enumerate() {
             parts.push(format!("bind.{i}.drop.{j}={dropped}"));
         }
+        parts.push(format!("bind.{i}.seeds={}", b.seeded_paths.len()));
+        for (j, seeded) in b.seeded_paths.iter().enumerate() {
+            parts.push(format!("bind.{i}.seed.{j}={seeded}"));
+        }
     }
     for (k, v) in &exec.kernel_env {
         debug_assert!(
@@ -558,12 +564,14 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![".env".into(), ".npmrc".into()],
+                seeded_paths: Vec::new(),
             },
             BindAttachment {
                 host_source: "/Users/me/cfg".into(),
                 target: "/cfg".into(),
                 read_only: true,
                 dropped_paths: vec![],
+                seeded_paths: Vec::new(),
             },
         ];
         let cmdline =

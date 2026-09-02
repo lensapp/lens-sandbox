@@ -26,6 +26,14 @@ Feature: host bind mounts — virtio-fs shares, read-only mode, dropped secrets,
     When a run requests host bind "/Users/me/proj" at "/work" dropping ".env"
     Then the bind spec for "/work" lists ".env" in its dropped paths
 
+  Scenario: A path a fileset writes into is threaded onto the bind spec for the guest to leave alone
+    When a run requests host bind "/Users/me/.claude" at "/root/.claude" seeding "settings.json"
+    Then the bind spec for "/root/.claude" lists "settings.json" in its seeded paths
+
+  Scenario: A bind no fileset writes into declares no seeded paths, so the guest mounts it whole
+    When a run requests host bind "/Users/me/proj" at "/work"
+    Then the bind spec for "/work" declares no seeded paths
+
   Scenario: Attaching a host bind emits an audit record
     When a host bind "/Users/me/proj" at "/work" is recorded in the audit chain
     Then the audit chain records the host source "/Users/me/proj" and target "/work"
