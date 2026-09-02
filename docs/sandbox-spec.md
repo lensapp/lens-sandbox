@@ -1762,8 +1762,20 @@ to be distinctive, so this costs an author nothing and gives every entry a key.
 
 Inside a connector the source is one [method](#322-methods), not the document.
 Two methods are alternatives and only one ever enters the merge, so they may
-reuse an `envVar` and a `placeholder` freely — and they usually should, since a
-token method and a sign-in method serve the same variable of the same service.
+share an `envVar` and share a `placeholder`, on the condition below. They usually
+should: a token method and a sign-in method serve the same variable of the same
+service.
+
+**Two methods that declare one `envVar` MUST declare one `placeholder` for it.**
+A run moves between methods, and a granted method's `env` reaches only the
+workloads that start after the grant. So granting method B leaves every live
+session of that run holding method A's marker. One placeholder per variable is
+what keeps those sessions valid across the switch. A connector that breaks this
+rule is refused wherever the document is parsed
+([§5](#5-validation-summary)).
+
+The rule runs one way only. Two methods MAY declare one `placeholder` under two
+`envVar`s: each variable still holds one marker, so nothing is left undecided.
 
 The definition names the shape of a secret without containing one. The real value
 is bound per machine and lives outside every document
@@ -1963,9 +1975,10 @@ Offline validation (`lns artifact validate`, and every load path including
   `~/`-anchored and a method's `inline` bytes total no more than 1 MiB
   ([§3.2.3](#323-what-a-method-may-carry)); an `auth`, where present, sets
   a `kind`; a method declaring `credentials` declares an `auth`; every placeholder self-identifies as fake and
-  is at least 16 characters; and every fileset file with a secret-shaped name
-  declares a placeholder **its own method** also declares
-  ([§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value)). That last
+  is at least 16 characters; no two methods declare one `envVar` with different
+  placeholders ([§4.1](#41-the-credential-definition)); and every fileset file
+  with a secret-shaped name declares a placeholder **its own method** also
+  declares ([§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value)). That last
   check reads content, so it covers an `inline` value and a file in a `path`
   directory beside the document. A `path` a validator cannot read — a pulled
   artifact's packed layer — is checked at push, where the layer is built. An
@@ -2176,8 +2189,9 @@ Three rules follow from a connector arriving over the network:
   reason and at the same moment. This covers an `envVar` — one variable holds one
   placeholder, and a second claim would make injection ambiguous — and a plain
   `env` key. The check is across connectors only: two **methods** of one
-  connector may claim the same variable, because they are alternatives and only
-  one is ever applied ([§3.2.2](#322-methods)). Within **one** source the rule
+  connector may claim the same variable — with one `placeholder` between them
+  ([§4.1](#41-the-credential-definition)) — because they are alternatives and
+  only one is ever applied ([§3.2.2](#322-methods)). Within **one** source the rule
   holds again and is not an install-time check at all: a source that sets a
   variable through `env` and also fills it from a credential claims one variable
   twice, and is refused wherever the document is parsed
