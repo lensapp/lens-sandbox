@@ -20,6 +20,7 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
                 image: "some-image".into(),
                 command: "some-command".into(),
                 status: RunStatus::Running,
+                created: "2026-01-01T00:00:00Z".into(),
                 started: "2026-01-01T00:00:00Z".into(),
             },
             config: RunConfig::default(),
@@ -281,6 +282,7 @@ fn one_running_one_stopped(w: &mut BehaviourWorld) {
                 image: "some-image".into(),
                 command: "some-command".into(),
                 status: RunStatus::Running,
+                created: "2026-01-01T00:00:00Z".into(),
                 started: "2026-01-01T00:00:00Z".into(),
             },
             RunSummary {
@@ -289,9 +291,32 @@ fn one_running_one_stopped(w: &mut BehaviourWorld) {
                 image: "some-image".into(),
                 command: "some-command".into(),
                 status: RunStatus::Exited { code: 0 },
+                created: "2026-01-01T00:00:00Z".into(),
                 started: "2026-01-01T00:00:00Z".into(),
             },
         ],
+    });
+    w.sandbox.stats_response = Some(Response::RunStats {
+        stats: lns_ipc::RunStatsInfo {
+            cpu_permille: 125,
+            mem_used_bytes: 92_274_688,
+            mem_total_bytes: 536_870_912,
+        },
+    });
+}
+
+#[given("the service reports a sandbox created on 2026-08-01 and last booted on 2026-08-30")]
+fn one_restarted_sandbox(w: &mut BehaviourWorld) {
+    w.sandbox.response = Some(Response::RunList {
+        runs: vec![RunSummary {
+            id: hexid(3),
+            name: "reviewer".into(),
+            image: "some-image".into(),
+            command: "some-command".into(),
+            status: RunStatus::Running,
+            created: "2026-08-01T00:00:00Z".into(),
+            started: "2026-08-30T09:00:00Z".into(),
+        }],
     });
     w.sandbox.stats_response = Some(Response::RunStats {
         stats: lns_ipc::RunStatsInfo {
@@ -337,6 +362,7 @@ fn one_running_none_stopped(w: &mut BehaviourWorld) {
             image: "some-image".into(),
             command: "some-command".into(),
             status: RunStatus::Running,
+            created: "2026-01-01T00:00:00Z".into(),
             started: "2026-01-01T00:00:00Z".into(),
         }],
     });
@@ -349,6 +375,7 @@ fn stopped_run(n: u32, name: &str) -> RunSummary {
         image: "some-image".into(),
         command: "some-command".into(),
         status: RunStatus::Exited { code: 0 },
+        created: "2026-01-01T00:00:00Z".into(),
         started: "2026-01-01T00:00:00Z".into(),
     }
 }

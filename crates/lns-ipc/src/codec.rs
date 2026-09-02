@@ -249,6 +249,7 @@ mod tests {
                     image: "alpine:latest".into(),
                     command: "sleep 30".into(),
                     status: crate::RunStatus::Running,
+                    created: "2026-05-19T12:30:00Z".into(),
                     started: "2026-05-19T12:34:01Z".into(),
                 },
                 crate::RunSummary {
@@ -257,6 +258,7 @@ mod tests {
                     image: "<imageless>".into(),
                     command: String::new(),
                     status: crate::RunStatus::Exited { code: 143 },
+                    created: "2026-05-19T12:30:00Z".into(),
                     started: "2026-05-19T12:35:01Z".into(),
                 },
             ],

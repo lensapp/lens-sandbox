@@ -154,6 +154,7 @@ fn details_with(image: &str, config: RunConfig) -> Response {
                 image: image.to_string(),
                 command: "some-command".into(),
                 status: RunStatus::Running,
+                created: "2026-01-01T00:00:00Z".into(),
                 started: "2026-01-01T00:00:00Z".into(),
             },
             config,
@@ -994,6 +995,7 @@ fn canned_running_with_stats(w: &mut BehaviourWorld, permille: u32, used: u64) {
             image: "some-image".into(),
             command: "some-command".into(),
             status: RunStatus::Running,
+            created: "2026-01-01T00:00:00Z".into(),
             started: "2026-01-01T00:00:00Z".into(),
         }],
     });

@@ -665,6 +665,7 @@ pub struct RunSummary {
     pub image: String,
     pub command: String,
     pub status: RunStatus,
+    pub created: String,
     pub started: String,
 }
 
@@ -1690,6 +1691,7 @@ mod tests {
                     image: "some-image:1".into(),
                     command: "echo hi".into(),
                     status: RunStatus::Running,
+                    created: "2026-01-01T00:00:00Z".into(),
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: RunConfig::from_run_args(&sample_run_args()),

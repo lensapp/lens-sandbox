@@ -143,6 +143,7 @@ impl FakeConnectorService {
                         image: "someimage".into(),
                         command: "sh".into(),
                         status: lns_ipc::RunStatus::Running,
+                        created: "2026-08-31T00:00:00Z".into(),
                         started: "2026-08-31T00:00:00Z".into(),
                     },
                     config: lns_ipc::RunConfig::default(),

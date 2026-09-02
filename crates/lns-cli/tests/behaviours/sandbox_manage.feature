@@ -168,6 +168,15 @@ Feature: managing cached sandboxes
     And the output contains "No sandboxes."
     And the output does not contain "STATE"
 
+  Scenario: ls separates when a sandbox was created from when it last booted
+    Given the service reports a sandbox created on 2026-08-01 and last booted on 2026-08-30
+    When the user runs sandbox command "ls"
+    Then the exit code is 0
+    And the output contains "CREATED"
+    And the output contains "STARTED"
+    And the output contains "2026-08-01 00:00:00"
+    And the output contains "2026-08-30 09:00:00"
+
   Scenario: a stopped sandbox is listed without sampling a guest that is not there
     Given the service reports one running sandbox and one that stopped
     When the user runs sandbox command "ls -a"

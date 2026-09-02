@@ -246,6 +246,7 @@ async fn a_stopped_run_pinning_an_image(w: &mut BehaviourWorld) {
         image: reference.into(),
         command: "sh -c true".into(),
         status: RunStatus::Exited { code: 0 },
+        created: "2026-08-18T00:00:00Z".into(),
         started: "2026-08-18T00:00:00Z".into(),
     }];
 }

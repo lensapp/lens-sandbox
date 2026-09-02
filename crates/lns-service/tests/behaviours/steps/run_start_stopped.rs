@@ -61,6 +61,7 @@ pub(crate) fn stopped_record(run_id: &str, name: &str) -> RunRecord {
         image: "registry.example.test/some-sandbox:1".into(),
         command: "sh -c true".into(),
         created_at: "2026-08-18T00:00:00Z".into(),
+        started_at: Some("2026-08-18T00:00:00Z".into()),
         finished_at: Some("2026-08-18T00:01:00Z".into()),
         exit_code: Some(0),
     }

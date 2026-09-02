@@ -23,6 +23,7 @@ pub fn fresh_handle(
         name: String::new(),
         image: image.into(),
         command: "some-command".into(),
+        created: "2026-01-01T00:00:00Z".into(),
         started: "2026-01-01T00:00:00Z".into(),
         status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
         logs: std::sync::Arc::new(lns_service::run_log::RunLogBuffer::default()),
