@@ -147,10 +147,19 @@ Feature: managing running sandboxes from the CLI
     And the service received a SaveRun request for run 3 naming the document "agreed"
 
   Scenario: save refuses to overwrite a file that is already there
-    Given "./out.yaml" already exists
+    Given the service renders run 3 as "apiVersion: lns.run/v1\nkind: sandbox\nname: out\n"
+    And "./out.yaml" already exists
     When the user runs sandbox command "save 3 -f ./out.yaml"
     Then the command fails with an exit code other than 0
-    And the output contains "already exists"
+    And the output contains "already exists; not overwriting it"
+    And no document was written
+
+  Scenario: save that cannot write names the file the user has to fix
+    Given the service renders run 3 as "apiVersion: lns.run/v1\nkind: sandbox\nname: out\n"
+    And "./locked/out.yaml" cannot be written
+    When the user runs sandbox command "save 3 -f ./locked/out.yaml"
+    Then the command fails with an exit code other than 0
+    And the output contains "writing ./locked/out.yaml"
     And no document was written
 
   Scenario: save without a file to write to is refused by the grammar

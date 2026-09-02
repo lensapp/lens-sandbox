@@ -244,6 +244,7 @@ pub struct SandboxCliRig {
     pub policy: Option<serde_json::Value>,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
     pub existing_documents: Vec<std::path::PathBuf>,
+    pub unwritable_documents: Vec<std::path::PathBuf>,
     pub written_documents: std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, String)>>>,
     pub workload_stdout: Vec<u8>,
     pub prompt_answer: Option<String>,

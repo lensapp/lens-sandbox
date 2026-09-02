@@ -33,6 +33,7 @@ pub(crate) struct FakeSandboxService {
     requests: Arc<Mutex<Vec<Request>>>,
     /// Layer 2 writes no files, so a saved document lands here for the scenario to read.
     existing_documents: Vec<PathBuf>,
+    unwritable_documents: Vec<PathBuf>,
     written_documents: Arc<Mutex<Vec<(PathBuf, String)>>>,
 }
 
@@ -125,11 +126,13 @@ impl SandboxService for FakeSandboxService {
         self.policy.clone()
     }
 
-    fn document_exists(&self, path: &Path) -> bool {
-        self.existing_documents.iter().any(|p| p == path)
-    }
-
     fn write_document(&self, path: &Path, contents: &str) -> std::io::Result<()> {
+        if self.existing_documents.iter().any(|p| p == path) {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        if self.unwritable_documents.iter().any(|p| p == path) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         self.written_documents
             .lock()
             .expect("lock")
@@ -553,6 +556,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         policy: w.sandbox.policy.clone(),
         requests: w.sandbox.requests.clone(),
         existing_documents: w.sandbox.existing_documents.clone(),
+        unwritable_documents: w.sandbox.unwritable_documents.clone(),
         written_documents: w.sandbox.written_documents.clone(),
     }
 }
@@ -802,6 +806,11 @@ fn canned_saved_document(w: &mut BehaviourWorld, _run_id: u32, document: String)
 #[given(regex = r#"^"([^"]+)" already exists$"#)]
 fn document_already_exists(w: &mut BehaviourWorld, path: String) {
     w.sandbox.existing_documents.push(PathBuf::from(path));
+}
+
+#[given(regex = r#"^"([^"]+)" cannot be written$"#)]
+fn document_cannot_be_written(w: &mut BehaviourWorld, path: String) {
+    w.sandbox.unwritable_documents.push(PathBuf::from(path));
 }
 
 #[then(regex = r#"^the document written to "([^"]+)" contains "([^"]+)"$"#)]
