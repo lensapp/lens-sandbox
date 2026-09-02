@@ -136,8 +136,7 @@ Notes:
 
 - Use one `Feature:` block containing all scenarios. Don't split into multiple fenced blocks unless the scenarios genuinely belong to different feature files.
 - Preserve the exact Gherkin text agreed in `/problem-first`. Do not rephrase.
-- Do NOT describe a solution beyond the agreed direction. The issue is a problem + behavior contract, not a design.
-- Do NOT add labels, milestones, assignees, or projects. The triage team owns those.
+- Describe no solution beyond the agreed direction; the issue is a problem + behavior contract, not a design.
 
 ### 4. Create the Issue
 
@@ -163,12 +162,7 @@ Show the user:
 - Scenario count, rejected-alternatives count, target crate (if any).
 - A reminder: *"Open and unassigned. Carries problem, scenarios, and chosen approach — ready for pickup."*
 
-## Don't
+## Boundaries
 
-- **Don't auto-invoke.** Only run when the user explicitly asks or uses `/problem-first-issue`.
-- **Don't re-run Phases 1-3.** That's `/problem-first`'s job. If inputs are missing, send the user back there.
-- **Don't assign, label, milestone, or add to a project.** An open, unassigned issue is the whole output.
-- **Don't link a PR.** There is no PR at this stage.
-- **Don't invent Gherkin or an approach.** If the user hasn't agreed them, don't fabricate — send them back to `/problem-first`.
-- **Don't file an issue with only scenarios and no approach.** An issue the implementer can't pick up is worse than no issue.
-- **Don't descend into technical design.** The Approach is direction, not types or function signatures. Detailed design happens in `/problem-first-impl` and the eventual PR.
+- Phases 1-3 are `/problem-first`'s job; if the problem, scenarios, or approach are missing, send the user back there instead of inventing them.
+- The Approach is direction, not types or function signatures; detailed design happens in `/problem-first-impl` and the eventual PR.

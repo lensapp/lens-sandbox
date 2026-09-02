@@ -230,9 +230,10 @@ Use conventional commit format. The message should make sense on its own — som
 After committing, run relevant tests to make sure the fix works and nothing is broken:
 
 ```bash
-# Run the specific test file(s) touched or related to the change
-# The exact command depends on the project — check package.json, Makefile, etc.
+cargo test -p <crate>
 ```
+
+Scoped to the crates you touched; the full gate is `/green`'s job.
 
 If tests fail, fix them before moving on.
 
@@ -253,15 +254,7 @@ Keep it concise — reviewers appreciate brevity. Get the commit SHA with:
 git rev-parse --short HEAD
 ```
 
-Examples of good replies:
-
-> "Fixed — the test now asserts `code == 0` and verifies the binary was updated with expected content. (commit c244245)"
-
-> "Fixed — now uses `effectiveServer` for the `IsLocalServer` check. Also extended `IsLocalServer` to recognize `127.0.0.1` in addition to `localhost`. Added test case for the edge case. (commit a1b2c3d)"
-
-> "Fixed — replaced raw `Read` with a `bufio.Scanner` that reads exactly one line per call. Added `TestTerminalPrompter_ReadsExactlyOneLine` which verifies two consecutive prompts from a multi-line buffer. (commit d4e5f6a)"
-
-Notice the pattern: "Fixed — [what changed in plain language]. [tests added if any]. (commit [sha])"
+Shape of a fix reply: "Fixed — [what changed, in plain language]. [test added, if any]. (commit [short sha])"
 
 For non-fix replies (explanations, disagreements, questions), help the user draft something clear and constructive. Present the draft to the user for approval before posting.
 

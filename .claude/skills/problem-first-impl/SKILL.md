@@ -55,8 +55,6 @@ Doc-level alignment was confirmed at intake. This phase is the complementary che
 2. **Approach vs current source.** Open the crate. Does the agreed approach still fit the code as it exists today? Has the crate drifted since `/problem-first` ran? If it has, name the drift and decide: does the approach still hold, or do we go back?
 3. **Re-verify assumptions.** Walk through each load-bearing assumption from `/problem-first` Phase 3. Can you confirm it from the code? An assumption that looked safe at intake may be wrong in practice — if so, the approach may need revisiting. Send the user back to `/problem-first` rather than papering over it.
 
-**Re-check doc alignment only if needed.** In Mode A (same session as `/problem-first`), doc alignment was just confirmed — skip it. In Mode B (picking up a GitHub issue that was filed earlier), the product docs may have moved since the issue was filed. Re-run the doc-level check from `/problem-first` Phase 4 before proceeding.
-
 Then present a summary:
 
 - Problem statement (1-2 sentences)
@@ -85,14 +83,7 @@ If the change has non-obvious unit-test scope (e.g. internal helpers, error-mapp
 
 ## Rules
 
-- **Do not auto-invoke.** Only run when the user explicitly asks or uses `/problem-first-impl`.
-- **Do not re-run Phases 1-3.** That's `/problem-first`'s job. If inputs are missing, send the user back there.
-- **Do not re-run the doc-level alignment check in Mode A.** It just happened. Re-running it is wasted work and second-guesses the intake.
-- **Do re-run it in Mode B.** When picking up an issue filed earlier, docs may have drifted. A quick re-check is cheap insurance.
-- **Do not proceed without an agreed approach.** Scenarios alone aren't enough — without direction, Phase 4 has nothing to compare against and Phase 5 becomes a guessing game.
-- **Do not skip Phase 4.** The code-level check is the last chance to catch spec duplication, stale assumptions, or source drift before code starts.
-- **Do not write the `.feature` file before Phase 4 is explicitly confirmed.**
+- **Phases 1-3 are `/problem-first`'s job.** If inputs are missing, send the user back there rather than re-deriving them here.
 - **Preserve the agreed Gherkin exactly.** Do not rephrase scenarios when writing the file.
 - **Use canonical terminology** from `docs/` and the Product Vision in the repo-root `CLAUDE.md`.
-- **Respect the test pyramid.** Behavioural specs land in Layer 2 (`tests/behaviours/`) unless they genuinely require real I/O (Layer 1, `e2e/`); they never spawn real subprocesses or hit the network at Layer 2.
 - **If scope or direction drifts during Phase 4 or Phase 5**, go back to `/problem-first` rather than papering over it here.
