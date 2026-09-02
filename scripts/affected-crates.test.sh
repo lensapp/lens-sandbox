@@ -9,6 +9,9 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 0
 fi
 
+# Sourced below the skip: it allocates a scratch home the trap must free.
+. "$SCRIPT_DIR/test-lib.sh"
+
 PASS=0
 FAIL=0
 FAILURES=""
@@ -18,6 +21,7 @@ cleanup() {
     for d in $TMPDIRS; do
         rm -rf "$d"
     done
+    test_lib_cleanup
 }
 trap cleanup EXIT
 
@@ -31,8 +35,6 @@ init_fixture() {
     dir=$1
     cd "$dir"
     git init -q
-    git config user.email "test@test.local"
-    git config user.name "Test"
 
     cat > Cargo.toml <<'TOML'
 [workspace]

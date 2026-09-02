@@ -9,6 +9,8 @@ SCRIPT="$SCRIPT_DIR/gate-timing.sh"
 # checkout that has not run `make install-hooks`.
 export LNS_GATE_HOOK_WARNING=0
 
+. "$SCRIPT_DIR/test-lib.sh"
+
 PASS=0
 FAIL=0
 FAILURES=""
@@ -18,6 +20,7 @@ cleanup() {
     for d in $TMPDIRS; do
         rm -rf "$d"
     done
+    test_lib_cleanup
 }
 trap cleanup EXIT
 
@@ -149,8 +152,7 @@ test_a_dead_hook_warns_without_failing() {
     echo "test_a_dead_hook_warns_without_failing"
     dir=$(mktmp)
     git -C "$dir" init -q
-    # The warning reads core.hooksPath, which falls back to the host's global
-    # config; pin it so the fixture, not the host, decides.
+    # The fixture states its own hooks path rather than leaning on git's default.
     git -C "$dir" config core.hooksPath .git/hooks
     log=$dir/timings.tsv
     status=0
@@ -169,9 +171,7 @@ test_every_worktree_appends_to_one_log() {
     main=$(mktmp)/repo
     mkdir -p "$main"
     git -C "$main" init -q
-    git -C "$main" config user.email t@t.local
-    git -C "$main" config user.name T
-    git -C "$main" -c commit.gpgsign=false commit -q --allow-empty -m seed
+    git -C "$main" commit -q --allow-empty -m seed
     tree=$(mktmp)/wt
     git -C "$main" worktree add -q --detach "$tree" HEAD
 

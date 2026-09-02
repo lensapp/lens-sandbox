@@ -131,7 +131,28 @@ test_the_jqless_enumeration_finds_the_executable() {
         "$(echo "$nontest" | sed -n 's/.*"test":true[^{]*"executable":"\([^"]*\)".*/\1/p')"
 }
 
+# test-lib.sh pins the toolchain homes from $HOME, which a container uid with
+# no passwd entry does not have. It must not become a requirement.
+test_the_shared_lib_needs_no_home() {
+    echo "test_the_shared_lib_needs_no_home"
+    status=0
+    out=$(env -u HOME -u CARGO_HOME -u RUSTUP_HOME \
+        sh -c "set -u; . \"$SCRIPT_DIR/test-lib.sh\"" 2>&1) || status=$?
+    check "sourcing it survives an unset HOME" "0" "$status"
+    check "it does not abort on an unbound variable" "0" \
+        "$(echo "$out" | grep -c 'parameter not set')"
+
+    # The harnesses that need no toolchain must run in that environment too.
+    for t in hooks gate-timing; do
+        status=0
+        env -u HOME -u CARGO_HOME -u RUSTUP_HOME sh "$SCRIPT_DIR/$t.test.sh" >/dev/null 2>&1 ||
+            status=$?
+        check "$t survives it" "0" "$status"
+    done
+}
+
 test_a_passing_binary_agrees
+test_the_shared_lib_needs_no_home
 test_a_failing_binary_is_named
 test_an_env_dependent_binary_is_caught
 test_a_pass_that_runs_nothing_is_not_agreement

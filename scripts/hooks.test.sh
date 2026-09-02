@@ -4,6 +4,8 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 HOOKS="$SCRIPT_DIR/hooks"
 
+. "$SCRIPT_DIR/test-lib.sh"
+
 PASS=0
 FAIL=0
 FAILURES=""
@@ -13,6 +15,7 @@ cleanup() {
     for d in $TMPDIRS; do
         rm -rf "$d"
     done
+    test_lib_cleanup
 }
 trap cleanup EXIT
 
@@ -40,8 +43,6 @@ check() {
 fixture_repo() {
     dir=$(mktmp)
     git -C "$dir" init -q
-    git -C "$dir" config user.email t@t.local
-    git -C "$dir" config user.name T
     mkdir -p "$dir/scripts/hooks" "$dir/bin"
     cp "$HOOKS/pre-push" "$dir/scripts/hooks/pre-push"
     # The hook must be able to reach the telemetry script, or "no rows" would
@@ -124,13 +125,11 @@ test_commit_msg_reaches_the_main_worktrees_node_modules() {
     main=$(mktmp)/repo
     mkdir -p "$main/scripts/hooks" "$main/node_modules/.bin"
     git -C "$main" init -q
-    git -C "$main" config user.email t@t.local
-    git -C "$main" config user.name T
     cp "$HOOKS/commit-msg" "$HOOKS/lib.sh" "$main/scripts/hooks/"
     # Stands in for commitlint: exit 3 is a verdict only this binary can give.
     printf '#!/bin/sh\nexit 3\n' >"$main/node_modules/.bin/commitlint"
     chmod +x "$main/node_modules/.bin/commitlint"
-    git -C "$main" -c commit.gpgsign=false commit -q --allow-empty -m seed
+    git -C "$main" commit -q --allow-empty -m seed
     tree=$(mktmp)/wt
     git -C "$main" worktree add -q --detach "$tree" HEAD
     # The seed commit is empty, so the worktree carries no checkout of the hook.
@@ -158,7 +157,10 @@ test_commit_msg_ignores_a_node_modules_outside_any_worktree() {
     chmod +x "$outside/node_modules/.bin/commitlint"
 
     git init -q --bare "$outside/repo.git"
-    empty=$(git -C "$outside/repo.git" hash-object -t tree /dev/null)
+    # An empty file of the fixture's own: /dev/null is a device the harness
+    # should not have to trust.
+    : >"$outside/empty"
+    empty=$(git -C "$outside/repo.git" hash-object -t tree "$outside/empty")
     seed=$(git -C "$outside/repo.git" commit-tree "$empty" -m seed)
     git -C "$outside/repo.git" update-ref refs/heads/main "$seed"
     tree=$(mktmp)/wt
