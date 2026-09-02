@@ -69,7 +69,7 @@ impl FakeVolumeService {
                 volume: fixture_volume(name, 32 * 1024 * 1024, Vec::new()),
             },
             Request::RemoveVolume { name } => Response::VolumeRemoved { name: name.clone() },
-            Request::PruneVolumes => {
+            Request::PruneVolumes { .. } => {
                 let (removed, reclaimed_bytes) = self.prune_plan.clone().unwrap_or_default();
                 Response::VolumesPruned {
                     removed,
@@ -313,11 +313,13 @@ fn no_request_sent(world: &mut BehaviourWorld) {
     assert!(requests.is_empty(), "got {requests:?}");
 }
 
-#[then(expr = "no prune request reached the service")]
-fn no_prune_request_sent(world: &mut BehaviourWorld) {
+#[then(expr = "no volume was pruned")]
+fn no_volume_pruned(world: &mut BehaviourWorld) {
     let requests = world.volume.requests.lock().unwrap();
     assert!(
-        !requests.iter().any(|r| matches!(r, Request::PruneVolumes)),
-        "got {requests:?}"
+        !requests
+            .iter()
+            .any(|r| matches!(r, Request::PruneVolumes { dry_run: false })),
+        "a dry run may be sent; a prune that removes may not: got {requests:?}"
     );
 }

@@ -375,12 +375,13 @@ impl VolumeRig {
         }
     }
 
-    pub async fn prune(&mut self) {
+    pub async fn prune(&mut self, dry_run: bool) {
         match lns_service::volume_store::prune_with(
             &self.fs,
             &self.registry,
             &self.holders,
             &self.store_root,
+            dry_run,
         )
         .await
         {

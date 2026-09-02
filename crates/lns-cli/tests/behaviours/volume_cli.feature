@@ -99,13 +99,13 @@ Feature: managing named volumes from the CLI
     And the output contains "Continue? [y/N]"
     And the output contains "Total reclaimed space: 64 MiB"
 
-  Scenario: declining the prune prompt aborts without touching the service
+  Scenario: declining the prune prompt removes nothing
     Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
     And the user will answer "n" to the prompt
     When the user runs volume command "prune"
     Then the exit code is 0
     And the output contains "Aborted."
-    And no prune request reached the service
+    And no volume was pruned
 
   Scenario: with no terminal to ask at, prune refuses rather than assuming
     Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
@@ -123,7 +123,7 @@ Feature: managing named volumes from the CLI
     Then the exit code is 0
     And the output contains "Continue? [y/N]"
     And the output contains "Aborted."
-    And no prune request reached the service
+    And no volume was pruned
 
   Scenario: pruning with nothing to remove says so
     Given the service will prune no volumes

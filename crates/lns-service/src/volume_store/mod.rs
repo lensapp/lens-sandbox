@@ -372,11 +372,13 @@ pub struct PruneReport {
     pub failed: Vec<lns_ipc::VolumePruneFailure>,
 }
 
+/// A dry run answers what the sweep would do without doing it, so the question and the sweep cannot disagree.
 pub async fn prune_with<F: Fs, H: Holders>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
     holders: &H,
     store_root: &Path,
+    dry_run: bool,
 ) -> Result<PruneReport> {
     let mut report = PruneReport::default();
     for info in list_with(fs, holders, store_root).await? {
@@ -392,9 +394,22 @@ pub async fn prune_with<F: Fs, H: Holders>(
                 continue;
             }
         }
-        let Ok(_guard) = take_lease(registry, &info.name, MAINTENANCE_HOLDER_RUN_ID) else {
-            continue;
+        // The dry run takes the lease too, so an open image is classified the same way in the question and in the sweep.
+        let _guard = match take_lease(registry, &info.name, MAINTENANCE_HOLDER_RUN_ID) {
+            Ok(guard) => guard,
+            Err(e) => {
+                report.failed.push(lns_ipc::VolumePruneFailure {
+                    name: info.name,
+                    error: e.to_string(),
+                });
+                continue;
+            }
         };
+        if dry_run {
+            report.reclaimed_bytes += info.disk_bytes;
+            report.removed.push(info.name);
+            continue;
+        }
         match fs.remove_file(&image_path_in(store_root, &info.name)).await {
             Ok(()) => {
                 report.reclaimed_bytes += info.disk_bytes;
@@ -439,12 +454,13 @@ pub async fn remove(name: &str) -> Result<()> {
     .await
 }
 
-pub async fn prune() -> Result<PruneReport> {
+pub async fn prune(dry_run: bool) -> Result<PruneReport> {
     prune_with(
         &real::RealFs,
         &global(),
         &real::RegistryHolders,
         &store_root()?,
+        dry_run,
     )
     .await
 }
@@ -1260,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_skips_held_volumes_and_reports_reclaimed_bytes() {
+    async fn prune_keeps_a_volume_whose_image_is_open_and_says_so() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/held.img", "/store/idle.img"]);
         fs.set_allocated("/store/idle.img", 2048);
@@ -1274,20 +1290,50 @@ mod tests {
         )
         .await
         .unwrap();
-        let report = prune_with(&fs, &registry, &Idle, Path::new("/store"))
+        let report = prune_with(&fs, &registry, &Idle, Path::new("/store"), false)
             .await
             .unwrap();
         assert_eq!(report.removed, vec!["idle".to_string()]);
         assert_eq!(report.reclaimed_bytes, 2048);
+        assert_eq!(report.failed.len(), 1, "got {:?}", report.failed);
+        assert_eq!(report.failed[0].name, "held");
         assert!(fs.exists(Path::new("/store/held.img")).await);
         assert!(!fs.exists(Path::new("/store/idle.img")).await);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_and_the_sweep_agree_about_a_volume_whose_image_is_open() {
+        let registry = reg();
+        let fs = FakeFs::with(&["/store/big.img"]);
+        let _open = take_lease(&registry, "big", "aa07").expect("a free volume");
+        let planned = prune_with(&fs, &registry, &Idle, Path::new("/store"), true)
+            .await
+            .unwrap();
+        let swept = prune_with(&fs, &registry, &Idle, Path::new("/store"), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            (planned.removed, planned.failed.len()),
+            (swept.removed.clone(), swept.failed.len()),
+            "the question and the sweep must classify a volume the same way, or the user consents to one thing and gets another"
+        );
+        assert!(
+            swept.removed.is_empty(),
+            "the image is open, so nothing was removed"
+        );
+        assert_eq!(
+            swept.failed.len(),
+            1,
+            "a volume the user asked to remove and that was kept must say so"
+        );
+        assert!(fs.exists(Path::new("/store/big.img")).await);
     }
 
     #[tokio::test]
     async fn prune_releases_its_maintenance_leases() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/idle.img"]);
-        prune_with(&fs, &registry, &Idle, Path::new("/store"))
+        prune_with(&fs, &registry, &Idle, Path::new("/store"), false)
             .await
             .unwrap();
         registry
@@ -1300,7 +1346,7 @@ mod tests {
         let fs = FakeFs::with(&["/store/bad.img", "/store/good.img"]);
         fs.set_allocated("/store/good.img", 4096);
         fs.refuse_remove("/store/bad.img");
-        let report = prune_with(&fs, &reg(), &Idle, Path::new("/store"))
+        let report = prune_with(&fs, &reg(), &Idle, Path::new("/store"), false)
             .await
             .unwrap();
         assert_eq!(report.removed, vec!["good".to_string()]);
@@ -1367,7 +1413,7 @@ mod tests {
         assert!(inspect("cov-lifecycle").await.unwrap().in_use_by.is_empty());
         remove("cov-lifecycle").await.unwrap();
         drop(create("cov-prune").await.unwrap());
-        let report = prune().await.unwrap();
+        let report = prune(false).await.unwrap();
         assert!(report.removed.contains(&"cov-prune".to_string()));
     }
 }
