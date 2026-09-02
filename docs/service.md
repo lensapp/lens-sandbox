@@ -28,7 +28,7 @@ If `lns run` reports that it can't reach the service, start it with
 ### Socket and binary locations
 
 On macOS the service listens on a local Unix socket at
-`<data-dir>/com.lensapp.sandbox/service.sock`.
+`<data-dir>/run.lns/service.sock`.
 
 `lns service start` looks for the `lns-service` binary next to the `lns` binary.
 Two environment variables override the defaults (mostly useful for development):
