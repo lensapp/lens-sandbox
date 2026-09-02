@@ -199,12 +199,14 @@ fn ca_bundle_env() -> [(&'static str, &'static str); 5] {
 }
 
 /// The proxy vars the supervisor hands its workload, so an HTTP client in an exec takes the route the agent's does rather than one the gate never sees.
-fn proxy_env() -> [(&'static str, &'static str); 4] {
+fn proxy_env() -> [(&'static str, &'static str); 6] {
     [
         ("HTTPS_PROXY", lns_session::GUEST_PROXY_URL),
         ("https_proxy", lns_session::GUEST_PROXY_URL),
         ("HTTP_PROXY", lns_session::GUEST_PROXY_URL),
         ("http_proxy", lns_session::GUEST_PROXY_URL),
+        ("NO_PROXY", lns_session::GUEST_NO_PROXY),
+        ("no_proxy", lns_session::GUEST_NO_PROXY),
     ]
 }
 
@@ -961,6 +963,18 @@ mod tests {
             assert!(
                 env.contains(&format!("{key}={}", lns_session::GUEST_PROXY_URL)),
                 "a curl in an exec would take a different route than the workload without {key}, so a probe would report on a path the agent never uses: {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loopback_request_in_an_exec_session_stays_in_the_guest() {
+        let env = exec_session_env(&Default::default(), &[], &Default::default()).env;
+
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                env.contains(&format!("{key}={}", lns_session::GUEST_NO_PROXY)),
+                "without {key} a curl in an exec sends a request for a server the run itself started to the egress proxy, which cannot connect back into the guest: {env:?}"
             );
         }
     }
