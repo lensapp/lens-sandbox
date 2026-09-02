@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_int};
+use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 
 use super::{MountError, MountFlags, NEWROOT, PROC, Syscalls};
@@ -29,6 +30,9 @@ impl Syscalls for RealSyscalls {
         let mut f: libc::c_ulong = 0;
         if flags.bind {
             f |= libc::MS_BIND;
+        }
+        if flags.recursive {
+            f |= libc::MS_REC;
         }
         if flags.read_only {
             f |= libc::MS_RDONLY;
@@ -119,6 +123,30 @@ impl Syscalls for RealSyscalls {
             libc::stat(path.as_ptr(), &mut buf) == 0
                 && (buf.st_mode & libc::S_IFMT) == libc::S_IFDIR
         }
+    }
+
+    fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<super::ShareEntry>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(std::path::Path::new(std::ffi::OsStr::from_bytes(
+            path.to_bytes(),
+        )))? {
+            let entry = entry?;
+            let kind = match std::fs::symlink_metadata(entry.path())? {
+                meta if meta.is_symlink() => super::EntryKind::Symlink(
+                    std::fs::read_link(entry.path())?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                meta if meta.is_dir() => super::EntryKind::Dir,
+                _ => super::EntryKind::File,
+            };
+            entries.push(super::ShareEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                kind,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 
     fn open_ro(&self, path: &CStr) -> io::Result<RawFd> {
