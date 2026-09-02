@@ -338,7 +338,34 @@ pub fn connector_env_for(run_id: &str) -> crate::workload_env::ConnectorEnv {
     crate::workload_env::ConnectorEnv {
         filled: variables_a_grant_fills(&supply),
         granted_env: values_a_granted_method_sets(&supply),
+        ..Default::default()
     }
+}
+
+/// [`connector_env_for`], plus the markers this run's own declarations are left to an installed connector for (§3.1.7). Boot only: an exec joins a session that already holds them.
+pub fn connector_env_for_boot(
+    run_id: &str,
+    declared: &[lns_spec::Credential],
+    run_policy: Option<&lns_policy::NetworkPolicy>,
+) -> crate::workload_env::ConnectorEnv {
+    let mut composed = connector_env_for(run_id);
+    composed.left_unarmed = super::claims::left_to_a_connector(
+        declared,
+        &undecided_connectors(&GrantHolder::Run(run_id.to_string())),
+        &composed.filled,
+        run_policy,
+    );
+    composed
+}
+
+/// Unreadable connector state leaves no declaration to anybody.
+fn undecided_connectors(holder: &GrantHolder) -> Vec<lns_artifact::connector::ConnectorDefinition> {
+    with_run_store(holder, handler::undecided).unwrap_or_else(|e| {
+        crate::log::warn!(
+            "cannot read which connectors are undecided, so no declaration is left to one: {e:#}"
+        );
+        Vec::new()
+    })
 }
 
 fn variables_a_grant_fills(
@@ -577,6 +604,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
+    }
+
+    fn declaring(variable: &str) -> Vec<lns_spec::Credential> {
+        vec![lns_spec::Credential {
+            env_var: Some(variable.to_string()),
+            placeholder: "the_declarations_own_LNSPLACEHOLDER".to_string(),
+            field: None,
+            injections: Vec::new(),
+        }]
     }
 
     fn filled(
@@ -1369,6 +1405,47 @@ mod tests {
         assert!(
             connector_env_for(OTHER_RUN).granted_env.is_empty(),
             "a grant belongs to one run"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn a_declaration_is_left_to_the_undecided_connector_that_claims_its_variable() {
+        // §3.1.7: a decline is a standing no and a grant fills the variable itself, so only an undecided connector can be left a declaration.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_filling(home.path(), "some-provider", "SOME_TOKEN");
+        install_filling(home.path(), "other-provider", "OTHER_TOKEN");
+        decline(home.path(), RUN, "other-provider");
+
+        let declared = [declaring("SOME_TOKEN"), declaring("OTHER_TOKEN")].concat();
+
+        assert_eq!(
+            connector_env_for_boot(RUN, &declared, None).left_unarmed,
+            [filled(
+                "SOME_TOKEN",
+                "some-provider",
+                "some-provider-LNSPLACEHOLDER000"
+            )]
+            .into(),
+            "the declined connector answers nothing, so that declaration is left to nobody"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn connector_state_this_build_cannot_reach_leaves_no_declaration_to_anybody() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        let said = crate::test_env::captured_messages(|| {
+            assert!(
+                connector_env_for_boot(RUN, &declaring("SOME_TOKEN"), None)
+                    .left_unarmed
+                    .is_empty()
+            );
+        });
+        assert!(
+            said.iter().any(|m| m.contains("undecided")),
+            "the run is told why it was left nothing: {said:?}"
         );
     }
 

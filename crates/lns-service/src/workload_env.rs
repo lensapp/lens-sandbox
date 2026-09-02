@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-/// What the methods this run granted put in its environment (§3.2.4).
+/// What this machine's connectors put in a run's environment: what a granted method supplies, and the marker a declaration was left to one for (§3.1.7, §3.2.4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectorEnv {
     /// Each variable a granted method fills with a placeholder, by the connector that fills it: no other source may set it.
     pub filled: BTreeMap<String, Filled>,
     /// What a granted method's own `env` block sets outright — non-secret config beside its credentials, carrying a plain value rather than a marker.
     pub granted_env: BTreeMap<String, String>,
+    /// Each variable this run declared and left to an installed connector, holding that connector's placeholder with no value behind it (§3.1.7).
+    pub left_unarmed: BTreeMap<String, Filled>,
 }
 
 impl ConnectorEnv {
@@ -25,7 +27,7 @@ impl ConnectorEnv {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filled {
     pub connector: String,
-    /// The marker the workload reads there; the boundary substitutes the real value on the wire.
+    /// The marker the workload reads there. Where a grant filled it the boundary substitutes the real value; where a declaration was left to a connector nothing substitutes until the grant arms it.
     pub placeholder: String,
 }
 
@@ -185,6 +187,12 @@ fn compose_workload_env(
     }
     for (key, filled) in connectors.filled.iter().filter(|(k, _)| claimable(k)) {
         upsert(&mut entries, key, &filled.placeholder);
+    }
+    // Last and never over anything: nothing consented to this connector, and nothing substitutes for its marker until a grant does (§3.1.7).
+    for (key, left) in connectors.left_unarmed.iter().filter(|(k, _)| claimable(k)) {
+        if !entries.iter().any(|(k, _)| k == key) {
+            entries.push((key.clone(), left.placeholder.clone()));
+        }
     }
     WorkloadEnv {
         env: entries
@@ -755,6 +763,59 @@ mod tests {
             "got: {:?}",
             joining.env
         );
+    }
+
+    #[test]
+    fn a_declaration_left_to_a_connector_boots_holding_that_connectors_marker() {
+        // §3.1.7: the variable is set from boot, so a client that reads it to decide whether it is signed in reaches the destination and the card is what settles it.
+        let connectors = ConnectorEnv {
+            left_unarmed: [(
+                "SOME_TOKEN".to_string(),
+                Filled {
+                    connector: "some-provider".to_string(),
+                    placeholder: MARKER.to_string(),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+
+        let c = compose_workload_env(None, &["SAFE=1".into()], &connectors);
+
+        assert_eq!(env(&c), ["SAFE=1", &format!("SOME_TOKEN={MARKER}")]);
+        assert!(
+            c.refused.is_empty(),
+            "nothing was displaced: {:?}",
+            c.refused
+        );
+    }
+
+    #[test]
+    fn a_value_any_source_set_outranks_a_marker_left_to_a_connector() {
+        // §3.1.7: nothing has consented to the connector and nothing substitutes for the marker yet, so a marker that displaced a working value would be an install breaking a run.
+        let connectors = ConnectorEnv {
+            left_unarmed: ["FROM_IMAGE", "FROM_FLAG"]
+                .map(|key| {
+                    (
+                        key.to_string(),
+                        Filled {
+                            connector: "some-provider".to_string(),
+                            placeholder: MARKER.to_string(),
+                        },
+                    )
+                })
+                .into(),
+            ..Default::default()
+        };
+
+        let c = compose_workload_env(
+            Some(&["FROM_IMAGE=from-image".into()]),
+            &["FROM_FLAG=mine".into()],
+            &connectors,
+        );
+
+        assert_eq!(env(&c), ["FROM_IMAGE=from-image", "FROM_FLAG=mine"]);
+        assert!(c.refused.is_empty(), "got: {:?}", c.refused);
     }
 
     #[test]

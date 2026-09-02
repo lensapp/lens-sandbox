@@ -39,6 +39,12 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
         lns_service::workload_env::source_among(&typed),
     );
     world.refused_env = refused;
+    world.connectors.left_unarmed = lns_service::connector::claims::left_to_a_connector(
+        &world.declared_credentials,
+        &world.installed_connectors,
+        &world.connectors.filled,
+        None,
+    );
     let image_env = world.image_env.clone();
     world.composed_env = Some(run_workload_env(
         image_env.as_deref(),
@@ -58,6 +64,67 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
             .chain(from_the_image),
     );
     world.user_env = user_env;
+}
+
+#[given(regex = r#"^the sandbox declares the credential (\S+)$"#)]
+fn the_sandbox_declares(world: &mut BehaviourWorld, key: String) {
+    world.declared_credentials.push(lns_spec::Credential {
+        env_var: Some(key),
+        placeholder: "the_declarations_own_LNSPLACEHOLDER".to_string(),
+        field: None,
+        injections: Vec::new(),
+    });
+}
+
+#[given(regex = r#"^the installed connector "([^"]+)" claims (\S+) with the placeholder (\S+)$"#)]
+fn the_installed_connector_claims(
+    world: &mut BehaviourWorld,
+    connector: String,
+    key: String,
+    placeholder: String,
+) {
+    // A real document, so the scenario exercises the rule rather than the harness's idea of it.
+    let document = serde_json::json!({
+        "apiVersion": "lns.run/v1",
+        "kind": "connector",
+        "name": connector,
+        "spec": {
+            "serves": [format!("api.{connector}.example")],
+            "methods": [{
+                "name": "token",
+                "auth": { "kind": "token" },
+                "credentials": [{ "envVar": key, "placeholder": placeholder }],
+            }],
+        },
+    });
+    world.installed_connectors.push(
+        lns_artifact::connector::parse(document.to_string().as_bytes()).expect("a valid connector"),
+    );
+}
+
+#[then(regex = r#"^the run is told nothing about (\S+)$"#)]
+fn then_the_run_is_told_nothing(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
+    match world.refused_env.iter().find(|refused| refused.key == key) {
+        Some(refused) => Err(format!(
+            "nothing displaced {key}, so a remedy for it names something nobody did: {}",
+            lns_service::workload_env::refusal_warning(refused)
+        )),
+        None => Ok(()),
+    }
+}
+
+#[then(regex = r#"^the workload's environment carries no (\S+) entry$"#)]
+fn then_env_carries_no_entry(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
+    let env = &composed(world)?.env;
+    match env
+        .iter()
+        .find(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))
+    {
+        Some(found) => Err(format!(
+            "no sandbox declared {key}, so {found:?} must not be set"
+        )),
+        None => Ok(()),
+    }
 }
 
 #[then(regex = r#"^the workload's environment contains (\S+) set to "([^"]*)"$"#)]

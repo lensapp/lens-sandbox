@@ -218,7 +218,17 @@ async fn orchestrate(
         .map(|l| l.env.clone())
         .unwrap_or_else(|| args.env.clone());
     // Dropped before the environment travels anywhere, so no source shadows the marker the boundary substitutes for.
-    let connectors = crate::connector::real::connector_env_for(&run_id);
+    let connectors = crate::connector::real::connector_env_for_boot(
+        &run_id,
+        sandbox_plan
+            .as_ref()
+            .map(|plan| plan.workload.credentials.as_slice())
+            .unwrap_or_default(),
+        sandbox_plan
+            .as_ref()
+            .and_then(|plan| plan.workload.policy.as_ref())
+            .map(|policy| &policy.network),
+    );
     let (env, refused_here) = crate::workload_env::without_what_a_grant_fills(
         &env,
         &connectors,
