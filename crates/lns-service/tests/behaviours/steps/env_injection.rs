@@ -31,11 +31,11 @@ fn given_image_env(world: &mut BehaviourWorld, key: String, value: String) {
 
 #[when(regex = r#"^the user runs `([^`]*)`$"#)]
 fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
-    // The run drops these before its environment travels, so the audit chain records what entered rather than what was typed.
+    // The run displaces these before its environment travels, so the audit chain records what the user supplied rather than what was typed.
     let typed = user_env_from(&cmd);
     let (user_env, refused) = lns_service::workload_env::without_what_a_grant_fills(
         &typed,
-        &world.filled_by_a_grant,
+        &world.connectors,
         lns_service::workload_env::source_among(&typed),
     );
     world.refused_env = refused;
@@ -46,7 +46,7 @@ fn when_user_runs(world: &mut BehaviourWorld, cmd: String) {
         None,
         None,
         &Default::default(),
-        &world.filled_by_a_grant,
+        &world.connectors,
     ));
     let from_the_image = composed(world)
         .map(|c| c.refused.clone())
@@ -104,21 +104,20 @@ fn then_audit_records(
     }
 }
 
-#[given(regex = r#"^the connector "([^"]+)" fills (\S+) for this run$"#)]
-fn the_connector_fills(world: &mut BehaviourWorld, connector: String, key: String) {
-    world.filled_by_a_grant.insert(key, connector);
-}
-
-#[then(regex = r#"^the workload's environment carries no (\S+) entry$"#)]
-fn then_env_carries_no_entry(world: &mut BehaviourWorld, key: String) -> Result<(), String> {
-    let env = &composed(world)?.env;
-    match env
-        .iter()
-        .find(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))
-    {
-        Some(found) => Err(format!("a grant fills {key}, so {found:?} must not be set")),
-        None => Ok(()),
-    }
+#[given(regex = r#"^the connector "([^"]+)" fills (\S+) with the placeholder (\S+) for this run$"#)]
+fn the_connector_fills(
+    world: &mut BehaviourWorld,
+    connector: String,
+    key: String,
+    placeholder: String,
+) {
+    world.connectors.filled.insert(
+        key,
+        lns_service::workload_env::Filled {
+            connector,
+            placeholder,
+        },
+    );
 }
 
 #[then(regex = r#"^the run is told "([^"]+)" fills (\S+)$"#)]

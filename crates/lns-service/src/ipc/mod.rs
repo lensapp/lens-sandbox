@@ -1163,10 +1163,9 @@ pub(super) fn build_session_params(
 ) -> crate::vm::session_client::SessionParams {
     let exec_environment = crate::run_registry::exec_environment(run_id);
     // Read now rather than from the run's start: the card grants during the run, and an exec joining afterwards must be held to what the run holds today.
-    let filled_by_a_grant = crate::connector::real::variables_a_grant_fills(run_id);
-    let joining =
-        crate::workload_env::exec_session_env(&exec_environment, &args.env, &filled_by_a_grant);
-    // The run says what its grants displaced; an exec that dropped a variable in silence would look like the caller mistyped it.
+    let connectors = crate::connector::real::connector_env_for(run_id);
+    let joining = crate::workload_env::exec_session_env(&exec_environment, &args.env, &connectors);
+    // The run says what its grants displaced; an exec that replaced a value in silence would look like the caller mistyped it.
     for refused in crate::workload_env::one_refusal_per_variable(joining.refused) {
         log::warn!("{}", crate::workload_env::refusal_warning(&refused));
     }
@@ -4090,8 +4089,8 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
-    async fn an_exec_drops_a_variable_the_run_s_grant_fills_and_says_who_fills_it() {
-        // An exec is a second way into a live run; letting its caller set that variable would put the real secret beside the placeholder the boundary substitutes, and dropping it in silence reads as the caller's own typo.
+    async fn an_exec_reads_the_marker_a_grant_fills_rather_than_the_value_its_caller_typed() {
+        // An exec is a second way into a live run; letting its caller set that variable would put the real secret beside the placeholder the boundary substitutes, and replacing it in silence reads as the caller's own typo.
         let home = tempfile::tempdir().expect("tempdir");
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let run_id = crate::run_registry::allocate_run_id();
@@ -4110,8 +4109,8 @@ mod tests {
 
         let env = params.expect("the exec was built").env;
         assert!(
-            !env.iter().any(|kv| kv.starts_with("SOME_TOKEN=")),
-            "the run refused this variable, and an exec is not a way around that: {env:?}"
+            env.contains(&"SOME_TOKEN=some-provider-LNSPLACEHOLDER00".to_string()),
+            "the run refused the caller's value, and an exec is not a way around that: it reads the same marker the workload does: {env:?}"
         );
         assert!(env.contains(&"SAFE=1".to_string()), "got: {env:?}");
         assert!(

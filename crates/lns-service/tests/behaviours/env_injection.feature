@@ -35,24 +35,24 @@ Feature: lns-service injects user env into the workload
     Then the audit entry for the run records CLAUDE_CODE_USE_BEDROCK set to "<redacted>"
 
   Scenario: -e cannot put a real secret where a grant writes a placeholder
-    Given the connector "some-provider" fills SOME_TOKEN for this run
+    Given the connector "some-provider" fills SOME_TOKEN with the placeholder some_LNSPLACEHOLDER0000000000 for this run
     When the user runs `lns run -e SOME_TOKEN=sk-live-real -e SAFE=1 someimage`
     Then the workload's environment contains SAFE set to "1"
-    And the workload's environment carries no SOME_TOKEN entry
+    And the workload's environment contains SOME_TOKEN set to "some_LNSPLACEHOLDER0000000000"
     And the run is told "some-provider" fills SOME_TOKEN
     And the audit entry for the run records SAFE set to "<redacted>"
     And the audit entry for the run records no SOME_TOKEN entry
 
-  Scenario: an image variable a grant fills is dropped the same way
-    Given the connector "some-provider" fills SOME_TOKEN for this run
+  Scenario: an image variable a grant fills is replaced the same way
+    Given the connector "some-provider" fills SOME_TOKEN with the placeholder some_LNSPLACEHOLDER0000000000 for this run
     And the image declares ENV SOME_TOKEN=from-image
     When the user runs `lns run someimage`
-    Then the workload's environment carries no SOME_TOKEN entry
+    Then the workload's environment contains SOME_TOKEN set to "some_LNSPLACEHOLDER0000000000"
 
   Scenario: a variable the image and a flag both set is named once
-    Given the connector "some-provider" fills SOME_TOKEN for this run
+    Given the connector "some-provider" fills SOME_TOKEN with the placeholder some_LNSPLACEHOLDER0000000000 for this run
     And the image declares ENV SOME_TOKEN=from-image
     When the user runs `lns run -e SOME_TOKEN=sk-live-real someimage`
-    Then the workload's environment carries no SOME_TOKEN entry
+    Then the workload's environment contains SOME_TOKEN set to "some_LNSPLACEHOLDER0000000000"
     And the run names SOME_TOKEN once
     And the run is told "some-provider" fills SOME_TOKEN
