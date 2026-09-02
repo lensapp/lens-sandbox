@@ -12,11 +12,7 @@ use lns_ipc::{Request, Response, VolumeInfo, VolumePruneFailure};
 const FIXTURE_CREATED: &str = "2026-06-01T12:00:00Z";
 const FIXTURE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-fn hexid(n: u32) -> String {
-    format!("{n:08x}{}", "0".repeat(24))
-}
-
-fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Option<String>) -> VolumeInfo {
+fn fixture_volume(name: &str, disk_bytes: u64, in_use_by: Vec<String>) -> VolumeInfo {
     VolumeInfo {
         name: name.to_string(),
         size_bytes: FIXTURE_SIZE_BYTES,
@@ -70,7 +66,7 @@ impl FakeVolumeService {
                     .clone(),
             },
             Request::CreateVolume { name } => Response::VolumeCreated {
-                volume: fixture_volume(name, 32 * 1024 * 1024, None),
+                volume: fixture_volume(name, 32 * 1024 * 1024, Vec::new()),
             },
             Request::RemoveVolume { name } => Response::VolumeRemoved { name: name.clone() },
             Request::PruneVolumes => {
@@ -94,17 +90,36 @@ impl VolumeService for FakeVolumeService {
     }
 }
 
-#[given(expr = "the service reports a volume {string} using {int} bytes on disk held by run {int}")]
-fn reports_held_volume(world: &mut BehaviourWorld, name: String, disk: u64, run: u32) {
+#[given(expr = "the service reports a volume {string} using {int} bytes on disk held by {string}")]
+fn reports_held_volume(world: &mut BehaviourWorld, name: String, disk: u64, holder: String) {
     world
         .volume
         .volumes
-        .push(fixture_volume(&name, disk, Some(hexid(run))));
+        .push(fixture_volume(&name, disk, vec![holder]));
+}
+
+#[given(
+    expr = "the service reports a volume {string} using {int} bytes on disk held by {string} and {string}"
+)]
+fn reports_doubly_held_volume(
+    world: &mut BehaviourWorld,
+    name: String,
+    disk: u64,
+    first: String,
+    second: String,
+) {
+    world
+        .volume
+        .volumes
+        .push(fixture_volume(&name, disk, vec![first, second]));
 }
 
 #[given(expr = "the service reports an idle volume {string} using {int} bytes on disk")]
 fn reports_idle_volume(world: &mut BehaviourWorld, name: String, disk: u64) {
-    world.volume.volumes.push(fixture_volume(&name, disk, None));
+    world
+        .volume
+        .volumes
+        .push(fixture_volume(&name, disk, Vec::new()));
 }
 
 #[given(expr = "the service reports no volumes")]
@@ -122,11 +137,11 @@ fn prune_plan(world: &mut BehaviourWorld, a: String, b: String, bytes: u64) {
     world
         .volume
         .volumes
-        .push(fixture_volume(&a, bytes / 2, None));
+        .push(fixture_volume(&a, bytes / 2, Vec::new()));
     world
         .volume
         .volumes
-        .push(fixture_volume(&b, bytes / 2, None));
+        .push(fixture_volume(&b, bytes / 2, Vec::new()));
     world.volume.prune_plan = Some((vec![a, b], bytes));
 }
 
@@ -147,7 +162,7 @@ fn volume_is_prunable(world: &mut BehaviourWorld, name: String) {
     world
         .volume
         .volumes
-        .push(fixture_volume(&name, 33_554_432, None));
+        .push(fixture_volume(&name, 33_554_432, Vec::new()));
     let plan = world
         .volume
         .prune_plan
@@ -276,7 +291,7 @@ fn output_is_volume_json(world: &mut BehaviourWorld, name: String, disk: u64) {
     assert_eq!(parsed["name"], serde_json::Value::String(name));
     assert_eq!(parsed["sizeBytes"], serde_json::json!(FIXTURE_SIZE_BYTES));
     assert_eq!(parsed["diskBytes"], serde_json::json!(disk));
-    assert_eq!(parsed["inUseBy"], serde_json::Value::Null);
+    assert_eq!(parsed["inUseBy"], serde_json::json!([]));
 }
 
 #[then(expr = "the listed row for {string} ends with {string}")]

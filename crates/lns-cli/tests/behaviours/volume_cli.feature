@@ -25,14 +25,20 @@ Feature: managing named volumes from the CLI
     And the output contains "invalid volume name"
 
   Scenario: listing volumes renders a table with disk usage and holder
-    Given the service reports a volume "prism-data" using 33554432 bytes on disk held by run 7
+    Given the service reports a volume "prism-data" using 33554432 bytes on disk held by "reviewer"
     When the user runs volume command "ls"
     Then the exit code is 0
     And the output contains "NAME"
     And the output contains "ON DISK"
     And the output contains "prism-data"
     And the output contains "32 MiB"
-    And the output contains "run 000000070000"
+    And the output contains "reviewer"
+
+  Scenario: listing volumes names every sandbox holding one
+    Given the service reports a volume "prism-data" using 33554432 bytes on disk held by "reviewer" and "auditor"
+    When the user runs volume command "ls"
+    Then the exit code is 0
+    And the output contains "reviewer, auditor"
 
   Scenario: listing volumes marks an unattached volume as idle
     Given the service reports an idle volume "prism-data" using 33554432 bytes on disk

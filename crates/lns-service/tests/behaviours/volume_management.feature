@@ -53,11 +53,62 @@ Feature: volume lifecycle — list, create, inspect, remove, prune
     When volume "prism-data" is removed
     Then the backing image for "prism-data" is gone from the store
 
-  Scenario: Removing a volume held by a live run is refused
-    Given a live run holds volume "prism-data"
+  Scenario: Removing a volume held by a live run is refused, naming the sandbox
+    Given the live sandbox "reviewer" holds volume "prism-data"
     When volume "prism-data" is removed
     Then the request is refused because the volume is in use
+    And the refusal names the sandbox "reviewer"
     And the backing image for "prism-data" remains in the store
+
+  Scenario: Removing a volume a stopped sandbox declares is refused
+    Given the stopped sandbox "reviewer" declares volume "prism-data"
+    When volume "prism-data" is removed
+    Then the request is refused because the volume is in use
+    And the refusal names the sandbox "reviewer"
+    And the backing image for "prism-data" remains in the store
+
+  Scenario: Removing a volume two sandboxes declare names both of them
+    Given the stopped sandbox "reviewer" declares volume "prism-data"
+    And the stopped sandbox "auditor" declares volume "prism-data"
+    When volume "prism-data" is removed
+    Then the request is refused because the volume is in use
+    And the refusal names the sandbox "reviewer"
+    And the refusal names the sandbox "auditor"
+    And the backing image for "prism-data" remains in the store
+
+  Scenario: A volume a run declares in a record this build will not run is still held
+    Given run "aa07" declares volume "prism-data" in a record this build will not run
+    When volume "prism-data" is removed
+    Then the request is refused
+    And the refusal tells the user to repair run "aa07" and restart the service
+    And the refusal does not tell the user to remove a sandbox
+    And the backing image for "prism-data" remains in the store
+
+  Scenario: A volume is not removed while a run's claims cannot be read at all
+    Given the record of run "aa07" cannot be read
+    When volume "prism-data" is removed
+    Then the request is refused
+    And the refusal tells the user to repair run "aa07" and restart the service
+
+  Scenario: Pruning keeps every volume while a run's claims cannot be read, and says why
+    Given volume "scratch" already exists in the store
+    And the record of run "aa07" cannot be read
+    When the volumes are pruned
+    Then the prune removes nothing
+    And the prune reports "scratch" as failed, naming run "aa07"
+    And the backing image for "scratch" remains in the store
+
+  Scenario: A run whose record cannot be read is not listed as a volume's holder
+    Given volume "scratch" already exists in the store
+    And the record of run "aa07" cannot be read
+    When the volumes are listed
+    Then the listing names "scratch" as idle
+
+  Scenario: A volume is removable once the last sandbox declaring it is gone
+    Given the stopped sandbox "reviewer" declares volume "prism-data"
+    And the sandbox "reviewer" is removed
+    When volume "prism-data" is removed
+    Then the backing image for "prism-data" is gone from the store
 
   Scenario: Removing an unknown volume is refused
     When volume "prism-data" is removed
@@ -82,6 +133,19 @@ Feature: volume lifecycle — list, create, inspect, remove, prune
     When the volumes are pruned
     Then the prune removes only "scratch"
     And the backing image for "prism-data" remains in the store
+
+  Scenario: Pruning skips a volume a stopped sandbox declares
+    Given the stopped sandbox "reviewer" declares volume "prism-data"
+    And volume "scratch" already exists in the store
+    When the volumes are pruned
+    Then the prune removes only "scratch"
+    And the backing image for "prism-data" remains in the store
+
+  Scenario: Listing names every sandbox that declares a volume
+    Given the stopped sandbox "reviewer" declares volume "prism-data"
+    And the stopped sandbox "auditor" declares volume "prism-data"
+    When the volumes are listed
+    Then the listing names "prism-data" as in use by "reviewer" and "auditor"
 
   Scenario: Pruning an empty store removes nothing
     When the volumes are pruned

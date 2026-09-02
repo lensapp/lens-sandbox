@@ -2075,7 +2075,7 @@ mod tests {
             .await,
         );
         assert_eq!(inspected["type"], "VolumeInspect", "got {inspected}");
-        assert_eq!(inspected["volume"]["in_use_by"], serde_json::Value::Null);
+        assert_eq!(inspected["volume"]["in_use_by"], serde_json::json!([]));
 
         let removed = handle_request(
             &Request::RemoveVolume {
@@ -3569,6 +3569,7 @@ mod tests {
         let damaged = [crate::run_record::DamagedRecord {
             run_id: "9f8e7d6c0000000000000000000000bb".into(),
             reason: "record.json is not json".into(),
+            declared_volumes: None,
         }];
 
         let kept = ids_a_boot_keeps(rebuilt, &damaged);

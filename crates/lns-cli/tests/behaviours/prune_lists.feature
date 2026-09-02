@@ -48,7 +48,7 @@ Feature: a prune lists what it would remove before asking
     And the service received no PruneRuns request
 
   Scenario: volume prune lists the unused volumes before asking
-    Given the service reports a volume "prism-data" using 1024 bytes on disk held by run 7
+    Given the service reports a volume "prism-data" using 1024 bytes on disk held by "reviewer"
     And the volume "orphan" is held by no running sandbox and named by no cached sandbox
     And the user will answer "y" to the prompt
     When the user runs volume command "prune"
@@ -58,7 +58,7 @@ Feature: a prune lists what it would remove before asking
     And the command's stderr shows "Would remove:" before "Continue? [y/N]"
 
   Scenario: a volume prune with nothing unused never asks
-    Given the service reports a volume "prism-data" using 1024 bytes on disk held by run 7
+    Given the service reports a volume "prism-data" using 1024 bytes on disk held by "reviewer"
     And a terminal is attached
     When the user runs volume command "prune"
     Then the exit code is 0

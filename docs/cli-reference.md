@@ -85,7 +85,8 @@ What the JSON gives you:
   `lns sandbox inspect`, `lns volume inspect`, and `lns config get` emit a single
   object instead.
 - **camelCase keys**, always present — a key with no value is `null`, never omitted, so
-  `jq .inUseBy` needs no guard.
+  `jq .policy` needs no guard. A key that holds a list is an array, empty when there
+  is nothing in it: a volume no sandbox holds reports `"inUseBy": []`.
 - **Raw numbers**, so nothing has to be un-humanized: `sizeBytes: 92274688`, not
   `"88.0 MiB"`. Timestamps pass through as the service reports them.
 - **The same exit code as the table.** `--format` changes the shape and nothing else:
@@ -291,11 +292,11 @@ lns volume prune [-f]
 
 | Subcommand       | Meaning                                                                              |
 | ---------------- | ------------------------------------------------------------------------------------ |
-| `ls`             | List named volumes with their on-disk size, age, and the run holding them (if any).  |
+| `ls`             | List named volumes with their on-disk size, age, and the sandboxes holding them (if any). |
 | `create <NAME>`  | Create a named volume ahead of its first `lns run -v` attach. No-op if it exists.    |
 | `inspect <NAME>` | Show a volume's capacity, on-disk bytes, age, and holder.                            |
-| `rm <NAME>`      | Remove a volume and its data; refused while a run holds it.                          |
-| `prune`          | Remove every volume not attached to a running sandbox. Lists them and asks first, unless `-f`/`--force`.|
+| `rm <NAME>`      | Remove a volume and its data; refused while a sandbox holds it. A stopped sandbox holds it too, until you remove the sandbox. |
+| `prune`          | Remove every volume no sandbox holds. Lists them and asks first, unless `-f`/`--force`.|
 
 See [Running workloads — volumes](running-workloads.md#volumes).
 

@@ -391,6 +391,7 @@ async fn rebuild_stopped_runs() {
     };
     match scan {
         Ok(scan) => {
+            crate::run_registry::remember_damaged(&scan.damaged);
             for damaged in &scan.damaged {
                 let (id, reason) = (&damaged.run_id, &damaged.reason);
                 log::warn!(

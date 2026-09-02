@@ -113,6 +113,16 @@ fn json_row_null(world: &mut BehaviourWorld, index: usize, key: String) -> Resul
     }
 }
 
+#[then(regex = r#"^JSON row (\d+) has an empty "([^"]+)"$"#)]
+fn json_row_empty(world: &mut BehaviourWorld, index: usize, key: String) -> Result<(), String> {
+    let found = field(&row(world, index)?, &key)?;
+    if found.as_array().is_some_and(|a| a.is_empty()) {
+        Ok(())
+    } else {
+        Err(format!("expected {key} to be an empty array, got {found}"))
+    }
+}
+
 #[then(regex = r#"^JSON row (\d+) has "([^"]+)" set to (-?\d+)$"#)]
 fn json_row_number(
     world: &mut BehaviourWorld,
