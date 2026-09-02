@@ -203,6 +203,7 @@ pub fn resolved_from_sandbox(
         base_image: def.spec.image.clone(),
         user: def.spec.user.clone(),
         scripts: def.spec.scripts.clone(),
+        credentials: def.spec.credentials.clone(),
         local_filesets: def
             .spec
             .filesets
@@ -458,6 +459,35 @@ mod tests {
         assert!(
             packed.is_empty(),
             "a directory this machine read has its files on this machine, so nothing is fetched for it"
+        );
+    }
+
+    #[test]
+    fn declared_credentials_survive_resolution_and_assembly() {
+        // §3.1.7 settles every declaration before boot, so a resolution that forgets them leaves the run with nothing to settle.
+        let def = lns_artifact::sandbox::parse(
+            br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"s","spec":{"image":"x:1","credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}}"#,
+        )
+        .expect("a valid sandbox");
+
+        let resolved = resolved_from_sandbox(&def, &PackedFilesets::new());
+
+        assert_eq!(
+            resolved
+                .credentials
+                .iter()
+                .filter_map(|c| c.env_var.as_deref())
+                .collect::<Vec<_>>(),
+            ["SOME_TOKEN"]
+        );
+        assert_eq!(
+            assembly::assemble(&resolved)
+                .credentials
+                .iter()
+                .filter_map(|c| c.env_var.as_deref())
+                .collect::<Vec<_>>(),
+            ["SOME_TOKEN"],
+            "the workload the run boots carries them too, or nothing downstream can settle one"
         );
     }
 

@@ -38,6 +38,7 @@ pub struct ResolvedSandbox {
     pub policy: Option<lns_policy::Policy>,
     pub tools: Vec<String>,
     pub scripts: Vec<lns_artifact::sandbox::ScriptStep>,
+    pub credentials: Vec<lns_spec::Credential>,
 }
 
 /// A `path` fileset that arrived packed into a layer of the artifact declaring it, materialized from that artifact rather than from this machine.
@@ -58,6 +59,7 @@ pub struct AssembledWorkload {
     pub policy: Option<lns_policy::Policy>,
     pub tools: Vec<String>,
     pub scripts: Vec<lns_artifact::sandbox::ScriptStep>,
+    pub credentials: Vec<lns_spec::Credential>,
 }
 
 pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
@@ -70,5 +72,6 @@ pub fn assemble(sandbox: &ResolvedSandbox) -> AssembledWorkload {
         policy: sandbox.policy.clone(),
         tools: sandbox.tools.clone(),
         scripts: sandbox.scripts.clone(),
+        credentials: sandbox.credentials.clone(),
     }
 }
