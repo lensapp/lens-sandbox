@@ -350,7 +350,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
             );
         }
         validate_volume(volume).with_context(|| format!("volume targeting {}", volume.target))?;
-        if !targets.insert(claimed_path(&volume.target)) {
+        if !targets.insert(lns_placement::claimed_path(&volume.target)) {
             bail!("duplicate volume target {}", volume.target);
         }
     }
@@ -361,7 +361,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     for fileset in &doc.spec.filesets {
         validate_fileset(fileset, spec::GuestAnchor::Root)?;
         refuse_a_secret_shaped_inline_name(fileset)?;
-        if !targets.insert(claimed_path(&fileset.guest_path)) {
+        if !targets.insert(lns_placement::claimed_path(&fileset.guest_path)) {
             bail!("duplicate guest path {}", fileset.guest_path);
         }
     }
@@ -563,21 +563,6 @@ fn overlaps_runtime_namespace(path: &str) -> bool {
 }
 
 /// The segments a guest path claims, so two spellings of one path — a trailing slash, a `.` segment, a doubled separator — are one claim rather than two.
-fn claimed_path(path: &str) -> Vec<&str> {
-    path.split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .collect()
-}
-
-/// Whether `outer` is a strict path prefix of `inner`: the prefix-based rule the shared volume/fileset guest-path namespace is held to (§3.1.10).
-pub fn encloses(outer: &str, inner: &str) -> bool {
-    let mut inner_segments = claimed_path(inner).into_iter();
-    claimed_path(outer)
-        .into_iter()
-        .all(|segment| inner_segments.next() == Some(segment))
-        && inner_segments.next().is_some()
-}
-
 /// The paths a fileset writes: an inline entry writes one per key, and the other two kinds write whatever the `guestPath` names (§3.1.11).
 fn fileset_claims(fileset: &FilesetEntry) -> Vec<String> {
     let Some(files) = &fileset.inline else {
@@ -585,24 +570,6 @@ fn fileset_claims(fileset: &FilesetEntry) -> Vec<String> {
     };
     let base = fileset.guest_path.trim_end_matches('/');
     files.keys().map(|key| format!("{base}/{key}")).collect()
-}
-
-/// Two spellings of one guest path, decided on segments so a trailing or doubled separator is not a second path.
-pub fn same_path(left: &str, right: &str) -> bool {
-    claimed_path(left) == claimed_path(right)
-}
-
-fn shares_a_path_with(target: &str, claim: &str) -> bool {
-    same_path(target, claim) || encloses(target, claim) || encloses(claim, target)
-}
-
-/// An `exclude` leaves a guest-local mask, so the write lands there and never reaches the share this bind holds (§3.1.11).
-fn masked_by_its_own_exclude(volume: &Volume, claim: &str) -> bool {
-    volume.is_bind()
-        && volume.exclude.iter().any(|entry| {
-            let mask = format!("{}/{entry}", volume.target.trim_end_matches('/'));
-            same_path(&mask, claim) || encloses(&mask, claim)
-        })
 }
 
 /// A fileset nested under a volume target reaches the workload only because lns-init copies it into the volume once mounted (§3.1.11), and these two kinds of volume take no such copy.
@@ -615,11 +582,15 @@ fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
             (_, true) => "a read-only volume takes no write, so the file could never land",
             _ => continue,
         };
+        let excludes = match volume.is_bind() {
+            true => volume.exclude.as_slice(),
+            false => &[],
+        };
         for claim in spec.filesets.iter().flat_map(fileset_claims) {
-            if shares_a_path_with(&volume.target, &claim)
-                && !masked_by_its_own_exclude(volume, &claim)
+            if lns_placement::place(&volume.target, excludes, &claim)
+                == lns_placement::Placement::WritesThrough
             {
-                let relation = match same_path(&volume.target, &claim) {
+                let relation = match lns_placement::same_path(&volume.target, &claim) {
                     true => "collides with",
                     false => "is nested with",
                 };
@@ -2384,19 +2355,6 @@ mod tests {
         assert!(
             format!("{err:#}").contains("duplicate guest path /s"),
             "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn a_sibling_whose_name_merely_starts_with_a_target_is_not_nested_under_it() {
-        assert!(encloses("/home/node", "/home/node/.config"));
-        assert!(
-            !encloses("/home/node", "/home/nodejs/.config"),
-            "a prefix rule on characters rather than segments would swallow an unrelated directory"
-        );
-        assert!(
-            !encloses("/home/node", "/home/node/"),
-            "one path spelled two ways is a duplicate claim, not a nested one"
         );
     }
 
