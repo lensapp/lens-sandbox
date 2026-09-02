@@ -62,7 +62,9 @@ Feature: managing cached sandboxes
     When the user runs "lns inspect reviewer"
     Then the exit code is 0
     And the output contains "running"
-    And the output contains "UPTIME"
+    And the field "CREATED" shows "2026-08-01 00:00:00"
+    And the field "STARTED" shows "2026-08-30 09:00:00"
+    And the output does not contain "UPTIME"
 
   Scenario: inspect on a cached sandbox shows its definition
     Given the reference "hermes:1.4.0" resolves to a cached sandbox

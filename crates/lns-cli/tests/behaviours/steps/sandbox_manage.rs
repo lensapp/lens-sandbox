@@ -20,12 +20,26 @@ fn reference_resolves_to_running(w: &mut BehaviourWorld, name: String) {
                 image: "some-image".into(),
                 command: "some-command".into(),
                 status: RunStatus::Running,
-                created: "2026-01-01T00:00:00Z".into(),
-                started: "2026-01-01T00:00:00Z".into(),
+                created: "2026-08-01T00:00:00Z".into(),
+                started: "2026-08-30T09:00:00Z".into(),
             },
             config: RunConfig::default(),
         }),
     });
+}
+
+#[then(regex = r#"^the field "([^"]+)" shows "([^"]+)"$"#)]
+fn field_shows(w: &mut BehaviourWorld, label: String, value: String) -> Result<(), String> {
+    let output = &w.result.as_ref().ok_or("no CLI run captured")?.output;
+    let row = output
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(label.as_str()))
+        .ok_or_else(|| format!("no {label} row in {output:?}"))?;
+    if row.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("expected {label} to show {value:?}, got {row:?}"))
+    }
 }
 
 #[given(regex = r#"^the reference "([^"]+)" resolves to a cached sandbox$"#)]

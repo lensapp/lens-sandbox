@@ -865,10 +865,6 @@ fn render_inspect<W: std::io::Write>(
     );
     doc.insert("created".into(), details.summary.created.clone().into());
     doc.insert("started".into(), details.summary.started.clone().into());
-    doc.insert(
-        "uptime".into(),
-        format!("since {}", details.summary.started).into(),
-    );
     doc.insert("config".into(), config.into());
     doc.insert("policy".into(), policy.unwrap_or(serde_json::Value::Null));
     let fields = inspect_fields(details);
@@ -891,7 +887,7 @@ fn inspect_fields(details: &RunDetails) -> Vec<(&'static str, String)> {
             crate::service::friendly_started(&details.summary.created),
         ),
         (
-            "UPTIME",
+            "STARTED",
             crate::service::friendly_started(&details.summary.started),
         ),
         ("CPUS", details.config.cpus.to_string()),

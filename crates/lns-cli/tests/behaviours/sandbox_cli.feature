@@ -93,6 +93,14 @@ Feature: managing running sandboxes from the CLI
     And the output contains "running"
     And the output contains "memMib"
 
+  Scenario: the record names the two times and invents no third
+    Given the service reports run 3 of image "some-image:1" running with 2 cpus and 1024 MiB
+    When the user runs sandbox command "inspect 3 --format json"
+    Then the exit code is 0
+    And the output contains "created"
+    And the output contains "started"
+    And the output does not contain "uptime"
+
   Scenario: inspect embeds the run's decisions file when it is readable
     Given the service reports run 3 with policy path "/home/dev/.lns/runs/aa01/decisions.yaml"
     And the policy file parses with one allow rule
