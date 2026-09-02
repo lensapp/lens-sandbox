@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -235,13 +235,24 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
 }
 
 pub(crate) fn find_service_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("LNS_SERVICE_BIN") {
+    find_service_binary_with(
+        std::env::var("LNS_SERVICE_BIN").ok(),
+        std::env::current_exe().ok(),
+        Path::exists,
+    )
+}
+
+fn find_service_binary_with(
+    override_path: Option<String>,
+    current_exe: Option<PathBuf>,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if let Some(p) = override_path {
         return PathBuf::from(p);
     }
-    if let Some(candidate) = std::env::current_exe()
-        .ok()
+    if let Some(candidate) = current_exe
         .and_then(|exe| exe.parent().map(|d| d.join("lns-service")))
-        .filter(|p| p.exists())
+        .filter(|p| exists(p))
     {
         return candidate;
     }
@@ -572,48 +583,28 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(env)]
     fn find_service_binary_falls_back_to_sibling_when_present() {
-        let _g = EnvScope::unset("LNS_SERVICE_BIN");
-        let exe = std::env::current_exe().expect("current_exe");
-        let parent = exe.parent().expect("exe parent");
-        let sibling = parent.join("lns-service");
-        let pre_existed = sibling.exists();
-        if !pre_existed {
-            std::fs::write(
-                &sibling,
-                b"#!/bin/sh
-exit 0
-",
-            )
-            .expect("write sibling");
-        }
-        let p = find_service_binary();
-        assert_eq!(p, sibling);
-        if !pre_existed {
-            let _ = std::fs::remove_file(&sibling);
-        }
+        let p =
+            find_service_binary_with(None, Some(PathBuf::from("/opt/lns/bin/lns")), |candidate| {
+                candidate == Path::new("/opt/lns/bin/lns-service")
+            });
+        assert_eq!(p, PathBuf::from("/opt/lns/bin/lns-service"));
     }
 
     #[test]
-    #[serial_test::serial(env)]
     fn find_service_binary_falls_back_to_relative_path_when_sibling_missing() {
-        let _g = EnvScope::unset("LNS_SERVICE_BIN");
-        let exe = std::env::current_exe().expect("current_exe");
-        let parent = exe.parent().expect("exe parent");
-        let sibling = parent.join("lns-service");
-        let pre_existed = sibling.exists();
-        if !pre_existed {
-            std::fs::write(&sibling, b"placeholder").expect("seed sibling");
-        }
-        let stash = sibling.with_extension("stash-for-test");
-        std::fs::rename(&sibling, &stash).expect("stash sibling");
-        let p = find_service_binary();
+        let p = find_service_binary_with(None, Some(PathBuf::from("/opt/lns/bin/lns")), |_| false);
+        assert_eq!(
+            p,
+            PathBuf::from("lns-service"),
+            "with no sibling the name is left to PATH"
+        );
+    }
+
+    #[test]
+    fn find_service_binary_falls_back_to_relative_path_when_the_exe_is_unknown() {
+        let p = find_service_binary_with(None, None, |_| panic!("no exe means nothing to probe"));
         assert_eq!(p, PathBuf::from("lns-service"));
-        std::fs::rename(&stash, &sibling).expect("restore sibling");
-        if !pre_existed {
-            let _ = std::fs::remove_file(&sibling);
-        }
     }
 
     #[test]
