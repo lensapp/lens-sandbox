@@ -29,7 +29,7 @@ pub fn default_socket_path() -> Result<PathBuf, SocketPathError> {
 #[cfg(any(target_os = "macos", test))]
 fn build_socket_path_macos(data_dir: Option<PathBuf>) -> Result<PathBuf, SocketPathError> {
     let data_dir = data_dir.ok_or(SocketPathError::HomeNotSet)?;
-    Ok(data_dir.join("com.lensapp.sandbox/service.sock"))
+    Ok(data_dir.join("run.lns/service.sock"))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -69,10 +69,7 @@ mod tests {
     #[test]
     fn macos_joins_data_dir_with_app_subpath() {
         let path = build_socket_path_macos(Some(PathBuf::from("/tmp/data"))).unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/data/com.lensapp.sandbox/service.sock")
-        );
+        assert_eq!(path, PathBuf::from("/tmp/data/run.lns/service.sock"));
     }
 
     #[test]
