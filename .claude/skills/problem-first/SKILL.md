@@ -40,7 +40,7 @@ This is a monorepo with multiple crates. When the user describes a problem, dete
 | `lns-cli` | The `lns` developer CLI — clap-driven IPC client that drives the service. The shipping artifact. |
 | `lns-service` | Tray-resident background service — microVM lifecycle, OCI ingest, content/layer caches, supervisor relay, audit-chain writer. |
 | `lns-ipc` | Shared `Request`/`Response` types and wire codec for the lns-cli ↔ lns-service contract. |
-| `lns-policy` | Network rules and credential-provider policy (`lns-local-mixin.yaml`) plus per-machine credential decisions. |
+| `lns-policy` | Network rules and credential-provider policy (the run's `decisions.yaml`) plus per-machine credential decisions. |
 | `lns-init` | Static-musl PID-1 for the guest microVM. |
 | `lns-session` | Wire-protocol types (postcard) for the host ↔ guest session channel. |
 | `lns-session-broker` | Guest-side session host — PTY allocation, per-session workload forks, vsock framing. |

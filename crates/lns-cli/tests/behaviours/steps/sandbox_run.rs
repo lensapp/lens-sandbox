@@ -199,11 +199,11 @@ fn drive_run(w: &mut BehaviourWorld, argv: &[String]) {
                 output: format!("{e:#}"),
             });
         }
-        Ok(target) => run_resolved(w, &target, cwd),
+        Ok(target) => run_resolved(w, &target),
     }
 }
 
-fn run_resolved(w: &mut BehaviourWorld, target: &RunTarget, cwd: &Path) {
+fn run_resolved(w: &mut BehaviourWorld, target: &RunTarget) {
     if let Some(refusal) = w.sandbox_run.refusal.clone() {
         w.result = Some(surface_service_refusal(&refusal));
         return;
@@ -212,9 +212,6 @@ fn run_resolved(w: &mut BehaviourWorld, target: &RunTarget, cwd: &Path) {
     w.sandbox_run.verify_sandbox = Some(target.verify_sandbox());
     w.sandbox_run.definition = target.definition_json();
     w.sandbox_run.project_dir = target.project_dir().map(Path::to_path_buf);
-    w.sandbox_run.decisions = Some(lns_cli::run::summary::policy_path(
-        target.project_dir().unwrap_or(cwd),
-    ));
     w.result = Some(CliRun {
         exit_code: 0,
         output: String::new(),

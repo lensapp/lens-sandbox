@@ -3,8 +3,8 @@ Feature: selecting the sandbox definition file
   reference naming a `.yaml` file, or the explicit `-f/--file` selector, is
   the override that operates on a different definition file: the file's
   directory is the project, so it roots the relative binds and filesets,
-  compose-style, and holds the decisions the run resolves. Nothing names the
-  decisions file: it is always the one beside the definition.
+  compose-style. That is all the directory decides: a run's own decisions live
+  with the run, and no file in a directory governs what starts there.
 
   Scenario: a path-shaped reference naming a yaml file runs that file's definition
     Given a sandbox definition file "lns.dev.yaml" in the current directory
@@ -57,12 +57,6 @@ Feature: selecting the sandbox definition file
     Then the command fails with an exit code other than 0
     And the output contains "no sandbox definition at"
     And the output contains "lns.dev.yaml"
-
-  Scenario: a definition in another directory is governed by that directory's decisions
-    Given a sandbox definition file "/other/lns.dev.yaml" declaring a relative bind and fileset
-    When the user runs "lns run /other/lns.dev.yaml"
-    Then the exit code is 0
-    And the run reads its decisions from "/other/lns-local-mixin.yaml"
 
   Scenario: no flag can point the run at another decisions file
     Given a sandbox definition file "/other/lns.dev.yaml" declaring a relative bind and fileset

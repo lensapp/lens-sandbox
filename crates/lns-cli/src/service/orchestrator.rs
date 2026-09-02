@@ -257,13 +257,11 @@ async fn preflight_local(
     definition: &str,
     project_dir: &Path,
     mixins: &[String],
-    decisions: &Path,
 ) -> Result<ResolvedDefinition> {
     let request = Request::ResolveDefinition {
         definition: definition.to_string(),
         project_dir: project_dir.display().to_string(),
         mixins: mixins.to_vec(),
-        decisions: Some(decisions.display().to_string()),
     };
     match timeout(
         PUBLISHED_PREFLIGHT_TIMEOUT,
@@ -303,12 +301,10 @@ async fn preflight_published(
     socket: &Path,
     reference: &str,
     mixins: &[String],
-    decisions: &Path,
 ) -> Result<PublishedTarget> {
     let request = Request::InspectImage {
         image: reference.to_string(),
         mixins: mixins.to_vec(),
-        decisions: Some(decisions.display().to_string()),
     };
     await_published_preflight(reference, real::send_request(socket, &request)).await
 }
@@ -342,9 +338,6 @@ pub async fn run_image(
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
-    let project_dir = target.project_dir().unwrap_or(&cwd).to_path_buf();
-    // §8.1 has every run in a directory resolve its decisions, so a directory that decided something needs the preflight even when nothing declared a mixin.
-    let decisions = crate::run::summary::policy_path(&project_dir);
     let mut authored_egress = None;
     // A mixin the preflight pulled brings its filesets packed in its own artifact, and the merged document alone cannot say which.
     let mut packed_filesets = Vec::new();
@@ -353,10 +346,9 @@ pub async fn run_image(
         json,
         project_dir,
     } = &mut target
-        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty() || decisions.is_file())
+        && (!def.spec.mixins.is_empty() || !args.mixins.is_empty())
     {
-        let resolved =
-            preflight_local(client.socket(), json, project_dir, &args.mixins, &decisions).await?;
+        let resolved = preflight_local(client.socket(), json, project_dir, &args.mixins).await?;
         **def = read_resolved_definition(&resolved.definition)?;
         *json = resolved.definition;
         authored_egress = Some(resolved.authored_egress);
@@ -370,7 +362,7 @@ pub async fn run_image(
     }
     let published = match &target {
         crate::run::target::RunTarget::Reference(reference) => {
-            Some(preflight_published(client.socket(), reference, &args.mixins, &decisions).await?)
+            Some(preflight_published(client.socket(), reference, &args.mixins).await?)
         }
         crate::run::target::RunTarget::Local { .. } => {
             // A path-shaped REF resolved to a definition; the summary names its image, not the path.
@@ -451,12 +443,9 @@ pub async fn run_image(
     // The size travels as its own value: writing it back into args.cpus/args.mem would tell the service the user asked for it explicitly.
     let size = crate::run::summary::resolved_size(defaults.size, &args);
     let quiet = args.quiet;
-    let resolved_policy = if quiet {
-        let (path, _source) = crate::run::summary::resolve_policy(&project_dir)?;
-        path
-    } else {
-        print_run_summary(&args, size, &project_dir, &mut std::io::stderr())?
-    };
+    if !quiet {
+        print_run_summary(&args, size, &mut std::io::stderr())?;
+    }
 
     let (volumes, bind_specs) = crate::cli::split_mounts(&args.mounts);
     let reference = target.image();
@@ -536,7 +525,6 @@ pub async fn run_image(
         mixins: run_mixins.to_merge,
         composed_mixins: run_mixins.composed,
         name: args.name,
-        policy_path: Some(resolved_policy.to_string_lossy().into_owned()),
         sandbox_user,
         sandbox_uid,
         entrypoint: args.entrypoint,

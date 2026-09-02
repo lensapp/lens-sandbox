@@ -3,9 +3,7 @@ use cucumber::{then, when};
 use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
 use lns_cli::config;
-use lns_cli::run::summary::{PolicySource, format_summary};
-use lns_policy::Policy;
-use std::path::Path;
+use lns_cli::run::summary::format_summary;
 
 fn config_path(world: &mut BehaviourWorld) -> std::path::PathBuf {
     if world.cwd.is_none() {
@@ -26,9 +24,6 @@ fn resolve_run_against_defaults(world: &mut BehaviourWorld, image_and_flags: Str
         summary: format_summary(
             &resolved,
             lns_cli::run::summary::resolved_size(Default::default(), &resolved),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
         ),
         mixins: resolved.mixins.clone(),
         ..Default::default()
@@ -79,9 +74,6 @@ fn compose_declared_summary_against_defaults(world: &mut BehaviourWorld, flags: 
         summary: format_summary(
             &resolved,
             lns_cli::run::summary::resolved_size(declared.size, &resolved),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
         ),
         ..Default::default()
     });

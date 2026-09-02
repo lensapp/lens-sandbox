@@ -25,6 +25,9 @@ pub trait SandboxService: Send + Sync {
     fn open_stream(&self, request: Request) -> BoxFuture<'_, Result<Self::Stream>>;
     fn aux_socket(&self) -> Option<PathBuf>;
     fn load_policy(&self, path: &str) -> Option<serde_json::Value>;
+    /// Where a rendered document lands. The service renders it and this machine writes it, so `lns sandbox save` never has the service reach into the user's directory.
+    fn document_exists(&self, path: &std::path::Path) -> bool;
+    fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]

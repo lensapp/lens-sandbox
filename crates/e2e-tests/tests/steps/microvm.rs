@@ -175,7 +175,7 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
         }
     }
     let definition = format!(
-        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  image: {}{spec_tail}\n",
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  mixins:\n    - ./{PROJECT_MIXIN}\n  image: {}{spec_tail}\n",
         world
             .project_image
             .clone()
@@ -183,10 +183,10 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
     );
     std::fs::write(root.join("lns.yaml"), definition).expect("write project lns.yaml");
     std::fs::write(
-        root.join("lns-local-mixin.yaml"),
-        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n",
+        root.join(PROJECT_MIXIN),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec:\n  egress:\n    http: []\n",
     )
-    .expect("write the project policy");
+    .expect("write the project mixin");
     root
 }
 
@@ -243,10 +243,10 @@ fn last_run(world: &E2eWorld) -> Result<String, String> {
         .ok_or_else(|| "no run id was captured from the run output".to_string())
 }
 
-/// The project's own mixin is the only decisions file a run reads, so a scenario that wants rules in force writes them beside the document.
+/// A rule applies because a document names it (`sandbox-spec.md` §8.5), so a scenario that wants rules in force writes them into the mixin the project's `lns.yaml` declares.
 fn write_policy(world: &mut E2eWorld, yaml: &str) {
-    let path = microvm_project(world).join("lns-local-mixin.yaml");
-    std::fs::write(&path, yaml).expect("write policy file");
+    let path = microvm_project(world).join(PROJECT_MIXIN);
+    std::fs::write(&path, yaml).expect("write the project mixin");
 }
 
 fn track_volume(world: &mut E2eWorld, name: &str) {
@@ -709,8 +709,8 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     std::fs::write(consumer.join("consumer-marker"), "consumer project\n")
         .expect("write consumer marker");
     std::fs::write(
-        consumer.join("lns-local-mixin.yaml"),
-        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join(PROJECT_MIXIN),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     track_volume(world, &volume);
@@ -724,6 +724,8 @@ async fn run_published_declarative_sandbox_offline(world: &mut E2eWorld) {
     let mut args = vec![
         "run".to_string(),
         "--yes".to_string(),
+        "--mixin".to_string(),
+        consumer.join(PROJECT_MIXIN).to_string_lossy().into_owned(),
         reference,
         "--".to_string(),
     ];
@@ -1087,13 +1089,15 @@ fn run_pulled_sandbox_offline(world: &mut E2eWorld, cmd_line: &str) {
         .path()
         .to_path_buf();
     std::fs::write(
-        consumer.join("lns-local-mixin.yaml"),
-        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        consumer.join(PROJECT_MIXIN),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     )
     .expect("write consumer policy");
     let mut args = vec![
         "run".to_string(),
         "--yes".to_string(),
+        "--mixin".to_string(),
+        consumer.join(PROJECT_MIXIN).to_string_lossy().into_owned(),
         reference,
         "--".to_string(),
     ];
@@ -1633,7 +1637,7 @@ fn output_lists_that_run(world: &mut E2eWorld) -> Result<(), String> {
 fn policy_ask_with_direct_route(world: &mut E2eWorld) {
     write_policy(
         world,
-        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec:\n  egress:\n    http:\n      - match: api.example.test\n        verdict: allow\n        transport: direct\n",
     );
 }
 
@@ -1641,9 +1645,12 @@ fn policy_ask_with_direct_route(world: &mut E2eWorld) {
 fn policy_deny_all(world: &mut E2eWorld) {
     write_policy(
         world,
-        "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec:\n  egress:\n    http:\n      - match: \"*\"\n        verdict: deny\n",
     );
 }
+
+/// The mixin every e2e project declares, since §8.5 makes a rule apply only where a document names it.
+const PROJECT_MIXIN: &str = "project-egress.yaml";
 
 const SUPERBLOCK_OFFSET: u64 = 1024;
 

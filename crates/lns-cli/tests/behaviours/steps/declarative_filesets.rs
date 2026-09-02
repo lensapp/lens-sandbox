@@ -87,12 +87,10 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
     if world.cwd.is_none() {
         world.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
     }
-    let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
     let mut buf = Vec::<u8>::new();
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");
@@ -176,12 +174,10 @@ fn pulled_run_prepared(world: &mut BehaviourWorld) {
     if world.cwd.is_none() {
         world.cwd = Some(tempfile::TempDir::new().expect("create tempdir"));
     }
-    let cwd = world.cwd.as_ref().expect("cwd").path().to_path_buf();
     let mut buf = Vec::<u8>::new();
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");

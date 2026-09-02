@@ -51,6 +51,7 @@ impl StartHost for ScriptedStartHost {
 
 pub(crate) fn stopped_record(run_id: &str, name: &str) -> RunRecord {
     RunRecord {
+        resolved_document: None,
         version: lns_service::run_record::CURRENT_VERSION,
         run_id: run_id.to_string(),
         name: name.to_string(),
@@ -78,7 +79,6 @@ fn sample_args() -> lns_ipc::RunImageArgs {
         mem_explicit: false,
         cpus_config: None,
         mem_config: None,
-        policy_path: None,
         denied_host_paths: Vec::new(),
         sandbox_user: None,
         sandbox_uid: None,

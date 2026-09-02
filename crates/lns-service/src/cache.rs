@@ -8,3 +8,10 @@ pub fn root() -> Result<PathBuf> {
 pub fn run_dir(root: &Path, run_id: &str) -> PathBuf {
     root.join("runs").join(run_id)
 }
+
+/// `sandbox-spec.md` §8.3 keeps a run's decisions in the run's own directory, so removing the run removes what it decided.
+pub fn decisions_path(root: &Path, run_id: &str) -> PathBuf {
+    run_dir(root, run_id).join(DECISIONS_FILENAME)
+}
+
+pub const DECISIONS_FILENAME: &str = "decisions.yaml";

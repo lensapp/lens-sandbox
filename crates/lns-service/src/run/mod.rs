@@ -2,7 +2,10 @@ use anyhow::Result;
 use lns_ipc::{Response, WireFrame};
 use tokio::sync::mpsc::Sender;
 
+mod decisions;
 mod orchestrator;
+mod save;
+pub(crate) use save::render as render_saved;
 mod scratch;
 mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};

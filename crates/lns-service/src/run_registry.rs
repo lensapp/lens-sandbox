@@ -551,11 +551,24 @@ pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
         .and_then(|m| m.get(run_id))
         .map(|e| lns_ipc::RunDetails {
             summary: summary_of(run_id, e),
-            config: match e {
-                RunEntry::Live(h) => h.config.clone(),
-                RunEntry::Stopped(s) => lns_ipc::RunConfig::from_run_args(&s.record.args),
-            },
+            config: with_its_decisions_file(
+                match e {
+                    RunEntry::Live(h) => h.config.clone(),
+                    RunEntry::Stopped(s) => lns_ipc::RunConfig::from_run_args(&s.record.args),
+                },
+                run_id,
+            ),
         })
+}
+
+/// A run's decisions file is the service's to name from the run's own directory (`docs/sandbox-spec.md` §8.3), so `inspect` fills it in here rather than reading it off what a caller sent.
+fn with_its_decisions_file(mut config: lns_ipc::RunConfig, run_id: &str) -> lns_ipc::RunConfig {
+    config.policy_path = crate::cache::root().ok().map(|root| {
+        crate::cache::decisions_path(&root, run_id)
+            .display()
+            .to_string()
+    });
+    config
 }
 
 pub fn cancel(run_id: &str) -> bool {

@@ -11,6 +11,9 @@ pub struct RunRecord {
     pub run_id: String,
     pub name: String,
     pub args: lns_ipc::RunImageArgs,
+    /// The merged sandbox document this run booted, so `lns sandbox save` writes what ran rather than what was typed.
+    #[serde(default)]
+    pub resolved_document: Option<String>,
     pub descriptor_sha256: String,
     pub layer_digests: Vec<String>,
     pub image: String,
@@ -217,7 +220,6 @@ mod tests {
             mem_explicit: false,
             cpus_config: None,
             mem_config: None,
-            policy_path: None,
             denied_host_paths: Vec::new(),
             sandbox_user: None,
             sandbox_uid: None,
@@ -245,6 +247,7 @@ mod tests {
 
     pub(crate) fn sample_record(run_id: &str) -> RunRecord {
         RunRecord {
+            resolved_document: None,
             version: CURRENT_VERSION,
             run_id: run_id.to_string(),
             name: format!("name-{run_id}"),

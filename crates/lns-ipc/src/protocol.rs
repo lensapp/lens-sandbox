@@ -70,6 +70,13 @@ pub enum Request {
         run: String,
         new_name: String,
     },
+    /// Render one run as a document the user keeps; the service owns the run's state, and the caller owns the file it lands in.
+    SaveRun {
+        run: String,
+        kind: SaveKind,
+        /// The `name` the rendered document carries, which the caller takes from the file it will write.
+        name: String,
+    },
     PruneRuns,
     ListVolumes,
     CreateVolume {
@@ -99,18 +106,12 @@ pub enum Request {
         project_dir: String,
         #[serde(default)]
         mixins: Vec<String>,
-        /// The decisions file this run reads, so what the preflight resolves is what the boot resolves.
-        #[serde(default)]
-        decisions: Option<String>,
     },
     InspectImage {
         image: String,
         /// The mixin references the user named on the command line, in flag order, so the preflight describes the document that will boot.
         #[serde(default)]
         mixins: Vec<String>,
-        /// The decisions file this run reads, absent when the question is about the artifact rather than about a run in some directory.
-        #[serde(default)]
-        decisions: Option<String>,
     },
     TagImage {
         from: String,
@@ -226,6 +227,9 @@ pub enum Response {
     RunStats {
         stats: RunStatsInfo,
     },
+    RunSaved {
+        document: String,
+    },
     RunsPruned {
         removed: Vec<String>,
     },
@@ -285,7 +289,7 @@ pub enum Response {
         /// Which source decided each entry of the merged document, so the disclosure can attribute every line it shows.
         #[serde(default)]
         contributions: Vec<SourceContribution>,
-        /// The egress every source but this directory's own decided, as JSON: the run folds the live decisions file over it rather than over the copy the merged document carries, so a rule deleted mid-run retracts.
+        /// The egress every document source decided, as JSON: the run folds the live decisions file over it rather than over the copy the merged document carries, so a rule deleted mid-run retracts.
         #[serde(default)]
         authored_egress: String,
         /// Which artifact carries each packed fileset the merge reached; the merged document alone cannot say, since a mixin's entry is a layer of the mixin's own artifact.
@@ -692,6 +696,7 @@ pub struct RunDetails {
 pub struct RunConfig {
     pub cpus: u8,
     pub mem_mib: usize,
+    /// The run's own decisions file, filled in by the service from the run's directory; a caller never names it.
     pub policy_path: Option<String>,
     pub sandbox_user: Option<String>,
     pub sandbox_uid: Option<u32>,
@@ -716,7 +721,7 @@ impl RunConfig {
         Self {
             cpus: args.cpus,
             mem_mib: args.mem,
-            policy_path: args.policy_path.clone(),
+            policy_path: None,
             sandbox_user: args.sandbox_user.clone(),
             sandbox_uid: args.sandbox_uid,
             entrypoint: args.entrypoint.clone(),
@@ -779,7 +784,6 @@ pub struct RunImageArgs {
     pub cpus_config: Option<u8>,
     #[serde(default)]
     pub mem_config: Option<usize>,
-    pub policy_path: Option<String>,
     #[serde(default)]
     pub sandbox_user: Option<String>,
     #[serde(default)]
@@ -819,7 +823,7 @@ pub struct RunImageArgs {
     /// The local definition's absolute directory; absent for a published reference, which the service resolves by repo@digest instead.
     #[serde(default)]
     pub definition_dir: Option<String>,
-    /// What the preflight resolved from every source but this directory's own, as JSON egress: the gate folds the live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
+    /// What the preflight resolved from every document source, as JSON egress: the gate folds the run's live decisions file over it, so a rule deleted mid-run retracts. Absent when the definition is the only source there was, and unread for a published reference (which the service resolves itself).
     #[serde(default)]
     pub authored_egress: Option<String>,
     /// Which artifact carries each of the merged definition's packed filesets, as the resolve answered; a published reference is peeked at boot and needs none of this.
@@ -1062,6 +1066,14 @@ pub struct ExecImageArgs {
     pub stdin: bool,
     #[serde(default)]
     pub initial_winsize: Option<(u16, u16)>,
+}
+
+/// Which document `SaveRun` renders: the run as a whole, or only what it decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveKind {
+    Sandbox,
+    Mixin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1374,7 +1386,6 @@ mod tests {
             mem_explicit: false,
             cpus_config: None,
             mem_config: None,
-            policy_path: None,
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
             entrypoint: None,
@@ -1417,7 +1428,6 @@ mod tests {
             mem_explicit: false,
             cpus_config: None,
             mem_config: None,
-            policy_path: None,
             sandbox_user: None,
             sandbox_uid: None,
             entrypoint: None,
@@ -1562,7 +1572,6 @@ mod tests {
             mem_explicit: true,
             cpus_config: None,
             mem_config: None,
-            policy_path: Some("/work/lns-local-mixin.yaml".into()),
             sandbox_user: Some("sandbox".into()),
             sandbox_uid: Some(65534),
             entrypoint: Some("/bin/sh".into()),
@@ -1611,8 +1620,8 @@ mod tests {
         assert_eq!(config.cpus, 2);
         assert_eq!(config.mem_mib, 1024);
         assert_eq!(
-            config.policy_path.as_deref(),
-            Some("/work/lns-local-mixin.yaml")
+            config.policy_path, None,
+            "a run's decisions file is the service's to name from the run's own directory, so a caller's launch args must not carry one"
         );
         assert_eq!(config.sandbox_user.as_deref(), Some("sandbox"));
         assert_eq!(config.entrypoint.as_deref(), Some("/bin/sh"));
@@ -1899,7 +1908,6 @@ mod tests {
         let req = Request::InspectImage {
             image: "registry.example.test/team/sandbox:1".into(),
             mixins: vec!["ghcr.io/acme/obs-tools:2".into()],
-            decisions: Some("/work/lns-local-mixin.yaml".into()),
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

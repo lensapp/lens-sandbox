@@ -219,7 +219,6 @@ pub struct SandboxRunRig {
     pub verify_sandbox: Option<bool>,
     pub definition: Option<String>,
     pub project_dir: Option<std::path::PathBuf>,
-    pub decisions: Option<std::path::PathBuf>,
     pub refusal: Option<String>,
 }
 
@@ -244,6 +243,8 @@ pub struct SandboxCliRig {
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
+    pub existing_documents: Vec<std::path::PathBuf>,
+    pub written_documents: std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, String)>>>,
     pub workload_stdout: Vec<u8>,
     pub prompt_answer: Option<String>,
     pub terminal_available: bool,

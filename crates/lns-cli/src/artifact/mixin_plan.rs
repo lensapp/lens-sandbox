@@ -6,8 +6,16 @@ use anyhow::{Context, Result, bail};
 use super::author::Fs;
 use super::fileset::local_mixin_document;
 
-/// The decisions file holds one machine's answers, so §6.1 refuses an entry naming it rather than publishing it.
-const LOCAL_MIXIN_FILENAME: &str = "lns-local-mixin.yaml";
+/// `sandbox-spec.md` §8.1: a run's decisions hold one machine's answers about one run, so an entry resolving into the run store is refused rather than published.
+const RUN_STORE_DIR: &str = "runs";
+
+/// True for a document inside `~/.lns/runs/`, whatever it is called there.
+fn is_a_runs_own_decisions(document: &Path, lns_home: Option<&Path>) -> bool {
+    let Some(home) = lns_home else {
+        return false;
+    };
+    document.starts_with(home.join(RUN_STORE_DIR))
+}
 
 /// One local mixin a push publishes, with the repository the parent reference and its own name earn it.
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +73,7 @@ pub fn plan_local_mixins<F: Fs + ?Sized>(
     let mut walk = Walk {
         fs,
         parent_reference,
+        lns_home: lns_ipc::lns_home().ok(),
         nodes: Vec::new(),
         trail: Vec::new(),
         children: std::collections::BTreeMap::new(),
@@ -78,6 +87,7 @@ pub fn plan_local_mixins<F: Fs + ?Sized>(
 struct Walk<'a, F: Fs + ?Sized> {
     fs: &'a F,
     parent_reference: &'a str,
+    lns_home: Option<PathBuf>,
     nodes: Vec<PlannedMixin>,
     trail: Vec<PathBuf>,
     children: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
@@ -104,9 +114,9 @@ impl<F: Fs + ?Sized> Walk<'_, F> {
 
     fn plan_one(&mut self, declared: &str, root: &Path) -> Result<PathBuf> {
         let document = local_mixin_document(self.fs, root, declared);
-        if document.file_name() == Some(LOCAL_MIXIN_FILENAME.as_ref()) {
+        if is_a_runs_own_decisions(&document, self.lns_home.as_deref()) {
             bail!(
-                "mixin {declared} names {LOCAL_MIXIN_FILENAME}, which holds this machine's own decisions and is never published"
+                "mixin {declared} names a run's own decisions, which are that run's answers on this machine and are never published; `lns sandbox save --kind mixin` writes a copy you can name"
             );
         }
         if let Some(position) = self.trail.iter().position(|seen| seen == &document) {
@@ -504,18 +514,56 @@ mod tests {
     }
 
     #[test]
-    fn a_local_entry_naming_the_decisions_file_is_refused() {
-        let fs = MapFs::with(&[("/work/lns-local-mixin.yaml", &mixin_yaml("lns-local-mixin"))]);
+    #[serial_test::serial(env)]
+    fn planning_an_entry_that_resolves_into_the_run_store_refuses_and_names_the_way_out() {
+        let _home = crate::test_env::EnvScope::set("LNS_HOME", "/home/dev/.lns");
+        let decisions = "/home/dev/.lns/runs/aa01/decisions.yaml";
+        let fs = MapFs::with(&[(decisions, &mixin_yaml("decisions"))]);
         let err = plan_local_mixins(
             &fs,
             Path::new("/work"),
-            &sandbox_naming(r#"["./lns-local-mixin.yaml"]"#),
+            &sandbox_naming(&format!(r#"["{decisions}"]"#)),
             PARENT,
         )
         .unwrap_err();
+        let message = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("never published"),
-            "§8.1 keeps one machine's answers off every registry; got: {err:#}"
+            message.contains("never published"),
+            "§8.1 keeps one run's answers off every registry; got: {message}"
+        );
+        assert!(
+            message.contains("lns sandbox save"),
+            "a refusal that does not name the supported way out leaves the author stuck; got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_path_inside_the_run_store_is_recognised_as_a_runs_own_decisions() {
+        assert!(
+            is_a_runs_own_decisions(
+                Path::new("/home/dev/.lns/runs/aa01/decisions.yaml"),
+                Some(Path::new("/home/dev/.lns"))
+            ),
+            "§8.1 keeps one run's answers off every registry, and the path is what identifies them"
+        );
+    }
+
+    #[test]
+    fn a_document_named_decisions_outside_the_run_store_publishes_like_any_other() {
+        assert!(
+            !is_a_runs_own_decisions(
+                Path::new("/work/decisions.yaml"),
+                Some(Path::new("/home/dev/.lns"))
+            ),
+            "§8.4 makes a saved copy an ordinary document, so refusing it by name would refuse what save exists to produce"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_no_resolvable_home_refuses_nothing_on_that_ground() {
+        assert!(
+            !is_a_runs_own_decisions(Path::new("/work/decisions.yaml"), None),
+            "a home nobody can resolve is not evidence that a path is a run's own"
         );
     }
 

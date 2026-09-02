@@ -178,6 +178,14 @@ impl SandboxService for CannedService {
     fn load_policy(&self, _path: &str) -> Option<serde_json::Value> {
         None
     }
+
+    fn document_exists(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+
+    fn write_document(&self, _path: &std::path::Path, _contents: &str) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) async fn stream_with(frames: &[Vec<u8>]) -> tokio::io::DuplexStream {
