@@ -97,6 +97,18 @@ Three separate cargo target dirs, because cargo fingerprints the flags each step
 
 `make coverage` clears only the profraw counters between runs. It falls back to a full artifact clean when the toolchain or any manifest changes, because those shift the artifact hashes and leave superseded binaries behind for `llvm-cov report` to find. The stamp that decides this is `.gate/coverage-toolchain-stamp`, which also hashes every workspace `Cargo.toml`.
 
+### Environment parity
+
+**A test result must never depend on the host.** Not on uid, umask, TZ, locale, `HOME`, `TMPDIR`, or proxy variables. A test that inverts on a root box is a test nobody can read, and one that silently stops covering its branch is worse — it stays green while pinning nothing.
+
+`make coverage` enforces this. After the test run it invokes `make parity`, which re-runs the test binaries it has just built — no recompilation, about 15 seconds — under a deliberately different environment: an unprivileged uid where the first pass was root, plus a fresh `HOME` and `TMPDIR`, `TZ=LNS-14`, `LC_ALL=C`, `umask 077`, and a dead HTTP proxy with loopback exempted. The first pass is the ordinary test run, which aborts the recipe on failure; parity judges the second. A binary that fails only there fails the gate, named. A pass that runs nothing fails too — silence must never read as agreement.
+
+Three things to know before you run it: it needs `jq` and, to drop privileges, `setpriv`; when it runs as root it adds `o+x` (never `o+r`) to any ancestor of the workspace that lacks it, so the unprivileged pass can reach the binaries, and it hands every bit back on exit; and `LNS_ENV_PARITY=0` skips it. `scripts/env-parity.test.sh` covers the harness.
+
+CI covers the other direction: the `coverage-as-root` job runs the same gate in a root container, because the runner is never root. Between the two, every PR exercises both uids.
+
+Never inject a failure by removing a permission bit — root ignores it. Take the failure through a seam instead: a parameter for the writer, the remover, or the tmp path; a port method; or an error the kernel enforces for everyone, such as `EEXIST` from `O_EXCL` or `ENOTDIR` from a path component that is a regular file.
+
 ### Gate telemetry
 
 `scripts/gate-timing.sh` records one row per gate step — the pre-push hook wraps each `make` call — plus the affected-crates verdict, in `.gate/timings.tsv`. That path is outside `target/`, so `cargo clean` keeps the history. Read it with `make gate-report`: runs, failures, and min/median/max seconds per step, then a count per coverage verdict (`__NONE__`, `__FULL__`, or the exact crate list). Set `LNS_GATE_TIMING=0` to stop recording. `scripts/gate-timing.test.sh` covers the script.
@@ -161,6 +173,7 @@ make coverage          full workspace coverage gate (all crates, 100% floor)
 make coverage-affected coverage gate narrowed to crates touched since origin/main
 make coverage-lcov     re-emit the last coverage run as target/llvm-cov-target/llvm-cov/lcov.info (no rerun)
 make e2e             Layer 1 cucumber harness against real lns + lns-service binaries
+make parity          re-run the built test binaries under a perturbed environment
 make gate-report     per-step gate timings recorded by scripts/gate-timing.sh
 make clean           rm -rf bin/ + cargo clean (coverage artifacts live inside target/)
 

@@ -1,4 +1,4 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report
+.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity
 
 CARGO ?= cargo
 
@@ -181,7 +181,19 @@ coverage-data:
 			echo "HTML report: $(COVERAGE_TARGET_DIR)/llvm-cov/html/index.html"; \
 		fi
 
+# Runs the binaries `coverage-data` just built, so it costs no compilation.
+parity: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
+parity:
+	@set -e; \
+		eval "$$($(CARGO) llvm-cov show-env --export-prefix)"; \
+		bins=$$($(CARGO) test $(COVERAGE_CARGO_SCOPE) --all-targets --no-run --message-format=json 2>/dev/null | \
+			(jq -r 'select(.profile.test == true) | .executable' 2>/dev/null || \
+			 sed -n 's/.*"test":true[^{]*"executable":"\([^"]*\)".*/\1/p') | \
+			grep -v '^null$$' | sort -u); \
+		./scripts/env-parity.sh $$bins
+
 coverage: coverage-data
+	@$(MAKE) parity
 	@status=0; \
 		for pkg in $(COVERAGE_CRATES_LIST); do \
 			echo ""; \
