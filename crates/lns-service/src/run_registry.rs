@@ -35,13 +35,6 @@ impl RunEntry {
         }
     }
 
-    fn set_name(&mut self, name: String) {
-        match self {
-            RunEntry::Live(h) => h.name = name,
-            RunEntry::Stopped(s) => s.record.name = name,
-        }
-    }
-
     fn as_live(&self) -> Option<&RunHandle> {
         match self {
             RunEntry::Live(h) => Some(h),
@@ -322,33 +315,6 @@ fn resolve_in(
         }),
         (None, _) => Err(unknown()),
     }
-}
-
-pub fn rename(handle: &str, new_name: &str) -> Result<(), String> {
-    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
-    rename_in(g.as_mut(), handle, new_name)
-}
-
-fn rename_in(
-    map: Option<&mut HashMap<String, RunEntry>>,
-    handle: &str,
-    new_name: &str,
-) -> Result<(), String> {
-    validate_run_name(new_name)?;
-    let map = map.ok_or_else(|| format!("no such run: {handle}"))?;
-    let target = resolve_in(Some(&*map), handle).map_err(|e| e.to_string())?;
-    if let Some(holder) = name_holder(map, new_name)
-        && holder != target
-    {
-        return Err(format!(
-            "name {new_name:?} already in use by run {}",
-            lns_ipc::short_run_id(&holder)
-        ));
-    }
-    map.get_mut(&target)
-        .expect("resolve_in only returns ids present in the map")
-        .set_name(new_name.to_string());
-    Ok(())
 }
 
 pub fn deregister(run_id: &str) {
@@ -927,63 +893,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_in_changes_the_name_in_place() {
-        let mut map = HashMap::new();
-        named_handle(&mut map, "1a2b3c4d0000000000000000000000aa", "reviewer").await;
-        rename_in(Some(&mut map), "reviewer", "auditor").unwrap();
-        assert_eq!(
-            map.get("1a2b3c4d0000000000000000000000aa").unwrap().name(),
-            "auditor"
-        );
-        assert_eq!(
-            resolve_in(Some(&map), "auditor"),
-            Ok("1a2b3c4d0000000000000000000000aa".to_string())
-        );
-        assert!(
-            resolve_in(Some(&map), "reviewer")
-                .unwrap_err()
-                .to_string()
-                .contains("no such run")
-        );
-    }
-
-    #[tokio::test]
-    async fn rename_in_to_a_held_name_is_refused() {
-        let mut map = HashMap::new();
-        named_handle(&mut map, "aa03", "reviewer").await;
-        named_handle(&mut map, "aa04", "auditor").await;
-        let err = rename_in(Some(&mut map), "auditor", "reviewer").unwrap_err();
-        assert!(err.contains("already in use by run aa03"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn rename_in_to_the_runs_own_name_is_a_noop_success() {
-        let mut map = HashMap::new();
-        named_handle(&mut map, "aa03", "reviewer").await;
-        rename_in(Some(&mut map), "reviewer", "reviewer").unwrap();
-        assert_eq!(map.get("aa03").unwrap().name(), "reviewer");
-    }
-
-    #[tokio::test]
-    async fn rename_in_rejects_an_invalid_new_name() {
-        let mut map = HashMap::new();
-        named_handle(&mut map, "aa03", "reviewer").await;
-        rename_in(Some(&mut map), "reviewer", "abcdef").unwrap_err();
-    }
-
-    #[tokio::test]
-    async fn rename_in_reports_no_such_run_for_unknown_name_id_or_empty_registry() {
-        let mut map = HashMap::new();
-        named_handle(&mut map, "aa03", "reviewer").await;
-        let err = rename_in(Some(&mut map), "ghost", "auditor").unwrap_err();
-        assert!(err.contains("no such run: ghost"), "got: {err}");
-        let err = rename_in(Some(&mut map), "ff99", "auditor").unwrap_err();
-        assert!(err.contains("no such run: ff99"), "got: {err}");
-        let err = rename_in(None, "ghost", "auditor").unwrap_err();
-        assert!(err.contains("no such run: ghost"), "got: {err}");
-    }
-
-    #[tokio::test]
     #[serial_test::serial(env, global_runs)]
     async fn register_named_assigns_an_auto_name_and_resolves_by_name_and_id() {
         let id = allocate_run_id();
@@ -1042,17 +951,6 @@ mod tests {
         );
         assert!(connector(&id).is_some());
         assert_eq!(exec_environment(&id), exec_environment_fixture());
-        deregister(&id);
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env, global_runs)]
-    async fn rename_via_the_global_registry_updates_the_name() {
-        let id = allocate_run_id();
-        let (h, _rx) = make_handle();
-        register_named(id.clone(), Some(format!("rev-{id}")), h).unwrap();
-        rename(&format!("rev-{id}"), &format!("aud-{id}")).unwrap();
-        assert_eq!(resolve(&format!("aud-{id}")), Ok(id.clone()));
         deregister(&id);
     }
 
@@ -1818,7 +1716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stopped_run_can_be_renamed_and_inspected_but_not_mutated_live() {
+    async fn a_stopped_run_resolves_by_name_but_offers_nothing_to_mutate_live() {
         let mut map = HashMap::new();
         map.insert(
             "aa07".to_string(),
@@ -1826,8 +1724,7 @@ mod tests {
                 record: stopped_record("aa07", "reviewer"),
             }),
         );
-        rename_in(Some(&mut map), "reviewer", "auditor").unwrap();
-        assert_eq!(map.get("aa07").unwrap().name(), "auditor");
+        assert_eq!(resolve_in(Some(&map), "reviewer"), Ok("aa07".to_string()));
         assert!(map.get_mut("aa07").unwrap().as_live_mut().is_none());
     }
 
@@ -1956,14 +1853,12 @@ mod tests {
                 record: stopped_record("aa07", "reviewer"),
             }),
         );
-        let (live, _rx) = make_handle();
-        let mut live = RunEntry::Live(live);
-        live.set_name("runner".to_string());
-        map.insert("aa08".to_string(), live);
-        let (exited, _rx2) = make_handle();
-        let mut exited = RunEntry::Live(exited);
-        exited.set_name("builder".to_string());
-        map.insert("aa09".to_string(), exited);
+        let (mut live, _rx) = make_handle();
+        live.name = "runner".to_string();
+        map.insert("aa08".to_string(), RunEntry::Live(live));
+        let (mut exited, _rx2) = make_handle();
+        exited.name = "builder".to_string();
+        map.insert("aa09".to_string(), RunEntry::Live(exited));
         set_status(&map, "aa09", RunStatus::Exited { code: 0 });
         assert_eq!(
             stopped_names_in(Some(&map)),

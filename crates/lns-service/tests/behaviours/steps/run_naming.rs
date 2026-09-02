@@ -192,24 +192,3 @@ fn then_can_register_name(world: &mut BehaviourWorld, name: String) -> Result<()
     run_registry::deregister(&id);
     outcome
 }
-
-#[when(regex = r#"^a RenameRun request renames "([^"]+)" to "([^"]+)"$"#)]
-async fn rename_request(world: &mut BehaviourWorld, run: String, new_name: String) {
-    world.response =
-        Some(run_one_shot(&Request::RenameRun { run, new_name }, world.started_at()).await);
-}
-
-#[then(regex = r#"^the run resolves by the name "([^"]+)"$"#)]
-fn then_resolves_by_name(_world: &mut BehaviourWorld, name: String) -> Result<(), String> {
-    run_registry::resolve(&name)
-        .map(|_| ())
-        .map_err(|e| format!("expected {name:?} to resolve, got {e}"))
-}
-
-#[then(regex = r#"^the run no longer resolves by the name "([^"]+)"$"#)]
-fn then_not_resolves_by_name(_world: &mut BehaviourWorld, name: String) -> Result<(), String> {
-    match run_registry::resolve(&name) {
-        Err(_) => Ok(()),
-        Ok(id) => Err(format!("expected {name:?} not to resolve, but got id {id}")),
-    }
-}
