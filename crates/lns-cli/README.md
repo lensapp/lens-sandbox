@@ -170,14 +170,13 @@ lns run ghcr.io/myorg/tool:dev --name reviewer  # custom sandbox name
 ### List, attach, stop
 
 ```bash
-lns status
-   NAME          IMAGE                                STATE     UPTIME
-   build         python:3.12                          running   14m
-   claude-code   ghcr.io/anthropic/claude-code        detached  2h
-   scraper       ghcr.io/myorg/scraper:dev            running   3d
+lns ps
+   ID            NAME         IMAGE                          STATE    CREATED              STARTED              CPU %  MEM
+   1a2b3c4d0000  build        python:3.12                    running  2026-08-30 09:12:00  2026-08-30 09:12:00  12.5%  184.0 MiB / 1.0 GiB
+   5e6f7a8b0000  claude-code  ghcr.io/anthropic/claude-code  running  2026-08-28 14:03:00  2026-08-30 08:41:00  3.1%   512.0 MiB / 2.0 GiB
 
 lns attach claude-code
-lns stop scraper
+lns stop build
 ```
 
 ### Tail logs and audit

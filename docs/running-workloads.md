@@ -389,7 +389,7 @@ Manage the store with `lns volume`:
 ```bash
 lns volume ls                  # list volumes: on-disk size, age, holding sandboxes
 lns volume create build-cache  # provision a volume before its first run
-lns volume inspect build-cache # full details as JSON
+lns volume inspect build-cache # capacity, on-disk size, age, and every holder
 lns volume rm build-cache      # delete one volume (refused while a sandbox holds it)
 lns volume prune               # delete every volume no sandbox holds
 ```
@@ -1135,7 +1135,7 @@ Everything you do to a run after starting it is a top-level verb, each
 an exact shortcut into `lns sandbox`:
 
 ```bash
-lns ps                     # list running sandboxes with their CPU and memory
+lns ps                     # list running sandboxes: times, CPU, and memory
 lns exec 7 -- bash         # open another session inside a run
 lns kill 7                 # send one signal (default SIGTERM)
 lns stop 7                 # SIGTERM, wait up to 10s, then SIGKILL
@@ -1260,17 +1260,25 @@ primarily a live view of its output.
 ### Inspecting
 
 `lns inspect <target>` reads whichever kind of sandbox the target names. For a
-**running** run it prints one JSON document with the run's status, image, command,
-and launch configuration (cpus, memory, env, ports, volumes, run-as identity), plus
-the contents of its policy file when that file is readable on this machine. For a
-**cached** reference it prints the artifact's kind and definition — a plain `image`,
-or a `sandbox`'s image, workdir, mounts, declared ports, and filesets, flagging a
-permissive default policy.
+**running** run it summarises the run as a table: its status, image, command, the
+same `CREATED` and `STARTED` times `lns ps` shows, and the headline resources.
+`--format json` prints the whole record instead — the launch configuration (cpus,
+memory, env, ports, volumes, run-as identity) and the contents of its policy file
+when that file is readable on this machine. For a **cached** reference it prints
+the artifact's kind and definition — a plain `image`, or a `sandbox`'s image,
+workdir, mounts, declared ports, and filesets, flagging a permissive default
+policy.
 
 ### Listing resource use
 
 `lns ps` lists running sandboxes with their CPU share and memory — the microVM is
 the workload, so the numbers cover everything the run is doing.
+
+Each row also carries two times. `CREATED` is when you made the sandbox, and it
+never moves. `STARTED` is when it last booted, so every `lns start` sets it
+again. On a sandbox you have never restarted the two read alike; on one you have,
+`STARTED` is the boot you are watching and `CREATED` is where its data began.
+`lns inspect` reports the same two, labelled the same way.
 
 A run whose guest has stopped answering — one you just killed, for instance —
 still gets a row, with `-` in place of its CPU and memory (`null` under
