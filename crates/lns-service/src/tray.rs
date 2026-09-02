@@ -1769,7 +1769,7 @@ fn set_window_shadows(_enabled: bool) {}
 pub fn refresh_window_shadows() {}
 
 fn load_icon() -> anyhow::Result<Icon> {
-    const ICON_BYTES: &[u8] = include_bytes!("../assets/lensTemplate@2x.png");
+    const ICON_BYTES: &[u8] = include_bytes!("../assets/lnsTemplate@2x.png");
     let decoder = png::Decoder::new(ICON_BYTES);
     let mut reader = decoder.read_info().context("read embedded icon PNG info")?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
@@ -1852,6 +1852,26 @@ mod tests {
     fn embedded_icon_decodes_successfully() {
         let icon = load_icon().expect("embedded template PNG should decode");
         drop(icon);
+    }
+
+    #[test]
+    fn the_embedded_mark_is_a_template_so_both_menu_bars_render_it() {
+        let bytes: &[u8] = include_bytes!("../assets/lnsTemplate@2x.png");
+        let mut reader = png::Decoder::new(bytes)
+            .read_info()
+            .expect("embedded mark is a readable PNG");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("embedded mark decodes");
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        let opaque = buf[..info.buffer_size()]
+            .chunks_exact(4)
+            .filter(|px| px[3] > 0)
+            .collect::<Vec<_>>();
+        assert!(!opaque.is_empty(), "the mark cannot be fully transparent");
+        assert!(
+            opaque.iter().all(|px| px[..3] == [0, 0, 0]),
+            "macOS reads the shape from alpha and Linux whitens the same pixels, so every drawn pixel must be black"
+        );
     }
 
     #[test]
