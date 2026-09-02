@@ -988,9 +988,10 @@ Directories and nested paths both work, an entry must stay inside the bind (no
 leading `/`, no `..`), and an entry for a path that isn't there is a no-op. There is
 no prompt: an exclude is the author's rule, not a per-machine decision, so it is
 never written to the KEEP/DROP store. To mask a path the definition's author did not
-name, put a bind with your own `exclude` in the local mixin — it is last in the
-merge, so a pulled definition cannot undo it. A `-v` flag carries no `exclude`, so
-an ad-hoc bind needs an `lns.yaml` or a local mixin to mask anything.
+name, write a mixin of your own with that `exclude` and layer it with `--mixin`.
+A mixin you name merges after a pulled definition, so the pulled one cannot undo
+it. A `-v` flag carries no `exclude`, so declare the bind in an `lns.yaml` or a
+mixin of your own when you need to mask a path.
 
 The semantic is **masked, not absent**. An excluded directory appears in the guest as
 an existing, empty, unwritable directory, and an excluded file reads as empty rather
