@@ -69,6 +69,7 @@ pub struct RunHandle {
     pub name: String,
     pub image: String,
     pub command: String,
+    pub created: String,
     pub started: String,
     pub status: std::sync::Mutex<RunStatus>,
     pub logs: std::sync::Arc<crate::run_log::RunLogBuffer>,
@@ -493,12 +494,18 @@ fn snapshot_from(map: Option<&HashMap<String, RunEntry>>) -> Vec<lns_ipc::RunSum
 }
 
 fn summary_of(id: &str, e: &RunEntry) -> lns_ipc::RunSummary {
-    let (image, command, started) = match e {
-        RunEntry::Live(h) => (h.image.clone(), h.command.clone(), h.started.clone()),
+    let (image, command, created, started) = match e {
+        RunEntry::Live(h) => (
+            h.image.clone(),
+            h.command.clone(),
+            h.created.clone(),
+            h.started.clone(),
+        ),
         RunEntry::Stopped(s) => (
             s.record.image.clone(),
             s.record.command.clone(),
             s.record.created_at.clone(),
+            last_boot_of(&s.record),
         ),
     };
     lns_ipc::RunSummary {
@@ -507,8 +514,17 @@ fn summary_of(id: &str, e: &RunEntry) -> lns_ipc::RunSummary {
         image,
         command,
         status: e.status(),
+        created,
         started,
     }
+}
+
+/// A record written before `started_at` existed was rewritten on every restart, so its creation time is the boot it last recorded.
+fn last_boot_of(record: &crate::run_record::RunRecord) -> String {
+    record
+        .started_at
+        .clone()
+        .unwrap_or_else(|| record.created_at.clone())
 }
 
 pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
@@ -656,6 +672,7 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
             name: String::new(),
             image: String::new(),
             command: String::new(),
+            created: String::new(),
             started: String::new(),
             status: std::sync::Mutex::new(RunStatus::Running),
             logs: std::sync::Arc::new(crate::run_log::RunLogBuffer::default()),
@@ -1558,6 +1575,39 @@ mod tests {
         record.exit_code = Some(3);
         record.finished_at = Some("2026-08-18T00:01:00Z".into());
         record
+    }
+
+    #[test]
+    fn a_stopped_runs_summary_separates_when_it_was_created_from_its_last_boot() {
+        let mut record = stopped_record("aa07", "reviewer");
+        record.created_at = "2026-08-01T00:00:00Z".into();
+        record.started_at = Some("2026-08-30T09:00:00Z".into());
+        let summary = summary_of("aa07", &RunEntry::Stopped(StoppedRun { record }));
+        assert_eq!(summary.created, "2026-08-01T00:00:00Z");
+        assert_eq!(summary.started, "2026-08-30T09:00:00Z");
+    }
+
+    #[test]
+    fn a_record_written_before_started_at_reports_its_creation_time_as_the_last_boot() {
+        let mut record = stopped_record("aa07", "reviewer");
+        record.created_at = "2026-08-01T00:00:00Z".into();
+        record.started_at = None;
+        let summary = summary_of("aa07", &RunEntry::Stopped(StoppedRun { record }));
+        assert_eq!(
+            (summary.created.as_str(), summary.started.as_str()),
+            ("2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+            "such a record was rewritten on every restart, so its creation time is its last boot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_runs_summary_reports_this_boot_as_started_and_keeps_its_creation_time() {
+        let (mut h, _rx) = make_handle();
+        h.created = "2026-08-01T00:00:00Z".into();
+        h.started = "2026-08-30T09:00:00Z".into();
+        let summary = summary_of("aa08", &RunEntry::Live(h));
+        assert_eq!(summary.created, "2026-08-01T00:00:00Z");
+        assert_eq!(summary.started, "2026-08-30T09:00:00Z");
     }
 
     #[test]

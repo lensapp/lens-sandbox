@@ -47,7 +47,18 @@ pub async fn conclude_run<F: crate::image_store::Fs, R: RemoveDir, N: Fn(&str)>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchMode {
     Fresh,
-    Restart { pinned_descriptor_sha256: String },
+    Restart {
+        pinned_descriptor_sha256: String,
+        created_at: String,
+    },
+}
+
+/// A run is created once; every restart after that rewrites its record, and the record must keep saying when the run began.
+pub fn recorded_created_at(mode: &LaunchMode, now: impl FnOnce() -> String) -> String {
+    match mode {
+        LaunchMode::Fresh => now(),
+        LaunchMode::Restart { created_at, .. } => created_at.clone(),
+    }
 }
 
 pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result<()> {
@@ -55,9 +66,11 @@ pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result
         LaunchMode::Fresh => Ok(()),
         LaunchMode::Restart {
             pinned_descriptor_sha256,
+            ..
         } if pinned_descriptor_sha256 == built_sha256 => Ok(()),
         LaunchMode::Restart {
             pinned_descriptor_sha256,
+            ..
         } => anyhow::bail!(
             "the sandbox stack changed under this run: its layers now build descriptor {built_sha256}, but its writable layer was written on {pinned_descriptor_sha256}; remove the run with `lns rm` and start a fresh one"
         ),
@@ -909,9 +922,31 @@ mod launch_mode_tests {
     }
 
     #[test]
+    fn a_restart_keeps_the_creation_time_its_record_already_carries() {
+        let mode = LaunchMode::Restart {
+            pinned_descriptor_sha256: "sha256:pinned".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        };
+        assert_eq!(
+            recorded_created_at(&mode, || "2026-09-02T12:00:00Z".to_string()),
+            "2026-08-01T00:00:00Z",
+            "a restart re-writes the record, so it must carry the original creation time forward"
+        );
+    }
+
+    #[test]
+    fn a_fresh_run_is_created_now() {
+        assert_eq!(
+            recorded_created_at(&LaunchMode::Fresh, || "2026-09-02T12:00:00Z".to_string()),
+            "2026-09-02T12:00:00Z"
+        );
+    }
+
+    #[test]
     fn a_restart_accepts_only_the_descriptor_its_upper_was_written_on() {
         let mode = LaunchMode::Restart {
             pinned_descriptor_sha256: "sha256:pinned".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
         };
         assert!(verify_pinned_descriptor(&mode, "sha256:pinned").is_ok());
         let err = verify_pinned_descriptor(&mode, "sha256:drifted").unwrap_err();

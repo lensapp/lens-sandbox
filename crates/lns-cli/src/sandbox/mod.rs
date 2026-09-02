@@ -513,6 +513,7 @@ struct PsRow {
     image: String,
     command: String,
     status: lns_ipc::RunStatus,
+    created: String,
     started: String,
     cpu_permille: Option<u32>,
     mem_used_bytes: Option<u64>,
@@ -536,6 +537,7 @@ impl PsRow {
             image: run.image.clone(),
             command: run.command.clone(),
             status: run.status,
+            created: run.created.clone(),
             started: run.started.clone(),
             cpu_permille: stats.as_ref().map(|s| s.cpu_permille),
             mem_used_bytes: stats.as_ref().map(|s| s.mem_used_bytes),
@@ -558,7 +560,9 @@ impl PsRow {
 }
 
 impl crate::output::TableRow for PsRow {
-    const HEADERS: &'static [&'static str] = &["ID", "NAME", "IMAGE", "STATE", "CPU %", "MEM"];
+    const HEADERS: &'static [&'static str] = &[
+        "ID", "NAME", "IMAGE", "STATE", "CREATED", "STARTED", "CPU %", "MEM",
+    ];
 
     fn cells(&self) -> Vec<String> {
         vec![
@@ -566,6 +570,8 @@ impl crate::output::TableRow for PsRow {
             self.name.clone(),
             self.image.clone(),
             state_cell(self.status),
+            crate::service::friendly_started(&self.created),
+            crate::service::friendly_started(&self.started),
             self.cpu_permille
                 .map_or_else(|| NO_SAMPLE.to_string(), format_permille),
             self.memory_cell(),
@@ -857,6 +863,7 @@ fn render_inspect<W: std::io::Write>(
         "status".into(),
         serde_json::to_value(details.summary.status)?,
     );
+    doc.insert("created".into(), details.summary.created.clone().into());
     doc.insert("started".into(), details.summary.started.clone().into());
     doc.insert(
         "uptime".into(),
@@ -878,6 +885,10 @@ fn inspect_fields(details: &RunDetails) -> Vec<(&'static str, String)> {
         (
             "STATUS",
             format!("{:?}", details.summary.status).to_lowercase(),
+        ),
+        (
+            "CREATED",
+            crate::service::friendly_started(&details.summary.created),
         ),
         (
             "UPTIME",
@@ -1064,6 +1075,7 @@ mod tests {
             image: "some-image".into(),
             command: "cmd".into(),
             status: lns_ipc::RunStatus::Running,
+            created: "2026-01-01T00:00:00Z".into(),
             started: "2026-01-01T00:00:00Z".into(),
         }
     }
@@ -1434,6 +1446,7 @@ mod tests {
                     image: "some-image".into(),
                     command: "cmd".into(),
                     status: lns_ipc::RunStatus::Exited { code: 0 },
+                    created: "2026-01-01T00:00:00Z".into(),
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 running_run(),
@@ -1443,6 +1456,7 @@ mod tests {
                     image: "some-image".into(),
                     command: "cmd".into(),
                     status: lns_ipc::RunStatus::Exited { code: 1 },
+                    created: "2026-01-01T00:00:00Z".into(),
                     started: "2026-01-01T00:00:00Z".into(),
                 },
             ],
@@ -1705,6 +1719,7 @@ mod tests {
                     image: "some-image".into(),
                     command: String::new(),
                     status: lns_ipc::RunStatus::Running,
+                    created: "2026-01-01T00:00:00Z".into(),
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {

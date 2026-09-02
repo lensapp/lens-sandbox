@@ -1302,6 +1302,7 @@ mod tests {
             image: image.to_string(),
             command: String::new(),
             status: lns_ipc::RunStatus::Running,
+            created: String::new(),
             started: String::new(),
         }
     }

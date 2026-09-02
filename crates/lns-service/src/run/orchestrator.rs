@@ -639,6 +639,7 @@ async fn orchestrate(
         .clone()
         .unwrap_or_else(|| "<imageless>".to_string());
     let command_label = record_args.cmd.join(" ");
+    let booted_at = crate::time_fmt::rfc3339_now();
     let record = crate::run_record::RunRecord {
         version: crate::run_record::CURRENT_VERSION,
         run_id: run_id.clone(),
@@ -649,7 +650,8 @@ async fn orchestrate(
         layer_digests: recorded_layer_digests,
         image: image_label,
         command: command_label,
-        created_at: crate::time_fmt::rfc3339_now(),
+        created_at: super::recorded_created_at(&mode, || booted_at.clone()),
+        started_at: Some(booted_at),
         finished_at: None,
         exit_code: None,
     };

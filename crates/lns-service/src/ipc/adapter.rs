@@ -236,6 +236,7 @@ impl super::StartHost for RealStartHost {
         args.stdin = options.attach && options.stdin;
         let mode = crate::run::LaunchMode::Restart {
             pinned_descriptor_sha256: record.descriptor_sha256.clone(),
+            created_at: record.created_at.clone(),
         };
         let Some(prepared) =
             super::prepare_while_the_client_waits(stream, &RealRunHost, &run_id, &args).await
@@ -476,6 +477,7 @@ where
         name: String::new(),
         image: image_label,
         command: command_label,
+        created: crate::run::recorded_created_at(&mode, || started_label.clone()),
         started: started_label,
         status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
         logs,

@@ -17,6 +17,7 @@ fn make_handle(
         name: String::new(),
         image: String::new(),
         command: String::new(),
+        created: String::new(),
         started: String::new(),
         status: std::sync::Mutex::new(lns_ipc::RunStatus::Running),
         logs: std::sync::Arc::new(lns_service::run_log::RunLogBuffer::default()),

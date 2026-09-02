@@ -19,6 +19,9 @@ pub struct RunRecord {
     pub image: String,
     pub command: String,
     pub created_at: String,
+    /// When this run's most recent boot began; absent on a record written before a restart stopped overwriting `created_at`.
+    #[serde(default)]
+    pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub exit_code: Option<i32>,
 }
@@ -257,6 +260,7 @@ mod tests {
             image: "registry.example.test/some-sandbox:1".into(),
             command: "sh -c true".into(),
             created_at: "2026-08-18T00:00:00Z".into(),
+            started_at: Some("2026-08-18T00:00:00Z".into()),
             finished_at: Some("2026-08-18T00:01:00Z".into()),
             exit_code: Some(0),
         }
