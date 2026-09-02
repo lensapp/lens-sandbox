@@ -7,7 +7,7 @@ Feature: volume lifecycle management end to end
 
   Background:
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
 
   Scenario: create, list, inspect, and remove round-trip
     When I run "lns volume create prism-data"

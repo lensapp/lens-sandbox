@@ -2,7 +2,7 @@
 name = "lns-policy"
 version = "0.0.0"
 edition = "2024"
-description = "Lens Sandbox policy schema — file format types shared between lns-service (enforcement) and lns-cli (run-summary introspection)"
+description = "LNS policy schema — file format types shared between lns-service (enforcement) and lns-cli (run-summary introspection)"
 license = "Apache-2.0"
 publish = false
 

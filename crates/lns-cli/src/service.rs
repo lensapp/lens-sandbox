@@ -19,8 +19,7 @@ pub(crate) async fn disable_login_agent() -> DisableOutcome {
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-const NOT_RUNNING_MESSAGE: &str =
-    "Lens Sandbox is not running. Run `lns service start` to start it.";
+const NOT_RUNNING_MESSAGE: &str = "LNS is not running. Run `lns service start` to start it.";
 
 mod orchestrator;
 pub use orchestrator::{
@@ -40,11 +39,11 @@ pub struct ServiceArgs {
 
 #[derive(clap::Subcommand)]
 pub enum ServiceCommand {
-    #[command(about = "Start the Lens Sandbox background service.")]
+    #[command(about = "Start the LNS background service.")]
     Start,
-    #[command(about = "Stop the Lens Sandbox background service.")]
+    #[command(about = "Stop the LNS background service.")]
     Stop,
-    #[command(about = "Show status of the Lens Sandbox background service.")]
+    #[command(about = "Show status of the LNS background service.")]
     Status(ServiceStatusArgs),
     #[command(
         about = "Register a per-user login agent and start the service now and on every login."
@@ -61,9 +60,7 @@ pub struct ServiceStatusArgs {
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
-    app.subcommand(
-        subcommand::<ServiceArgs>("service").about("Manage the Lens Sandbox background service."),
-    )
+    app.subcommand(subcommand::<ServiceArgs>("service").about("Manage the LNS background service."))
 }
 
 pub const SPEC: CommandSpec = CommandSpec {
@@ -84,12 +81,12 @@ fn require_running_check(alive: bool) -> Result<(), &'static str> {
 
 pub(super) async fn cmd_start(client: &impl ServiceClient) -> Result<()> {
     if client.ping().await {
-        println!("Lens Sandbox is already running.");
+        println!("LNS is already running.");
         return Ok(());
     }
 
     if client.start_and_wait_for_ready(START_TIMEOUT).await? {
-        println!("Lens Sandbox started.");
+        println!("LNS started.");
         Ok(())
     } else {
         anyhow::bail!(
@@ -101,16 +98,16 @@ pub(super) async fn cmd_start(client: &impl ServiceClient) -> Result<()> {
 
 pub(super) async fn cmd_stop(client: &impl ServiceClient) -> Result<()> {
     if client.shutdown().await.is_none() {
-        println!("Lens Sandbox is not running.");
+        println!("LNS is not running.");
         return Ok(());
     }
 
     if client.wait_for_stopped(STOP_TIMEOUT).await {
-        println!("Lens Sandbox stopped.");
+        println!("LNS stopped.");
         Ok(())
     } else {
         anyhow::bail!(
-            "Lens Sandbox acknowledged shutdown but did not exit within {}s",
+            "LNS acknowledged shutdown but did not exit within {}s",
             STOP_TIMEOUT.as_secs()
         );
     }
@@ -131,11 +128,11 @@ pub(super) async fn cmd_status(
         version,
     }) = status
     else {
-        writeln!(writer, "Lens Sandbox is not running.")?;
+        writeln!(writer, "LNS is not running.")?;
         return Ok(());
     };
 
-    writeln!(writer, "Lens Sandbox is running.")?;
+    writeln!(writer, "LNS is running.")?;
     writeln!(writer, "  PID:     {pid}")?;
     writeln!(writer, "  Uptime:  {uptime_secs}s")?;
     writeln!(writer, "  Version: {version}")?;
@@ -206,7 +203,7 @@ async fn disable_with_outcome(
 fn report_enable_outcome(outcome: login_agent::EnableOutcome) {
     match outcome {
         login_agent::EnableOutcome::Registered => {
-            println!("Login auto-start enabled. Lens Sandbox will start on every login.");
+            println!("Login auto-start enabled. LNS will start on every login.");
         }
         login_agent::EnableOutcome::AlreadyRegistered => {
             println!("Login auto-start is already enabled.");
@@ -222,7 +219,7 @@ fn report_enable_outcome(outcome: login_agent::EnableOutcome) {
 fn report_disable_outcome(outcome: login_agent::DisableOutcome) {
     match outcome {
         login_agent::DisableOutcome::Unregistered => {
-            println!("Login auto-start disabled. Lens Sandbox will not start on the next login.");
+            println!("Login auto-start disabled. LNS will not start on the next login.");
         }
         login_agent::DisableOutcome::WasNotRegistered => {
             println!("Login auto-start was not enabled.");
@@ -284,7 +281,7 @@ mod tests {
     #[test]
     fn require_running_check_errors_when_not_alive() {
         let err = require_running_check(false).expect_err("expected error");
-        assert!(err.contains("Lens Sandbox is not running"));
+        assert!(err.contains("LNS is not running"));
         assert!(err.contains("`lns service start`"));
     }
 
@@ -506,7 +503,7 @@ mod tests {
 
         let text = status_output(&client, crate::output::Format::Table).await;
 
-        assert_eq!(text, "Lens Sandbox is not running.\n");
+        assert_eq!(text, "LNS is not running.\n");
         assert_eq!(client.calls(), vec!["status"]);
     }
 
@@ -516,7 +513,7 @@ mod tests {
 
         let text = status_output(&client, crate::output::Format::Table).await;
 
-        assert!(text.contains("Lens Sandbox is running."), "got: {text}");
+        assert!(text.contains("LNS is running."), "got: {text}");
         assert!(text.contains("PID:     4242"), "got: {text}");
         assert!(text.contains("Uptime:  17s"), "got: {text}");
         assert!(text.contains("Version: test-version"), "got: {text}");

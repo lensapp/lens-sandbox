@@ -1,4 +1,4 @@
-# Lens Sandbox
+# LNS
 
 [![CI](https://github.com/lensapp/lens-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/lensapp/lens-sandbox/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 >
 > Run AI agents, commands, and OCI images locally. Control access into and out of the sandbox.
 
-Lens Sandbox is a local desktop app that runs AI agents, commands, OCI images, and other untrusted workloads inside a microVM on your own machine. The workload gets a real environment for installs, tools, builds, and long-running work — but inbound and outbound access is checked against policy. Allowed requests proceed; denied requests are blocked at the boundary; and when no rule matches yet, Lens Sandbox starts an approval flow and remembers your decision.
+LNS is a local desktop app that runs AI agents, commands, OCI images, and other untrusted workloads inside a microVM on your own machine. The workload gets a real environment for installs, tools, builds, and long-running work — but inbound and outbound access is checked against policy. Allowed requests proceed; denied requests are blocked at the boundary; and when no rule matches yet, LNS starts an approval flow and remembers your decision.
 
 ## Install
 
@@ -16,7 +16,7 @@ Lens Sandbox is a local desktop app that runs AI agents, commands, OCI images, a
 curl -fsSL https://get.lns.run | bash
 ```
 
-This installs the `lns` CLI and the `lns-service` background service. Lens Sandbox runs on **macOS on Apple Silicon** (M-series, via the Virtualization framework) and **Linux on x86_64/aarch64** (glibc 2.35+, e.g. Ubuntu 22.04+; via KVM + Cloud Hypervisor — needs `/dev/kvm` plus `cloud-hypervisor` and `virtiofsd`). On **Windows 11**, run it inside WSL2, which uses the same Linux build — turn on nested virtualization to run workloads.
+This installs the `lns` CLI and the `lns-service` background service. LNS runs on **macOS on Apple Silicon** (M-series, via the Virtualization framework) and **Linux on x86_64/aarch64** (glibc 2.35+, e.g. Ubuntu 22.04+; via KVM + Cloud Hypervisor — needs `/dev/kvm` plus `cloud-hypervisor` and `virtiofsd`). On **Windows 11**, run it inside WSL2, which uses the same Linux build — turn on nested virtualization to run workloads.
 
 ## Quickstart
 

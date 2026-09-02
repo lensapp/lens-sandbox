@@ -2,7 +2,7 @@
 name = "lns-ipc"
 version = "0.1.0"
 edition = "2024"
-description = "IPC contract library for Lens Sandbox — shared Request/Response types and frame codec"
+description = "IPC contract library for LNS — shared Request/Response types and frame codec"
 license = "Apache-2.0"
 publish = false
 

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SocketPathError {
-    #[error("cannot locate Lens Sandbox service socket: HOME is not set")]
+    #[error("cannot locate LNS service socket: HOME is not set")]
     HomeNotSet,
     #[error("unsupported platform: only macOS and Linux are supported")]
     UnsupportedPlatform,

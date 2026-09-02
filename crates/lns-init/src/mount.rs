@@ -447,8 +447,7 @@ fn prepend_user_line(passwd_path: &str, user: &str, uid: u32, gid: u32) {
     if existing.lines().any(|l| l.starts_with(&prefix)) {
         return;
     }
-    let updated =
-        format!("{user}:x:{uid}:{gid}:lens sandbox user:/home/{user}:/bin/sh\n{existing}");
+    let updated = format!("{user}:x:{uid}:{gid}:LNS sandbox user:/home/{user}:/bin/sh\n{existing}");
     let _ = std::fs::write(passwd_path, updated);
 }
 
@@ -1348,7 +1347,7 @@ mod tests {
             (65534, 65534)
         );
         let passwd = std::fs::read_to_string(format!("{newroot}/etc/passwd")).unwrap();
-        assert!(passwd.contains("sandbox:x:65534:65534:"));
+        assert!(passwd.contains("sandbox:x:65534:65534:LNS sandbox user:"));
         assert!(sys.calls().iter().any(|c| matches!(
             c,
             Call::Lchown {

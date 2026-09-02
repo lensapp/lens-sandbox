@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Lens Sandbox CLI (lns).
+# Install the LNS CLI (lns).
 #
 #   curl -fsSL https://get.lns.run | bash
 #   curl -fsSL https://get.lns.run | VERSION=0.1.0 bash
@@ -290,7 +290,7 @@ if [ "$OS" = "linux" ] && [ "$HAS_SERVICE" = true ] && command -v ldconfig >/dev
 fi
 
 if [ "$HAS_SERVICE" = true ] && [ -z "$NO_SERVICE" ]; then
-  info "Starting the Lens Sandbox service and enabling login auto-start..."
+  info "Starting the LNS service and enabling login auto-start..."
   # The `if` guard keeps `set -e` from aborting the install if the binary is unrunnable.
   if "${INSTALL_DIR}/${BINARY_NAME}" service enable; then
     SERVICE_ENABLED=true

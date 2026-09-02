@@ -313,7 +313,7 @@ pub(crate) async fn pull_artifact_with<R: Registry>(
             "{image} is a connector; a connector is installed on this machine rather than pulled into a project"
         ),
         None => anyhow::bail!(
-            "{image} is an OCI image, not a Lens Sandbox artifact; `lns pull` takes a published sandbox or mixin"
+            "{image} is an OCI image, not an LNS artifact; `lns pull` takes a published sandbox or mixin"
         ),
     }
     let def = lns_artifact::sandbox::parse(config_str.as_bytes())
@@ -420,7 +420,7 @@ fn refuse_beyond_the_transfer_budget(bytes: u64) -> Result<()> {
 }
 
 fn sandbox_pull_error(e: anyhow::Error) -> anyhow::Error {
-    anyhow::anyhow!("{e:#}").context("this reference is not a supported Lens Sandbox artifact")
+    anyhow::anyhow!("{e:#}").context("this reference is not a supported LNS artifact")
 }
 
 pub(crate) fn verify_digest_pin(
@@ -1684,7 +1684,7 @@ mod tests {
             .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("OCI image, not a Lens Sandbox artifact"),
+            rendered.contains("OCI image, not an LNS artifact"),
             "got: {rendered}"
         );
         assert_eq!(
@@ -1740,7 +1740,7 @@ mod tests {
             .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("not a supported Lens Sandbox artifact")
+            rendered.contains("not a supported LNS artifact")
                 && rendered.contains("vnd.acme.surprise"),
             "got: {rendered}"
         );

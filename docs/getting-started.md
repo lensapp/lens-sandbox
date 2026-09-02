@@ -5,7 +5,7 @@ sandbox.
 
 ## Prerequisites
 
-Lens Sandbox boots a real microVM under a hardware hypervisor:
+LNS boots a real microVM under a hardware hypervisor:
 
 - **macOS on Apple Silicon** (M-series) — uses Apple's Virtualization framework,
   which ships with macOS, so there's nothing extra to install. Intel Macs cannot
@@ -16,7 +16,7 @@ Lens Sandbox boots a real microVM under a hardware hypervisor:
   to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN`). `virtiofsd` must
   support read-only shares through `--readonly`. The installer checks these
   requirements and tells you what's missing or unsupported.
-- **Windows 11 with WSL2** — Run Lens Sandbox inside WSL2. It uses the Linux
+- **Windows 11 with WSL2** — Run LNS inside WSL2. It uses the Linux
   build, with the same requirements. To run workloads, turn on nested
   virtualization so WSL2 can start virtual machines. Windows 11 turns this on by
   default.
@@ -27,7 +27,7 @@ same "policy you run into, not write."
 ## Platform support
 
 macOS on Apple Silicon, Linux (x86_64 / aarch64), and Windows 11 with WSL2 are
-supported. On Windows, Lens Sandbox runs inside WSL2 as the Linux build. Turn on
+supported. On Windows, LNS runs inside WSL2 as the Linux build. Turn on
 nested virtualization to run workloads. Running Windows directly, without WSL2,
 is not supported.
 
@@ -102,7 +102,7 @@ lns run
     source: auto-created (no policy in the project directory)
 ```
 
-You run Lens Sandbox from a project directory — that's where it looks for
+You run LNS from a project directory — that's where it looks for
 `lns-local-mixin.yaml`, creating an empty one the first time. Run a definition in
 another directory and it reads that project's file instead. To
 give the workload your actual project files, bind-mount the directory with
@@ -150,7 +150,7 @@ not learning a schema. `spec.image` is used exactly as written: a bare reference
 like `alpine:3.20` resolves the way every OCI client reads it, to
 `docker.io/library/alpine:3.20`. That differs from a bare reference typed as a
 command operand — `lns run alpine:3.20` qualifies it against your `run.registry`
-default, else the Lens hub (`hub.lns.run`) — so write the registry host into
+default, else the LNS hub (`hub.lns.run`) — so write the registry host into
 `spec.image` when you mean a different one. Edit `spec.image` (and the fields
 you need), then check it offline —
 `validate` runs schema, cross-field, and secret checks without touching the
@@ -195,7 +195,7 @@ If no one answers, the request times out and is denied.
 
 ## Uninstall
 
-To remove Lens Sandbox, run:
+To remove LNS, run:
 
 ```bash
 lns uninstall

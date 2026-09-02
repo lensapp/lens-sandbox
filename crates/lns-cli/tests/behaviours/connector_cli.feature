@@ -26,7 +26,7 @@ Feature: lns connector, on this machine
     When the user runs connector command "install ghcr.io/acme/some-provider:1"
     Then the service was asked to install "ghcr.io/acme/some-provider:1"
 
-  Scenario: a bare reference addresses the Lens hub rather than Docker Hub
+  Scenario: a bare reference addresses the LNS hub rather than Docker Hub
     Given the service installs "docs" serving "docs.rs"
     When the user runs connector command "install acme/docs"
     Then the service was asked to install "hub.lns.run/acme/docs"

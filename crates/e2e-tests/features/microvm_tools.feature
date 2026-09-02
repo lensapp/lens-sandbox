@@ -16,20 +16,20 @@ Feature: declared developer tools reach a real guest
   there, and `rustc --version` passes even when that directory is read-only.
 
   Scenario: A declared tool is available to the workload
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a lns.yaml declaring tools ["node@22"] over the pinned base image
     When the sandbox runs "node --version"
     Then it prints a node 22 version
 
   Scenario: A launcher the provisioning engine rewrote still runs in the guest
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a lns.yaml declaring tools ["node@22"] over the pinned base image
     When the sandbox runs "npm --version"
     Then it prints an npm version
 
   Scenario: Provisioning is disclosed, audited, and reused on the next run
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
     And a lns.yaml declaring tools ["node@22"] over the pinned base image
     When the sandbox runs "node --version"
     Then it prints a node 22 version
@@ -40,13 +40,13 @@ Feature: declared developer tools reach a real guest
     And nothing is provisioned again
 
   Scenario: A tool whose upstream archive nests its bin dir is still on the PATH
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a lns.yaml declaring tools ["gh@2"] over the pinned base image
     When the sandbox runs "gh --version"
     Then it prints a gh version
 
   Scenario: A tool the engine installs outside its own install dir still runs
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a lns.yaml declaring tools ["rust@1.95.0"] over a glibc base image
     And a provisioning budget of 15 minutes
     And the sandbox may reach the crates.io hosts
@@ -54,14 +54,14 @@ Feature: declared developer tools reach a real guest
     Then the build succeeds
 
   Scenario: A declared tool wins over the base image's copy
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a base image that ships node 20 and a lns.yaml declaring tools ["node@22"]
     When the sandbox runs "node --version"
     Then it prints a node 22 version
 
   Scenario: A pulled sandbox with tools starts offline
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
     And a published sandbox declaring pinned tools
     And I ran "lns pull" on its reference while online
     When I run the sandbox with no network available
@@ -69,7 +69,7 @@ Feature: declared developer tools reach a real guest
 
   Scenario: A pulled sandbox addresses its cached tools from the published pin alone
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
     And a published sandbox declaring tools ["jq@1.7.1"]
     And I ran "lns pull" on its reference while online
     And the tool resolution record is lost

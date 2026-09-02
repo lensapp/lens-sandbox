@@ -99,7 +99,7 @@ pub struct ForgetArgs {
 #[derive(clap::Args)]
 pub struct InstallArgs {
     #[arg(
-        help = "A published connector reference, or a path to a directory or the document itself. A bare reference is qualified by run.registry, else the Lens hub."
+        help = "A published connector reference, or a path to a directory or the document itself. A bare reference is qualified by run.registry, else the LNS hub."
     )]
     pub source: String,
 }
@@ -1657,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_reference_addresses_the_lens_hub_rather_than_docker_hub() {
+    fn a_bare_reference_addresses_the_lns_hub_rather_than_docker_hub() {
         // §2.3: a bare REF is qualified, never guessed — and the guess the registry parser makes on its own is Docker Hub, which is someone else's registry.
         assert_eq!(qualified_source("acme/docs", None), "hub.lns.run/acme/docs");
     }

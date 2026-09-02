@@ -1,9 +1,9 @@
 # Claude Code in a sandbox
 
-Runs [Claude Code](https://docs.claude.com/en/docs/claude-code) inside a Lens
-Sandbox microVM. The agent runs unrestricted **inside** the guest; the microVM
-and its network policy are the boundary — nothing leaves the sandbox except the
-hosts you allow.
+Runs [Claude Code](https://docs.claude.com/en/docs/claude-code) inside an LNS
+microVM. The agent runs unrestricted **inside** the guest; the microVM and its
+network policy are the boundary — nothing leaves the sandbox except the hosts
+you allow.
 
 ## Files
 

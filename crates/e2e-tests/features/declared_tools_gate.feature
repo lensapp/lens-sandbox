@@ -7,7 +7,7 @@ Feature: declared tools gate the launch before boot
 
   Scenario: an unknown declared tool refuses the launch
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
     And a lns.yaml declaring tools ["definitely-not-a-tool@1"]
     When the user runs the sandbox definition
     Then the exit code is non-zero
@@ -16,7 +16,7 @@ Feature: declared tools gate the launch before boot
 
   Scenario: a plugin-backed tool is refused with the image remedy
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
     And a lns.yaml declaring a registry tool with an unsupported backend
     When the user runs the sandbox definition
     Then the exit code is non-zero

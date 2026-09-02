@@ -11,19 +11,19 @@ Feature: Docker-compat run flags that need a real image
   supervisor echoes in its `[agent] starting:` line.
 
   Scenario: a command after the image runs without an explicit separator
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs image "public.ecr.aws/docker/library/alpine:3.20" with command "/bin/sh -c 'echo nodash-$((6*7))'" and no separator
     Then the exit code is 0
     And the output contains "nodash-42"
 
   Scenario: --entrypoint sets the program the workload runs
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs image "public.ecr.aws/docker/library/alpine:3.20" with entrypoint "/bin/sh" and command "-c 'echo entry-$((7*8))'"
     Then the exit code is 0
     And the output contains "entry-56"
 
   Scenario: -u/--user resolves a named user against the image
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs image "public.ecr.aws/docker/library/alpine:3.20" as user "games" with command "id"
     Then the exit code is 0
     And the output contains "uid=35(games)"

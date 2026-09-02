@@ -64,18 +64,18 @@ fn parse_uptime(output: &str) -> Option<u64> {
     None
 }
 
-#[given("no Lens Sandbox service is running")]
+#[given("no LNS service is running")]
 fn no_service_running(world: &mut E2eWorld) {
     world.ensure_service_dir();
     world.shutdown_service();
 }
 
-#[given("the Lens Sandbox service is running")]
+#[given("the LNS service is running")]
 fn service_is_running(world: &mut E2eWorld) {
     start_service(world);
 }
 
-#[given("the Lens Sandbox service is running in that home")]
+#[given("the LNS service is running in that home")]
 fn service_is_running_in_home(world: &mut E2eWorld) {
     assert!(
         world.home.is_some(),
@@ -84,7 +84,7 @@ fn service_is_running_in_home(world: &mut E2eWorld) {
     start_service(world);
 }
 
-#[given("the Lens Sandbox service is running headless in that home")]
+#[given("the LNS service is running headless in that home")]
 fn service_is_running_headless_in_home(world: &mut E2eWorld) {
     assert!(
         world.home.is_some(),
@@ -229,15 +229,13 @@ fn command_exits_nonzero(world: &mut E2eWorld) -> Result<(), String> {
     assert_ne_int(0, res.exit_code, "exit code")
 }
 
-#[then(
-    "the error message reads: \"Lens Sandbox is not running. Run `lns service start` to start it.\""
-)]
+#[then("the error message reads: \"LNS is not running. Run `lns service start` to start it.\"")]
 fn error_message_reads(world: &mut E2eWorld) -> Result<(), String> {
     let res = world.result.as_ref().ok_or("no CLI run captured")?;
     let combined = format!("{}{}", res.stdout, res.stderr);
     assert_contains(
         &combined,
-        "Lens Sandbox is not running. Run `lns service start` to start it.",
+        "LNS is not running. Run `lns service start` to start it.",
         "error output",
     )
 }

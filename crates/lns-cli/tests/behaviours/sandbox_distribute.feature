@@ -12,14 +12,14 @@ Feature: distributing a sandbox
     And the output contains "built"
     And the output contains "ghcr.io/team/hermes:1.4.0"
 
-  Scenario: a bare push reference publishes to the Lens hub
+  Scenario: a bare push reference publishes to the LNS hub
     Given a valid lns.yaml in the current directory
     And the registry accepts the push
     When the user runs artifact command "push hchen/claude-code"
     Then the exit code is 0
     And the output contains "hub.lns.run/hchen/claude-code"
 
-  Scenario: a bare pull reference fetches from the Lens hub
+  Scenario: a bare pull reference fetches from the LNS hub
     Given the registry serves the sandbox "hub.lns.run/hchen/claude-code"
     When the user runs artifact command "pull hchen/claude-code"
     Then the exit code is 0
@@ -187,7 +187,7 @@ Feature: distributing a sandbox
     Then the exit code is 0
     And the sandbox "ghcr.io/team/hermes:latest" resolves to the same cached artifact
 
-  Scenario: a bare tag pair re-references in the Lens hub
+  Scenario: a bare tag pair re-references in the LNS hub
     Given the sandbox "hub.lns.run/team/hermes:1.4.0" is cached
     When the user runs artifact command "tag team/hermes:1.4.0 team/hermes:latest"
     Then the exit code is 0
@@ -199,13 +199,13 @@ Feature: distributing a sandbox
     Then the exit code is 0
     And the service was asked to tag "registry.example.test/team/hermes:1.4.0" as "registry.example.test/team/hermes:latest"
 
-  Scenario: a bare rm reference removes the Lens hub record a pull wrote
+  Scenario: a bare rm reference removes the LNS hub record a pull wrote
     Given the sandbox "hub.lns.run/team/hermes:1.4.0" is cached and no other sandbox shares its base-image layers
     When the user runs artifact command "rm team/hermes:1.4.0"
     Then the exit code is 0
     And the service was asked to remove the cached artifact "hub.lns.run/team/hermes:1.4.0"
 
-  Scenario: a bare inspect reference asks the service about its Lens hub form
+  Scenario: a bare inspect reference asks the service about its LNS hub form
     Given the reference "hub.lns.run/team/hermes:1.4.0" resolves to a cached sandbox
     When the user runs artifact command "inspect team/hermes:1.4.0"
     Then the exit code is 0

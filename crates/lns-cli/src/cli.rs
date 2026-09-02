@@ -16,7 +16,7 @@ pub enum LogLevel {
 #[command(
     name = "lns",
     version,
-    about = "Lens Sandbox — run AI agents, commands, and OCI images in local microVMs. Control access into and out of the sandbox."
+    about = "LNS — run AI agents, commands, and OCI images in local microVMs. Control access into and out of the sandbox."
 )]
 pub struct Cli {
     #[arg(

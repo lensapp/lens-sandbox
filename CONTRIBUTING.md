@@ -1,8 +1,8 @@
-# Contributing to Lens Sandbox
+# Contributing to LNS
 
-Thanks for your interest in Lens Sandbox.
+Thanks for your interest in LNS.
 
-This repository is the Lens Sandbox monorepo — the `lns` developer CLI, the tray-resident `lns-service`, the guest-side microVM components, and their shared libraries. [`AGENTS.md`](AGENTS.md) at the repo root is the authoritative guide to the architecture, the test pyramid, and the project conventions; this file is the short on-ramp.
+This repository is the LNS monorepo — the `lns` developer CLI, the tray-resident `lns-service`, the guest-side microVM components, and their shared libraries. [`AGENTS.md`](AGENTS.md) at the repo root is the authoritative guide to the architecture, the test pyramid, and the project conventions; this file is the short on-ramp.
 
 ## Development Setup
 

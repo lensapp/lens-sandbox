@@ -6,7 +6,7 @@ Feature: a RUN verb given a document redirects before touching the service
 
   Scenario: lns exec given a document names the artifact reader instead
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns exec ./lns.yaml -- true"
     Then the exit code is 2
     And the output contains "takes a RUN"
@@ -14,7 +14,7 @@ Feature: a RUN verb given a document redirects before touching the service
 
   Scenario: lns sandbox logs given a document is the same refusal
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns sandbox logs ./lns.yaml"
     Then the exit code is 2
     And the output contains "lns artifact inspect"

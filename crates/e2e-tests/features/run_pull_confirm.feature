@@ -13,7 +13,7 @@ Feature: running a pulled sandbox asks before mounting into the workload
   Background:
     Given a clean lns cache home
     And a local registry
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
 
   Scenario: a pulled sandbox declaring a bind and a volume fails closed without a terminal
     Given the user pushes a sandbox built from ./lns.yaml in one step

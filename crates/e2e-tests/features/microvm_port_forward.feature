@@ -11,14 +11,14 @@ Feature: only published ports are reachable from the host through a real microVM
   reduce the chance of colliding with a service already running on the machine.
 
   Scenario: a published port is reachable but an unpublished one the guest serves is not
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user starts a detached microVM command "/bin/sh -c '(while true; do printf published | /.lens/guest-tools/bin/busybox nc -l -p 47821; done) & while true; do printf private | /.lens/guest-tools/bin/busybox nc -l -p 47822; done'" publishing port 47821
     Then the exit code is 0
     And the host can fetch "published" from port 47821
     And the host cannot connect to port 47822
 
   Scenario: a locally declared port publishes automatically like compose up
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And the project definition declares port 47823
     When the user starts a detached microVM command "/bin/sh -c 'while true; do printf declared | /.lens/guest-tools/bin/busybox nc -l -p 47823; done'" with no port flags
     Then the exit code is 0

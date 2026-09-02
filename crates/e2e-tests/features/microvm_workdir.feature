@@ -6,7 +6,7 @@ Feature: -w sets the workload's working directory in the guest
   only real output, not the echoed command line.
 
   Scenario: a workdir is the guest working directory at exec
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs a microVM command "/bin/sh -c 'echo wd=$(/.lens/guest-tools/bin/busybox pwd)'" with workdir "/tmp"
     Then the exit code is 0
     And the output contains "wd=/tmp"

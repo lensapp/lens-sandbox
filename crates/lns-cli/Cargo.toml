@@ -2,7 +2,7 @@
 name = "lns-cli"
 version = "0.23.0"
 edition = "2024"
-description = "Lens Sandbox — thin CLI that drives the lns-service daemon"
+description = "LNS — thin CLI that drives the lns-service daemon"
 repository = "https://github.com/lensapp/lens-sandbox"
 
 # Binary + library split. The library hosts the orchestration
