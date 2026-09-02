@@ -596,6 +596,15 @@ fn shares_a_path_with(target: &str, claim: &str) -> bool {
     same_path(target, claim) || encloses(target, claim) || encloses(claim, target)
 }
 
+/// An `exclude` leaves a guest-local mask, so the write lands there and never reaches the share this bind holds (§3.1.11).
+fn masked_by_its_own_exclude(volume: &Volume, claim: &str) -> bool {
+    volume.is_bind()
+        && volume.exclude.iter().any(|entry| {
+            let mask = format!("{}/{entry}", volume.target.trim_end_matches('/'));
+            same_path(&mask, claim) || encloses(&mask, claim)
+        })
+}
+
 /// A fileset nested under a volume target reaches the workload only because lns-init copies it into the volume once mounted (§3.1.11), and these two kinds of volume take no such copy.
 fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
     for volume in &spec.volumes {
@@ -607,7 +616,9 @@ fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
             _ => continue,
         };
         for claim in spec.filesets.iter().flat_map(fileset_claims) {
-            if shares_a_path_with(&volume.target, &claim) {
+            if shares_a_path_with(&volume.target, &claim)
+                && !masked_by_its_own_exclude(volume, &claim)
+            {
                 let relation = match same_path(&volume.target, &claim) {
                     true => "collides with",
                     false => "is nested with",
@@ -2442,6 +2453,70 @@ mod tests {
         assert!(
             message.contains("/root/.claude.json") && message.contains("host filesystem"),
             "a claim landing exactly on the mount point is buried by it too: {message}"
+        );
+    }
+
+    #[test]
+    fn a_fileset_under_a_bind_the_same_bind_excludes_is_allowed_because_the_mask_is_guest_local() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude","exclude":["agent"]}],"filesets":[{"inline":{"settings.json":"{}"},"guestPath":"/root/.claude/agent"}]}"#,
+        ))
+        .expect("an excluded subpath is masked guest-local, so the write never reaches the host");
+    }
+
+    #[test]
+    fn a_host_path_fileset_seeds_an_excluded_path_with_a_copy_the_workload_may_rewrite() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude","exclude":["settings.json"]}],"filesets":[{"hostPath":"~/.claude/settings.json","guestPath":"/root/.claude/settings.json","optional":true}]}"#,
+        ))
+        .expect("the guest gets a copy it may rewrite, and the host file behind the mask is untouched");
+    }
+
+    #[test]
+    fn a_fileset_whose_guest_path_is_the_bind_target_itself_is_a_duplicate_claim_on_it() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude","exclude":["settings.json"]}],"filesets":[{"inline":{"settings.json":"{}"},"guestPath":"/root/.claude"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate guest path /root/.claude"),
+            "an exclude rescues a claim under the mount point, not a second claim on it: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_fileset_under_a_bind_another_bind_excludes_is_refused() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude"},{"type":"bind","source":"~/other","target":"/root/other","exclude":["agent"]}],"filesets":[{"inline":{"settings.json":"{}"},"guestPath":"/root/.claude/agent"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/root/.claude"),
+            "only the covering bind's own exclude rescues a claim: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_fileset_under_a_read_only_bind_the_bind_excludes_is_allowed_too() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude","readOnly":true,"exclude":["agent"]}],"filesets":[{"inline":{"settings.json":"{}"},"guestPath":"/root/.claude/agent"}]}"#,
+        ))
+        .expect("readOnly governs the share, not the mask, and the mask is guest-local either way");
+    }
+
+    #[test]
+    fn a_path_fileset_claims_its_whole_directory_so_an_exclude_must_cover_all_of_it() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"./src","target":"/work","exclude":["cfg"]}],"filesets":[{"path":"./cfg","guestPath":"/work/cfg"}]}"#,
+        ))
+        .expect("the exclude covers the whole claimed directory");
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"./src","target":"/work","exclude":["cfg/inner"]}],"filesets":[{"path":"./cfg","guestPath":"/work/cfg"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/work/cfg"),
+            "an exclude below the claimed directory leaves the rest of it on the host: {err:#}"
         );
     }
 
