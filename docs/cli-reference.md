@@ -273,8 +273,8 @@ workload does.
 | `start`    | `lns start`  | Run a stopped sandbox again on its preserved writable layer. The launch replays exactly as recorded — image (digest-pinned), command, env, mounts, ports, resources, run-as — while the network rules re-resolve as they would for a fresh boot. Detached by default: prints the handle and returns. `-a` attaches output and adopts the workload's exit code; `-i` (with `-a`) forwards stdin. A conflict — a taken host port, a volume another sandbox holds, a missing bind source — aborts the start and leaves the sandbox stopped, untouched. |
 | `logs`     | `lns logs`   | Print the sandbox's captured stdout/stderr; `-f` keeps streaming until the workload exits. The service keeps the most recent 2 MiB per sandbox. |
 | `attach`   | `lns attach` | Re-join a sandbox's live output, most useful after `lns run -d`. The detach chord (`ctrl-p,ctrl-q` by default) leaves it running and returns you to your shell (no signal is sent). Stdin reaches the workload only if the sandbox was started with stdin open. |
-| `ls`       | `lns ps`     | List running sandboxes with their state, CPU, and memory. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
-| `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
+| `ls`       | `lns ps`     | List running sandboxes with their state, `CREATED`, `STARTED`, CPU, and memory. `CREATED` is when the sandbox was made and never changes; `STARTED` is when it last booted, so `lns start` moves it. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
+| `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration, including the same `CREATED` and `STARTED` times `lns ps` shows. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
 | `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. What it granted and declined about a connector goes with it, so a new sandbox of that name is asked again. Refuses a running one; `-f`/`--force` stops it first. |
 | `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks first, unless `-f`/`--force`. |
 
@@ -294,7 +294,7 @@ lns volume prune [-f]
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `ls`             | List named volumes with their on-disk size, age, and the sandboxes holding them (if any). |
 | `create <NAME>`  | Create a named volume ahead of its first `lns run -v` attach. No-op if it exists.    |
-| `inspect <NAME>` | Show a volume's capacity, on-disk bytes, age, and holder.                            |
+| `inspect <NAME>` | Show a volume's capacity, on-disk bytes, age, and every sandbox that holds it.       |
 | `rm <NAME>`      | Remove a volume and its data; refused while a sandbox holds it. A stopped sandbox holds it too, until you remove the sandbox. |
 | `prune`          | Remove every volume no sandbox holds. Lists them and asks first, unless `-f`/`--force`.|
 
