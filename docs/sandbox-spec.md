@@ -90,9 +90,12 @@ them:
   and is never asked about.
 
 A `connector` is the one kind that grants nothing even after it arrives.
-Installing it opens nothing, arms nothing, writes nothing, and sets nothing — it
-only makes the destinations it serves ask. What grants is the user granting one of
-its methods to a run ([§3.2.4](#324-installing-connecting-and-applying)).
+Installing it opens no destination, arms no injection, writes no file, and
+supplies no real value — it makes the destinations it serves ask. It lends its
+placeholder to a variable a sandbox itself declared and left to it
+([§3.1.7](#317-credentials)), and sets nothing a sandbox did not ask for. What
+grants is the user granting one of its methods to a run
+([§3.2.4](#324-installing-connecting-and-applying)).
 
 ### 1.4 Credentials, and what a connector adds
 
@@ -126,8 +129,11 @@ their own machine.
 **Two things separate a connector from a plain mixin, and neither is the
 format.** A mixin is named by a document and resolved at startup. A connector is
 named by nobody: the user installs it, a run **detects** that it is relevant, and
-the user is **offered** it. Detection reads one block — `serves`, the
-destinations the connector is worth offering for — and detection grants nothing.
+the user is **offered** it. Detection reads `serves` — the destinations the
+connector is worth offering for — and, before boot, the `envVar` of each
+credential its methods declare, which is how a run finds the connector a
+declaration was left to ([§3.1.7](#317-credentials)). Neither reading grants
+anything.
 
 **The restriction is what makes it a mixin at all.** A connector is applied while
 the guest is already running, so it may carry only blocks that a booted guest can
@@ -136,8 +142,10 @@ still be given — egress, credentials, filesets, and env — and no others
 rules in [§3.3.2](#332-merge-rules), so a method granted at the gate and one
 already granted at boot produce the same run.
 
-**Nothing applies until the user grants a method.** Installing is not a merge and
-not a seed: it grants nothing, and only makes the connector's destinations ask.
+**Nothing applies until the user grants a method.** Installing is not a merge: it
+grants nothing, and makes the connector's destinations ask. The one thing it sets
+is a marker in a variable a sandbox itself declared and left to it
+([§3.1.7](#317-credentials)).
 A **grant** applies one method to one run; a **connect** authenticates where a
 method requires it, and the card does both at once
 ([§3.2.4](#324-installing-connecting-and-applying)).
@@ -151,7 +159,10 @@ A mixin resolves into the sandbox at **startup**, so the document a consumer
 pulls is not yet the sandbox that boots. What the consumer approves is therefore
 the **resolved** sandbox: before boot, the run presents the merged result in full
 — every rule, mount, file, tool, script, and credential, each attributed to the
-mixin it came from. Whatever the reference looked like, the approval is against a resolved
+mixin it came from. A declared credential left to a connector
+([§3.1.7](#317-credentials)) names that connector too, marked as supplying no
+value yet: the variable is set from a document the consumer did not approve, so
+the approval must say whose marker it holds. Whatever the reference looked like, the approval is against a resolved
 digest, so what boots is what was approved
 ([§3.3.1](#331-how-a-mixin-enters-a-run)).
 
@@ -520,24 +531,62 @@ credentials:
 | Domains | Every `injections[].domain` SHOULD be a destination this document's [`egress`](#316-egress) allows; one it does not is asked about like any other. |
 
 **A declared credential is a requirement.** An author writes one down because the
-workload does not work without it, so the run resolves every declaration before
-boot:
+workload does not work without it, so the run settles every declaration before
+boot — by binding a value, or by leaving it to a connector that serves it:
 
 | At boot | Outcome |
 |---|---|
 | A value is bound on this machine | The workload starts with `placeholder` in `envVar`, and the proxy substitutes the real value on requests to each declared `domain`. |
-| No value is bound | The run asks the developer for one, naming the `envVar` and the domains it will reach. Answering binds the value and the run continues; declining refuses the run. |
+| No value is bound, and no connector can answer the `envVar` | The run asks the developer for one, naming the `envVar` and the domains it will reach. Answering binds the value and the run continues; declining refuses the run. |
+| No value is bound, and a connector this run has not decided claims the `envVar` through one of its credentials | The declaration is **left to that connector**. The workload starts with that connector's `placeholder` in `envVar`, holding no value. The pre-boot disclosure names the connector ([§1.5](#15-one-disclosure)). The first request the connector's `serves` holds raises the ordinary consent card ([§3.2.4](#324-installing-connecting-and-applying)), and granting arms the marker the run already holds. |
+
+**Only a connector that can still answer takes the declaration.** A run that
+already **declined** the connector has said its standing no, and a run whose own
+document **denies** every destination the connector serves silences the card
+([§3.2.4](#324-installing-connecting-and-applying)) — either way no card will
+fire, so a marker would leave the requirement unmet in exactly the way declaring
+it exists to prevent. Both fall to the row above, and the run asks. A run that
+already granted the connector needs no marker where the granted method fills the
+variable ([§3.2.4](#324-installing-connecting-and-applying)). A method's
+credential may name no `envVar`, or another one
+([§4.1](#41-the-credential-definition)) — then nothing answers the declaration,
+and the run asks as the first row does.
 
 Asking before boot is the value of writing the credential down: the alternative is
 a workload that starts, runs, and fails somewhere inside itself with an unset
-variable.
+variable. Leaving it to a connector answers the same need a different way — the
+variable is set from boot, so a client that reads it to decide whether it is
+signed in reaches the destination, and the card is what settles it.
 
-**A declaration is answered here, not by a connector.** A
-[connector](#32-kind-connector) is offered when a request reaches a destination
-the run does not deny ([§3.2.4](#324-installing-connecting-and-applying)), which
-is after boot — so it is not what satisfies a declaration the run resolves before
-boot. The two paths meet at the same mechanism and nowhere else: both end in an
-injection, and the injection is identical.
+**The marker is the connector's `placeholder`, not the declaration's.** Two
+sources would otherwise write two markers for one variable, and only one of them
+is the one the boundary substitutes for once the method is granted
+([§3.3.2](#332-merge-rules) replaces a credential whole). The connector's is
+well-defined before any method is chosen: no two installed connectors may claim
+one `envVar` ([§7.1](#71-connectors)), and one variable carries one placeholder
+across a connector's methods ([§4.1](#41-the-credential-definition)).
+
+**The marker fills the variable only where nothing else set it.** A `-e`, an
+`--env-file` entry, the definition's own `env`, and the image's `ENV` each
+outrank it. Nothing has consented to the connector, and nothing substitutes for
+the marker yet — so a marker that displaced a working value would be an install
+breaking a run, which is the one thing [§3.2.4](#324-installing-connecting-and-applying)
+forbids. A grant reverses it, as it does for any variable a granted method fills.
+
+**Before the grant the marker registers nothing with the boundary.** It is not a
+declared `placeholder` in [§4.1](#41-the-credential-definition)'s sense: no
+injection knows it, and nothing substitutes for it. What holds the first request
+is the served destination ([§3.2.1](#321-serves)), not the marker. So a marker
+sent to a destination the connector does not serve is ordinary bytes, decided by
+the run's own rules — harmless, because a placeholder self-identifies as fake by
+construction, and the request could not have succeeded either way.
+
+**A declaration is answered before boot, or left to a connector.** Where it is
+left, the [connector](#32-kind-connector)'s own card is what answers it: a
+connector is offered when a request reaches a destination the run does not deny
+([§3.2.4](#324-installing-connecting-and-applying)), which is after boot. The two
+paths end in the same mechanism — both end in an injection, and the injection is
+identical.
 
 A declaration never carries the value. Per-machine credential values live outside
 every document ([§7.1](#71-connectors)).
@@ -1063,8 +1112,10 @@ spec:
 ```
 
 **Installing grants nothing** — no destination opens, no injection is armed, no
-file is written, no variable is set. What it does do is make its `serves`
-destinations **ask** ([§3.2.1](#321-serves)).
+file is written, and no real value is supplied. What it does do is make its
+`serves` destinations **ask** ([§3.2.1](#321-serves)), and lend its `placeholder`
+to a variable a sandbox itself declared and left to it
+([§3.1.7](#317-credentials)).
 
 Two later acts change what a run gets: a **grant** applies one method to one
 run, and a **connect** authenticates where a method requires it
@@ -1263,9 +1314,11 @@ fileset entry declares no mode of its own.
 
 #### 3.2.4 Installing, connecting, and applying
 
-**Installing grants nothing**, and an installed connector appears nowhere in a
-resolved sandbox ([§1.5](#15-one-disclosure)) and nowhere in a running guest — it
-only makes its destinations ask ([§3.2.1](#321-serves)).
+**Installing grants nothing**, and an installed connector contributes no merge
+source ([§3.3.2](#332-merge-rules)). It makes its destinations ask
+([§3.2.1](#321-serves)). The one thing it puts in a running guest is a marker in
+a variable a sandbox itself declared and left to it
+([§3.1.7](#317-credentials)) — the declaration's doing, not the install's.
 
 **Granting has three parts, in this order:**
 
@@ -1280,7 +1333,9 @@ only makes its destinations ask ([§3.2.1](#321-serves)).
 3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
    running guest, and a grant is recorded for this run — the method, and the
    connection behind it where one exists
-   ([§8.6](#86-where-a-connector-grant-goes)).
+   ([§8.6](#86-where-a-connector-grant-goes)). Where a marker mismatch defers the
+   grant, the record is written and the payload reaches the guest at the run's
+   next start instead (see below).
 
 Authentication that fails or is abandoned grants nothing and leaves the offer
 standing.
@@ -1330,7 +1385,9 @@ the pre-boot disclosure did not name.
 a destination nothing decided, and a destination the run allows. So a run holds a
 request for a served destination it would otherwise have allowed, until this
 run grants or declines the connector. A connector is not offered before boot
-either, because nothing yet said the run needs it.
+either: consent is given against a live need, and before boot there is no request
+to consent for. Where a declaration named it ([§3.1.7](#317-credentials)), the
+pre-boot disclosure has already said the connector will be asked about.
 
 The card is what a `deny` silences, not a grant. `lns connector grant` gives a
 grant ahead of any request, and it is not refused because some run's document
@@ -1354,15 +1411,44 @@ triggered the offer stays held while the user chooses a connection and satisfies
 The deadline is the workload's, not the run's, and a mechanism that sends the user
 to a browser can outlast it — then that request fails as any refused request does.
 **An expired hold does not cancel the connect:** the user finishes, the connection
-applies, and the next request succeeds.
+applies, and the next request succeeds. A deferred grant is the one case where
+applying does not follow: the hold is released without the request proceeding, and
+the next request succeeds only after the run's next start (see below).
 
 **`env` reaches the next workload of that run.** The granted method's `env`, and
 the `placeholder` of each credential it declares, are set for workloads that
 start after the grant; the workload that triggered the offer keeps the
 environment it was launched with. A tool authenticating over the wire works
-immediately; one reading a variable works from the next `lns sandbox exec`, or
-the next start of that run. It does **not** reach a fresh `lns run`: that is a
-different run, and it holds no grant.
+immediately; one reading a variable the grant introduces works from the next
+`lns sandbox exec`, or the next start of that run. It does **not** reach a fresh
+`lns run`: that is a different run, and it holds no grant.
+
+**A variable the declaration already filled is the exception, and it works at
+once.** Where the run declared the credential, left it to this connector
+([§3.1.7](#317-credentials)), and the marker filled the variable, every live
+session already holds that marker — and the grant arms the marker the run booted
+with. Nothing has to change in the environment, so a tool reading the variable
+works in the session that raised the card, with no exec and no restart. That is
+what leaving a declaration to a connector buys.
+
+**A grant arms the marker the run booted with, or it waits for the next start.**
+This decides one case only: a run that booted with a marker for a variable the
+granted credential claims. The installed set can change in between — a connector
+may be republished under a new `placeholder`, or uninstalled and replaced by
+another claiming the same `envVar` — and then the grant would arm a marker no
+live session holds. So a grant whose `placeholder` differs from the marker the
+run booted with **takes effect at that run's next start**: the grant is recorded,
+no payload applies, and the card says so. The request that raised it fails as any
+refused request does. A grant whose placeholder matches applies at once, and so
+does every grant to a run that booted with no marker for that variable — the
+ordinary case, and nothing here changes it.
+
+The rule is uniform because the alternative is worse than a failed request. A
+stale marker in a header the proxy sets is overwritten and the request succeeds
+by accident; a stale marker a `uri_placeholder` injection was meant to replace
+travels as fake bytes and the request fails. A rule that held in one family and
+not the other would be no rule. The environment and the boundary move together or
+not at all.
 
 **Declining is one run's standing no**, remembered outside every document
 ([§8.6](#86-where-a-connector-grant-goes)) and retractable there.
@@ -1807,8 +1893,9 @@ What survives is a real mismatch, and there are two:
   produces this: a [connector](#32-kind-connector) connection a run granted, on
   a machine that no longer holds it
   ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
-  own credential cannot reach it, because [§3.1.7](#317-credentials) resolves
-  every declaration before boot — bound, or the run refuses.
+  own credential still cannot reach it: a bound declaration is armed before boot,
+  and one left to a connector ([§3.1.7](#317-credentials)) declares nothing to the
+  boundary at all until the grant registers it armed.
 - The placeholder is somewhere the declared kind does not reach. A
   `bearer_header` injection sets one header; the same placeholder in a request
   body is untouched by it, so it survives. Reaching a body takes a
@@ -2158,8 +2245,9 @@ becoming a standing consent: a reservation is consumed once, and an
 automatically generated name never takes one.
 
 A connector that is installed and neither granted nor declined by a run holds no
-row of its own, and still changes that run: its `serves` destinations ask
-([§3.2.1](#321-serves)).
+row of its own, and still changes that run in two ways. Its `serves` destinations
+ask ([§3.2.1](#321-serves)), and a declaration it can still answer holds its
+`placeholder` ([§3.1.7](#317-credentials)).
 
 **The two keys differ deliberately.** A connection's key starts with the connector
 name and survives an update; a grant is keyed by the digest too and does not, and
