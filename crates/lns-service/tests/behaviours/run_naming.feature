@@ -3,8 +3,7 @@ Feature: naming runs — the service owns names and resolution
   Every run carries a numeric id and a name. `--name` sets the name;
   omitting it auto-generates an adjective_noun one. Names are unique
   among listed runs, are addressable in place of the id, and are freed
-  for reuse once their run is removed. `lns sandbox rename` changes a
-  run's name in place.
+  for reuse once their run is removed.
 
   Scenario: a run registered without a name is auto-assigned an adjective_noun name
     Given a fresh service handler
@@ -57,22 +56,3 @@ Feature: naming runs — the service owns names and resolution
     Given a fresh service handler
     When a run is registered with the name "has space"
     Then registration is refused
-
-  Scenario: rename changes the name in place
-    Given a registered run named "reviewer"
-    When a RenameRun request renames "reviewer" to "auditor"
-    Then the response is Acknowledged
-    And the run resolves by the name "auditor"
-    And the run no longer resolves by the name "reviewer"
-
-  Scenario: rename to a held name is refused
-    Given a registered run named "reviewer"
-    And a registered run named "auditor"
-    When a RenameRun request renames "auditor" to "reviewer"
-    Then the response is Error
-    And the error message contains "already in use"
-
-  Scenario: rename to an all-hex name is refused
-    Given a registered run named "reviewer"
-    When a RenameRun request renames "reviewer" to "7"
-    Then the response is Error

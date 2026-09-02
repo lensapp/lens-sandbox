@@ -596,10 +596,6 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
         Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
-        Request::RenameRun { run, new_name } => match crate::run_registry::rename(run, new_name) {
-            Ok(()) => Response::Acknowledged,
-            Err(message) => Response::Error { message },
-        },
         Request::PruneRuns => image_response(prune_runs_request().await),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
         Request::Unknown { method } => Response::Error {

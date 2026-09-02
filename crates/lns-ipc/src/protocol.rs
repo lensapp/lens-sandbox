@@ -66,10 +66,6 @@ pub enum Request {
         run: String,
         force: bool,
     },
-    RenameRun {
-        run: String,
-        new_name: String,
-    },
     /// Render one run as a document the user keeps; the service owns the run's state, and the caller owns the file it lands in.
     SaveRun {
         run: String,
@@ -1753,17 +1749,6 @@ mod tests {
             run: "reviewer".into(),
             attach: true,
             stdin: true,
-        };
-        let frame = crate::encode_frame(&req).unwrap();
-        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
-    fn rename_run_survives_a_request_round_trip() {
-        let req = Request::RenameRun {
-            run: "reviewer".into(),
-            new_name: "auditor".into(),
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
