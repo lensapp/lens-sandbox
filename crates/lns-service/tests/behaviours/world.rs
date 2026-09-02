@@ -31,6 +31,10 @@ pub struct BehaviourWorld {
     pub user_env: Vec<String>,
     /// Each variable a connector this run granted fills, by the connector that fills it.
     pub connectors: lns_service::workload_env::ConnectorEnv,
+    /// The credentials the sandbox document declares, which is what decides whether a connector's claim reaches the environment.
+    pub declared_credentials: Vec<lns_spec::Credential>,
+    /// The connectors this machine has installed and this run has not decided.
+    pub installed_connectors: Vec<lns_artifact::connector::ConnectorDefinition>,
     /// The values a grant displaced, from every source.
     pub refused_env: Vec<lns_service::workload_env::Refused>,
     /// `spec.env` entries, merged ahead of `-e` exactly as `sandbox_launch` merges them.

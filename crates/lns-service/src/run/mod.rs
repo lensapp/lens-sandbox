@@ -125,7 +125,7 @@ pub(super) struct EnvInputs<'a> {
     pub user_env: &'a [String],
     pub workdir: Option<&'a str>,
     pub tools: &'a crate::workload_env::ToolRuntime,
-    /// The placeholder a granted method fills each of this run's variables with (§3.2.4).
+    /// What this run's connectors put in its environment: what a granted method fills, and the marker a declaration was left to one for.
     pub connectors: &'a crate::workload_env::ConnectorEnv,
 }
 

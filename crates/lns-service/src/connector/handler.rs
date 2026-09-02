@@ -305,6 +305,23 @@ fn written_paths(payload: &crate::approval_flow::protocol::GrantedPayload) -> Ve
     payload.files.iter().map(|file| file.path.clone()).collect()
 }
 
+/// The installed connectors this run has neither granted nor declined — the only ones a declaration may be left to (§3.1.7). A document this build cannot parse answers for nothing, as it offers nothing.
+pub fn undecided(
+    store: &ConnectorStore<'_>,
+    holder: &GrantHolder,
+) -> Result<Vec<lns_artifact::connector::ConnectorDefinition>> {
+    let mut open = Vec::new();
+    for entry in store.installed()? {
+        if decided_here(store, holder, &entry) {
+            continue;
+        }
+        if let Ok(definition) = lns_artifact::connector::parse(&entry.document) {
+            open.push(definition);
+        }
+    }
+    Ok(open)
+}
+
 /// What every recorded grant gives this run, by connector, so a run that granted yesterday is not asked again and is not left empty-handed (§7.1).
 pub fn granted_supply(
     store: &ConnectorStore<'_>,

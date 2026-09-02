@@ -59,6 +59,12 @@ impl NetworkPolicy {
         first_denied(http, pattern).or_else(|| first_denied(tcp, pattern))
     }
 
+    /// Whether no destination of `pattern` is left for a rule behind the deny that covers it. Folded, because the answer carries the rule's spelling of the shared destinations, not the pattern's.
+    pub fn denies_every_destination_of(&self, pattern: &str) -> bool {
+        self.first_denied_within(pattern)
+            .is_some_and(|denied| denied.eq_ignore_ascii_case(pattern))
+    }
+
     /// The `egress.http` rules a raw rule pre-empts on its port: the raw table is the pre-filter, so those rules stop applying and the traffic is spliced unread.
     pub fn http_rules_pre_empted_by(&self, raw: &TcpEgressRule) -> Vec<&RouteRule> {
         if raw.verdict == Verdict::Deny {
@@ -1123,6 +1129,27 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(policy.first_denied_within("api.example"), None);
+    }
+
+    #[test]
+    fn a_deny_that_shouts_the_host_still_covers_every_destination_of_the_pattern() {
+        // Callers decide whether a connector can still be offered from this answer, so a shouted deny that read as partial would leave a marker nothing can ever arm.
+        let policy = table(
+            vec![RouteRule::deny_host("API.SOME-PROVIDER.EXAMPLE")],
+            Vec::new(),
+        );
+        assert!(policy.denies_every_destination_of("api.some-provider.example"));
+    }
+
+    #[test]
+    fn a_deny_over_part_of_a_pattern_does_not_cover_all_of_it() {
+        let policy = table(vec![RouteRule::deny_host("blocked.example")], Vec::new());
+        assert!(!policy.denies_every_destination_of("*.example"));
+    }
+
+    #[test]
+    fn a_pattern_nothing_denies_is_not_wholly_denied() {
+        assert!(!table(Vec::new(), Vec::new()).denies_every_destination_of("api.example"));
     }
 
     #[test]
