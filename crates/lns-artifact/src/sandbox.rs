@@ -62,7 +62,7 @@ pub struct Volume {
     pub target: String,
     #[serde(default)]
     read_only: bool,
-    /// Subpaths of a bind the workload must not see, relative to the bind root; masked in the guest exactly as a `.lnsignore` entry is.
+    /// Subpaths of a bind the workload must not see, relative to the bind root, masked in the guest.
     #[serde(default)]
     exclude: Vec<String>,
     /// A bind source the running machine does not have is skipped instead of refusing the run.

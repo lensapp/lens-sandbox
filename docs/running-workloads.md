@@ -922,11 +922,8 @@ Host bind: /Users/you/proj/.env looks like a secret. Expose it to the workload? 
   stderr, rather than exposing it unasked. `-d` is not that: the scan happens
   before the run starts, so a detached run asks at your terminal like any other.
 - Decisions to **keep** a real secret are per-machine and never written to a shared
-  file. To share a "never expose these" rule with your team, commit a `.lnsignore`
-  in the bind root — one path per line — and those paths are dropped with no prompt.
-  An entry may be a top-level name or a nested path relative to the bind root
-  (`packages/api/.env`); it must stay inside the bind (no leading `/`, no `..`), and a
-  rule for a file that isn't present is simply a no-op.
+  file. To share a "never expose these" rule with your team, put the paths in the
+  bind's `exclude` list (see below) — those are dropped with no prompt.
 
 The run summary lists each bind, its mode, and the disposition of every detected
 secret (`kept (exposed)` / `dropped`).
@@ -952,8 +949,10 @@ spec:
 Directories and nested paths both work, an entry must stay inside the bind (no
 leading `/`, no `..`), and an entry for a path that isn't there is a no-op. There is
 no prompt: an exclude is the author's rule, not a per-machine decision, so it is
-never written to the KEEP/DROP store. A `.lnsignore` in the bind root does the same
-job for a rule you don't want in the definition; naming a path in both drops it once.
+never written to the KEEP/DROP store. To mask a path the definition's author did not
+name, put a bind with your own `exclude` in the local mixin — it is last in the
+merge, so a pulled definition cannot undo it. A `-v` flag carries no `exclude`, so
+an ad-hoc bind needs an `lns.yaml` or a local mixin to mask anything.
 
 The semantic is **masked, not absent**. An excluded directory appears in the guest as
 an existing, empty, unwritable directory, and an excluded file reads as empty rather
@@ -970,8 +969,8 @@ host; publishing a sandbox never grants it silent access to host files.
 > root are scanned for secret shapes, so a secret nested in a subdirectory
 > (`packages/api/.env`, a key under `server/certs/`, credentials embedded in
 > `.git/config`) is exposed to the workload **without a prompt**. To hide a nested
-> secret you know about, name it in `.lnsignore` (a nested path is honored); for an
-> untrusted subtree, bind a narrower path or use `:ro`.
+> secret you know about, name it in the bind's `exclude` (a nested path is honored);
+> for an untrusted subtree, bind a narrower path or use `:ro`.
 
 ### Publishing ports
 
