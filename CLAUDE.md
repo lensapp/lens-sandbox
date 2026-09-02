@@ -97,7 +97,7 @@ Three separate cargo target dirs, because cargo fingerprints the flags each step
 
 `crates/lns-service/build.rs` embeds the guest binaries (lns-init, session-broker, supervisor, static-nft) in **release** builds and skips them in **debug** builds. That keeps one fingerprint across every debug caller, so no gate step needs to export `LNS_*_BIN=skip`. Set `LNS_<NAME>_BIN=<path>` to point a build at a pre-built guest binary; a shipping artifact must be a release build.
 
-`make coverage` clears only the profraw counters between runs. It falls back to a full artifact clean when the toolchain or any manifest changes, because those shift the artifact hashes and leave superseded binaries behind for `llvm-cov report` to find. The stamp that decides this is `.gate/coverage-toolchain-stamp`, which also hashes every workspace `Cargo.toml`.
+`make coverage` clears only the profraw counters between runs. It falls back to a full artifact clean when the toolchain or any manifest changes, because those shift the artifact hashes and leave superseded binaries behind for `llvm-cov report` to find. The stamp that decides this is `.gate/coverage-toolchain-stamp`, which also hashes every workspace `Cargo.toml`. It stays per worktree, unlike the timing log: it describes that worktree's own instrumented artifacts, so sharing it would let one worktree call another's tree warm.
 
 ### Environment parity
 
@@ -113,7 +113,7 @@ Never inject a failure by removing a permission bit — root ignores it. Take th
 
 ### Gate telemetry
 
-Every gate step records itself — `make lint`, `test`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `.gate/timings.tsv`, which is outside `target/`, so `cargo clean` keeps the history.
+Every gate step records itself — `make lint`, `test`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `<git-common-dir>/lns-gate/timings.tsv` — `.git/lns-gate/` in a plain checkout. That is the shared git directory, so every worktree of the repo appends to one history instead of restarting it per branch, and the log itself lands outside every working tree, where `cargo clean` and a branch switch cannot disturb it.
 
 `make gate-report` reads the last 30 days: runs, failures, and min/median/max seconds per step, a count per coverage verdict, and `coverage-data` split by cold and warm cache — a full artifact clean and a counter-only clean are different runs and averaging them hides both. `scripts/gate-timing.sh report --since <days>` or `--all` widens it.
 

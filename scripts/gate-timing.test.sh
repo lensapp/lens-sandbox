@@ -162,7 +162,71 @@ test_a_dead_hook_warns_without_failing() {
     check "it says what to do" "1" "$(echo "$err" | grep -c 'make install-hooks')"
 }
 
+# Worktrees are the normal way to work here, and a per-worktree log would
+# restart the history on every branch.
+test_every_worktree_appends_to_one_log() {
+    echo "test_every_worktree_appends_to_one_log"
+    main=$(mktmp)/repo
+    mkdir -p "$main"
+    git -C "$main" init -q
+    git -C "$main" config user.email t@t.local
+    git -C "$main" config user.name T
+    git -C "$main" -c commit.gpgsign=false commit -q --allow-empty -m seed
+    tree=$(mktmp)/wt
+    git -C "$main" worktree add -q --detach "$tree" HEAD
+
+    # The default path is the subject here, so the fixture must not inherit an
+    # override from whoever runs the suite.
+    (cd "$main" && env -u LNS_GATE_TIMING_LOG -u LNS_GATE_TIMING "$SCRIPT" run lint -- true)
+    (cd "$tree" && env -u LNS_GATE_TIMING_LOG -u LNS_GATE_TIMING "$SCRIPT" run test -- true)
+
+    shared="$main/.git/lns-gate/timings.tsv"
+    check "both rows land in the shared log" "2" "$(grep -c '' "$shared" 2>/dev/null || echo 0)"
+    check "the worktree keeps no log of its own" "no" \
+        "$([ -f "$tree/.gate/timings.tsv" ] && echo yes || echo no)"
+}
+
+# git echoes an unknown flag and exits 0, so a naive fallback chain never fires
+# and the log lands nowhere at all.
+test_an_old_git_still_records_somewhere() {
+    echo "test_an_old_git_still_records_somewhere"
+    dir=$(mktmp)
+    repo=$dir/repo
+    mkdir -p "$repo" "$dir/bin"
+    git -C "$repo" init -q
+    real_git=$(command -v git)
+    cat >"$dir/bin/git" <<EOF
+#!/bin/sh
+# Stands in for git < 2.31, which does not know --path-format: it echoes the
+# unrecognised flag back on stdout and still exits 0.
+kept=""
+seen=""
+for a in "\$@"; do
+    if [ "\$a" = "--path-format=absolute" ]; then
+        seen=yes
+    else
+        kept="\$kept \$a"
+    fi
+done
+[ -z "\$seen" ] || echo "--path-format=absolute"
+exec "$real_git" \$kept
+EOF
+    chmod +x "$dir/bin/git"
+
+    (
+        cd "$repo"
+        PATH="$dir/bin:$PATH" env -u LNS_GATE_TIMING_LOG -u LNS_GATE_TIMING \
+            "$SCRIPT" run lint -- true
+    )
+    check "it falls back to the worktree log" "1" \
+        "$(grep -c '' "$repo/.gate/timings.tsv" 2>/dev/null || echo 0)"
+    check "the row is one line of seven fields" "7" \
+        "$(awk -F'\t' 'NR == 1 { print NF }' "$repo/.gate/timings.tsv" 2>/dev/null)"
+}
+
 test_run_records_a_row
+test_an_old_git_still_records_somewhere
+test_every_worktree_appends_to_one_log
 test_a_detail_left_by_the_step_labels_its_row
 test_the_report_window_excludes_older_rows
 test_a_dead_hook_warns_without_failing

@@ -43,7 +43,7 @@ make lint && make complexity && make coverage
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity`.
 - `make coverage` — runs the test suite instrumented and enforces a 100% per-file line-coverage floor (exemptions live in `scripts/coverage-floor.sh`).
 
-The `make install-hooks` pre-push hook runs this gate (narrowed to affected crates) on every push. CI runs the same targets plus `make test` and `make e2e`. Every gate step records its own duration in `.gate/timings.tsv`; `make gate-report` summarises the last 30 days.
+The `make install-hooks` pre-push hook runs this gate (narrowed to affected crates) on every push. CI runs the same targets plus `make test` and `make e2e`. Every gate step records its own duration in `.git/lns-gate/timings.tsv`, which all worktrees of the repo share; `make gate-report` summarises the last 30 days.
 
 ## Test Layers
 
