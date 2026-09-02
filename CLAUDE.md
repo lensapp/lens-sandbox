@@ -36,18 +36,24 @@ Never edit the specification to match the code. A divergence is work to be done,
 
 ## Project Overview
 
-Monorepo. Eight Rust crates and one shell-script package today; built to grow.
+Monorepo. A Cargo workspace (production crates, two operator tools, two test/coverage infra crates) and one shell-script package; `Cargo.toml` `members` is the authoritative list.
 
 | Package | Purpose |
 |---------|---------|
 | `crates/lns-cli` | The `lns` developer CLI — thin clap-driven IPC client that drives the daemon. The shipping artifact. |
 | `crates/lns-service` | Tray-resident background service. Owns the microVM lifecycle, OCI ingest, content / layer caches, supervisor relay, and audit-chain writer; exposes a local Unix-socket IPC. |
 | `crates/lns-ipc` | Shared `Request`/`Response` types and wire-format codec for the lns-cli ↔ lns-service contract. |
+| `crates/lns-spec` | The `lns.run/v1` document grammar — the shared definitions every `kind` is built from (`docs/sandbox-spec.md`). |
+| `crates/lns-policy` | Policy schema — file-format types shared between lns-service (enforcement) and lns-cli (run-summary introspection). |
+| `crates/lns-artifact` | Typed OCI artifact model — spec types, parsers, and producer-side validation. |
+| `crates/lns-audit` | Audit-timeline reader — merges per-run logs and the connection ledger into one chronological view. |
+| `crates/lns-ocsf` | OCSF v1.7.0 event builders for the audit logs. |
 | `crates/lns-init` | Static-musl PID-1 for the guest microVM. Mounts composefs/overlay then `fexecve`'s `lns-session-broker`. |
 | `crates/lns-session` | Wire-protocol types (postcard) for the host ↔ guest session channel. Shared by `lns-service` and `lns-session-broker`. |
 | `crates/lns-session-broker` | Static-musl guest-side session host. `lns-init` execs into it; it owns PTY allocation, per-session workload forks, and vsock framing. |
 | `crates/lns-supervisor` | Static-musl in-guest supervisor built on `lens-sandbox-core`. Embedded into `lns-service` and run inside the microVM; owns the agent process lifecycle, nftables network lockdown, privilege drop, and the vsock relay client. |
 | `crates/bump-kernel` | Operator tooling for managing the kernel pin (`crates/lns-service/kernels.toml`). |
+| `crates/bump-mise` | Operator tooling for the pinned mise tool-provisioning engine and its registry snapshot. |
 | `scripts/lns-install` | Installer shell script published to `get.lns.run`. |
 
 ## Conventions
@@ -70,7 +76,7 @@ Monorepo. Eight Rust crates and one shell-script package today; built to grow.
 
 ## Verification gate
 
-The **local pre-push gate** is `make lint && make complexity && make coverage` — three targets defined in the top-level Makefile, run serially by `scripts/hooks/pre-push`. The **CI required suite** runs the same three as parallel jobs (with `CARGO_LOCKED=--locked` for `lint` / `test`) plus `make test`, `make e2e`, the kernel pin drift check, and a path-gated `check-release-build` (real cross-builds + codesign). The Makefile is the single source of truth for both.
+The **local pre-push gate** is `make lint && make complexity && make coverage-affected` — three targets defined in the top-level Makefile, run serially by `scripts/hooks/pre-push` (`LNS_PREPUSH_FULL_COVERAGE=1` swaps the last step for full `make coverage`). The **CI required suite** runs the same three as parallel jobs (with `CARGO_LOCKED=--locked` for `lint` / `test`) plus `make test`, `make e2e`, the kernel pin drift check, and a path-gated `check-release-build` (real cross-builds + codesign). The Makefile is the single source of truth for both.
 
 - `make lint` — `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. Also the gate's compile signal (clippy is a strict superset of `cargo check`).
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity` (per-crate because workspace feature unification disagrees with per-crate runs). For genuinely-branchy functions, use `#[allow(clippy::cognitive_complexity)]` with a one-line reason.
@@ -97,10 +103,10 @@ Two design implications fall out of this split:
 
 The 2 ↔ 3 balance is intentionally weighted toward Layer 2: the more behavior we can pin via Gherkin scenarios against a public API, the better. Layer 3 fills the gaps that aren't expressible as user-facing behaviors (e.g. "if `tokio::fs::rename` fails partway through atomic install, no half-written file remains" — a property, not a behavior).
 
-> **Migration status (2026-05).** The pyramid is operational:
+> **Where each layer lives today:**
 >
 > - Layer 1 lives in `crates/e2e-tests/` and spawns the real `lns` / `lns-service` binaries against real Unix sockets and tempdir homes. Its profraw is excluded from the coverage gate.
-> - Layer 2 lives in `crates/lns-cli/tests/behaviours/` (in-process via `lns_cli::cli::Cli`) and `crates/lns-service/tests/behaviours/` (in-process via `lns_service::ipc::handle_request`). Cross-crate deps are mocked at the public trait boundary (`ServiceClient` in lns-cli today; Handler-style extraction for lns-service streaming dispatch remains follow-up work).
+> - Layer 2 lives in `crates/lns-cli/tests/behaviours/` (in-process via `lns_cli::cli::Cli`) and `crates/lns-service/tests/behaviours/` (in-process via `lns_service::ipc::handle_request`). Cross-crate deps are mocked at the public trait boundary (`ServiceClient` in lns-cli; lns-service streaming dispatch has no Handler-style seam yet).
 > - Layer 3 exists as `#[cfg(test)] mod tests` blocks. Newer modules (kernel.rs, oci_layer_cache::install) use injected ports (`Fetcher`, `Fs`, `WritableFile`) with in-memory fakes; the still-tempfile-based modules are tracked in IGNORES under "needs ${X} port".
 >
 > Do not extend the cross-crate subprocess-spawning pattern. New behaviour goes in Layer 2 / Layer 3 with mocked cross-crate deps; only true end-to-end wiring confirmations belong in Layer 1.
@@ -189,7 +195,7 @@ The coverage gate is wired into `pre-push` via the in-tree hook at `scripts/hook
 make install-hooks
 ```
 
-That points `core.hooksPath` at the in-tree hooks dir so `make verify` + `make coverage-affected` run before every push. The hook refreshes `origin/main` before computing the affected set. Override to full workspace: `LNS_PREPUSH_FULL_COVERAGE=1 git push`. Bypass entirely (rare, intentional): `git push --no-verify`.
+That points `core.hooksPath` at the in-tree hooks dir so `make lint`, `make complexity`, and `make coverage-affected` run before every push. The hook refreshes `origin/main` before computing the affected set. Override to full workspace: `LNS_PREPUSH_FULL_COVERAGE=1 git push`. Bypass entirely (rare, intentional): `git push --no-verify`.
 
 ### Affected-crates coverage (CI + pre-push)
 
