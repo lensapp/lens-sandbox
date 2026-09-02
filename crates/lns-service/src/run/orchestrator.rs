@@ -354,6 +354,7 @@ async fn orchestrate(
             target: b.target.clone(),
             read_only: b.read_only,
             dropped_paths: b.dropped_paths.clone(),
+            excluded_paths: b.excluded_paths.clone(),
             seeded_paths: Vec::new(),
         })
         .collect();
@@ -411,6 +412,8 @@ async fn orchestrate(
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
     fileset_specs.extend(workload_ca_spec);
+    let connector_claims = crate::connector::real::installed_claims();
+    fileset_specs.extend(crate::connector::writes::claims_manifest(&connector_claims));
     crate::artifact::fileset::refuse_writes_a_mount_would_hide(
         &fileset_specs,
         &args.volumes,

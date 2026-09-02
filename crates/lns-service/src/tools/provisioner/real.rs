@@ -201,6 +201,7 @@ async fn run_provisioner(
             target: super::STAGING.to_string(),
             read_only: false,
             dropped_paths: Vec::new(),
+            excluded_paths: Vec::new(),
             seeded_paths: Vec::new(),
         }],
         workload_uid: run_as.uid,

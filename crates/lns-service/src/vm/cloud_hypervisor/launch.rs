@@ -439,6 +439,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![],
+                excluded_paths: Vec::new(),
                 seeded_paths: Vec::new(),
             },
             BindAttachment {
@@ -446,6 +447,7 @@ mod tests {
                 target: "/data".into(),
                 read_only: true,
                 dropped_paths: vec![],
+                excluded_paths: Vec::new(),
                 seeded_paths: Vec::new(),
             },
         ];

@@ -30,6 +30,10 @@ Feature: host bind mounts — virtio-fs shares, read-only mode, dropped secrets,
     When a run requests host bind "/Users/me/.claude" at "/root/.claude" seeding "settings.json"
     Then the bind spec for "/root/.claude" lists "settings.json" in its seeded paths
 
+  Scenario: Every declared exclude reaches the guest, so it can decide which a connector needs
+    When a run requests host bind "/Users/me/.claude" at "/root/.claude" excluding ".credentials.json"
+    Then the bind spec for "/root/.claude" lists ".credentials.json" in its excluded paths
+
   Scenario: A bind no fileset writes into declares no seeded paths, so the guest mounts it whole
     When a run requests host bind "/Users/me/proj" at "/work"
     Then the bind spec for "/work" declares no seeded paths

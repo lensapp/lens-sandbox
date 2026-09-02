@@ -325,6 +325,7 @@ mod tests {
             target: target.to_string(),
             read_only,
             dropped_paths: vec![],
+            excluded_paths: Vec::new(),
             seeded_paths: Vec::new(),
         }
     }

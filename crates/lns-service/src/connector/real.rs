@@ -321,6 +321,19 @@ fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T>
     f(&ConnectorStore::new(&installed, &values, &grants))
 }
 
+/// The paths every installed connector would write, for the boot to make room for (§3.1.11). Unreadable connector state claims nothing, as it offers nothing.
+pub fn installed_claims() -> Vec<String> {
+    match with_stores(|store| Ok(store.installed_definitions()?.0)) {
+        Ok(definitions) => super::writes::installed_claims(&definitions),
+        Err(e) => {
+            crate::log::warn!(
+                "cannot read this machine's connectors, so this run makes room for none of them: {e:#}"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// What the grants this run already made supply to it as it starts, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
 pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
     match read_granted_supply(&GrantHolder::Run(run_id.to_string())) {
@@ -729,6 +742,61 @@ mod tests {
             ["api.some-provider.example"],
             "another run decided nothing, so it is still offered"
         );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn the_boot_is_told_every_path_an_installed_connector_would_write() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_writing(home.path(), "~/.claude", ".credentials.json");
+        assert_eq!(
+            installed_claims(),
+            ["~/.claude/.credentials.json"],
+            "the guest makes room for it only if the run tells it the path"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn connector_state_this_build_cannot_reach_claims_nothing_rather_than_failing_the_run() {
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        assert!(
+            installed_claims().is_empty(),
+            "an unreadable store must not refuse a boot that has nothing to protect"
+        );
+    }
+
+    fn install_writing(home: &Path, guest_path: &str, file: &str) {
+        let dir = home.join("connectors").join("writer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": "writer",
+                "spec": {
+                    "serves": ["api.some-provider.example"],
+                    "methods": [{
+                        "name": "token",
+                        "auth": { "kind": "token" },
+                        "credentials": [{
+                            "envVar": "SOME_TOKEN",
+                            "placeholder": "some-provider-LNSPLACEHOLDER00",
+                            "injections": [{ "kind": "bearer_header", "domain": "api.some-provider.example" }],
+                        }],
+                        "filesets": [{
+                            "guestPath": guest_path,
+                            "inline": { file: "{\"token\":\"some-provider-LNSPLACEHOLDER00\"}" },
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
     }
 
     #[test]

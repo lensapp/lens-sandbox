@@ -28,6 +28,18 @@ impl BindRig {
             target: target.into(),
             read_only,
             dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+            excluded_paths: Vec::new(),
+            seeded_paths: Vec::new(),
+        });
+    }
+
+    pub fn request_excluding(&mut self, source: &str, target: &str, excludes: &[&str]) {
+        self.binds.push(BindAttachment {
+            host_source: source.into(),
+            target: target.into(),
+            read_only: false,
+            dropped_paths: Vec::new(),
+            excluded_paths: excludes.iter().map(|s| s.to_string()).collect(),
             seeded_paths: Vec::new(),
         });
     }
@@ -38,6 +50,7 @@ impl BindRig {
             target: target.into(),
             read_only: false,
             dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
+            excluded_paths: Vec::new(),
             seeded_paths: seeds.iter().map(|s| s.to_string()).collect(),
         });
     }
