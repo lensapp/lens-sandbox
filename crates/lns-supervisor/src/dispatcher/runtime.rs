@@ -9,13 +9,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use lens_sandbox_core::activity::ActivityStream;
 use lens_sandbox_core::child_spawner;
-use lens_sandbox_core::lifecycle::{DEFAULT_GRACE, OrphanReaper, wait_with_signal_forwarding};
+use lens_sandbox_core::lifecycle::{
+    DEFAULT_GRACE, OrphanReaper, exit_code_of, wait_with_signal_forwarding,
+};
+use lens_sandbox_core::prestart::{PreStartFailure, StepRunner};
 use lens_sandbox_core::privilege::SandboxCredentials;
 
 use super::agent::{AgentRunner, agent_child_spec, build_agent_command, stream_output};
 use super::{CYAN, DIM, GREEN, RED, RESET};
 use crate::config::AgentConfig;
-use crate::scripts::{Abort, PreparedScript, ScriptFailure, StepRunner};
+use crate::scripts::Abort;
 
 /// Hold an extra slave fd open for the agent's PTY: while any slave is open the master never returns EIO, so the agent's final output stays buffered through its exit instead of being lost to the slave-close race; we drop this fd after the agent exits for a clean drain-then-EOF.
 #[cfg(target_os = "linux")]
@@ -380,24 +383,21 @@ async fn run_agent_piped(
     }
 }
 
-/// The real script runner: spawn the staged script with the same hardening the workload gets, stream its output live so a slow install never reads as a hang, and report the status it exited with.
+/// The real script runner: stream the staged script's output live so a slow install never reads as a hang, and report the status it exited with.
 pub(crate) struct RealStepRunner;
 
 #[async_trait::async_trait]
 impl StepRunner for RealStepRunner {
     async fn run(
         &self,
-        script: &PreparedScript,
+        mut cmd: tokio::process::Command,
+        label: &str,
         position: &str,
         activity: ActivityStream,
     ) -> Result<i32, String> {
         activity.emit(format!(
-            "{CYAN}[scripts {position}]{RESET} {DIM}{}{RESET}\r\n",
-            script.label
+            "{CYAN}[scripts {position}]{RESET} {DIM}{label}{RESET}\r\n"
         ));
-        let mut cmd = child_spawner::build_command(&script.spec);
-        // A script has no stdin (`docs/sandbox-spec.md` §3.1.13): nothing answers the run's own stdin before the workload starts, and no timeout ends a read left waiting on it.
-        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -435,22 +435,13 @@ enum StreamKind {
     Err(tokio::process::ChildStderr),
 }
 
-/// A signal-killed script did not "exit 1": report `128 + signal` the way a shell does, so the status names what happened.
-fn exit_code_of(status: std::process::ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    status
-        .code()
-        .or_else(|| status.signal().map(|signal| 128 + signal))
-        .unwrap_or(1)
-}
-
 /// A script that failed leaves the run with no workload: log it, then exit with the status a before-workload failure has (`docs/cli-spec.md` §5).
 pub(crate) struct ExitBeforeWorkload;
 
 #[async_trait::async_trait]
 impl Abort for ExitBeforeWorkload {
-    async fn refuse(&self, failure: &ScriptFailure) {
-        tracing::error!("{failure}");
+    async fn refuse(&self, failure: &PreStartFailure) {
+        tracing::error!("{}", crate::scripts::refusal(failure));
         drain_console().await;
         std::process::exit(crate::scripts::BEFORE_WORKLOAD_EXIT);
     }

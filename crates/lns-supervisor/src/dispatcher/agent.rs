@@ -44,8 +44,8 @@ pub(crate) struct AgentDispatcher {
     /// Shared across WS sessions so the running agent's output reaches the current session after a reconnect.
     activity: ActivityStream,
     runner: Arc<dyn AgentRunner>,
-    steps: Arc<dyn crate::scripts::StepRunner>,
-    passwd: Arc<dyn crate::scripts::ids::Passwd>,
+    steps: Arc<dyn lens_sandbox_core::prestart::StepRunner>,
+    passwd: Arc<dyn lens_sandbox_core::privilege::Passwd>,
     abort: Arc<dyn crate::scripts::Abort>,
     /// Held only so a test can await the launch it started; production drops the handle, which detaches the task.
     #[cfg(test)]
@@ -67,7 +67,7 @@ impl AgentDispatcher {
             reaper,
             Arc::new(RealAgentRunner),
             Arc::new(super::runtime::RealStepRunner),
-            Arc::new(crate::scripts::ids::GuestPasswd),
+            Arc::new(lens_sandbox_core::privilege::SystemPasswd),
             Arc::new(super::runtime::ExitBeforeWorkload),
         )
     }
@@ -77,15 +77,12 @@ impl AgentDispatcher {
         sandbox_creds: Option<SandboxCredentials>,
         reaper: Arc<OrphanReaper>,
         runner: Arc<dyn AgentRunner>,
-        steps: Arc<dyn crate::scripts::StepRunner>,
-        passwd: Arc<dyn crate::scripts::ids::Passwd>,
+        steps: Arc<dyn lens_sandbox_core::prestart::StepRunner>,
+        passwd: Arc<dyn lens_sandbox_core::privilege::Passwd>,
         abort: Arc<dyn crate::scripts::Abort>,
     ) -> Self {
-        let exec_manager = ExecManager::new(
-            crate::run_as::setuid_creds(sandbox_creds.as_ref()),
-            config.core.is_root,
-            reaper.guard(),
-        );
+        let exec_manager =
+            ExecManager::new(sandbox_creds.clone(), config.core.is_root, reaper.guard());
         let activity = ActivityStream::new();
         spawn_activity_to_stdout(&activity);
         Self {
@@ -188,8 +185,8 @@ struct AgentSession {
     activity: ActivityStream,
     exec_manager: ExecManager,
     runner: Arc<dyn AgentRunner>,
-    steps: Arc<dyn crate::scripts::StepRunner>,
-    passwd: Arc<dyn crate::scripts::ids::Passwd>,
+    steps: Arc<dyn lens_sandbox_core::prestart::StepRunner>,
+    passwd: Arc<dyn lens_sandbox_core::privilege::Passwd>,
     abort: Arc<dyn crate::scripts::Abort>,
     #[cfg(test)]
     launch: LaunchSlot,
@@ -249,7 +246,10 @@ impl SessionHandler for AgentSession {
             )
             .await
             {
-                activity.emit(format!("{RED}[scripts]{RESET} {failure}\r\n"));
+                activity.emit(format!(
+                    "{RED}[scripts]{RESET} {}\r\n",
+                    crate::scripts::refusal(&failure)
+                ));
                 abort.refuse(&failure).await;
                 return;
             }
@@ -344,25 +344,16 @@ pub(crate) fn build_script_env(
     build_agent_env(config, creds, env)
 }
 
-/// A script runs in its own user's home, not the workload's workdir: the workdir may be a bind the script is meant to prepare rather than sit inside.
-pub(crate) fn resolve_script_cwd(creds: Option<&SandboxCredentials>) -> String {
-    creds
-        .map(SandboxCredentials::home)
-        .filter(|home| !home.is_empty())
-        .unwrap_or("/")
-        .to_string()
-}
-
 async fn run_scripts_before(
     config: &AgentConfig,
     creds: Option<&SandboxCredentials>,
     env: &HashMap<String, String>,
-    passwd: &dyn crate::scripts::ids::Passwd,
-    steps: &dyn crate::scripts::StepRunner,
+    passwd: &dyn lens_sandbox_core::privilege::Passwd,
+    steps: &dyn lens_sandbox_core::prestart::StepRunner,
     activity: &ActivityStream,
-) -> Result<(), crate::scripts::ScriptFailure> {
+) -> Result<(), lens_sandbox_core::prestart::PreStartFailure> {
     let scripts = crate::scripts::prepare(config, creds, env, passwd)?;
-    crate::scripts::run_all(&scripts, steps, activity).await
+    lens_sandbox_core::prestart::run_all(&scripts, steps, activity).await
 }
 
 /// Assemble the agent `ChildSpec` with agent-specific env layering atop the shared `child_spawner` hardening.
@@ -378,7 +369,7 @@ pub(crate) fn agent_child_spec(
             effective_home(env, creds).as_deref(),
         )),
         env: build_agent_env(config, creds, env),
-        creds: crate::run_as::setuid_creds(creds),
+        creds: creds.cloned(),
         is_root: config.core.is_root,
     }
 }
@@ -613,16 +604,22 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn a_root_run_as_keeps_its_identity_but_not_its_setuid() {
-        let creds = SandboxCredentials::resolve_by_uid(0, 0).expect("uid 0 resolves on host");
+    fn a_root_run_as_reaches_the_spawn_with_the_identity_it_resolved_to() {
+        let creds = SandboxCredentials::resolve_by_uid(0, 20).expect("uid 0 resolves on host");
         let mut config = make_agent_config();
         config.workspace_path = None;
 
         let spec = agent_child_spec(&config, Some(&creds), &HashMap::new());
 
-        assert!(
-            spec.creds.is_none(),
-            "a root run-as must reach child_spawner's cap-drop branch, which only runs when creds is None"
+        let (uid, gid) = spec
+            .creds
+            .as_ref()
+            .expect("the resolved identity reaches the spawn")
+            .uid_gid();
+        assert_eq!(
+            (uid.as_raw(), gid.as_raw()),
+            (0, 20),
+            "privilege_drop_for routes uid 0 to the cap drop and applies the group it was resolved for, so filtering root out here would cost the child that group"
         );
         assert_eq!(
             spec.env.get("HOME").map(String::as_str),
@@ -1180,17 +1177,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::scripts::StepRunner for RecordingSteps {
+    impl lens_sandbox_core::prestart::StepRunner for RecordingSteps {
         async fn run(
             &self,
-            script: &crate::scripts::PreparedScript,
+            _command: Command,
+            label: &str,
             _position: &str,
             _activity: ActivityStream,
         ) -> Result<i32, String> {
             self.ran
                 .lock()
                 .expect("uncontended")
-                .push(script.label.clone());
+                .push(label.to_string());
             Ok(self.fail_with.unwrap_or(0))
         }
     }
@@ -1198,10 +1196,11 @@ mod tests {
     struct NoScripts;
 
     #[async_trait]
-    impl crate::scripts::StepRunner for NoScripts {
+    impl lens_sandbox_core::prestart::StepRunner for NoScripts {
         async fn run(
             &self,
-            _script: &crate::scripts::PreparedScript,
+            _command: Command,
+            _label: &str,
             _position: &str,
             _activity: ActivityStream,
         ) -> Result<i32, String> {
@@ -1217,7 +1216,7 @@ mod tests {
 
     #[async_trait]
     impl crate::scripts::Abort for RecordingAbort {
-        async fn refuse(&self, failure: &crate::scripts::ScriptFailure) {
+        async fn refuse(&self, failure: &lens_sandbox_core::prestart::PreStartFailure) {
             self.refused
                 .lock()
                 .expect("uncontended")
@@ -1227,7 +1226,7 @@ mod tests {
 
     struct NoPasswd;
 
-    impl crate::scripts::ids::Passwd for NoPasswd {
+    impl lens_sandbox_core::privilege::Passwd for NoPasswd {
         fn uid_of(&self, _name: &str) -> Option<u32> {
             None
         }
@@ -1385,7 +1384,7 @@ mod tests {
         );
         assert!(matches!(
             failure,
-            crate::scripts::ScriptFailure::UnresolvableUser { .. }
+            lens_sandbox_core::prestart::PreStartFailure::UnresolvableUser { .. }
         ));
     }
 
