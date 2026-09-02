@@ -94,11 +94,11 @@ fn mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
     );
 }
 
-#[given(regex = r#"^the directory's own decisions declare the tool "([^"]+)"$"#)]
+#[given(regex = r#"^the run's own decisions declare the tool "([^"]+)"$"#)]
 fn local_mixin_declaring_a_tool(w: &mut BehaviourWorld, tool: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.local_mixin = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{{"tools":["{tool}"]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{{"tools":["{tool}"]}}}}"#
     ));
 }
 
@@ -106,13 +106,13 @@ fn local_mixin_declaring_a_tool(w: &mut BehaviourWorld, tool: String) {
 fn decided(w: &mut BehaviourWorld, spec: &str, allowing: &str) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.local_mixin = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{spec}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{spec}}}"#
     ));
     rig.overlay
         .add_rule(lns_policy::RouteRule::allow_host(allowing));
 }
 
-#[given(regex = r#"^the directory's own decisions allow "([^"]+)"$"#)]
+#[given(regex = r#"^the run's own decisions allow "([^"]+)"$"#)]
 fn local_mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
     decided(
         w,
@@ -123,7 +123,7 @@ fn local_mixin_allowing_a_destination(w: &mut BehaviourWorld, host: String) {
     );
 }
 
-#[given(regex = r#"^the directory's own decisions allow "([^"]+)" and nothing else$"#)]
+#[given(regex = r#"^the run's own decisions allow "([^"]+)" and nothing else$"#)]
 fn local_mixin_allowing_only_a_destination(w: &mut BehaviourWorld, host: String) {
     decided(
         w,
@@ -132,11 +132,11 @@ fn local_mixin_allowing_only_a_destination(w: &mut BehaviourWorld, host: String)
     );
 }
 
-#[given(regex = r#"^the directory's own decisions declare the tool "([^"]+)" and that mixin$"#)]
+#[given(regex = r#"^the run's own decisions declare the tool "([^"]+)" and that mixin$"#)]
 fn local_mixin_declaring_a_tool_and_that_mixin(w: &mut BehaviourWorld, tool: String) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.local_mixin = Some(format!(
-        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{{"tools":["{tool}"],"mixins":["{MIXIN}"]}}}}"#
+        r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{{"tools":["{tool}"],"mixins":["{MIXIN}"]}}}}"#
     ));
 }
 
@@ -232,13 +232,13 @@ async fn sandbox_is_resolved_and_launched(w: &mut BehaviourWorld) {
     };
     let local = lns_service::artifact::mixin::LocalSource::read(
         local.map(|document| FetchedMixin {
-            pinned: "lns-local-mixin.yaml".to_string(),
+            pinned: "decisions.yaml".to_string(),
             document,
             layers: Vec::new(),
         }),
         Locator::Local(std::path::PathBuf::from("/work")),
     )
-    .expect("the directory's decisions read");
+    .expect("the run's decisions read");
     let planned = match lns_service::artifact::mixin::resolve(
         definition.as_bytes(),
         &[],
@@ -392,13 +392,13 @@ fn disclosure_attributes(
     }
 }
 
-#[then("the run resolved the directory's own decisions as a source")]
-fn run_resolved_the_directorys_decisions(w: &mut BehaviourWorld) -> Result<(), String> {
+#[then("the run resolved its own decisions as a source")]
+fn run_resolved_its_own_decisions(w: &mut BehaviourWorld) -> Result<(), String> {
     let rig = w.declared.as_ref().ok_or("no launch happened")?;
     if rig
         .resolved_mixins
         .iter()
-        .any(|source| source == "lns-local-mixin.yaml")
+        .any(|source| source == "decisions.yaml")
     {
         Ok(())
     } else {

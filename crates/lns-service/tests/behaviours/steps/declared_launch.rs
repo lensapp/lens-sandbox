@@ -42,7 +42,7 @@ fn declared_definition(w: &mut BehaviourWorld) -> String {
         .expect("a Given step must declare the definition")
 }
 
-#[given("the directory's lns-local-mixin.yaml denies all by default")]
+#[given("the run's decisions.yaml denies all by default")]
 fn overlay_denies_by_default(w: &mut BehaviourWorld) {
     let rig = w.declared.get_or_insert_with(Default::default);
     rig.overlay.add_rule(lns_policy::RouteRule::deny_host("*"));

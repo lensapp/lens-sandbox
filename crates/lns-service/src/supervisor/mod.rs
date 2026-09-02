@@ -531,8 +531,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-local-mixin.yaml");
-        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("decisions.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  egress:\n    http: []\n").expect("policy");
 
         let result = SupervisorSession::start(
             "deadbeef00000000000000000000aa99".to_string(),
@@ -561,8 +561,8 @@ mod tests {
         let supervisor_bin = d.path().join("supervisor.real");
         std::fs::write(&supervisor_bin, b"fake supervisor").expect("write");
         let _sb = EnvVarGuard::set("LNS_SUPERVISOR_BIN", &supervisor_bin);
-        let policy_path = d.path().join("lns-local-mixin.yaml");
-        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  egress:\n    http: []\n").expect("policy");
+        let policy_path = d.path().join("decisions.yaml");
+        std::fs::write(&policy_path, "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  egress:\n    http: []\n").expect("policy");
         let mut sandbox_policy = lns_policy::Policy::default();
         sandbox_policy.add_rule(lns_policy::RouteRule::deny_host("api.example.test"));
 

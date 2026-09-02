@@ -84,7 +84,7 @@ fn given_workload_with_file(world: &mut BehaviourWorld, _filename: String) {
         .expect("save initial policy");
 }
 
-#[given(regex = r#"^the sandbox was launched with --policy "([^"]+)"$"#)]
+#[given(regex = r#"^the run records what it decides in "([^"]+)"$"#)]
 fn given_launched_with_policy(world: &mut BehaviourWorld, _filename: String) {
     let rig = world.approval();
     Policy::default()

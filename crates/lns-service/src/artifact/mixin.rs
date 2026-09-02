@@ -1361,7 +1361,7 @@ mod tests {
     fn a_decisions_file_that_is_no_mixin_refuses_the_run_naming_the_file() {
         let err = LocalSource::read(
             Some(FetchedMixin {
-                pinned: "lns-local-mixin.yaml".to_string(),
+                pinned: "decisions.yaml".to_string(),
                 document: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"x","spec":{"image":"x:1"}}"#.to_string(),
                 layers: Vec::new(),
             }),
@@ -1369,7 +1369,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("lns-local-mixin.yaml"),
+            format!("{err:#}").contains("decisions.yaml"),
             "a run that dropped a decisions file it could not read would boot without what the developer decided; got: {err:#}"
         );
     }
@@ -1378,8 +1378,8 @@ mod tests {
     fn a_directory_that_decided_only_destinations_is_still_a_source_of_the_merge() {
         let local = LocalSource::read(
             Some(FetchedMixin {
-                pinned: "lns-local-mixin.yaml".to_string(),
-                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#.to_string(),
+                pinned: "decisions.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{"egress":{"http":[{"match":"api.example.test","verdict":"allow"}]}}}"#.to_string(),
                 layers: Vec::new(),
             }),
             decided_in("/work/lns.yaml"),
@@ -1396,9 +1396,9 @@ mod tests {
     fn decided(spec: &str) -> Option<LocalSource> {
         LocalSource::read(
             Some(FetchedMixin {
-                pinned: "lns-local-mixin.yaml".to_string(),
+                pinned: "decisions.yaml".to_string(),
                 document: format!(
-                    r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{spec}}}"#
+                    r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{spec}}}"#
                 ),
                 layers: Vec::new(),
             }),
@@ -1442,7 +1442,7 @@ mod tests {
                 .map(|c| (c.key.as_str(), c.source.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("allow docs.some-vendor.example", "lns-local-mixin.yaml"),
+                ("allow docs.some-vendor.example", "decisions.yaml"),
                 (
                     "deny docs.some-vendor.example",
                     lns_artifact::merge::ROOT_LABEL
@@ -1452,7 +1452,7 @@ mod tests {
         );
         assert_eq!(
             out.mixins,
-            ["lns-local-mixin.yaml"],
+            ["decisions.yaml"],
             "a source the run merged is one the disclosure names"
         );
     }
@@ -1533,11 +1533,11 @@ mod tests {
         let source = Fake::new(&[("/decisions/tools", r#"{"tools":["ripgrep@14"]}"#)]);
         let local = LocalSource::read(
             Some(FetchedMixin {
-                pinned: "lns-local-mixin.yaml".to_string(),
-                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"lns-local-mixin","spec":{"mixins":["./tools"]}}"#.to_string(),
+                pinned: "decisions.yaml".to_string(),
+                document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"decisions","spec":{"mixins":["./tools"]}}"#.to_string(),
                 layers: Vec::new(),
             }),
-            decided_in("/decisions/lns-local-mixin.yaml"),
+            decided_in("/decisions/decisions.yaml"),
         )
         .expect("a written file reads")
         .expect("a written file contributes");
@@ -1567,7 +1567,7 @@ mod tests {
                 document: r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"dev","spec":{"mixins":["./tools"]}}"#.to_string(),
                 layers: Vec::new(),
             }),
-            decided_in("/decisions/lns-local-mixin.yaml"),
+            decided_in("/decisions/decisions.yaml"),
         )
         .expect("a written file reads")
         .expect("a written file contributes");

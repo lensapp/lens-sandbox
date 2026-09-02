@@ -9,7 +9,7 @@ pub struct DeclaredRig {
     pub error: Option<String>,
     /// Mixin documents this machine can resolve, keyed by reference.
     pub mixins: std::collections::BTreeMap<String, String>,
-    /// The document the directory's own decisions file holds, for a scenario about the source §3.3.2 puts last.
+    /// The document a run's own decisions file holds, for a scenario about the source §3.3.2 puts last.
     pub local_mixin: Option<String>,
     /// The document the resolution produced, so a scenario can see what did and did not get merged into it.
     pub resolved_document: Option<String>,

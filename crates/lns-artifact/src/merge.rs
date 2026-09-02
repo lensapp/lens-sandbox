@@ -66,7 +66,7 @@ pub struct Merged {
 /// The graph is walked this deep and refused beyond, so a chain nobody can read cannot stall a launch.
 pub const MAX_DEPTH: usize = 5;
 
-/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it, then the directory's own decisions last.
+/// Flatten a sandbox and its mixins into the one ordered source list §3.3.2 merges: the sandbox first, then each of its `mixins` in order with that mixin's own `mixins` expanded right after it, then each extra reference in the order the user gave it, then the run's own decisions last.
 ///
 /// A mixin's own mixins come after it, so they beat it — a mixin that pulls in another is asking for that other's version of a shared setting. The local source is the exception: §8.1 puts it after every other source outright, so what it pulled merges before it.
 /// A source many documents name appears once, at the last place it was named: an earlier appearance can decide nothing a later one does not, since either a source after it sets a key or the source itself sets it again.

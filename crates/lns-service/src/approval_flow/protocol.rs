@@ -21,7 +21,7 @@ pub enum GuestFrame {
     Other,
 }
 
-/// The verdict the guest gate accepts. `ask` is one no document may write — `lns_policy::Verdict` stays two-valued so it cannot reach `lns-local-mixin.yaml` — but the gate has always taken it, and it is how a served destination is held (sandbox-spec §3.2.1).
+/// The verdict the guest gate accepts. `ask` is one no document may write — `lns_policy::Verdict` stays two-valued so it cannot reach a run's `decisions.yaml` — but the gate has always taken it, and it is how a served destination is held (sandbox-spec §3.2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WireVerdict {

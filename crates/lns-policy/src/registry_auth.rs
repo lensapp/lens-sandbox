@@ -1,4 +1,4 @@
-//! Registry logins live in `~/.lns/registry-auth.json`, not `lns-local-mixin.yaml`, to keep the shareable policy file free of per-machine secrets.
+//! Registry logins live in `~/.lns/registry-auth.json`, not a run's `decisions.yaml`, to keep a document that can be saved and shared free of per-machine secrets.
 
 use std::collections::HashMap;
 use std::fs;

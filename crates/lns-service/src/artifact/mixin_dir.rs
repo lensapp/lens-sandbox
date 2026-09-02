@@ -28,7 +28,7 @@ pub fn read_path_mixin<D: MixinDir>(dir: &D, path: &Path) -> Result<FetchedMixin
     parse_document(&yaml, &document, &root, document.display().to_string())
 }
 
-/// Read the directory's own decisions, which every run there resolves without being named (`docs/sandbox-spec.md` §8.1); a directory nobody has decided anything in has none to read.
+/// Read a run's own decisions, which that run resolves without being named (`docs/sandbox-spec.md` §8.1); a run that has been asked nothing has none to read.
 pub fn read_local_mixin<D: MixinDir>(dir: &D, file: &Path) -> Result<Option<FetchedMixin>> {
     let yaml = match dir.read(file) {
         Ok(yaml) => yaml,
@@ -279,7 +279,7 @@ mod tests {
         assert!(
             read_local_mixin(
                 &Fake::new(BTreeMap::new()),
-                Path::new("/work/lns-local-mixin.yaml")
+                Path::new("/work/decisions.yaml")
             )
             .unwrap()
             .is_none(),
@@ -289,9 +289,9 @@ mod tests {
 
     #[test]
     fn a_decisions_file_an_editor_has_truncated_contributes_nothing() {
-        let dir = holding("/work/lns-local-mixin.yaml", "  \n");
+        let dir = holding("/work/decisions.yaml", "  \n");
         assert!(
-            read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+            read_local_mixin(&dir, Path::new("/work/decisions.yaml"))
                 .unwrap()
                 .is_none(),
             "an editor truncates a file before it writes one, and a run that caught it mid-write must not refuse"
@@ -301,14 +301,14 @@ mod tests {
     #[test]
     fn the_decisions_file_is_named_by_the_file_it_is() {
         let dir = holding(
-            "/work/lns-local-mixin.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  tools:\n    - ripgrep@14\n",
+            "/work/decisions.yaml",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  tools:\n    - ripgrep@14\n",
         );
-        let fetched = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+        let fetched = read_local_mixin(&dir, Path::new("/work/decisions.yaml"))
             .unwrap()
             .expect("a written file contributes");
         assert_eq!(
-            fetched.pinned, "lns-local-mixin.yaml",
+            fetched.pinned, "decisions.yaml",
             "nothing names this source, so a disclosure attributes it by the file it is"
         );
         assert!(
@@ -321,10 +321,10 @@ mod tests {
     #[test]
     fn a_path_the_decisions_file_writes_is_rooted_in_its_own_directory() {
         let dir = holding(
-            "/work/lns-local-mixin.yaml",
-            "apiVersion: lns.run/v1\nkind: mixin\nname: lns-local-mixin\nspec:\n  filesets:\n    - path: ./notes\n      guestPath: /home/agent/notes\n",
+            "/work/decisions.yaml",
+            "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  filesets:\n    - path: ./notes\n      guestPath: /home/agent/notes\n",
         );
-        let fetched = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml"))
+        let fetched = read_local_mixin(&dir, Path::new("/work/decisions.yaml"))
             .unwrap()
             .expect("a written file contributes");
         assert!(
@@ -354,19 +354,19 @@ mod tests {
             format!("{refused:#}").contains("/work/mixins/pg"),
             "a path this machine cannot read is not a path that decided nothing; got: {refused:#}"
         );
-        let err = read_local_mixin(&Denied, Path::new("/work/lns-local-mixin.yaml")).unwrap_err();
+        let err = read_local_mixin(&Denied, Path::new("/work/decisions.yaml")).unwrap_err();
         assert!(
-            format!("{err:#}").contains("/work/lns-local-mixin.yaml"),
+            format!("{err:#}").contains("/work/decisions.yaml"),
             "a file that exists and cannot be read is not a directory that decided nothing; got: {err:#}"
         );
     }
 
     #[test]
     fn a_decisions_file_that_is_not_yaml_names_the_file_it_could_not_parse() {
-        let dir = holding("/work/lns-local-mixin.yaml", "\tnot: [valid");
-        let err = read_local_mixin(&dir, Path::new("/work/lns-local-mixin.yaml")).unwrap_err();
+        let dir = holding("/work/decisions.yaml", "\tnot: [valid");
+        let err = read_local_mixin(&dir, Path::new("/work/decisions.yaml")).unwrap_err();
         assert!(
-            format!("{err:#}").contains("parsing /work/lns-local-mixin.yaml"),
+            format!("{err:#}").contains("parsing /work/decisions.yaml"),
             "got: {err:#}"
         );
     }
