@@ -337,7 +337,7 @@ enum VolumeVerb<'a> {
     Create(&'a str),
     Inspect(&'a str),
     Remove(&'a str),
-    Prune,
+    Prune { dry_run: bool },
 }
 
 impl<'a> VolumeVerb<'a> {
@@ -347,7 +347,7 @@ impl<'a> VolumeVerb<'a> {
             Request::CreateVolume { name } => Some(VolumeVerb::Create(name)),
             Request::InspectVolume { name } => Some(VolumeVerb::Inspect(name)),
             Request::RemoveVolume { name } => Some(VolumeVerb::Remove(name)),
-            Request::PruneVolumes => Some(VolumeVerb::Prune),
+            Request::PruneVolumes { dry_run } => Some(VolumeVerb::Prune { dry_run: *dry_run }),
             _ => None,
         }
     }
@@ -377,13 +377,15 @@ async fn handle_volume_request(verb: VolumeVerb<'_>) -> Response {
                 }
             }))
         }
-        VolumeVerb::Prune => volume_response(crate::volume_store::prune().await.map(|report| {
-            Response::VolumesPruned {
-                removed: report.removed,
-                reclaimed_bytes: report.reclaimed_bytes,
-                failed: report.failed,
-            }
-        })),
+        VolumeVerb::Prune { dry_run } => {
+            volume_response(crate::volume_store::prune(dry_run).await.map(|report| {
+                Response::VolumesPruned {
+                    removed: report.removed,
+                    reclaimed_bytes: report.reclaimed_bytes,
+                    failed: report.failed,
+                }
+            }))
+        }
     }
 }
 
@@ -450,7 +452,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::CreateVolume { .. }
         | Request::InspectVolume { .. }
         | Request::RemoveVolume { .. }
-        | Request::PruneVolumes
+        | Request::PruneVolumes { .. }
         | Request::InstallConnector { .. }
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
@@ -2098,12 +2100,19 @@ mod tests {
             now,
         )
         .await;
-        let pruned = as_json(handle_request(&Request::PruneVolumes, now).await);
+        let planned = as_json(handle_request(&Request::PruneVolumes { dry_run: true }, now).await);
+        let planned_names = planned["removed"].as_array().expect("a removed array");
+        assert!(
+            planned_names.contains(&serde_json::json!("cov-ipc-prune")),
+            "a dry run answers what the prune would take: got {planned_names:?}"
+        );
+
+        let pruned = as_json(handle_request(&Request::PruneVolumes { dry_run: false }, now).await);
         assert_eq!(pruned["type"], "VolumesPruned", "got {pruned}");
         let pruned_names = pruned["removed"].as_array().expect("a removed array");
-        assert!(
-            pruned_names.contains(&serde_json::json!("cov-ipc-prune")),
-            "got {pruned_names:?}"
+        assert_eq!(
+            pruned_names, planned_names,
+            "the dry run and the prune classify the same volumes, or the question the user answered was about something else"
         );
         assert!(pruned["reclaimed_bytes"].as_u64().expect("reclaimed bytes") > 0);
     }

@@ -26,7 +26,12 @@ async fn remove_volume(w: &mut BehaviourWorld, name: String) {
 
 #[when(expr = "the volumes are pruned")]
 async fn prune_volumes(w: &mut BehaviourWorld) {
-    w.volume().prune().await;
+    w.volume().prune(false).await;
+}
+
+#[when(expr = "the volumes are pruned as a dry run")]
+async fn prune_volumes_dry(w: &mut BehaviourWorld) {
+    w.volume().prune(true).await;
 }
 
 fn listing(rig: &VolumeRig) -> &[lns_ipc::VolumeInfo] {

@@ -84,7 +84,10 @@ pub enum Request {
     RemoveVolume {
         name: String,
     },
-    PruneVolumes,
+    /// A dry run classifies every volume the way the prune does and removes none, so a caller can ask before it sweeps.
+    PruneVolumes {
+        dry_run: bool,
+    },
     PullImage {
         image: String,
         expected_digest: String,
@@ -1486,7 +1489,8 @@ mod tests {
             Request::RemoveVolume {
                 name: "prism-data".into(),
             },
-            Request::PruneVolumes,
+            Request::PruneVolumes { dry_run: false },
+            Request::PruneVolumes { dry_run: true },
         ] {
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

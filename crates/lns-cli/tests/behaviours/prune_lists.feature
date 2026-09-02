@@ -57,6 +57,24 @@ Feature: a prune lists what it would remove before asking
     And the command's stderr does not contain "prism-data"
     And the command's stderr shows "Would remove:" before "Continue? [y/N]"
 
+  Scenario: the volume prune question says a sandbox holds a volume, not a running one
+    Given the volume "orphan" is held by no running sandbox and named by no cached sandbox
+    And the user will answer "n" to the prompt
+    When the user runs volume command "prune"
+    Then the exit code is 0
+    And the command's stderr contains "This removes every volume no sandbox holds."
+
+  Scenario: a volume prune that can remove nothing says why instead of asking
+    Given the service reports an idle volume "scratch" using 1024 bytes on disk
+    And the service will fail to prune "scratch" with "run aa07's record cannot be read; restart the service"
+    And a terminal is attached
+    When the user runs volume command "prune"
+    Then the exit code is 1
+    And the output contains "Failed to remove scratch"
+    And the command's stderr does not contain "Would remove:"
+    And the command's stderr does not contain "Continue?"
+    And no volume was pruned
+
   Scenario: a volume prune with nothing unused never asks
     Given the service reports a volume "prism-data" using 1024 bytes on disk held by "reviewer"
     And a terminal is attached
@@ -64,4 +82,4 @@ Feature: a prune lists what it would remove before asking
     Then the exit code is 0
     And the output contains "No unused volumes."
     And the command's stderr does not contain "Continue?"
-    And no prune request reached the service
+    And no volume was pruned

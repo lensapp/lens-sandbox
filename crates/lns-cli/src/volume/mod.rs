@@ -27,7 +27,7 @@ pub enum VolumeCommand {
     Inspect(VolumeInspectArgs),
     #[command(about = "Remove a named volume; refused while a run holds it.")]
     Rm(VolumeNameArg),
-    #[command(about = "Remove every volume not attached to a running sandbox.")]
+    #[command(about = "Remove every volume no sandbox holds.")]
     Prune(VolumePruneArgs),
 }
 
@@ -234,67 +234,70 @@ async fn prune(
     if !force {
         if !terminal.is_available() {
             bail!(
-                "this removes every volume not attached to a running sandbox; there is no terminal to ask at, so pass --force to confirm"
+                "this removes every volume no sandbox holds; there is no terminal to ask at, so pass --force to confirm"
             );
         }
-        let unused = unused_volume_names(svc).await?;
-        if unused.is_empty() {
-            writeln!(writer, "No unused volumes.")?;
-            return Ok(0);
+        // The question has to be about the sweep that follows it, so the service answers both.
+        let planned = prune_report(svc, true).await?;
+        if planned.removed.is_empty() {
+            return report_prune(writer, &planned);
         }
-        crate::output::announce_prune_candidates(&unused, err).await?;
+        crate::output::announce_prune_candidates(&planned.removed, err).await?;
         if !confirm_prune(terminal, err).await? {
             return Ok(0);
         }
     }
-    match send(svc, Request::PruneVolumes).await? {
+    let pruned = prune_report(svc, false).await?;
+    report_prune(writer, &pruned)
+}
+
+#[derive(Debug)]
+struct PruneOutcome {
+    removed: Vec<String>,
+    reclaimed_bytes: u64,
+    failed: Vec<lns_ipc::VolumePruneFailure>,
+}
+
+async fn prune_report(svc: &dyn VolumeService, dry_run: bool) -> Result<PruneOutcome> {
+    match send(svc, Request::PruneVolumes { dry_run }).await? {
         Response::VolumesPruned {
             removed,
             reclaimed_bytes,
             failed,
-        } => {
-            for name in &removed {
-                writeln!(writer, "{name}")?;
-            }
-            if !removed.is_empty() {
-                writeln!(
-                    writer,
-                    "Total reclaimed space: {}",
-                    format_size(reclaimed_bytes)
-                )?;
-            }
-            for f in &failed {
-                writeln!(writer, "Failed to remove {}: {}", f.name, f.error)?;
-            }
-            if removed.is_empty() && failed.is_empty() {
-                writeln!(writer, "No unused volumes.")?;
-            }
-            Ok(if failed.is_empty() { 0 } else { 1 })
-        }
+        } => Ok(PruneOutcome {
+            removed,
+            reclaimed_bytes,
+            failed,
+        }),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
 
-async fn unused_volume_names(svc: &dyn VolumeService) -> Result<Vec<String>> {
-    match send(svc, Request::ListVolumes).await? {
-        Response::VolumeList { volumes } => {
-            let mut names: Vec<String> = volumes
-                .into_iter()
-                .filter(|volume| volume.in_use_by.is_empty())
-                .map(|volume| volume.name)
-                .collect();
-            names.sort_unstable();
-            Ok(names)
-        }
-        other => bail!("unexpected response from daemon: {other:?}"),
+fn report_prune(writer: &mut impl Write, outcome: &PruneOutcome) -> Result<i32> {
+    for name in &outcome.removed {
+        writeln!(writer, "{name}")?;
     }
+    if !outcome.removed.is_empty() {
+        writeln!(
+            writer,
+            "Total reclaimed space: {}",
+            format_size(outcome.reclaimed_bytes)
+        )?;
+    }
+    for f in &outcome.failed {
+        writeln!(writer, "Failed to remove {}: {}", f.name, f.error)?;
+    }
+    if outcome.removed.is_empty() && outcome.failed.is_empty() {
+        writeln!(writer, "No unused volumes.")?;
+    }
+    Ok(if outcome.failed.is_empty() { 0 } else { 1 })
 }
 
 async fn confirm_prune(
     terminal: &mut dyn Terminal,
     err: &mut (impl tokio::io::AsyncWriteExt + Unpin),
 ) -> Result<bool> {
-    err.write_all(b"This removes every volume not attached to a running sandbox. Continue? [y/N] ")
+    err.write_all(b"This removes every volume no sandbox holds. Continue? [y/N] ")
         .await?;
     err.flush().await?;
     let yes = crate::terminal::is_affirmative(&terminal.read_answer()?);
@@ -436,12 +439,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_without_force_says_so_when_every_volume_is_held() {
-        let svc = CannedService::with([Some(Response::VolumeList {
-            volumes: vec![VolumeInfo {
-                in_use_by: vec!["reviewer".into()],
-                ..volume("held")
-            }],
+    async fn a_prune_with_nothing_to_remove_says_so_without_asking() {
+        let svc = CannedService::with([Some(Response::VolumesPruned {
+            removed: Vec::new(),
+            reclaimed_bytes: 0,
+            failed: Vec::new(),
         })]);
         let (code, out) = run_cmd(
             &VolumeCommand::Prune(VolumePruneArgs { force: false }),
@@ -455,9 +457,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unused_volume_listing_rejects_an_unrelated_variant() {
+    async fn a_prune_that_would_remove_nothing_reports_what_stands_in_the_way_without_asking() {
+        let svc = CannedService::with([Some(Response::VolumesPruned {
+            removed: Vec::new(),
+            reclaimed_bytes: 0,
+            failed: vec![lns_ipc::VolumePruneFailure {
+                name: "scratch".into(),
+                error: "run aa07's record cannot be read".into(),
+            }],
+        })]);
+        let (code, out) = run_cmd(
+            &VolumeCommand::Prune(VolumePruneArgs { force: false }),
+            &svc,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            code, 1,
+            "a prune that removed nothing it was asked to is a failure"
+        );
+        assert!(out.contains("Failed to remove scratch"), "got: {out}");
+        assert!(
+            !out.contains("Continue?"),
+            "there is nothing to consent to, so the question must not be asked: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prune_plan_rejects_an_unrelated_variant() {
         let svc = CannedService::with([Some(Response::Pong)]);
-        let err = unused_volume_names(&svc).await.unwrap_err();
+        let err = prune_report(&svc, true).await.unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 

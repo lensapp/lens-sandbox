@@ -147,6 +147,21 @@ Feature: volume lifecycle — list, create, inspect, remove, prune
     When the volumes are listed
     Then the listing names "prism-data" as in use by "reviewer" and "auditor"
 
+  Scenario: A dry run names what a prune would remove and removes none of it
+    Given volume "scratch" already exists in the store
+    And the stopped sandbox "reviewer" declares volume "prism-data"
+    When the volumes are pruned as a dry run
+    Then the prune removes only "scratch"
+    And the backing image for "scratch" remains in the store
+    And the backing image for "prism-data" remains in the store
+
+  Scenario: A dry run reports a repair-blocked volume the way the prune itself would
+    Given volume "scratch" already exists in the store
+    And the record of run "aa07" cannot be read
+    When the volumes are pruned as a dry run
+    Then the prune removes nothing
+    And the prune reports "scratch" as failed, naming run "aa07"
+
   Scenario: Pruning an empty store removes nothing
     When the volumes are pruned
     Then the prune removes nothing
