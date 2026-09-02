@@ -113,7 +113,7 @@ Rules:
 - For mixed-type PRs, the label tracks the same "most significant prefix" used for the title, so title and label never disagree.
 - `chore(deps):` dependency bumps stay `chore` — the `dependencies` label exists but is applied only when the user explicitly asks.
 - These labels are expected to already exist in the repo. If `gh pr create` rejects a missing label, create it with `gh label create "<name>"` and retry.
-- CI enforces this: the `labels` job in `.github/workflows/ci.yml` (via `scripts/check-pr-labels.sh`) fails the PR unless it carries exactly one type label and no labels outside the sanctioned set. A PR with zero or two type labels is blocked.
+- CI enforces this: `.github/workflows/pr-labels.yml` (via `scripts/check-pr-labels.sh`) fails the PR unless it carries exactly one type label and no labels outside the sanctioned set. A PR with zero or two type labels is blocked.
 
 ### 4. Write PR Body
 
