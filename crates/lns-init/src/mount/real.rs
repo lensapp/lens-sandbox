@@ -187,6 +187,16 @@ impl Syscalls for RealSyscalls {
         rc_to_result(rc)
     }
 
+    fn unlink_if_symlink(&self, path: &CStr) -> io::Result<()> {
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+        match std::fs::symlink_metadata(path) {
+            Ok(found) if found.file_type().is_symlink() => std::fs::remove_file(path),
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     fn umount(&self, target: &CStr) -> io::Result<()> {
         // SAFETY: target is a valid NUL-terminated C string; umount reads it only.
         let rc = unsafe { libc::umount(target.as_ptr()) };
