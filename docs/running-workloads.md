@@ -595,6 +595,34 @@ spec:
   refusal names the fileset entry and the volume entry. Add one of those two
   mounts with a `-v` flag instead of in the document and the run is refused when
   it starts, before anything boots.
+- A path a bind [`exclude`s](#excluding-subpaths-from-a-bind) is the one place
+  inside a bind a fileset may write. The mask an exclusion leaves is guest-local,
+  so the file never reaches the host directory the bind shares and dies with the
+  microVM, exactly as any other fileset does. Only that same bind's own `exclude`
+  allows it, and `readOnly` makes no difference:
+
+  ```yaml
+  spec:
+    volumes:
+      - type: bind
+        source: ~/.agent
+        target: /root/.agent
+        exclude:
+          - session          # the guest gets a mask here, not the host's copy
+    filesets:
+      - inline:
+          state.json: |
+            {"mode":"review"}
+        guestPath: /root/.agent/session
+  ```
+
+  The bind pays for it. To keep the mask writable without touching the host, the
+  guest mounts that bind's entries one at a time instead of the directory whole,
+  following the excluded path down. At each of those levels every entry is its own
+  mount point: renaming or unlinking one fails, an entry the workload creates
+  beside them stays in the guest, and an entry that appears on the host mid-run
+  does not show up. Paths inside those entries behave as any bound path does, and
+  a bind no fileset writes into is mounted whole.
 - **`owner`** decides who owns the materialized files in the guest.
   The default, `workload`, transfers the guest path and everything it ships
   to the run-as user, so a seeded config the tool rewrites at runtime

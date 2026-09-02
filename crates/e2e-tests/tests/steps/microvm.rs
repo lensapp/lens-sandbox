@@ -307,6 +307,31 @@ fn write_declarative_definition(world: &mut E2eWorld) -> std::path::PathBuf {
     project
 }
 
+fn write_seeding_bind_definition(world: &mut E2eWorld, seeded: &str) -> std::path::PathBuf {
+    let source = host_bind_source(world);
+    let project = microvm_project(world);
+    let definition = format!(
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-seeded-exclude\nspec:\n  image: {}\n  volumes:\n    - type: bind\n      source: {source}\n      target: /work\n      exclude:\n        - {seeded}\n  filesets:\n    - inline:\n        state.json: |-\n          from-the-document\n      guestPath: /work/{seeded}\n",
+        pinned_microvm_image()
+    );
+    std::fs::write(project.join("lns.yaml"), definition)
+        .expect("write seeded-exclude project lns.yaml");
+    project
+}
+
+#[when(
+    regex = r#"^the user runs a microVM command "([^"]*)" from a sandbox binding that directory and seeding "([^"]+)"$"#
+)]
+fn run_command_from_seeding_bind(world: &mut E2eWorld, cmd_line: String, seeded: String) {
+    let project = write_seeding_bind_definition(world, &seeded);
+    let mut args = vec!["run".to_string(), "--".to_string()];
+    args.extend(split_args(&cmd_line));
+    let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
+    let result = run_cli_with_timeout_in_dir(&project, args, socket_env(world), budget);
+    world.last_run_id = parse_run_id(&format!("{}\n{}", result.stdout, result.stderr));
+    world.result = Some(result);
+}
+
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" from a declarative sandbox$"#)]
 fn run_command_from_declarative_sandbox(world: &mut E2eWorld, cmd_line: String) {
     let project = write_declarative_definition(world);
@@ -583,6 +608,22 @@ fn run_command_with_keyed_volume(
         ],
         &cmd_line,
     );
+}
+
+#[then(regex = r#"^the host bind directory has no entry "([^"]+)"$"#)]
+fn host_bind_has_no_entry(world: &mut E2eWorld, name: String) -> Result<(), String> {
+    let dir = world
+        .host_bind_dir
+        .as_ref()
+        .ok_or("no host bind directory was created")?;
+    let path = dir.path().join(&name);
+    match path.exists() {
+        true => Err(format!(
+            "{} reached the host, so the guest write was not guest-local",
+            path.display()
+        )),
+        false => Ok(()),
+    }
 }
 
 #[then(regex = r#"^the host bind directory has a file "([^"]+)" containing "([^"]*)"$"#)]
