@@ -12,17 +12,19 @@ The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml); `r
 cargo install cargo-llvm-cov   # make coverage
 ```
 
-Wire the repository hooks into your checkout (one-time):
+Wire the repository hooks into your clone (one-time — worktrees inherit it):
 
 ```bash
 make install-hooks   # points core.hooksPath at scripts/hooks
 ```
 
 That installs `commit-msg` (commitlint), `pre-commit` (`cargo fmt --check` and
-markdownlint), and `pre-push` (the gate). The two node-based steps print a
-notice and skip themselves unless both the tool and a reachable `node` are
-present, so `npm install` is optional. Until you run `make install-hooks`,
-every gate step reminds you that no hook is active.
+markdownlint), and `pre-push` (the gate). `core.hooksPath` lives in the shared
+`.git/config`, so every worktree of the clone gets the hooks — including ones
+you create later. The node-based steps look for their tool in the current
+worktree and then in the main one, and print a notice and skip themselves if
+neither has it, so `npm install` is optional and never per worktree. Until you
+run `make install-hooks`, every gate step reminds you that no hook is active.
 
 Fast inner loop:
 
