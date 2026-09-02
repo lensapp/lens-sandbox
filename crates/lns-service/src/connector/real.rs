@@ -332,30 +332,41 @@ pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
     }
 }
 
-/// The placeholder a granted method fills each of this run's variables with (§3.2.4).
+/// What the methods this run granted put in its environment (§3.2.4).
 pub fn connector_env_for(run_id: &str) -> crate::workload_env::ConnectorEnv {
+    let supply = granted_supply_for(run_id);
     crate::workload_env::ConnectorEnv {
-        filled: variables_a_grant_fills(run_id),
+        filled: variables_a_grant_fills(&supply),
+        granted_env: values_a_granted_method_sets(&supply),
     }
 }
 
-fn variables_a_grant_fills(run_id: &str) -> BTreeMap<String, crate::workload_env::Filled> {
-    granted_supply_for(run_id)
-        .into_iter()
-        .flat_map(|(connector, supply)| {
-            supply
-                .credentials
-                .into_iter()
-                .filter_map(move |credential| {
-                    Some((
-                        credential.env_var?,
-                        crate::workload_env::Filled {
-                            connector: connector.clone(),
-                            placeholder: credential.placeholder?,
-                        },
-                    ))
-                })
+fn variables_a_grant_fills(
+    supply: &BTreeMap<String, GrantedPayload>,
+) -> BTreeMap<String, crate::workload_env::Filled> {
+    supply
+        .iter()
+        .flat_map(|(connector, granted)| {
+            granted.credentials.iter().filter_map(move |credential| {
+                Some((
+                    credential.env_var.clone()?,
+                    crate::workload_env::Filled {
+                        connector: connector.clone(),
+                        placeholder: credential.placeholder.clone()?,
+                    },
+                ))
+            })
         })
+        .collect()
+}
+
+/// A granted method's own `env` block, which the boot policy frame carries and an exec joining later composes here instead.
+fn values_a_granted_method_sets(
+    supply: &BTreeMap<String, GrantedPayload>,
+) -> BTreeMap<String, String> {
+    supply
+        .values()
+        .flat_map(|granted| granted.env.clone())
         .collect()
 }
 
@@ -1309,6 +1320,60 @@ mod tests {
 
     #[test]
     #[serial(env, global_runs)]
+    fn a_granted_methods_own_env_block_travels_beside_its_credentials() {
+        // An exec reads its environment from here rather than from the boot frame that carries a method's `env` (§3.2.4).
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_with_credential(
+            home.path(),
+            "some-provider",
+            serde_json::json!({
+                "envVar": "SOME_TOKEN",
+                "placeholder": "some-provider-LNSPLACEHOLDER000",
+            }),
+        );
+        std::fs::write(
+            home.path().join("connectors/some-provider/document.json"),
+            serde_json::json!({
+                "apiVersion": "lns.run/v1",
+                "kind": "connector",
+                "name": "some-provider",
+                "spec": {
+                    "serves": ["api.some-provider.example"],
+                    "methods": [{
+                        "name": "token",
+                        "auth": { "kind": "token" },
+                        "env": { "SOME_PROVIDER_REGION": "eu" },
+                        "credentials": [{
+                            "envVar": "SOME_TOKEN",
+                            "placeholder": "some-provider-LNSPLACEHOLDER000",
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        grant_recorded(RUN, "some-provider");
+
+        let env = connector_env_for(RUN);
+        assert_eq!(
+            env.granted_env,
+            [("SOME_PROVIDER_REGION".to_string(), "eu".to_string())].into()
+        );
+        assert!(
+            env.filled.contains_key("SOME_TOKEN"),
+            "the credential still travels beside it: {:?}",
+            env.filled
+        );
+        assert!(
+            connector_env_for(OTHER_RUN).granted_env.is_empty(),
+            "a grant belongs to one run"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
     fn only_the_connector_this_run_granted_fills_a_variable() {
         // A decline is the run's standing no, and an install on its own consents to nothing: the grant is what puts a marker in the environment.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1345,7 +1410,7 @@ mod tests {
         }
 
         assert_eq!(
-            variables_a_grant_fills(RUN),
+            connector_env_for(RUN).filled,
             [
                 filled(
                     "OTHER_TOKEN",
@@ -1362,7 +1427,7 @@ mod tests {
             "every granted connector contributes its marker, and a credential with no envVar sets no variable"
         );
         assert!(
-            variables_a_grant_fills(OTHER_RUN).is_empty(),
+            connector_env_for(OTHER_RUN).filled.is_empty(),
             "a grant belongs to one run, so another run's environment is not narrowed by it"
         );
     }

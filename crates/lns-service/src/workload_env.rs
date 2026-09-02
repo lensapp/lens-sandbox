@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-/// Each variable a granted method fills for this run, by the connector that fills it: no other source may set it (§3.2.4).
+/// What the methods this run granted put in its environment (§3.2.4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectorEnv {
+    /// Each variable a granted method fills with a placeholder, by the connector that fills it: no other source may set it.
     pub filled: BTreeMap<String, Filled>,
+    /// What a granted method's own `env` block sets outright — non-secret config beside its credentials, carrying a plain value rather than a marker.
+    pub granted_env: BTreeMap<String, String>,
 }
 
 impl ConnectorEnv {
@@ -239,7 +242,7 @@ fn proxy_env() -> [(&'static str, &'static str); 6] {
     ]
 }
 
-/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, its declared tools, and the proxy and CA bundle the workload is given.
+/// What an `lns exec` into a live run joins: the run's own resolved environment, then the caller's additions, what its granted methods set, its declared tools, and the proxy and CA bundle the workload is given.
 pub fn exec_session_env(
     exec_environment: &crate::run_registry::ExecEnvironment,
     exec_env: &[String],
@@ -258,6 +261,10 @@ pub fn exec_session_env(
         .cloned()
         .collect();
     let mut composed = compose_workload_env(Some(&joined), &caller, connectors);
+    // The boot policy frame layers this over the guest's own environment, so an exec joining the same run must too.
+    for (key, value) in connectors.granted_env.iter().filter(|(k, _)| claimable(k)) {
+        overwrite(&mut composed.env, key, value);
+    }
     // The composer's image slot here is the run's own environment, and telling this caller to edit an image that set nothing sends them nowhere.
     for refused in &mut composed.refused {
         if refused.source == EnvSource::Image {
@@ -426,6 +433,7 @@ mod tests {
                 },
             )]
             .into(),
+            ..Default::default()
         }
     }
 
@@ -543,6 +551,7 @@ mod tests {
                         )
                     })
                     .into(),
+                ..Default::default()
             },
             source_among(&typed),
         );
@@ -670,6 +679,82 @@ mod tests {
                 "and the warning must say so: {warning}"
             );
         }
+    }
+
+    #[test]
+    fn an_exec_joins_the_plain_env_a_granted_method_supplies() {
+        // §3.2.4 promises a method's own `env` reaches the next exec, and an exec composes its environment here rather than from the boot frame that carries it.
+        let run = crate::run_registry::ExecEnvironment::default();
+        let connectors = ConnectorEnv {
+            granted_env: [("SOME_PROVIDER_REGION".to_string(), "eu".to_string())].into(),
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&run, &[], &connectors);
+
+        assert!(
+            joining.env.contains(&"SOME_PROVIDER_REGION=eu".to_string()),
+            "got: {:?}",
+            joining.env
+        );
+    }
+
+    #[test]
+    fn what_a_granted_method_sets_outranks_the_value_the_run_started_with() {
+        // The boot frame layers this over the guest's own environment, so an exec that only filled an unset variable would disagree with the start of the same run.
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["SOME_PROVIDER_REGION=us".into()],
+            ..Default::default()
+        };
+        let connectors = ConnectorEnv {
+            granted_env: [("SOME_PROVIDER_REGION".to_string(), "eu".to_string())].into(),
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&run, &[], &connectors);
+
+        assert!(
+            joining.env.contains(&"SOME_PROVIDER_REGION=eu".to_string())
+                && !joining.env.contains(&"SOME_PROVIDER_REGION=us".to_string()),
+            "got: {:?}",
+            joining.env
+        );
+    }
+
+    #[test]
+    fn a_granted_methods_env_may_not_claim_what_the_guest_composes_either() {
+        // A grant consents to the method's config, not to the PATH that finds every binary the workload runs.
+        let connectors = ConnectorEnv {
+            granted_env: [("PATH".to_string(), "/only/this".to_string())].into(),
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&Default::default(), &[], &connectors);
+
+        assert!(
+            !joining.env.iter().any(|kv| kv == "PATH=/only/this"),
+            "the guest composes PATH: {:?}",
+            joining.env
+        );
+    }
+
+    #[test]
+    fn the_runs_proxy_still_outranks_what_a_granted_method_sets() {
+        // A route around the gate is not a connector's to choose, any more than an exec caller's.
+        let connectors = ConnectorEnv {
+            granted_env: [("HTTPS_PROXY".to_string(), "http://elsewhere".to_string())].into(),
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&Default::default(), &[], &connectors);
+
+        assert!(
+            joining
+                .env
+                .contains(&format!("HTTPS_PROXY={}", lns_session::GUEST_PROXY_URL)),
+            "got: {:?}",
+            joining.env
+        );
     }
 
     #[test]
