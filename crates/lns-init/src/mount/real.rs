@@ -125,6 +125,16 @@ impl Syscalls for RealSyscalls {
         }
     }
 
+    fn read_to_string(&self, path: &CStr) -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(std::path::Path::new(std::ffi::OsStr::from_bytes(
+            path.to_bytes(),
+        ))) {
+            Ok(body) => Ok(Some(body)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<super::ShareEntry>> {
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(std::path::Path::new(std::ffi::OsStr::from_bytes(

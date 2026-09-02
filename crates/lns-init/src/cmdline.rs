@@ -27,6 +27,8 @@ pub struct BindParam {
     pub dropped_paths: Vec<String>,
     /// Excluded paths a fileset writes into, so the share is exploded and these are left for the fileset (§3.1.11).
     pub seeded_paths: Vec<String>,
+    /// Every path the definition excluded, so this side can decide which a connector's claim needs left unmounted.
+    pub excluded_paths: Vec<String>,
 }
 
 #[derive(Default)]
@@ -38,6 +40,8 @@ struct PartialBind {
     drops: BTreeMap<usize, String>,
     seeds_count: Option<usize>,
     seeds: BTreeMap<usize, String>,
+    excludes_count: Option<usize>,
+    excludes: BTreeMap<usize, String>,
 }
 
 enum BindOutcome {
@@ -55,6 +59,7 @@ impl PartialBind {
             (Some(_), Some(_))
                 if self.drops.len() != self.drops_count.unwrap_or(0)
                     || self.seeds.len() != self.seeds_count.unwrap_or(0)
+                    || self.excludes.len() != self.excludes_count.unwrap_or(0)
                     || self
                         .seeds
                         .values()
@@ -69,6 +74,7 @@ impl PartialBind {
                     read_only,
                     dropped_paths: self.drops.into_values().collect(),
                     seeded_paths: self.seeds.into_values().collect(),
+                    excluded_paths: self.excludes.into_values().collect(),
                 })
             }
             (Some(_), Some(_)) => BindOutcome::Skip,
@@ -185,6 +191,7 @@ fn parse_bind_key(key: &str, value: &str, binds: &mut BTreeMap<usize, PartialBin
         "ro" => entry.read_only = value == "1",
         "drops" => entry.drops_count = value.parse::<usize>().ok(),
         "seeds" => entry.seeds_count = value.parse::<usize>().ok(),
+        "excludes" => entry.excludes_count = value.parse::<usize>().ok(),
         _ => indexed_bind_path(entry, field, value),
     }
 }
@@ -200,6 +207,11 @@ fn indexed_bind_path(entry: &mut PartialBind, field: &str, value: &str) {
         .and_then(|j| j.parse::<usize>().ok())
     {
         entry.seeds.insert(j, value.to_string());
+    } else if let Some(j) = field
+        .strip_prefix("exclude.")
+        .and_then(|j| j.parse::<usize>().ok())
+    {
+        entry.excludes.insert(j, value.to_string());
     }
 }
 
@@ -481,6 +493,7 @@ mod tests {
                 read_only: false,
                 dropped_paths: vec![".env".into(), ".npmrc".into()],
                 seeded_paths: Vec::new(),
+                excluded_paths: Vec::new(),
             }]
         );
         assert!(p.incomplete_binds.is_empty());
@@ -518,6 +531,33 @@ mod tests {
             p.incomplete_binds,
             vec![0],
             "an empty seed would explode the bind and protect nothing"
+        );
+    }
+
+    #[test]
+    fn a_bind_carries_every_path_its_definition_excluded_in_index_order() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.excludes=2 bind.0.exclude.1=projects bind.0.exclude.0=.credentials.json",
+        );
+        assert_eq!(
+            p.binds[0].excluded_paths,
+            vec![".credentials.json".to_string(), "projects".to_string()],
+            "the guest decides which of them a connector claim needs, so it needs all of them"
+        );
+        assert!(p.incomplete_binds.is_empty());
+    }
+
+    #[test]
+    fn a_bind_missing_one_of_its_declared_excludes_is_incomplete_rather_than_half_masked() {
+        let p = CmdlineParams::parse(
+            "bind.0.tag=lns-bind-0 bind.0.target=/root/.claude \
+             bind.0.excludes=2 bind.0.exclude.0=.credentials.json",
+        );
+        assert_eq!(
+            p.incomplete_binds,
+            vec![0],
+            "a missing exclude would let a claim look unprotected and refuse a boot that should stand"
         );
     }
 

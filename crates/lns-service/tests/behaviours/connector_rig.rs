@@ -24,6 +24,8 @@ pub struct ConnectorRig {
 
     pub error: Option<String>,
     pub listed: Vec<Installed>,
+    /// What a run's boot counted this machine's connectors would write; `None` is a holder with no boot behind it.
+    pub counted: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for ConnectorRig {
@@ -48,6 +50,7 @@ impl Default for ConnectorRig {
             methods: Vec::new(),
             error: None,
             listed: Vec::new(),
+            counted: None,
         }
     }
 }
@@ -197,6 +200,7 @@ impl ConnectorRig {
             &holder(run),
             method,
             Some("work"),
+            self.counted.as_deref(),
         )
         .err()
         .map(|e| format!("{e:#}"));

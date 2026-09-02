@@ -25,6 +25,9 @@ struct DamagedClaim {
     declared_volumes: Option<Vec<lns_ipc::VolumeMount>>,
 }
 
+/// What each live run's boot counted an installed connector would write, so a grant the boot never made room for is refused rather than written through a bind (§3.2.4).
+static COUNTED_CLAIMS: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
+
 /// A listed run: alive with a session behind it, or stopped with only its record — restartable until removed.
 pub enum RunEntry {
     Live(RunHandle),
@@ -397,6 +400,30 @@ pub fn deregister(run_id: &str) {
     if let Some(m) = g.as_mut() {
         m.remove(run_id);
     }
+    let mut claims = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
+    if let Some(m) = claims.as_mut() {
+        m.remove(run_id);
+    }
+}
+
+pub fn record_counted_claims(run_id: &str, claims: Vec<String>) {
+    let mut g = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
+    g.get_or_insert_with(HashMap::new)
+        .insert(run_id.to_string(), claims);
+}
+
+/// A run this process never booted counted nothing, which is not the same as counting an empty set.
+pub fn counted_claims(run_id: &str) -> Option<Vec<String>> {
+    let g = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
+    g.as_ref().and_then(|m| m.get(run_id).cloned())
+}
+
+/// Whether this process holds a live session for the run, so a missing counted set is a gap rather than a run that never booted here.
+pub fn is_live(run_id: &str) -> bool {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(run_id))
+        .is_some_and(|entry| matches!(entry, RunEntry::Live(_)))
 }
 
 pub fn input_sender(run_id: &str) -> Option<mpsc::Sender<SessionInput>> {
@@ -875,6 +902,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(name, "amber_otter_0");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn what_a_boot_counted_lives_as_long_as_the_run_and_no_longer() {
+        let id = allocate_run_id();
+        assert_eq!(
+            counted_claims(&id),
+            None,
+            "a run this process never booted counted nothing, which is not an empty set"
+        );
+
+        record_counted_claims(&id, vec!["~/.claude/.credentials.json".into()]);
+        assert_eq!(
+            counted_claims(&id),
+            Some(vec!["~/.claude/.credentials.json".to_string()]),
+            "a grant is held to what this run's boot made room for"
+        );
+
+        let (h, _rx) = make_handle();
+        register(id.clone(), h);
+        assert!(is_live(&id), "the session is up, so a grant can reach it");
+
+        deregister(&id);
+        assert_eq!(
+            counted_claims(&id),
+            None,
+            "the run is gone, and so is what it counted"
+        );
+        assert!(!is_live(&id));
     }
 
     #[tokio::test]

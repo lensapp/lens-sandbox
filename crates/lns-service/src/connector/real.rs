@@ -147,7 +147,15 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         connection: Option<&str>,
     ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
         let (granted, payload) = self.with_store(|store| {
-            handler::grant_disclosed(store, name, digest, &self.holder, method, connection)
+            handler::grant_disclosed(
+                store,
+                name,
+                digest,
+                &self.holder,
+                method,
+                connection,
+                counted_claims_of(&self.holder).as_deref(),
+            )
         })?;
         // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
         if !granted.unchanged {
@@ -321,17 +329,23 @@ fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T>
     f(&ConnectorStore::new(&installed, &values, &grants))
 }
 
-/// The paths every installed connector would write, for the boot to make room for (§3.1.11). Unreadable connector state claims nothing, as it offers nothing.
-pub fn installed_claims() -> Vec<String> {
-    match with_stores(|store| Ok(store.installed_definitions()?.0)) {
-        Ok(definitions) => super::writes::installed_claims(&definitions),
-        Err(e) => {
-            crate::log::warn!(
-                "cannot read this machine's connectors, so this run makes room for none of them: {e:#}"
-            );
-            Vec::new()
-        }
+/// A reservation has no boot behind it, so nothing is held against the grant; a live run always has a counted set, and one without it is a run this process cannot vouch for (§3.2.4).
+fn counted_claims_of(holder: &GrantHolder) -> Option<Vec<String>> {
+    let GrantHolder::Run(run_id) = holder else {
+        return None;
+    };
+    match crate::run_registry::counted_claims(run_id) {
+        Some(counted) => Some(counted),
+        None if crate::run_registry::is_live(run_id) => Some(Vec::new()),
+        None => None,
     }
+}
+
+/// The paths every installed connector would write, for the boot to make room for (§3.1.11). A store this boot cannot read is an error, not an empty set: a recorded grant is replayed into the guest either way.
+pub fn installed_claims() -> Result<Vec<super::writes::Claim>> {
+    let definitions = with_stores(|store| Ok(store.installed_definitions()?.0))
+        .context("reading this machine's connectors to make room for what they write")?;
+    Ok(super::writes::installed_claims(&definitions))
 }
 
 /// What the grants this run already made supply to it as it starts, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
@@ -466,7 +480,15 @@ pub async fn answer(call: Call) -> Result<Response> {
             connection,
         } => {
             let holder = holder_of(&run)?;
-            let granted = handler::grant(&store, &name, &holder, &method, connection.as_deref())?;
+            let counted = counted_claims_of(&holder);
+            let granted = handler::grant(
+                &store,
+                &name,
+                &holder,
+                &method,
+                connection.as_deref(),
+                counted.as_deref(),
+            )?;
             if !granted.unchanged {
                 record_decision(
                     &holder,
@@ -751,19 +773,26 @@ mod tests {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_writing(home.path(), "~/.claude", ".credentials.json");
         assert_eq!(
-            installed_claims(),
-            ["~/.claude/.credentials.json"],
+            installed_claims()
+                .expect("a readable store")
+                .into_iter()
+                .map(|claim| (claim.connector, claim.path))
+                .collect::<Vec<_>>(),
+            [(
+                "writer".to_string(),
+                "~/.claude/.credentials.json".to_string()
+            )],
             "the guest makes room for it only if the run tells it the path"
         );
     }
 
     #[test]
     #[serial(env, global_runs)]
-    fn connector_state_this_build_cannot_reach_claims_nothing_rather_than_failing_the_run() {
+    fn a_connector_store_this_boot_cannot_read_refuses_the_run_rather_than_claiming_nothing() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(
-            installed_claims().is_empty(),
-            "an unreadable store must not refuse a boot that has nothing to protect"
+            installed_claims().is_err(),
+            "a recorded grant is replayed into the guest either way, so an unreadable store must not read as no connectors"
         );
     }
 
@@ -1204,6 +1233,86 @@ mod tests {
                 lns_ipc::SecretValues(asked_for("some-provider", "token")),
             )
             .expect("connect");
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_live_run_whose_boot_this_process_did_not_record_grants_nothing_that_writes_a_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_writing(home.path(), "~/.claude", ".credentials.json");
+        let _run = a_registered_run(RUN);
+
+        let err = answer(Call::Grant {
+            name: "writer".into(),
+            run: RUN.to_string(),
+            method: "token".into(),
+            connection: None,
+        })
+        .await
+        .expect_err("a live run with no counted set is one this process cannot vouch for");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("~/.claude/.credentials.json") && message.contains("writer"),
+            "the refusal names the path and the connector: {message}"
+        );
+    }
+
+    fn connect_writer() {
+        use crate::approval_flow::session::ConnectorPort;
+        RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string())
+            .connect(
+                "writer",
+                "token",
+                "work",
+                lns_ipc::SecretValues(asked_for("writer", "token")),
+            )
+            .expect("connect");
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_grant_of_the_very_path_this_run_counted_goes_through() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_writing(home.path(), "~/.claude", ".credentials.json");
+        let _run = a_registered_run(RUN);
+        crate::run_registry::record_counted_claims(
+            RUN,
+            vec!["~/.claude/.credentials.json".to_string()],
+        );
+        connect_writer();
+
+        answer(Call::Grant {
+            name: "writer".to_string(),
+            run: RUN.to_string(),
+            method: "token".to_string(),
+            connection: None,
+        })
+        .await
+        .expect("the boot made room for exactly this path, so the grant stands");
+    }
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn a_stopped_run_takes_a_grant_because_its_next_boot_counts_the_connector() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_writing(home.path(), "~/.claude", ".credentials.json");
+        connect_writer();
+        crate::run_registry::register_stopped(crate::run_registry::StoppedRun {
+            record: crate::run_record::test_record(RUN),
+        });
+
+        let granted = answer(Call::Grant {
+            name: "writer".to_string(),
+            run: RUN.to_string(),
+            method: "token".to_string(),
+            connection: None,
+        })
+        .await;
+        crate::run_registry::deregister(RUN);
+        granted.expect("no session exists to deliver the file, and the restart counts the claim");
     }
 
     /// A run the registry answers for, because a `--run` handle is resolved before any decision is recorded against it. Deregisters itself, so a run one test needs is not a run another one finds.

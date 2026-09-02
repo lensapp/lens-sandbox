@@ -3445,6 +3445,7 @@ name = "lns-init"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "lns-placement",
  "sha2 0.10.9",
  "tempfile",
 ]

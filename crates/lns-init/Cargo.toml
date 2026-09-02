@@ -13,6 +13,9 @@ name = "lns-init"
 path = "src/main.rs"
 
 [dependencies]
+# The one rule deciding where a written file lands; no dependencies of its own.
+lns-placement = { path = "../lns-placement" }
+
 # libc for the syscall surface we need at PID 1: mount, pivot_root,
 # execve, umount2, etc. The host libc crate we already depend on for
 # lns-cli; pinning the same major here keeps the workspace consistent.
