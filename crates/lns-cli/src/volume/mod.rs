@@ -19,13 +19,17 @@ pub struct VolumeArgs {
 
 #[derive(clap::Subcommand)]
 pub enum VolumeCommand {
-    #[command(about = "List named volumes with their on-disk size, age, and holder.")]
+    #[command(
+        about = "List named volumes with their on-disk size, age, and the sandboxes holding them."
+    )]
     Ls(VolumeLsArgs),
     #[command(about = "Create a named volume ahead of its first `lns run -v` attach.")]
     Create(VolumeNameArg),
-    #[command(about = "Show a volume's capacity, on-disk bytes, age, and holder.")]
+    #[command(
+        about = "Show a volume's capacity, on-disk bytes, age, and every sandbox that holds it."
+    )]
     Inspect(VolumeInspectArgs),
-    #[command(about = "Remove a named volume; refused while a run holds it.")]
+    #[command(about = "Remove a named volume; refused while a sandbox holds it.")]
     Rm(VolumeNameArg),
     #[command(about = "Remove every volume no sandbox holds.")]
     Prune(VolumePruneArgs),
