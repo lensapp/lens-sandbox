@@ -715,23 +715,25 @@ directory is often the only sensible mount and also brings things the workload h
 no business reading: another sandbox's state, a host toolchain the guest must not
 use, an unrelated project. Each entry names a path relative to `source`, and the
 guest gets an empty mount there instead of the real contents — the path exists, and
-what was behind it does not. Where a [fileset](#3111-filesets) writes to that path,
-the guest gets a plain directory holding the fileset's files instead of an empty
-mount.
+what was behind it does not. Where a [fileset](#3111-filesets), or a
+[granted method](#324-installing-connecting-and-applying), writes to that path,
+the guest gets a plain directory rather than an empty mount: it holds the
+fileset's files, and it is where the granted file lands when the grant applies.
 
 | Rule | Detail |
 |---|---|
 | Relative | Each entry is relative to `source`. Every segment MUST be non-empty and MUST NOT be `.` or `..`, which refuses a leading `/`, a trailing `/`, and `a//b` in one rule. |
 | Exact | An entry names one path, not a pattern. There are no globs. |
-| Absent is fine | An entry naming a path that is not there does nothing. |
+| Absent is fine | An entry naming a path the host does not have masks nothing. It still anchors a write — a [fileset](#3111-filesets) or a [granted method](#324-installing-connecting-and-applying) may land there — and it counts the same way in the mount decision [§3.1.11](#3111-filesets) states. |
 | Author's rule, not a decision | An exclusion is part of the document, so it is never prompted for and never recorded as a per-machine choice. |
 
 An exclusion travels with the sandbox: a published bind masks what its author
 meant, on whatever machine runs it.
 
-What the mask leaves is guest-local, so a [fileset](#3111-filesets) may write
-there. [§3.1.11](#3111-filesets) states that rule, and how a bind with such an
-exclusion is mounted.
+What the mask leaves is guest-local, so a [fileset](#3111-filesets), or a
+[granted method](#324-installing-connecting-and-applying), may write there.
+[§3.1.11](#3111-filesets) states that rule, and how a bind with such an exclusion
+is mounted.
 
 A developer who wants to mask something the author did not name writes a mixin of
 their own with that `exclude`, and layers it with `--mixin` or from `spec.mixins`.
@@ -836,6 +838,24 @@ allowed when an `exclude` entry of that same bind covers it. Another bind's
 `exclude` does not, and `readOnly` makes no difference, because the mask is
 guest-local whatever the bind does with the share.
 
+A [granted method](#324-installing-connecting-and-applying)'s files are held to
+the same rule, and counted before the guest boots. A method is applied to a guest
+that is already running, so its files reach paths the mounts have already decided.
+The run therefore counts two sets of claims: this document's filesets, and the
+filesets of every connector **installed on the machine when the run starts**. Both
+are resolved against the guest's home, which only the guest can resolve
+([§3.1.3](#313-user)), so the split is decided there. A run whose
+[`user`](#313-user) has no home counts no connector claim: such a run can take no
+fileset-carrying method at all ([§3.2.3](#323-what-a-method-may-carry)), so its
+binds need no room made for one.
+
+A connector claim that lands under a bind no `exclude` of that bind covers
+**refuses the run**, naming the claim, the bind, and the connector it came from. A
+granted file is never written through a share. The two mounts above take no such
+claim either: one landing under a **read-only** volume, or under a bind whose
+`exclude` does not reach it, refuses the run for the reason it refuses a
+fileset.
+
 A bind with such an `exclude` is mounted entry by entry rather than whole, because
 the masked path needs a guest-local parent for the write to land there. The split
 follows the excluded path: the bind `target`, and every directory between it and
@@ -848,7 +868,7 @@ mounted one at a time. At each of those levels every entry is its own mount poin
 - An entry that appears on the host after the run starts does not show up.
 
 Paths inside those entries behave as any bound path does. A bind whose `exclude`
-no fileset covers is mounted whole.
+no claim covers is mounted whole.
 
 A document validates against its own `volumes`, so a run that adds one of those
 two mounts itself — a read-only or bind mount the launch names rather than the
@@ -1146,9 +1166,10 @@ spec:
 
 **Installing grants nothing** — no destination opens, no injection is armed, no
 file is written, and no real value is supplied. What it does do is make its
-`serves` destinations **ask** ([§3.2.1](#321-serves)), and lend its `placeholder`
+`serves` destinations **ask** ([§3.2.1](#321-serves)), lend its `placeholder`
 to a variable a sandbox itself declared and left to it
-([§3.1.7](#317-credentials)).
+([§3.1.7](#317-credentials)), and put the paths its filesets would write into the
+mount decision every later run makes ([§3.1.11](#3111-filesets)).
 
 Two later acts change what a run gets: a **grant** applies one method to one
 run, and a **connect** authenticates where a method requires it
@@ -1330,6 +1351,16 @@ One consequence, and it is the intended one: a run whose
 so it cannot take a method that writes a fileset. It refuses the same way
 [§3.1.11](#3111-filesets) refuses a `~/`-anchored sandbox fileset.
 
+**A claim that lands inside a bind needs that bind's `exclude`.** A home the run
+binds is an ordinary case — a developer shares `~/.agent` with the workload — and
+a method writing there would otherwise reach the host directory the bind shares.
+Two conditions make it legal, both decided at boot ([§3.1.11](#3111-filesets)):
+the bind carries an `exclude` covering the claim, and the connector was installed
+when the run started. A run whose bind carries no covering `exclude` refuses
+before it boots. A connector installed after the run started is refused at the
+grant instead ([§3.2.4](#324-installing-connecting-and-applying)): only the
+guest's own boot resolves `~` and counts a claim, and this run's boot is over.
+
 **A method's filesets MUST NOT exceed 1 MiB in total**, the same ceiling
 [§3.1.11](#3111-filesets) sets on one inline fileset. The limit is per method,
 not per document, because methods are alternatives and only one is ever granted.
@@ -1349,9 +1380,12 @@ fileset entry declares no mode of its own.
 
 **Installing grants nothing**, and an installed connector contributes no merge
 source ([§3.3.2](#332-merge-rules)). It makes its destinations ask
-([§3.2.1](#321-serves)). The one thing it puts in a running guest is a marker in
-a variable a sandbox itself declared and left to it
-([§3.1.7](#317-credentials)) — the declaration's doing, not the install's.
+([§3.2.1](#321-serves)). Two things reach a running guest before any grant. The
+first is a marker in a variable a sandbox itself declared and left to it
+([§3.1.7](#317-credentials)) — the declaration's doing, not the install's. The
+second is the paths its filesets would write: a run counts them when it decides
+how to mount its binds, so a bind is split for a claim nobody has granted, and a
+claim no `exclude` covers refuses the run ([§3.1.11](#3111-filesets)).
 
 **Granting has three parts, in this order:**
 
@@ -1447,6 +1481,15 @@ to a browser can outlast it — then that request fails as any refused request d
 applies, and the next request succeeds. A deferred grant is the one case where
 applying does not follow: the hold is released without the request proceeding, and
 the next request succeeds only after the run's next start (see below).
+
+**A granted file lands guest-local, or the grant is refused.** The files a method
+writes are re-sent on every policy change and never reach a host share
+([§3.2.3](#323-what-a-method-may-carry)). Where a run binds the directory a method
+writes into, the boot has already left that path unmounted for it. A grant whose
+files the boot did not count — a connector installed after the run started — is
+refused, naming the method: only a boot resolves `~` and counts a claim, so this
+run cannot know where the files would land. The remedy is to restart the run,
+which counts the connector as it boots.
 
 **`env` reaches the next workload of that run.** The granted method's `env`, and
 the `placeholder` of each credential it declares, are set for workloads that
@@ -1578,7 +1621,10 @@ The client reads the file and sends the placeholder. On a request to
 real value, replacing whatever the client sent — the header-family behaviour in
 [§4.1](#41-the-credential-definition), reached by a file instead of a variable.
 The real value stays on the host, which is what makes a fileset at a
-secret-shaped name in the guest's home safe to allow.
+secret-shaped name in the guest's home safe to allow. The placeholder file itself
+is guest-local wherever it lands, including inside a bind, because
+[§3.2.4](#324-installing-connecting-and-applying) refuses a grant it cannot place
+that way.
 
 Two rules govern it, and only the second is checkable:
 
@@ -2117,7 +2163,7 @@ Offline validation (`lns artifact validate`, and every load path including
   is not an offline check on one document: it depends on the document that entry
   names ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
 
-Offline validation checks one document in isolation. Six checks cannot run
+Offline validation checks one document in isolation. These checks cannot run
 there, because they depend on state no document carries — they run at launch:
 
 | Check | Depends on |
@@ -2128,6 +2174,8 @@ there, because they depend on state no document carries — they run at launch:
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
 | Whether a `~/`-anchored fileset claim lands under a volume `target` ([§3.1.11](#3111-filesets)) | The guest's home directory, for the same reason. |
+| Whether a granted method's fileset claim lands under a bind, and whether that bind's `exclude` was left unmounted for it ([§3.1.11](#3111-filesets)) | The machine's installed connectors, and the guest's home directory. |
+| Whether a grant's claims were among those this run counted as it booted ([§3.2.4](#324-installing-connecting-and-applying)) | When the connector was installed, relative to the run. |
 | The resolved source list in [§3.3.2](#332-merge-rules) | The mixin graph — its depth, its cycles, and which source wins each setting — is only known once each mixin, and each mixin it declares, is pulled. |
 
 The last one is why a merge collision refuses the **run** rather than the
