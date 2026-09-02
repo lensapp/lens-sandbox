@@ -1980,8 +1980,6 @@ Offline validation (`lns artifact validate`, and every load path including
   [§3.3.1](#331-how-a-mixin-enters-a-run). Whether a local entry is *publishable*
   is not an offline check on one document: it depends on the document that entry
   names ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
-  A local entry — and a `--mixin` — that resolves to a run's `decisions.yaml` is
-  refused, because that file is one run's own answers ([§8.1](#81-what-it-is)).
 
 Offline validation checks one document in isolation. Six checks cannot run
 there, because they depend on state no document carries — they run at launch:
@@ -2276,9 +2274,11 @@ spec:
 - **Local, and never published.** The one exception to
   [§1.1](#11-one-distribution-mechanism): every other artifact is addressed by
   digest, and this one is a working file on disk. It holds one machine's answers
-  about one run, so a `mixins` entry or a `--mixin` that resolves to a run's
-  `decisions.yaml` MUST be refused. Saving it is the supported way to reuse it
-  ([§8.4](#84-how-a-decision-leaves-the-run)).
+  about one run, so a `mixins` entry that names it is refused rather than
+  published ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
+  Reading it is not publishing it: a `--mixin` that names one is an ordinary
+  local reference to an ordinary mixin. Saving it is how a decision travels to
+  another machine ([§8.4](#84-how-a-decision-leaves-the-run)).
 - **Last in the merge.** It is the developer's own, so it sits after every other
   source in [§3.3.2](#332-merge-rules) — including a `--mixin`. Nothing they pulled
   can overrule what they decided, and that includes what this file itself pulls: a
