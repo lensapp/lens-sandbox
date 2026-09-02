@@ -25,7 +25,7 @@ fn its_method_allows_and_sets(
         "egress": { "http": [{ "match": destination, "verdict": "allow" }] },
         "credentials": [{
             "envVar": variable,
-            "placeholder": format!("{}_LNSPLACEHOLDER0000000000", method),
+            "placeholder": format!("{}_LNSPLACEHOLDER0000000000", variable.to_lowercase()),
         }],
     }));
 }
