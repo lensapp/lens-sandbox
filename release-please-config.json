@@ -18,7 +18,6 @@
   ],
   "exclude-paths": [
     ".github",
-    ".husky",
     ".vscode",
     "docs"
   ],
@@ -30,7 +29,6 @@
       "bump-minor-pre-major": true,
       "exclude-paths": [
         ".github",
-        ".husky",
         ".vscode",
         "docs",
         "scripts/lns-install",

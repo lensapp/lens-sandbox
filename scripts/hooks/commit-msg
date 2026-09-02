@@ -1,0 +1,15 @@
+#!/bin/sh
+# Conventional-commit check. Skipped, not failed, when the tool is absent — a
+# Rust-only contributor must not be blocked from committing.
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# The launcher is `#!/usr/bin/env node`, so the runtime has to be reachable too.
+if [ ! -x node_modules/.bin/commitlint ] || ! command -v node >/dev/null 2>&1; then
+    printf 'commit-msg: commitlint not installed, check skipped (npm install to enable).\n'
+    exit 0
+fi
+
+node_modules/.bin/commitlint --edit "$1"

@@ -2,13 +2,11 @@
   "name": "lens-sandbox-monorepo",
   "private": true,
   "scripts": {
-    "lint:md": "markdownlint-cli2 '**/*.md' '#node_modules' '#packages/*/CHANGELOG.md'",
-    "prepare": "husky"
+    "lint:md": "markdownlint-cli2 '**/*.md' '#node_modules' '#crates/*/CHANGELOG.md'"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.1",
     "@commitlint/config-conventional": "^21.2.0",
-    "husky": "^9.1.7",
     "markdownlint-cli2": "^0.23.0"
   }
 }

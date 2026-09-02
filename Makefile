@@ -1,4 +1,5 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity
+.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests \
+	lint-impl test-impl complexity-impl coverage-impl coverage-data-impl parity-impl coverage-affected-impl
 
 CARGO ?= cargo
 
@@ -33,6 +34,11 @@ COMPLEXITY_TARGET_DIR := $(WORKSPACE_ROOT)/target/complexity
 # Gate bookkeeping that must outlive `cargo clean` and stay out of the target
 # dirs CI caches: rust-cache strips loose files from a cached target root.
 GATE_STATE_DIR := $(WORKSPACE_ROOT)/.gate
+
+# Every gate step records itself, whoever ran it — a terminal, an agent, the
+# pre-push hook, CI. Each public target is a timed wrapper around its own
+# `-impl`, so no caller has to remember to ask for telemetry.
+TIMED := ./scripts/gate-timing.sh run
 
 # Crates whose code is enforced by the per-crate `complexity` gate,
 # which iterates this list with `cd crates/<crate> && cargo …` so each
@@ -102,15 +108,21 @@ build-lns-service:
 # of incremental there only bounds disk. `lint` and `test` share the dir
 # with `make dev` and rust-analyzer, and CARGO_INCREMENTAL is part of the
 # fingerprint — they keep the default so switching between them is free.
-complexity coverage-data: export CARGO_INCREMENTAL := 0
+complexity-impl coverage-data-impl: export CARGO_INCREMENTAL := 0
 
 lint:
+	@$(TIMED) lint -- $(MAKE) --no-print-directory lint-impl
+
+lint-impl: shell-tests
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace --all-targets $(CARGO_LOCKED) -- -D warnings -D clippy::undocumented_unsafe_blocks
 
 # `--exclude e2e-tests`: the Layer 1 cucumber harness spawns real
 # binaries — owned by `make e2e`, not the fast in-process test gate.
 test:
+	@$(TIMED) test -- $(MAKE) --no-print-directory test-impl
+
+test-impl:
 	$(CARGO) test --workspace --exclude e2e-tests --all-targets $(CARGO_LOCKED)
 
 # Per-crate cargo invocations (not workspace-wide): workspace feature
@@ -118,8 +130,11 @@ test:
 # and `cognitive_complexity` workspace-wide flags functions that pass
 # the per-crate gate. Keep complexity per-crate on both sides for
 # parity.
-complexity: export CARGO_TARGET_DIR := $(COMPLEXITY_TARGET_DIR)
 complexity:
+	@$(TIMED) complexity -- $(MAKE) --no-print-directory complexity-impl
+
+complexity-impl: export CARGO_TARGET_DIR := $(COMPLEXITY_TARGET_DIR)
+complexity-impl:
 	@status=0; for crate in $(GATE_CRATES); do \
 		(cd crates/$$crate && $(CARGO) clippy --all-targets -- -D clippy::cognitive_complexity) || status=$$?; \
 	done; exit $$status
@@ -128,6 +143,14 @@ complexity-all: complexity
 
 fmt:
 	$(CARGO) fmt --all
+
+# The shell harnesses that cover the gate's own scripts. Cheap enough to sit
+# inside `lint`, which is where a contributor already looks for "is it clean".
+shell-tests:
+	@status=0; for t in scripts/*.test.sh; do \
+		echo "── $$t ──"; \
+		"./$$t" || status=$$?; \
+	done; exit $$status
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:
@@ -139,8 +162,11 @@ fmt:
 # `show-env` emits RUSTFLAGS / LLVM_PROFILE_FILE so the test step runs
 # fully instrumented (cargo-llvm-cov has no `build` subcommand — only
 # test/run/nextest).
-coverage-data: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
 coverage-data:
+	@$(TIMED) coverage-data -- $(MAKE) --no-print-directory coverage-data-impl
+
+coverage-data-impl: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
+coverage-data-impl:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
 		echo "cargo-llvm-cov not installed. Install with: cargo install cargo-llvm-cov"; \
 		exit 1; \
@@ -160,8 +186,10 @@ coverage-data:
 		inputs_sha=$$( cat Cargo.lock crates/*/Cargo.toml Cargo.toml | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 ); \
 		want="$$(rustc -V)|$$($(CARGO) llvm-cov --version)|$$inputs_sha"; \
 		if [ "$$(cat "$$stamp" 2>/dev/null)" = "$$want" ]; then \
+			./scripts/gate-timing.sh detail coverage-data warm; \
 			$(CARGO) llvm-cov clean --profraw-only; \
 		else \
+			./scripts/gate-timing.sh detail coverage-data cold; \
 			echo "coverage: toolchain or manifests changed — full artifact clean"; \
 			$(CARGO) llvm-cov clean --workspace; \
 			mkdir -p "$(GATE_STATE_DIR)"; \
@@ -182,8 +210,11 @@ coverage-data:
 		fi
 
 # Runs the binaries `coverage-data` just built, so it costs no compilation.
-parity: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
 parity:
+	@$(TIMED) parity -- $(MAKE) --no-print-directory parity-impl
+
+parity-impl: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
+parity-impl:
 	@set -e; \
 		eval "$$($(CARGO) llvm-cov show-env --export-prefix)"; \
 		bins=$$($(CARGO) test $(COVERAGE_CARGO_SCOPE) --all-targets --no-run --message-format=json 2>/dev/null | \
@@ -192,7 +223,11 @@ parity:
 			grep -v '^null$$' | sort -u); \
 		./scripts/env-parity.sh $$bins
 
-coverage: coverage-data
+coverage:
+	@$(TIMED) coverage -- $(MAKE) --no-print-directory coverage-impl
+
+# Its duration covers coverage-data and parity, which record their own rows.
+coverage-impl: coverage-data
 	@$(MAKE) parity
 	@status=0; \
 		for pkg in $(COVERAGE_CRATES_LIST); do \
@@ -204,6 +239,9 @@ coverage: coverage-data
 
 BASE_REF ?= origin/main
 coverage-affected:
+	@$(TIMED) coverage-affected -- $(MAKE) --no-print-directory coverage-affected-impl
+
+coverage-affected-impl:
 	@out=$$(./scripts/affected-crates.sh $(BASE_REF)); \
 		./scripts/gate-timing.sh note coverage-scope "$$(echo "$$out" | tr '\n' ' ' | sed 's/ *$$//')"; \
 		case "$$out" in \
@@ -290,5 +328,11 @@ clean:
 # pre-push runs the gate automatically.
 install-hooks:
 	git config core.hooksPath scripts/hooks
-	@echo "Installed git hooks from scripts/hooks (pre-push: lint + complexity + coverage)."
+	@echo "Installed git hooks from scripts/hooks:"
+	@echo "  commit-msg  conventional-commit check (commitlint)"
+	@echo "  pre-commit  cargo fmt --check, and markdownlint"
+	@echo "  pre-push    lint + complexity + coverage-affected"
+	@if [ ! -x node_modules/.bin/commitlint ] || [ ! -x node_modules/.bin/markdownlint-cli2 ] || ! command -v node >/dev/null 2>&1; then \
+		echo "  note: commitlint and markdownlint are skipped until \`npm install\` and a reachable node."; \
+	fi
 	@echo "Bypass when needed: git push --no-verify"
