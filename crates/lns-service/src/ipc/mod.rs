@@ -2439,9 +2439,20 @@ mod tests {
         );
     }
 
+    /// Deregisters what a test registered, so a later `prune` does not sweep a run the suite left behind.
+    struct RegisteredRun(&'static str);
+
+    impl Drop for RegisteredRun {
+        fn drop(&mut self) {
+            crate::run_registry::deregister(self.0);
+        }
+    }
+
     /// A stopped run with a record on disk, which is what `save` reads: the record is written for every run before its session begins.
-    #[cfg(test)]
-    fn stopped_run_with_a_record(home: &std::path::Path, run_id: &str) -> String {
+    fn stopped_run_with_a_record(
+        home: &std::path::Path,
+        run_id: &'static str,
+    ) -> (String, RegisteredRun) {
         let record = crate::run_record::test_record(run_id);
         let name = record.name.clone();
         std::fs::create_dir_all(crate::cache::run_dir(home, run_id)).expect("run dir");
@@ -2451,7 +2462,7 @@ mod tests {
         )
         .expect("record");
         crate::run_registry::register_stopped(crate::run_registry::StoppedRun { record });
-        name
+        (name, RegisteredRun(run_id))
     }
 
     #[tokio::test]
@@ -2460,7 +2471,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let run_id = "aa0000000000000000000000000000fb";
-        let name = stopped_run_with_a_record(home.path(), run_id);
+        let (name, _registered) = stopped_run_with_a_record(home.path(), run_id);
         match handle_request(&Request::InspectRun { run: name }, Instant::now()).await {
             Response::RunInspect { details } => assert_eq!(
                 details.config.policy_path,
@@ -2480,7 +2491,8 @@ mod tests {
     async fn saving_a_run_renders_the_document_and_writes_no_file() {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
-        let name = stopped_run_with_a_record(home.path(), "aa0000000000000000000000000000ff");
+        let (name, _registered) =
+            stopped_run_with_a_record(home.path(), "aa0000000000000000000000000000ff");
         match handle_request(
             &Request::SaveRun {
                 run: name,
@@ -2507,7 +2519,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let run_id = "aa0000000000000000000000000000fe";
-        let name = stopped_run_with_a_record(home.path(), run_id);
+        let (name, _registered) = stopped_run_with_a_record(home.path(), run_id);
         std::fs::write(
             crate::cache::decisions_path(home.path(), run_id),
             "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  egress:\n    http:\n      - match: git.example.test\n        verdict: allow\n",
@@ -2541,6 +2553,7 @@ mod tests {
         let record = crate::run_record::test_record("aa0000000000000000000000000000fd");
         let name = record.name.clone();
         crate::run_registry::register_stopped(crate::run_registry::StoppedRun { record });
+        let _registered = RegisteredRun("aa0000000000000000000000000000fd");
         match handle_request(
             &Request::SaveRun {
                 run: name.clone(),
@@ -2552,8 +2565,8 @@ mod tests {
         .await
         {
             Response::Error { message } => assert!(
-                message.contains(&name),
-                "a run whose record is unreadable must name itself rather than fail anonymously; got: {message}"
+                message.contains(&format!("no run record for {name}")),
+                "a run whose record is unreadable must say the record is missing, not that the run is; got: {message}"
             ),
             other => unreachable!("expected Error, got {other:?}"),
         }
@@ -2587,7 +2600,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let run_id = "aa0000000000000000000000000000fc";
-        let name = stopped_run_with_a_record(home.path(), run_id);
+        let (name, _registered) = stopped_run_with_a_record(home.path(), run_id);
         std::fs::write(crate::run_record::record_path(home.path(), run_id), b"{").expect("damage");
         match handle_request(
             &Request::SaveRun {
