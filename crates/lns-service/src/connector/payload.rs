@@ -15,7 +15,13 @@ pub fn granted_payload(method: &Method, values: &SecretValues) -> GrantedPayload
             .iter()
             .map(|credential| armed(method, credential, values))
             .collect(),
-        env: method.env.clone(),
+        // Filtered at the source, so the frame a booting guest receives and the map an exec composes carry the same keys.
+        env: method
+            .env
+            .iter()
+            .filter(|(key, _)| crate::workload_env::claimable(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
         files: inline_files(method),
     }
 }
@@ -113,6 +119,24 @@ mod tests {
             .spec
             .methods
             .remove(0)
+    }
+
+    #[test]
+    fn a_methods_env_may_not_supply_a_variable_the_guest_itself_composes() {
+        // The frame carries this into a booting guest, and an exec composes the same map: filtering one and not the other would make a method's PATH take effect at the next start and vanish at the next exec.
+        let granted = granted_payload(
+            &method(serde_json::json!({
+                "name": "token",
+                "auth": { "kind": "token" },
+                "env": { "PATH": "/only/this", "SOME_PROVIDER_REGION": "eu" },
+            })),
+            &SecretValues::default(),
+        );
+        assert_eq!(
+            granted.env,
+            [("SOME_PROVIDER_REGION".to_string(), "eu".to_string())].into(),
+            "the config travels; the variable the guest composes does not"
+        );
     }
 
     #[test]

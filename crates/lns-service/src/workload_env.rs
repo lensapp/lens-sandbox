@@ -385,7 +385,7 @@ pub fn run_workload_env(
 }
 
 /// A connector may not take a variable the guest itself composes: the supervisor's own channel, the PATH that finds every binary the workload runs, or the identity a session lands in.
-fn claimable(key: &str) -> bool {
+pub fn claimable(key: &str) -> bool {
     !is_internal(key) && key != "PATH" && !IDENTITY_ENV_KEYS.contains(&key)
 }
 
