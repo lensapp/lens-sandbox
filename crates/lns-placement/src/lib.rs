@@ -1,5 +1,8 @@
 //! Where a written file lands against one mount, per `docs/sandbox-spec.md` §3.1.11.
 
+/// Where the run leaves the guest the paths its installed connectors would write, so both sides name one file (§3.1.11).
+pub const CONNECTOR_WRITES_MANIFEST: &str = "/.lens/connector-claims";
+
 /// What a mount does to a path something writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {

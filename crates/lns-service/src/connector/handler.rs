@@ -200,13 +200,13 @@ pub fn grant(
     holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
-    counted: Option<&[String]>,
+    counted_at_boot: Option<&[String]>,
 ) -> Result<Granted> {
     let entry = installed_entry(store, name)?;
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
     refuse_a_path_another_connector_writes(store, holder, name, &entry, &method.name)?;
-    refuse_a_path_this_run_never_counted(store, &entry, &method.name, name, counted)?;
+    refuse_a_path_this_run_never_counted(store, &entry, &method.name, name, counted_at_boot)?;
     let connection = behind_the_method(store, name, method, connection)?;
     let authority = match &connection {
         Some(label) => store
@@ -254,7 +254,7 @@ pub fn grant_disclosed(
     holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
-    counted: Option<&[String]>,
+    counted_at_boot: Option<&[String]>,
 ) -> Result<(Granted, crate::approval_flow::protocol::GrantedPayload)> {
     let entry = installed_entry(store, name)?;
     if entry.digest != disclosed_digest {
@@ -263,7 +263,7 @@ pub fn grant_disclosed(
         );
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
-    let settled = grant(store, name, holder, method, connection, counted)?;
+    let settled = grant(store, name, holder, method, connection, counted_at_boot)?;
     let payload = supplied_by(store, &entry, method, settled.connection.as_deref())?;
     Ok((settled, payload))
 }
@@ -293,9 +293,9 @@ fn refuse_a_path_this_run_never_counted(
     entry: &Installed,
     method: &str,
     name: &str,
-    counted: Option<&[String]>,
+    counted_at_boot: Option<&[String]>,
 ) -> Result<()> {
-    let Some(counted) = counted else {
+    let Some(counted) = counted_at_boot else {
         return Ok(());
     };
     for path in written_paths(&supplied_by(store, entry, method, None)?) {

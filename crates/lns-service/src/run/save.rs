@@ -97,7 +97,7 @@ fn overlay_launch(spec: &mut serde_json::Map<String, Value>, args: &lns_ipc::Run
     );
 }
 
-/// The run's mounts reach the service already merged with the document's, in a shape that carries less — no `exclude`, no `size`. So a guest path the document declares keeps the document's entry, and only one it does not declare is added from the run.
+/// The run's binds reach the service carrying the document's `exclude` as `excluded_paths` but no `size`, and the entry this function builds from a run drops both. So a guest path the document declares keeps the document's entry, and only one it does not declare is added from the run.
 fn overlay_mounts(spec: &mut serde_json::Map<String, Value>, args: &lns_ipc::RunImageArgs) {
     let mut mounts: Vec<Value> = spec
         .get("volumes")
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(mounts[1]["readOnly"], true);
     }
 
-    /// The wire shape carries no `exclude` and no `size`, so a declared target that took it would lose an isolation control and a capacity floor with nothing in the file to say a rule was ever there.
+    /// The entry built from the run carries no `exclude` and no `size`, so a declared target that took it would lose an isolation control and a capacity floor with nothing in the file to say a rule was ever there.
     #[test]
     fn a_declared_mount_is_saved_as_the_document_wrote_it() {
         let document = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"upstream","spec":{"image":"alpine:3.20","volumes":[{"type":"bind","source":"./","target":"/work","exclude":[".cargo","node_modules"]},{"name":"cache","target":"/cache","size":"100Gi"}]}}"#;

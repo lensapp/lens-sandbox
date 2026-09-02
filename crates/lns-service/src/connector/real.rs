@@ -154,7 +154,7 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
                 &self.holder,
                 method,
                 connection,
-                counted_claims_of(&self.holder).as_deref(),
+                paths_counted_at_boot_for(&self.holder).as_deref(),
             )
         })?;
         // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
@@ -330,11 +330,11 @@ fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T>
 }
 
 /// A reservation has no boot behind it, so nothing is held against the grant; a live run always has a counted set, and one without it is a run this process cannot vouch for (§3.2.4).
-fn counted_claims_of(holder: &GrantHolder) -> Option<Vec<String>> {
+fn paths_counted_at_boot_for(holder: &GrantHolder) -> Option<Vec<String>> {
     let GrantHolder::Run(run_id) = holder else {
         return None;
     };
-    match crate::run_registry::counted_claims(run_id) {
+    match crate::run_registry::paths_counted_at_boot(run_id) {
         Some(counted) => Some(counted),
         None if crate::run_registry::is_live(run_id) => Some(Vec::new()),
         None => None,
@@ -342,10 +342,12 @@ fn counted_claims_of(holder: &GrantHolder) -> Option<Vec<String>> {
 }
 
 /// The paths every installed connector would write, for the boot to make room for (§3.1.11). A store this boot cannot read is an error, not an empty set: a recorded grant is replayed into the guest either way.
-pub fn installed_claims() -> Result<Vec<super::writes::Claim>> {
+pub fn paths_installed_connectors_write() -> Result<Vec<super::writes::WrittenPath>> {
     let definitions = with_stores(|store| Ok(store.installed_definitions()?.0))
         .context("reading this machine's connectors to make room for what they write")?;
-    Ok(super::writes::installed_claims(&definitions))
+    Ok(super::writes::paths_installed_connectors_write(
+        &definitions,
+    ))
 }
 
 /// What the grants this run already made supply to it as it starts, by connector (§7.1). Unreadable connector state supplies nothing, as it offers nothing.
@@ -480,7 +482,7 @@ pub async fn answer(call: Call) -> Result<Response> {
             connection,
         } => {
             let holder = holder_of(&run)?;
-            let counted = counted_claims_of(&holder);
+            let counted = paths_counted_at_boot_for(&holder);
             let granted = handler::grant(
                 &store,
                 &name,
@@ -773,7 +775,7 @@ mod tests {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_writing(home.path(), "~/.claude", ".credentials.json");
         assert_eq!(
-            installed_claims()
+            paths_installed_connectors_write()
                 .expect("a readable store")
                 .into_iter()
                 .map(|claim| (claim.connector, claim.path))
@@ -791,7 +793,7 @@ mod tests {
     fn a_connector_store_this_boot_cannot_read_refuses_the_run_rather_than_claiming_nothing() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(
-            installed_claims().is_err(),
+            paths_installed_connectors_write().is_err(),
             "a recorded grant is replayed into the guest either way, so an unreadable store must not read as no connectors"
         );
     }
@@ -1277,7 +1279,7 @@ mod tests {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_writing(home.path(), "~/.claude", ".credentials.json");
         let _run = a_registered_run(RUN);
-        crate::run_registry::record_counted_claims(
+        crate::run_registry::record_paths_counted_at_boot(
             RUN,
             vec!["~/.claude/.credentials.json".to_string()],
         );

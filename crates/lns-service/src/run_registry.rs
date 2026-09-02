@@ -26,7 +26,7 @@ struct DamagedClaim {
 }
 
 /// What each live run's boot counted an installed connector would write, so a grant the boot never made room for is refused rather than written through a bind (§3.2.4).
-static COUNTED_CLAIMS: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
+static PATHS_COUNTED_AT_BOOT: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
 
 /// A listed run: alive with a session behind it, or stopped with only its record — restartable until removed.
 pub enum RunEntry {
@@ -400,21 +400,27 @@ pub fn deregister(run_id: &str) {
     if let Some(m) = g.as_mut() {
         m.remove(run_id);
     }
-    let mut claims = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
-    if let Some(m) = claims.as_mut() {
+    let mut counted = PATHS_COUNTED_AT_BOOT
+        .lock()
+        .expect("PATHS_COUNTED_AT_BOOT poisoned");
+    if let Some(m) = counted.as_mut() {
         m.remove(run_id);
     }
 }
 
-pub fn record_counted_claims(run_id: &str, claims: Vec<String>) {
-    let mut g = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
+pub fn record_paths_counted_at_boot(run_id: &str, paths: Vec<String>) {
+    let mut g = PATHS_COUNTED_AT_BOOT
+        .lock()
+        .expect("PATHS_COUNTED_AT_BOOT poisoned");
     g.get_or_insert_with(HashMap::new)
-        .insert(run_id.to_string(), claims);
+        .insert(run_id.to_string(), paths);
 }
 
 /// A run this process never booted counted nothing, which is not the same as counting an empty set.
-pub fn counted_claims(run_id: &str) -> Option<Vec<String>> {
-    let g = COUNTED_CLAIMS.lock().expect("COUNTED_CLAIMS poisoned");
+pub fn paths_counted_at_boot(run_id: &str) -> Option<Vec<String>> {
+    let g = PATHS_COUNTED_AT_BOOT
+        .lock()
+        .expect("PATHS_COUNTED_AT_BOOT poisoned");
     g.as_ref().and_then(|m| m.get(run_id).cloned())
 }
 
@@ -909,14 +915,14 @@ mod tests {
     async fn what_a_boot_counted_lives_as_long_as_the_run_and_no_longer() {
         let id = allocate_run_id();
         assert_eq!(
-            counted_claims(&id),
+            paths_counted_at_boot(&id),
             None,
             "a run this process never booted counted nothing, which is not an empty set"
         );
 
-        record_counted_claims(&id, vec!["~/.claude/.credentials.json".into()]);
+        record_paths_counted_at_boot(&id, vec!["~/.claude/.credentials.json".into()]);
         assert_eq!(
-            counted_claims(&id),
+            paths_counted_at_boot(&id),
             Some(vec!["~/.claude/.credentials.json".to_string()]),
             "a grant is held to what this run's boot made room for"
         );
@@ -927,7 +933,7 @@ mod tests {
 
         deregister(&id);
         assert_eq!(
-            counted_claims(&id),
+            paths_counted_at_boot(&id),
             None,
             "the run is gone, and so is what it counted"
         );
