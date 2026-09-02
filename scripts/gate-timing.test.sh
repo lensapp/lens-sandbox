@@ -149,9 +149,14 @@ test_a_dead_hook_warns_without_failing() {
     echo "test_a_dead_hook_warns_without_failing"
     dir=$(mktmp)
     git -C "$dir" init -q
+    # The warning reads core.hooksPath, which falls back to the host's global
+    # config; pin it so the fixture, not the host, decides.
+    git -C "$dir" config core.hooksPath .git/hooks
     log=$dir/timings.tsv
     status=0
-    err=$(cd "$dir" && LNS_GATE_HOOK_WARNING=1 LNS_GATE_TIMING_LOG="$log" \
+    # CI is exempt from the warning, so this case states its own environment
+    # rather than inheriting the runner's.
+    err=$(cd "$dir" && CI= LNS_GATE_HOOK_WARNING=1 LNS_GATE_TIMING_LOG="$log" \
         "$SCRIPT" run lint -- true 2>&1 >/dev/null) || status=$?
     check "the step still passes" "0" "$status"
     check "it says what to do" "1" "$(echo "$err" | grep -c 'make install-hooks')"

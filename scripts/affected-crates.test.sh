@@ -4,6 +4,11 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$SCRIPT_DIR/affected-crates.sh"
 
+if ! command -v jq >/dev/null 2>&1; then
+    echo "skip: affected-crates.sh degrades to __FULL__ without jq, so its crate-list cases cannot run"
+    exit 0
+fi
+
 PASS=0
 FAIL=0
 FAILURES=""

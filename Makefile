@@ -146,11 +146,19 @@ fmt:
 
 # The shell harnesses that cover the gate's own scripts. Cheap enough to sit
 # inside `lint`, which is where a contributor already looks for "is it clean".
+# Run under both CI and non-CI, because these scripts branch on it and a
+# harness that only passes in one environment is the defect this gate exists
+# to catch.
 shell-tests:
-	@status=0; for t in scripts/*.test.sh; do \
-		echo "── $$t ──"; \
-		"./$$t" || status=$$?; \
-	done; exit $$status
+	@status=0; failed=""; \
+		for t in scripts/*.test.sh; do \
+			echo "── $$t (no CI) ──"; \
+			env -u CI "./$$t" || { status=$$?; failed="$$failed $$t(no-CI)"; }; \
+			echo "── $$t (CI=1) ──"; \
+			CI=1 "./$$t" || { status=$$?; failed="$$failed $$t(CI)"; }; \
+		done; \
+		[ -z "$$failed" ] || echo "shell-tests failed:$$failed"; \
+		exit $$status
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:
