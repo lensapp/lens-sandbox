@@ -15,6 +15,9 @@ pub const SYSTEM_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The proxy the supervisor runs and points its workload at, so the service can point an exec session at the same one; one spelling, or an exec takes a route the workload never takes.
 pub const GUEST_PROXY_URL: &str = "http://127.0.0.1:3128";
 
+/// What the proxy variables exclude, so a workload reaching a server it started itself is not sent to a proxy that cannot connect back into the guest; one spelling, or an exec fails a request the workload can make.
+pub const GUEST_NO_PROXY: &str = "localhost,127.0.0.1,::1";
+
 /// Where the service stages each `pre-start` script and the supervisor reads them from; one spelling, or the guest runs nothing and reports success.
 pub const SCRIPTS_DIR: &str = "/.lens/scripts";
 
