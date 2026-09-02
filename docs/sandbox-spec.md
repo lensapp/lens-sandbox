@@ -715,7 +715,9 @@ directory is often the only sensible mount and also brings things the workload h
 no business reading: another sandbox's state, a host toolchain the guest must not
 use, an unrelated project. Each entry names a path relative to `source`, and the
 guest gets an empty mount there instead of the real contents — the path exists, and
-what was behind it does not.
+what was behind it does not. Where a [fileset](#3111-filesets) writes to that path,
+the guest gets a plain directory holding the fileset's files instead of an empty
+mount.
 
 | Rule | Detail |
 |---|---|
@@ -726,6 +728,10 @@ what was behind it does not.
 
 An exclusion travels with the sandbox: a published bind masks what its author
 meant, on whatever machine runs it.
+
+What the mask leaves is guest-local, so a [fileset](#3111-filesets) may write
+there. [§3.1.11](#3111-filesets) states that rule, and how a bind with such an
+exclusion is mounted.
 
 A developer who wants to mask something the author did not name writes a mixin of
 their own with that `exclude`, and layers it with `--mixin` or from `spec.mixins`.
@@ -804,18 +810,45 @@ file into the volume once the volume is mounted, and it does so on **every** boo
 because a fileset is re-derived from its source every run. What the workload wrote
 there last run does not survive — the document is what decides that path.
 
-Two volumes take no such write, and a document declaring one under them is
-**refused**:
+A fileset writes exact paths, and those paths are what the rules below compare. An
+`inline` fileset writes `guestPath` joined with each key, so `guestPath: /root`
+carrying a `.claude.json` key claims `/root/.claude.json` and nothing else. A
+`hostPath` fileset carries one file and claims its `guestPath`. A `path` fileset
+places a whole directory, so it claims the whole `guestPath` directory.
 
-- a **bind**, because writing there would create files in the host directory the
-  bind shares, and they would outlive the run. A fileset never writes to the host
+Two mounts take no write from a fileset, and a document whose claim lands under
+one is **refused**:
+
+- a **bind**, because the write would create a file in the host directory the bind
+  shares, and it would outlive the run. A fileset never writes to the host
   filesystem.
 - a **read-only** volume, because it takes no write at all, so the file could
   never land.
 
-Both refusals name the fileset entry and the volume entry. The nesting may run
-either way — a `guestPath` under a `target`, or a `target` under a `guestPath` —
-and is refused the same.
+The refusal names the fileset entry and the volume entry. The nesting runs either
+way — a claim under a `target`, or a `target` under a claim — and is refused the
+same.
+
+A bind's `exclude` ([§3.1.10](#3110-volumes)) is the one place inside a bind that
+does take the write. The mask it leaves is guest-local, so a file written there
+never reaches the host and does not outlive the run. A claim under a bind is
+allowed when an `exclude` entry of that same bind covers it. Another bind's
+`exclude` does not, and `readOnly` makes no difference, because the mask is
+guest-local whatever the bind does with the share.
+
+A bind with such an `exclude` is mounted entry by entry rather than whole, because
+the masked path needs a guest-local parent for the write to land there. The split
+follows the excluded path: the bind `target`, and every directory between it and
+the masked path, is a guest-local directory, and the host entries beside them are
+mounted one at a time. At each of those levels every entry is its own mount point:
+
+- A rename over one, or an unlink of one, fails.
+- An entry the workload creates beside them is guest-local, and it does not reach
+  the host.
+- An entry that appears on the host after the run starts does not show up.
+
+Paths inside those entries behave as any bound path does. A bind whose `exclude`
+no fileset covers is mounted whole.
 
 A document validates against its own `volumes`, so a run that adds one of those
 two mounts itself — a read-only or bind mount the launch names rather than the
@@ -2047,7 +2080,10 @@ Offline validation (`lns artifact validate`, and every load path including
   literal, and names one file; `optional` appears only on a `hostPath`;
   `guestPath` is absolute or `~/`-anchored and never names another user's home,
   and is unique **as written** across volumes and filesets — two spellings of one
-  resolved path are caught at launch ([§3.1.11](#3111-filesets)).
+  resolved path are caught at launch ([§3.1.11](#3111-filesets)); no claim lands
+  under a read-only volume, and none lands under a bind unless that same bind's
+  `exclude` covers it — decided here for an absolute claim, and at launch for a
+  `~/`-anchored one ([§3.1.11](#3111-filesets)).
 - **ports**: `container` and `host` in range and each unique.
 - **scripts**: every entry sets a `when` this grammar defines and a `run` that is
   non-empty and free of NUL; a `user`, where present, follows the `user` rule; at
@@ -2091,6 +2127,7 @@ there, because they depend on state no document carries — they run at launch:
 | The host a `%` share resolves against ([§3.1.5](#315-resources)) | The host's total cores and RAM. |
 | Whether a bind `source` ([§3.1.10](#3110-volumes)) or a `hostPath` is present, and whether a pulled `hostPath` is allowed ([§3.1.11](#3111-filesets)) | The running machine's files, and its recorded host-path decisions. |
 | Whether two `guestPath` entries resolve to one path ([§3.1.11](#3111-filesets)) | The guest's home directory, which a `~/`-anchored path is resolved against. |
+| Whether a `~/`-anchored fileset claim lands under a volume `target` ([§3.1.11](#3111-filesets)) | The guest's home directory, for the same reason. |
 | The resolved source list in [§3.3.2](#332-merge-rules) | The mixin graph — its depth, its cycles, and which source wins each setting — is only known once each mixin, and each mixin it declares, is pulled. |
 
 The last one is why a merge collision refuses the **run** rather than the
