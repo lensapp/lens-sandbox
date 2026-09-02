@@ -1,0 +1,16 @@
+#!/bin/sh
+# Commit time stays cheap: formatting only. The gate — lint, complexity,
+# coverage — runs at push time, where it belongs.
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+cargo fmt --all -- --check
+
+# The launcher is `#!/usr/bin/env node`, so the runtime has to be reachable too.
+if [ -x node_modules/.bin/markdownlint-cli2 ] && command -v node >/dev/null 2>&1; then
+    node_modules/.bin/markdownlint-cli2 '**/*.md' '#node_modules' '#crates/*/CHANGELOG.md'
+else
+    printf 'pre-commit: markdownlint not installed, check skipped (npm install to enable).\n'
+fi

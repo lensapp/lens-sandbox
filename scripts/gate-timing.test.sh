@@ -4,6 +4,11 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$SCRIPT_DIR/gate-timing.sh"
 
+# Every `run` warns when hooks are not installed. That is not what this suite
+# is about, and asserting on stderr without it would make `make lint` fail on a
+# checkout that has not run `make install-hooks`.
+export LNS_GATE_HOOK_WARNING=0
+
 PASS=0
 FAIL=0
 FAILURES=""
@@ -96,7 +101,7 @@ test_report_summarises_per_step() {
     printf '2026-01-01T00:00:00Z\tlint\t10\t0\tmain\tabc\t\n' >>"$log"
     printf '2026-01-01T00:01:00Z\tlint\t30\t1\tmain\tabc\t\n' >>"$log"
     printf '2026-01-01T00:02:00Z\tlint\t20\t0\tmain\tabc\t\n' >>"$log"
-    row=$("$SCRIPT" report "$log" | awk '$1 == "lint"')
+    row=$("$SCRIPT" report --all "$log" | awk '$1 == "lint"')
     check "runs" "3" "$(echo "$row" | awk '{print $2}')"
     check "fails" "1" "$(echo "$row" | awk '{print $3}')"
     check "min" "10" "$(echo "$row" | awk '{print $5}')"
@@ -112,7 +117,50 @@ test_report_tolerates_a_missing_log() {
     check "explains itself" "1" "$(echo "$out" | grep -c 'run the gate first')"
 }
 
+test_a_detail_left_by_the_step_labels_its_row() {
+    echo "test_a_detail_left_by_the_step_labels_its_row"
+    dir=$(mktmp)
+    log=$dir/timings.tsv
+    detail=$dir/detail
+    LNS_GATE_TIMING_LOG=$log LNS_GATE_DETAIL_FILE=$detail "$SCRIPT" run coverage-data -- \
+        env LNS_GATE_TIMING_LOG="$log" LNS_GATE_DETAIL_FILE="$detail" "$SCRIPT" detail coverage-data cold
+    check "the row carries the label" "cold" "$(cut -f7 "$log")"
+    check "the label is consumed once" "no" "$([ -f "$detail.coverage-data" ] && echo yes || echo no)"
+
+    # A label left for one step must not colour another step's row.
+    other=$dir/other.tsv
+    LNS_GATE_TIMING_LOG=$other LNS_GATE_DETAIL_FILE=$detail "$SCRIPT" run coverage-data -- \
+        env LNS_GATE_TIMING_LOG="$other" LNS_GATE_DETAIL_FILE="$detail" "$SCRIPT" detail lint warm
+    check "another step's label is left alone" "" "$(cut -f7 "$other")"
+}
+
+test_the_report_window_excludes_older_rows() {
+    echo "test_the_report_window_excludes_older_rows"
+    log=$(mktmp)/timings.tsv
+    printf '2020-01-01T00:00:00Z\tlint\t900\t0\tmain\tabc\t\n' >>"$log"
+    printf '%s\tlint\t10\t0\tmain\tabc\t\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$log"
+    windowed=$("$SCRIPT" report "$log" | awk '$1 == "lint" {print $2}')
+    check "the default window drops the old row" "1" "$windowed"
+    all=$("$SCRIPT" report --all "$log" | awk '$1 == "lint" {print $2}')
+    check "--all keeps it" "2" "$all"
+}
+
+test_a_dead_hook_warns_without_failing() {
+    echo "test_a_dead_hook_warns_without_failing"
+    dir=$(mktmp)
+    git -C "$dir" init -q
+    log=$dir/timings.tsv
+    status=0
+    err=$(cd "$dir" && LNS_GATE_HOOK_WARNING=1 LNS_GATE_TIMING_LOG="$log" \
+        "$SCRIPT" run lint -- true 2>&1 >/dev/null) || status=$?
+    check "the step still passes" "0" "$status"
+    check "it says what to do" "1" "$(echo "$err" | grep -c 'make install-hooks')"
+}
+
 test_run_records_a_row
+test_a_detail_left_by_the_step_labels_its_row
+test_the_report_window_excludes_older_rows
+test_a_dead_hook_warns_without_failing
 test_run_propagates_failure
 test_an_unwritable_log_never_fails_the_step
 test_disabled_records_nothing_but_still_runs

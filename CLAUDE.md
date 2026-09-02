@@ -83,7 +83,9 @@ The **local pre-push gate** is `make lint && make complexity && make coverage-af
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity` (per-crate because workspace feature unification disagrees with per-crate runs). For genuinely-branchy functions, use `#[allow(clippy::cognitive_complexity)]` with a one-line reason.
 - `make coverage` — compiles and runs all tests **instrumented** in `target/llvm-cov-target/`, then enforces every file at 100% line coverage unless listed in `scripts/coverage-floor.sh`'s IGNORES table. Test failures surface here. See [Per-file coverage gate](#per-file-coverage-gate) below.
 
-`make install-hooks` wires the gate into pre-push. Bypass: `git push --no-verify`.
+`make install-hooks` points `core.hooksPath` at `scripts/hooks/`, the repo's only hook directory: `commit-msg` (commitlint), `pre-commit` (`cargo fmt --check` and markdownlint), and `pre-push` (the gate). The two node-based steps skip themselves with a printed notice unless both the tool and a reachable `node` are present, so a Rust-only checkout — or an nvm shell where `node` is off `PATH` — is never blocked from committing. Bypass: `git push --no-verify`.
+
+Until that command runs, no hook exists and nothing says so — git has no dead-hook signal — so every timed gate step prints a one-line reminder while `core.hooksPath` is unset.
 
 ### Build-cache rules the gate depends on
 
@@ -111,7 +113,11 @@ Never inject a failure by removing a permission bit — root ignores it. Take th
 
 ### Gate telemetry
 
-`scripts/gate-timing.sh` records one row per gate step — the pre-push hook wraps each `make` call — plus the affected-crates verdict, in `.gate/timings.tsv`. That path is outside `target/`, so `cargo clean` keeps the history. Read it with `make gate-report`: runs, failures, and min/median/max seconds per step, then a count per coverage verdict (`__NONE__`, `__FULL__`, or the exact crate list). Set `LNS_GATE_TIMING=0` to stop recording. `scripts/gate-timing.test.sh` covers the script.
+Every gate step records itself — `make lint`, `test`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `.gate/timings.tsv`, which is outside `target/`, so `cargo clean` keeps the history.
+
+`make gate-report` reads the last 30 days: runs, failures, and min/median/max seconds per step, a count per coverage verdict, and `coverage-data` split by cold and warm cache — a full artifact clean and a counter-only clean are different runs and averaging them hides both. `scripts/gate-timing.sh report --since <days>` or `--all` widens it.
+
+The rows nest: `coverage-affected` covers `coverage`, which covers `coverage-data` and `parity`. Each records its own row, so the durations must not be summed. Only one layer wraps — the pre-push hook calls the targets plainly, because they time themselves. Set `LNS_GATE_TIMING=0` to stop recording. `scripts/gate-timing.test.sh` covers the script.
 
 Outside the gate: `make build` (shipping artifacts), `make test` (uninstrumented — coverage already runs the same tests instrumented), `make e2e` (real binaries — runs in CI's test job, manual locally). The live-microVM interactive-shell smoke test (`crates/lns-cli/tests/smoke/interactive-shell.exp`) is run manually via `expect -f` when touching `lns run -it` plumbing — no Makefile wrapper.
 
