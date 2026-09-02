@@ -587,12 +587,13 @@ fn fileset_claims(fileset: &FilesetEntry) -> Vec<String> {
     files.keys().map(|key| format!("{base}/{key}")).collect()
 }
 
-fn one_claim(left: &str, right: &str) -> bool {
+/// Two spellings of one guest path, decided on segments so a trailing or doubled separator is not a second path.
+pub fn same_path(left: &str, right: &str) -> bool {
     claimed_path(left) == claimed_path(right)
 }
 
 fn shares_a_path_with(target: &str, claim: &str) -> bool {
-    one_claim(target, claim) || encloses(target, claim) || encloses(claim, target)
+    same_path(target, claim) || encloses(target, claim) || encloses(claim, target)
 }
 
 /// A fileset nested under a volume target reaches the workload only because lns-init copies it into the volume once mounted (§3.1.11), and these two kinds of volume take no such copy.
@@ -607,7 +608,7 @@ fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
         };
         for claim in spec.filesets.iter().flat_map(fileset_claims) {
             if shares_a_path_with(&volume.target, &claim) {
-                let relation = match one_claim(&volume.target, &claim) {
+                let relation = match same_path(&volume.target, &claim) {
                     true => "collides with",
                     false => "is nested with",
                 };

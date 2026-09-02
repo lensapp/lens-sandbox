@@ -1478,6 +1478,7 @@ mod tests {
             read_only: false,
             kept: vec![".env".into()],
             dropped: vec![".npmrc".into()],
+            excluded: vec![],
         }];
         let s = format_bind_dispositions(&binds);
         assert!(s.contains(".env: kept (exposed)"), "missing kept line: {s}");
@@ -1492,6 +1493,7 @@ mod tests {
             read_only: false,
             kept: vec![],
             dropped: vec![],
+            excluded: vec![],
         }];
         assert!(format_bind_dispositions(&binds).is_empty());
     }

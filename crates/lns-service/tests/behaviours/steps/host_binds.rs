@@ -38,6 +38,11 @@ async fn request_dropping(w: &mut BehaviourWorld, source: String, target: String
     w.bind().request(&source, &target, false, &[&drop]);
 }
 
+#[when(expr = "a run requests host bind {string} at {string} seeding {string}")]
+async fn request_seeding(w: &mut BehaviourWorld, source: String, target: String, seed: String) {
+    w.bind().request_seeding(&source, &target, &[], &[&seed]);
+}
+
 #[when(expr = "a host bind {string} at {string} is recorded in the audit chain")]
 async fn record_bind_audit(w: &mut BehaviourWorld, source: String, target: String) {
     w.bind().record_audit(&source, &target, &[], &[]);
@@ -86,6 +91,23 @@ async fn two_distinct_tags(w: &mut BehaviourWorld) -> Result<(), String> {
 #[then(expr = "the content share tag is left untouched")]
 async fn content_tag_untouched(w: &mut BehaviourWorld) -> Result<(), String> {
     cmdline_has(w, "content.tag=lns-content")
+}
+
+#[then(expr = "the bind spec for {string} lists {string} in its seeded paths")]
+async fn bind_lists_seed(
+    w: &mut BehaviourWorld,
+    target: String,
+    name: String,
+) -> Result<(), String> {
+    cmdline_has(w, &format!("bind.0.target={target}"))?;
+    cmdline_has(w, "bind.0.seeds=1")?;
+    cmdline_has(w, &format!("bind.0.seed.0={name}"))
+}
+
+#[then(expr = "the bind spec for {string} declares no seeded paths")]
+async fn bind_lists_no_seed(w: &mut BehaviourWorld, target: String) -> Result<(), String> {
+    cmdline_has(w, &format!("bind.0.target={target}"))?;
+    cmdline_has(w, "bind.0.seeds=0")
 }
 
 #[then(expr = "the bind spec for {string} lists {string} in its dropped paths")]

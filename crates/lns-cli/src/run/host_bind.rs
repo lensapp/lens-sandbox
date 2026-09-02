@@ -70,6 +70,11 @@ fn validate_exclude_entry(entry: &str) -> Result<()> {
     if entry.split('/').any(|seg| seg == "." || seg == "..") {
         bail!("exclude entry {entry:?} must not contain `.` or `..` path segments");
     }
+    if entry.contains(lns_ipc::cmdline_unsafe_char) {
+        bail!(
+            "exclude entry {entry:?} must be free of whitespace, quotes, and control characters, which can't be carried to the guest safely"
+        );
+    }
     Ok(())
 }
 
@@ -85,6 +90,7 @@ pub struct ResolvedBind {
     pub read_only: bool,
     pub kept: Vec<String>,
     pub dropped: Vec<String>,
+    pub excluded: Vec<String>,
 }
 
 impl ResolvedBind {
@@ -95,6 +101,7 @@ impl ResolvedBind {
             read_only: self.read_only,
             dropped_paths: self.dropped.clone(),
             kept_paths: self.kept.clone(),
+            excluded_paths: self.excluded.clone(),
         }
     }
 }
@@ -166,6 +173,7 @@ pub fn resolve_binds(
             read_only: spec.read_only,
             kept,
             dropped,
+            excluded: spec.exclude.clone(),
         });
     }
     if recorded {
@@ -723,13 +731,14 @@ mod tests {
     }
 
     #[test]
-    fn to_wire_carries_source_target_mode_and_both_kept_and_dropped_paths() {
+    fn to_wire_carries_source_target_mode_kept_dropped_and_excluded_paths() {
         let resolved = ResolvedBind {
             host_source: "/proj".into(),
             target: "/work".into(),
             read_only: true,
             kept: vec![".env".into()],
             dropped: vec![".npmrc".into()],
+            excluded: vec![".cargo".into()],
         };
         let wire = resolved.to_wire();
         assert_eq!(
@@ -740,7 +749,29 @@ mod tests {
                 read_only: true,
                 dropped_paths: vec![".npmrc".into()],
                 kept_paths: vec![".env".into()],
+                excluded_paths: vec![".cargo".into()],
             }
+        );
+    }
+
+    #[test]
+    fn an_exclude_the_guest_cmdline_cannot_carry_is_refused_rather_than_dropped_silently() {
+        let dir = FakeDir {
+            entries: vec!["src".into()],
+            ..Default::default()
+        };
+        let store = FakeStore::default();
+        let (out, _) = resolve(
+            &[bind_excluding("/proj", "/work", &["my notes"])],
+            &dir,
+            &store,
+            true,
+            "",
+        );
+        let err = out.unwrap_err().to_string();
+        assert!(
+            err.contains("exclude entry") && err.contains("whitespace"),
+            "an exclude reaches the guest on the kernel cmdline: {err}"
         );
     }
 }

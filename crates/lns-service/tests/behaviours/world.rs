@@ -76,6 +76,7 @@ pub struct BehaviourWorld {
     pub fileset_artifact_layers: Option<usize>,
     /// The named volumes the scenario's run mounts, which a fileset landing under one is staged past.
     pub fileset_volumes: Vec<lns_ipc::VolumeMount>,
+    pub fileset_binds: Vec<lns_ipc::BindMount>,
     /// The pre-start scripts a scenario declares, before they become a document.
     pub script_declaration: Option<crate::steps::guest_scripts::ScriptDeclaration>,
     /// The runtime-layer specs a planned run stages for its pre-start scripts.

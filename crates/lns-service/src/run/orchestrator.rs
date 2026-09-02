@@ -346,7 +346,7 @@ async fn orchestrate(
         )?;
     }
 
-    let bind_attachments: Vec<vm::BindAttachment> = args
+    let mut bind_attachments: Vec<vm::BindAttachment> = args
         .binds
         .iter()
         .map(|b| vm::BindAttachment {
@@ -354,6 +354,7 @@ async fn orchestrate(
             target: b.target.clone(),
             read_only: b.read_only,
             dropped_paths: b.dropped_paths.clone(),
+            seeded_paths: Vec::new(),
         })
         .collect();
     for bind in &args.binds {
@@ -415,7 +416,14 @@ async fn orchestrate(
         &args.volumes,
         &args.binds,
     )?;
-    crate::artifact::fileset::stage_what_a_volume_would_hide(&mut fileset_specs, &args.volumes);
+    for (attachment, bind) in bind_attachments.iter_mut().zip(&args.binds) {
+        attachment.seeded_paths = crate::artifact::fileset::seeded_paths(bind, &fileset_specs);
+    }
+    crate::artifact::fileset::stage_what_a_mount_would_hide(
+        &mut fileset_specs,
+        &args.volumes,
+        &args.binds,
+    );
     let runtime_layer = runtime_layer::for_run(
         imageless,
         &content_store,

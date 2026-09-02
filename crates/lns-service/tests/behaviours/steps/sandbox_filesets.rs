@@ -76,9 +76,10 @@ fn plan_published_sandbox(world: &mut BehaviourWorld) {
 
 fn capture_materialized(world: &mut BehaviourWorld, materialized: MaterializedFilesets) {
     let mut specs = materialized.into_specs();
-    lns_service::artifact::fileset::stage_what_a_volume_would_hide(
+    lns_service::artifact::fileset::stage_what_a_mount_would_hide(
         &mut specs,
         &world.fileset_volumes,
+        &world.fileset_binds,
     );
     world.fileset_manifest = specs
         .iter()

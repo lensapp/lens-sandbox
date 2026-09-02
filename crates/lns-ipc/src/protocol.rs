@@ -971,6 +971,9 @@ pub struct BindMount {
     /// Secret-shaped files the operator chose to expose; carried for the audit record, not consumed by the guest.
     #[serde(default)]
     pub kept_paths: Vec<String>,
+    /// Subpaths the definition excluded, whether or not the host has them, so the guest can leave one for a fileset to write.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1454,6 +1457,7 @@ mod tests {
                 read_only: false,
                 dropped_paths: vec![".env".into()],
                 kept_paths: vec![".npmrc".into()],
+                excluded_paths: Vec::new(),
             }],
             auto_remove: false,
             verify_sandbox: false,
@@ -1604,6 +1608,7 @@ mod tests {
                 read_only: false,
                 dropped_paths: vec![],
                 kept_paths: vec![],
+                excluded_paths: Vec::new(),
             }],
             auto_remove: true,
             verify_sandbox: false,

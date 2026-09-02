@@ -441,6 +441,7 @@ mod tests {
             read_only: false,
             dropped_paths: Vec::new(),
             kept_paths: Vec::new(),
+            excluded_paths: Vec::new(),
         }];
         record.args.volumes = vec![lns_ipc::VolumeMount {
             name: "cache".into(),
@@ -478,6 +479,7 @@ mod tests {
             read_only: false,
             dropped_paths: Vec::new(),
             kept_paths: Vec::new(),
+            excluded_paths: Vec::new(),
         }];
         record.args.volumes = vec![lns_ipc::VolumeMount {
             name: "cache".into(),
@@ -521,6 +523,7 @@ mod tests {
             read_only: false,
             dropped_paths: Vec::new(),
             kept_paths: Vec::new(),
+            excluded_paths: Vec::new(),
         }];
         let text = render(&record, &Policy::default(), SaveKind::Sandbox, "reviewer")
             .expect("a run with an extra -v can be written out");

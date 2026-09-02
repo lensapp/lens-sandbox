@@ -15,23 +15,53 @@ pub const OWNED_MANIFEST_PATH: &str = "/.lens/fileset-owned";
 /// Where a guest write a volume mount would cover is staged instead, for lns-init to copy onto its final path once the volume is mounted.
 pub const DEFERRED_ROOT: &str = "/.lens/fileset-deferred";
 
-/// A volume mounts after the runtime layer is in place, so a write under its target is staged here for lns-init to copy in once the volume is mounted.
-pub fn stage_what_a_volume_would_hide(
+/// A mount goes on after the runtime layer is in place, so a write the mount would cover is staged here for lns-init to copy in once the mount is up.
+pub fn stage_what_a_mount_would_hide(
     specs: &mut [RuntimeFileSpec],
     volumes: &[lns_ipc::VolumeMount],
+    binds: &[lns_ipc::BindMount],
 ) {
     for spec in specs {
-        if volumes
+        let under_a_writable_volume = volumes
             .iter()
             .filter(|volume| !volume.read_only)
-            .any(|volume| lns_artifact::sandbox::encloses(&volume.target, &spec.guest_path))
-        {
+            .any(|volume| lns_artifact::sandbox::encloses(&volume.target, &spec.guest_path));
+        let inside_a_mask = binds.iter().any(|bind| masks(bind, &spec.guest_path));
+        if under_a_writable_volume || inside_a_mask {
             spec.guest_path = format!("{DEFERRED_ROOT}{}", spec.guest_path);
         }
     }
 }
 
-/// A read-only volume takes no write and a bind would leave the file in the host directory it shares, so a run whose write lands under either is refused rather than started without it.
+fn mask_path(bind: &lns_ipc::BindMount, entry: &str) -> String {
+    format!("{}/{entry}", bind.target.trim_end_matches('/'))
+}
+
+/// An exclude leaves a guest-local mask, so a write there never reaches the share and never outlives the run (§3.1.11).
+fn masks(bind: &lns_ipc::BindMount, guest_path: &str) -> bool {
+    bind.excluded_paths.iter().any(|entry| {
+        let mask = mask_path(bind, entry);
+        lns_artifact::sandbox::same_path(&mask, guest_path)
+            || lns_artifact::sandbox::encloses(&mask, guest_path)
+    })
+}
+
+/// The excluded paths of this bind that a fileset writes into: the guest leaves each one unmounted so the write lands in a guest-local directory (§3.1.11).
+pub fn seeded_paths(bind: &lns_ipc::BindMount, specs: &[RuntimeFileSpec]) -> Vec<String> {
+    bind.excluded_paths
+        .iter()
+        .filter(|entry| {
+            let mask = mask_path(bind, entry);
+            specs.iter().any(|spec| {
+                lns_artifact::sandbox::same_path(&mask, &spec.guest_path)
+                    || lns_artifact::sandbox::encloses(&mask, &spec.guest_path)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// A read-only volume takes no write and a bind would leave the file in the host directory it shares, so a run whose write lands under either is refused rather than started without it — unless that bind's own exclude masks the path (§3.1.11).
 pub fn refuse_writes_a_mount_would_hide(
     specs: &[RuntimeFileSpec],
     volumes: &[lns_ipc::VolumeMount],
@@ -40,12 +70,17 @@ pub fn refuse_writes_a_mount_would_hide(
     let covering = volumes
         .iter()
         .filter(|volume| volume.read_only)
-        .map(|volume| ("read-only volume", volume.target.as_str()))
-        .chain(binds.iter().map(|bind| ("bind", bind.target.as_str())));
-    for (kind, target) in covering {
-        let hidden = specs
-            .iter()
-            .find(|spec| lns_artifact::sandbox::encloses(target, &spec.guest_path));
+        .map(|volume| ("read-only volume", volume.target.as_str(), None))
+        .chain(
+            binds
+                .iter()
+                .map(|bind| ("bind", bind.target.as_str(), Some(bind))),
+        );
+    for (kind, target, bind) in covering {
+        let hidden = specs.iter().find(|spec| {
+            lns_artifact::sandbox::encloses(target, &spec.guest_path)
+                && !bind.is_some_and(|bind| masks(bind, &spec.guest_path))
+        });
         if let Some(hidden) = hidden {
             bail!(
                 "the fileset at {} lands under the {kind} mounted at {target}, which takes no write from a fileset; the workload would never see the file",
@@ -460,7 +495,7 @@ mod tests {
             spec_at("/home/nodejs/tool.md"),
             spec_at(OWNED_MANIFEST_PATH),
         ];
-        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", false)]);
+        stage_what_a_mount_would_hide(&mut specs, &[volume_at("/home/node", false)], &[]);
         let paths: Vec<&str> = specs.iter().map(|s| s.guest_path.as_str()).collect();
         assert_eq!(
             paths,
@@ -475,19 +510,20 @@ mod tests {
     #[test]
     fn a_write_at_the_volume_target_itself_is_the_mount_point_and_is_left_alone() {
         let mut specs = vec![spec_at("/home/node")];
-        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", false)]);
+        stage_what_a_mount_would_hide(&mut specs, &[volume_at("/home/node", false)], &[]);
         assert_eq!(specs[0].guest_path, "/home/node");
     }
 
     #[test]
     fn a_write_under_a_read_only_volume_is_left_where_it_was_written_because_no_copy_can_land() {
         let mut specs = vec![spec_at("/home/node/tool.md")];
-        stage_what_a_volume_would_hide(&mut specs, &[volume_at("/home/node", true)]);
+        stage_what_a_mount_would_hide(&mut specs, &[volume_at("/home/node", true)], &[]);
         assert_eq!(specs[0].guest_path, "/home/node/tool.md");
     }
 
     fn bind_at(target: &str) -> lns_ipc::BindMount {
         lns_ipc::BindMount {
+            excluded_paths: Vec::new(),
             host_source: "/Users/dev/project".to_string(),
             target: target.to_string(),
             read_only: false,
@@ -514,6 +550,83 @@ mod tests {
         let specs = [spec_at("/work/.agent/settings.json")];
         let err = refuse_writes_a_mount_would_hide(&specs, &[], &[bind_at("/work")]).unwrap_err();
         assert!(format!("{err:#}").contains("bind"), "got: {err:#}");
+    }
+
+    fn bind_excluding(target: &str, exclude: &[&str]) -> lns_ipc::BindMount {
+        lns_ipc::BindMount {
+            excluded_paths: exclude.iter().map(|e| e.to_string()).collect(),
+            ..bind_at(target)
+        }
+    }
+
+    #[test]
+    fn a_bind_whose_own_exclude_masks_the_write_refuses_nothing_because_the_mask_is_guest_local() {
+        let specs = [spec_at("/root/.claude/agent/settings.json")];
+        refuse_writes_a_mount_would_hide(
+            &specs,
+            &[],
+            &[bind_excluding("/root/.claude", &["agent"])],
+        )
+        .expect("a write into the mask never reaches the share the bind holds");
+    }
+
+    #[test]
+    fn a_bind_excluding_something_else_still_refuses_the_write_it_would_bury() {
+        let specs = [spec_at("/root/.claude/agent/settings.json")];
+        let err = refuse_writes_a_mount_would_hide(
+            &specs,
+            &[],
+            &[bind_excluding("/root/.claude", &["projects"])],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/root/.claude/agent/settings.json"),
+            "an exclude elsewhere in the bind rescues nothing: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_write_into_a_mask_is_staged_so_it_lands_after_the_entries_are_bound() {
+        let mut specs = vec![spec_at("/root/.claude/agent/settings.json")];
+        stage_what_a_mount_would_hide(
+            &mut specs,
+            &[],
+            &[bind_excluding("/root/.claude", &["agent"])],
+        );
+        assert_eq!(
+            specs[0].guest_path, "/.lens/fileset-deferred/root/.claude/agent/settings.json",
+            "written into the rootfs it would be covered, so lns-init lands it once the bind is up"
+        );
+    }
+
+    #[test]
+    fn seeded_paths_names_only_the_excludes_a_fileset_writes_into() {
+        let specs = [spec_at("/root/.claude/agent/settings.json")];
+        let bind = bind_excluding("/root/.claude", &["agent", "projects", "settings.json"]);
+        assert_eq!(
+            seeded_paths(&bind, &specs),
+            vec!["agent".to_string()],
+            "an exclude no fileset writes into is masked as usual, not left unmounted"
+        );
+    }
+
+    #[test]
+    fn seeded_paths_names_an_exclude_a_fileset_writes_exactly() {
+        let specs = [spec_at("/root/.claude/settings.json")];
+        let bind = bind_excluding("/root/.claude", &["settings.json"]);
+        assert_eq!(
+            seeded_paths(&bind, &specs),
+            vec!["settings.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn seeded_paths_is_empty_for_a_bind_no_fileset_writes_into() {
+        let specs = [spec_at("/root/.claude/settings.json")];
+        assert!(
+            seeded_paths(&bind_at("/root/.claude"), &specs).is_empty(),
+            "a bind with no exclude is mounted whole"
+        );
     }
 
     #[test]
