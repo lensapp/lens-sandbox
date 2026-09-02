@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PROFILE: &str = "release-init";
+const GUEST_PROFILE: &str = "release-init";
 
 fn guest_target() -> (&'static str, &'static str) {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH set by cargo");
@@ -114,15 +114,31 @@ fn main() {
     stage_static_nft(&workspace, &out_dir);
 }
 
+// Debug builds are the dev loop, so they skip the guest embeds; every shipping
+// artifact is a release build, which always embeds.
+fn embed_is_skipped(override_env: &str) -> bool {
+    if std::env::var_os(override_env).is_some_and(|v| !v.is_empty()) {
+        return true;
+    }
+    std::env::var("PROFILE").as_deref() == Ok("debug")
+}
+
+// The debug default is the documented dev loop, so only the explicit override warns.
+fn warn_if_overridden(override_env: &str, what: &str) {
+    if std::env::var_os(override_env).is_some_and(|v| !v.is_empty()) {
+        println!(
+            "cargo:warning=lns-service build.rs: {override_env} is set; \
+             skipping the {what} embed (override will be read at runtime)."
+        );
+    }
+}
+
 fn stage_static_nft(workspace: &Path, out_dir: &Path) {
-    if std::env::var_os("LNS_NFT_BIN").is_some_and(|v| !v.is_empty()) {
+    if embed_is_skipped("LNS_NFT_BIN") {
         let empty = out_dir.join("nft.empty");
         std::fs::write(&empty, []).expect("write empty nft placeholder");
         println!("cargo:rustc-env=LNS_NFT_BIN_EMBEDDED={}", empty.display());
-        println!(
-            "cargo:warning=lns-service build.rs: LNS_NFT_BIN is set; \
-             skipping static-nft embed (override will be read at runtime)."
-        );
+        warn_if_overridden("LNS_NFT_BIN", "static-nft");
         return;
     }
 
@@ -203,14 +219,11 @@ fn stage_with_optional_override(
     override_env: &str,
     embed_env: &str,
 ) {
-    if std::env::var_os(override_env).is_some_and(|v| !v.is_empty()) {
+    if embed_is_skipped(override_env) {
         let empty = out_dir.join(format!("{pkg}.empty"));
         std::fs::write(&empty, []).expect("write empty placeholder");
         println!("cargo:rustc-env={embed_env}={}", empty.display());
-        println!(
-            "cargo:warning=lns-service build.rs: {override_env} is set; \
-             skipping {pkg} cross-build (override will be read at runtime)."
-        );
+        warn_if_overridden(override_env, pkg);
         return;
     }
     let dst = cross_build_and_stage(workspace, target_dir, out_dir, pkg);
@@ -226,8 +239,16 @@ fn cross_build_and_stage(
     let (target, linker_var) = guest_target();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(&cargo);
-    cmd.args(["build", "-p", pkg, "--profile", PROFILE, "--target", target])
-        .current_dir(workspace);
+    cmd.args([
+        "build",
+        "-p",
+        pkg,
+        "--profile",
+        GUEST_PROFILE,
+        "--target",
+        target,
+    ])
+    .current_dir(workspace);
 
     if std::env::var_os(linker_var).is_none() {
         cmd.env(linker_var, "rust-lld");
@@ -251,7 +272,7 @@ fn cross_build_and_stage(
         );
     }
 
-    let elf = target_dir.join(target).join(PROFILE).join(pkg);
+    let elf = target_dir.join(target).join(GUEST_PROFILE).join(pkg);
     if !elf.is_file() {
         panic!(
             "{pkg} build succeeded but artifact not found at {} — \

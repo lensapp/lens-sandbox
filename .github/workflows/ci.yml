@@ -73,13 +73,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      # Skip the aarch64-musl cross-build of the embedded guest binaries
-      # (build.rs treats non-empty as skip). Saves ~10 min of apt install
-      # for the cross toolchain; release-please builds the real binary.
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
-
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -92,7 +85,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           # Per-job cache-shared-key so lint/test/coverage don't fight
-          # for the same target/ slot.
+          # for the same target/ slot. `make complexity` nests its own dir
+          # inside target/, which rust-cache stores with the rest.
           cache-workspaces: .
           cache-on-failure: true
           cache-shared-key: lns-ci-lint
@@ -104,9 +98,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -151,9 +142,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -175,6 +163,9 @@ jobs:
           # path (COVERAGE_TARGET_DIR). Cache key matches its layout.
           cache-workspaces: |
             . -> target/llvm-cov-target
+          # The stamp that decides profraw-only vs full clean. rust-cache
+          # strips loose files from a cached target root, so it lives here.
+          cache-directories: .gate
           cache-on-failure: true
           cache-shared-key: lns-ci-coverage
 
@@ -258,7 +249,7 @@ jobs:
       - run: make audit
 
   # `make build` with real cross-builds + codesign — what the gate's
-  # LNS_*_BIN=skip flow doesn't validate. Env pins mirror release-please.yml.
+  # debug-profile embed skip doesn't validate. Env pins mirror release-please.yml.
   check-release-build:
     needs: changes
     if: needs.changes.outputs['check-release-build'] == 'true'
@@ -274,6 +265,8 @@ jobs:
     env:
       LNS_INIT_BIN: ""
       LNS_SESSION_BROKER_BIN: ""
+      LNS_NFT_BIN: ""
+      LNS_SUPERVISOR_BIN: ""
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
       CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
       AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar

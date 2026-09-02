@@ -1,15 +1,15 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks
+.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report
 
 CARGO ?= cargo
 
 # `CARGO_LOCKED=--locked make <step>` from CI; empty locally.
 CARGO_LOCKED ?=
 
-WORKSPACE_ROOT = $(shell $(CARGO) metadata --format-version 1 --no-deps | \
+WORKSPACE_ROOT := $(shell $(CARGO) metadata --format-version 1 --no-deps | \
 	(jq -r .workspace_root 2>/dev/null || \
 	 sed -n 's/.*"workspace_root":"\([^"]*\)".*/\1/p'))
-WORKSPACE_MANIFEST = $(WORKSPACE_ROOT)/Cargo.toml
-CARGO_TARGET_DIR = $(shell $(CARGO) metadata --format-version 1 --no-deps | \
+WORKSPACE_MANIFEST := $(WORKSPACE_ROOT)/Cargo.toml
+CARGO_TARGET_DIR := $(shell $(CARGO) metadata --format-version 1 --no-deps | \
 	(jq -r .target_directory 2>/dev/null || \
 	 sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'))
 
@@ -22,7 +22,17 @@ CARGO_TARGET_DIR = $(shell $(CARGO) metadata --format-version 1 --no-deps | \
 # letting `cargo clean` sweep it. Derived from WORKSPACE_ROOT, not
 # CARGO_TARGET_DIR — the coverage recipes' target-specific
 # `export CARGO_TARGET_DIR` would shadow it into double-nesting.
-COVERAGE_TARGET_DIR = $(WORKSPACE_ROOT)/target/llvm-cov-target
+COVERAGE_TARGET_DIR := $(WORKSPACE_ROOT)/target/llvm-cov-target
+
+# `complexity` runs per-crate clippy with different trailing args than the
+# workspace-wide `lint`. Cargo fingerprints those args, so sharing a target
+# dir makes each step re-check what the other just built. Its own dir ends
+# the thrash; nesting inside target/ keeps `cargo clean` sweeping it.
+COMPLEXITY_TARGET_DIR := $(WORKSPACE_ROOT)/target/complexity
+
+# Gate bookkeeping that must outlive `cargo clean` and stay out of the target
+# dirs CI caches: rust-cache strips loose files from a cached target root.
+GATE_STATE_DIR := $(WORKSPACE_ROOT)/.gate
 
 # Crates whose code is enforced by the per-crate `complexity` gate,
 # which iterates this list with `cd crates/<crate> && cargo …` so each
@@ -46,15 +56,12 @@ COVERAGE_CARGO_SCOPE := $(if $(strip $(COVERAGE_CRATES)),$(foreach c,$(COVERAGE_
 
 # ── Dev loop ──────────────────────────────────────────────────────────
 
-# Inner dev loop: debug build of the two user-facing crates. Skips
-# the lns-init + lns-session-broker aarch64-musl cross-builds (~40x
-# faster incremental than `make build`) and the static-nft embed.
-# Set LNS_INIT_BIN / LNS_SESSION_BROKER_BIN / LNS_NFT_BIN to `<path>`
-# at runtime to use a real pre-built guest binary instead.
-dev: export LNS_INIT_BIN := skip
-dev: export LNS_SESSION_BROKER_BIN := skip
-dev: export LNS_NFT_BIN := skip
-dev: export LNS_SUPERVISOR_BIN := skip
+# Inner dev loop: debug build of the two user-facing crates. Debug builds
+# skip the aarch64-musl guest cross-builds and the static-nft embed (see
+# lns-service/build.rs), which every plain `cargo` invocation and
+# rust-analyzer also get — one fingerprint, no rebuild when you switch
+# between them. Set LNS_INIT_BIN / LNS_SESSION_BROKER_BIN / LNS_NFT_BIN /
+# LNS_SUPERVISOR_BIN to `<path>` at runtime to use a pre-built guest binary.
 dev:
 	$(CARGO) build -p lns-cli -p lns-service
 
@@ -91,25 +98,18 @@ build-lns-service:
 # below). CI invokes these targets as parallel jobs, with
 # `CARGO_LOCKED=--locked make <step>` for strictness on lint/test.
 
-# Gate targets are one-shot full passes; incremental caches only cost
-# disk here (cargo never prunes them), so the gates opt out while
-# `make dev` and raw cargo iteration keep incremental speed.
-lint test complexity coverage-data: export CARGO_INCREMENTAL := 0
+# `complexity` and `coverage-data` each own their target dir, so opting out
+# of incremental there only bounds disk. `lint` and `test` share the dir
+# with `make dev` and rust-analyzer, and CARGO_INCREMENTAL is part of the
+# fingerprint — they keep the default so switching between them is free.
+complexity coverage-data: export CARGO_INCREMENTAL := 0
 
-lint: export LNS_INIT_BIN := skip
-lint: export LNS_SESSION_BROKER_BIN := skip
-lint: export LNS_NFT_BIN := skip
-lint: export LNS_SUPERVISOR_BIN := skip
 lint:
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace --all-targets $(CARGO_LOCKED) -- -D warnings -D clippy::undocumented_unsafe_blocks
 
 # `--exclude e2e-tests`: the Layer 1 cucumber harness spawns real
 # binaries — owned by `make e2e`, not the fast in-process test gate.
-test: export LNS_INIT_BIN := skip
-test: export LNS_SESSION_BROKER_BIN := skip
-test: export LNS_NFT_BIN := skip
-test: export LNS_SUPERVISOR_BIN := skip
 test:
 	$(CARGO) test --workspace --exclude e2e-tests --all-targets $(CARGO_LOCKED)
 
@@ -118,10 +118,7 @@ test:
 # and `cognitive_complexity` workspace-wide flags functions that pass
 # the per-crate gate. Keep complexity per-crate on both sides for
 # parity.
-complexity: export LNS_INIT_BIN := skip
-complexity: export LNS_SESSION_BROKER_BIN := skip
-complexity: export LNS_NFT_BIN := skip
-complexity: export LNS_SUPERVISOR_BIN := skip
+complexity: export CARGO_TARGET_DIR := $(COMPLEXITY_TARGET_DIR)
 complexity:
 	@status=0; for crate in $(GATE_CRATES); do \
 		(cd crates/$$crate && $(CARGO) clippy --all-targets -- -D clippy::cognitive_complexity) || status=$$?; \
@@ -143,10 +140,6 @@ fmt:
 # fully instrumented (cargo-llvm-cov has no `build` subcommand — only
 # test/run/nextest).
 coverage-data: export CARGO_TARGET_DIR := $(COVERAGE_TARGET_DIR)
-coverage-data: export LNS_INIT_BIN := skip
-coverage-data: export LNS_SESSION_BROKER_BIN := skip
-coverage-data: export LNS_NFT_BIN := skip
-coverage-data: export LNS_SUPERVISOR_BIN := skip
 coverage-data:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
 		echo "cargo-llvm-cov not installed. Install with: cargo install cargo-llvm-cov"; \
@@ -157,17 +150,36 @@ coverage-data:
 	# Debug mode: `syn` (heavy dep) compiles ~3x faster in debug than release;
 	# runtime cost over ~100 source files is sub-second either way.
 	$(CARGO) build -p coverage-strip-ast
-	$(CARGO) llvm-cov clean --workspace
+	# A source-only change rebuilds a test binary in place, so clearing the
+	# counters is enough. A toolchain or manifest change shifts the artifact
+	# hashes instead: the superseded binaries stay behind and `llvm-cov
+	# report` still picks them up as objects. The stamp catches that and
+	# falls back to the full clean.
+	@set -e; \
+		stamp="$(GATE_STATE_DIR)/coverage-toolchain-stamp"; \
+		inputs_sha=$$( cat Cargo.lock crates/*/Cargo.toml Cargo.toml | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 ); \
+		want="$$(rustc -V)|$$($(CARGO) llvm-cov --version)|$$inputs_sha"; \
+		if [ "$$(cat "$$stamp" 2>/dev/null)" = "$$want" ]; then \
+			$(CARGO) llvm-cov clean --profraw-only; \
+		else \
+			echo "coverage: toolchain or manifests changed — full artifact clean"; \
+			$(CARGO) llvm-cov clean --workspace; \
+			mkdir -p "$(GATE_STATE_DIR)"; \
+			printf '%s\n' "$$want" >"$$stamp"; \
+		fi
 	@set -e; \
 		eval "$$($(CARGO) llvm-cov show-env --export-prefix)"; \
 		$(if $(strip $(COVERAGE_CRATES)),$(if $(filter lns-service,$(COVERAGE_CRATES)),$(CARGO) build -p lns-service;,),$(CARGO) build -p lns-service;) \
 		$(CARGO) test $(COVERAGE_CARGO_SCOPE) --all-targets; \
-		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST); \
-		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST) --html; \
+		mkdir -p $(COVERAGE_TARGET_DIR)/llvm-cov; \
 		$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST) --lcov \
 			--output-path $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info; \
 		$(COVERAGE_TARGET_DIR)/debug/coverage-strip-ast $(COVERAGE_TARGET_DIR)/llvm-cov/lcov.info; \
-		echo "HTML report: $(COVERAGE_TARGET_DIR)/llvm-cov/html/index.html"
+		if [ "$(COVERAGE_HTML)" = "1" ]; then \
+			$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST); \
+			$(CARGO) llvm-cov report --manifest-path $(WORKSPACE_MANIFEST) --html; \
+			echo "HTML report: $(COVERAGE_TARGET_DIR)/llvm-cov/html/index.html"; \
+		fi
 
 coverage: coverage-data
 	@status=0; \
@@ -181,6 +193,7 @@ coverage: coverage-data
 BASE_REF ?= origin/main
 coverage-affected:
 	@out=$$(./scripts/affected-crates.sh $(BASE_REF)); \
+		./scripts/gate-timing.sh note coverage-scope "$$(echo "$$out" | tr '\n' ' ' | sed 's/ *$$//')"; \
 		case "$$out" in \
 			__NONE__) echo "no crates affected; skipping coverage"; exit 0 ;; \
 			__FULL__) $(MAKE) coverage ;; \
@@ -207,10 +220,6 @@ coverage-lcov:
 # harness in `crates/e2e-tests/` with their paths passed via LNS_BIN /
 # LNS_SERVICE_BIN. Excluded from the coverage gate (spawns real
 # subprocesses with side effects).
-e2e: export LNS_INIT_BIN := skip
-e2e: export LNS_SESSION_BROKER_BIN := skip
-e2e: export LNS_NFT_BIN := skip
-e2e: export LNS_SUPERVISOR_BIN := skip
 e2e:
 	$(CARGO) build -p lns-cli -p lns-service
 	@LNS_BIN=$(CARGO_TARGET_DIR)/debug/lns \
@@ -251,12 +260,19 @@ audit:
 	}
 	$(CARGO) audit
 
+# ── Gate telemetry ────────────────────────────────────────────────────
+# scripts/gate-timing.sh records one row per gate step (pre-push wraps
+# each `make` call) plus the affected-crates verdict. The log is
+# .gate/timings.tsv; set LNS_GATE_TIMING=0 to stop recording.
+
+gate-report:
+	@./scripts/gate-timing.sh report
+
 # ── Housekeeping ──────────────────────────────────────────────────────
 
 clean:
 	rm -rf bin/
 	$(CARGO) clean
-	rm -rf $(WORKSPACE_ROOT)/target-cov
 
 # One-time setup per checkout: point git at the in-tree hooks dir so
 # pre-push runs the gate automatically.

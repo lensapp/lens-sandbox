@@ -52,7 +52,7 @@ fn resolve_lns_init_bytes(
     }
     if embedded.is_empty() {
         bail!(
-            "embedded lns-init is empty — build.rs saw LNS_INIT_BIN=<path> at compile time and skipped the cross-build, but the env var is now unset at runtime. Either set LNS_INIT_BIN again, or rebuild lns-cli without it (`unset LNS_INIT_BIN && cargo build -p lns-cli --release`)."
+            "embedded lns-init is empty — build.rs skipped the cross-build because this is a debug build, or because LNS_INIT_BIN was set at compile time. Either set LNS_INIT_BIN to a cross-built lns-init, or rebuild as a release build without it (`unset LNS_INIT_BIN && cargo build -p lns-service --release`)."
         );
     }
     let bytes = embedded.to_vec();
@@ -99,7 +99,7 @@ fn resolve_broker_bytes(
     }
     if embedded.is_empty() {
         bail!(
-            "embedded lns-session-broker is empty — build.rs saw LNS_SESSION_BROKER_BIN=<path> at compile time and skipped the cross-build, but the env var is now unset at runtime. Either set LNS_SESSION_BROKER_BIN again, or rebuild without it (`unset LNS_SESSION_BROKER_BIN && cargo build -p lns-service --release`)."
+            "embedded lns-session-broker is empty — build.rs skipped the cross-build because this is a debug build, or because LNS_SESSION_BROKER_BIN was set at compile time. Either set LNS_SESSION_BROKER_BIN to a cross-built broker, or rebuild as a release build without it (`unset LNS_SESSION_BROKER_BIN && cargo build -p lns-service --release`)."
         );
     }
     Ok(embedded.to_vec())
