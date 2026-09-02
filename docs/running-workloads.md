@@ -352,9 +352,10 @@ should always apply belongs in the sandbox definition's `spec.env`.
 One variable no source here can set: one a connector this run granted fills. The
 workload reads a placeholder there and the boundary substitutes the real value on
 the wire, so a `-e`, an env file, the definition's own `spec.env`, or an image
-`ENV` under that name is dropped and the run names the connector that fills it
-and the source it displaced. Clear that run's grant with `lns connector forget
-<ID> --run <RUN>` and start again, or drop the variable.
+`ENV` under that name is dropped, the variable holds the placeholder instead, and
+the run names the connector that fills it and the source it displaced. Clear that
+run's grant with `lns connector forget <ID> --run <RUN>` and start again, or drop
+the variable.
 
 Secrets do **not** belong in either flag — `-e` and `--env-file` values are
 plain environment variables visible to the workload.

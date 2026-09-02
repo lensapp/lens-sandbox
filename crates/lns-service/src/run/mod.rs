@@ -125,8 +125,8 @@ pub(super) struct EnvInputs<'a> {
     pub user_env: &'a [String],
     pub workdir: Option<&'a str>,
     pub tools: &'a crate::workload_env::ToolRuntime,
-    /// Each variable a granted connector fills, by the connector that fills it, so no other source shadows the placeholder the boundary substitutes.
-    pub filled_by_a_grant: &'a std::collections::BTreeMap<String, String>,
+    /// The placeholder a granted method fills each of this run's variables with (§3.2.4).
+    pub connectors: &'a crate::workload_env::ConnectorEnv,
 }
 
 pub(super) fn exec_env_strings(
@@ -151,7 +151,7 @@ pub(super) fn exec_env_strings(
         agent_command.as_deref(),
         inputs.workdir,
         inputs.tools,
-        inputs.filled_by_a_grant,
+        inputs.connectors,
     )
 }
 
@@ -573,7 +573,7 @@ mod tests {
                 user_env: &[],
                 workdir: None,
                 tools: &Default::default(),
-                filled_by_a_grant: &Default::default(),
+                connectors: &Default::default(),
             },
         );
         assert!(
@@ -597,7 +597,7 @@ mod tests {
                 user_env: &[],
                 workdir: None,
                 tools: &Default::default(),
-                filled_by_a_grant: &Default::default(),
+                connectors: &Default::default(),
             },
         );
         let agent = env
@@ -622,7 +622,7 @@ mod tests {
                 user_env: &["FOO=bar".into()],
                 workdir: None,
                 tools: &Default::default(),
-                filled_by_a_grant: &Default::default(),
+                connectors: &Default::default(),
             },
         );
         assert_eq!(
@@ -671,7 +671,7 @@ mod tests {
                 user_env: &[],
                 workdir: None,
                 tools: &Default::default(),
-                filled_by_a_grant: &Default::default(),
+                connectors: &Default::default(),
             },
         );
         assert!(env.env.contains(&"AGENT_COMMAND=/srv arg".to_string()));
@@ -697,7 +697,7 @@ mod tests {
                 user_env: &["PORT=4000".into()],
                 workdir: None,
                 tools: &Default::default(),
-                filled_by_a_grant: &Default::default(),
+                connectors: &Default::default(),
             },
         );
         assert!(

@@ -332,15 +332,29 @@ pub fn granted_supply_for(run_id: &str) -> BTreeMap<String, GrantedPayload> {
     }
 }
 
-/// Each variable a granted method fills for this run, by the connector that fills it: the workload reads a placeholder there and the boundary substitutes the real value, so no other source may set it (§3.2.4).
-pub fn variables_a_grant_fills(run_id: &str) -> BTreeMap<String, String> {
+/// The placeholder a granted method fills each of this run's variables with (§3.2.4).
+pub fn connector_env_for(run_id: &str) -> crate::workload_env::ConnectorEnv {
+    crate::workload_env::ConnectorEnv {
+        filled: variables_a_grant_fills(run_id),
+    }
+}
+
+fn variables_a_grant_fills(run_id: &str) -> BTreeMap<String, crate::workload_env::Filled> {
     granted_supply_for(run_id)
         .into_iter()
         .flat_map(|(connector, supply)| {
             supply
                 .credentials
                 .into_iter()
-                .filter_map(move |credential| Some((credential.env_var?, connector.clone())))
+                .filter_map(move |credential| {
+                    Some((
+                        credential.env_var?,
+                        crate::workload_env::Filled {
+                            connector: connector.clone(),
+                            placeholder: credential.placeholder?,
+                        },
+                    ))
+                })
         })
         .collect()
 }
@@ -554,6 +568,20 @@ mod tests {
         std::fs::write(dir.join("digest"), "sha256:abc").unwrap();
     }
 
+    fn filled(
+        variable: &str,
+        connector: &str,
+        placeholder: &str,
+    ) -> (String, crate::workload_env::Filled) {
+        (
+            variable.to_string(),
+            crate::workload_env::Filled {
+                connector: connector.to_string(),
+                placeholder: placeholder.to_string(),
+            },
+        )
+    }
+
     fn install_filling(home: &Path, name: &str, env_var: &str) {
         install_with_credential(
             home,
@@ -616,7 +644,7 @@ mod tests {
     }
 
     /// Through the store rather than hand-written json, so the file this reads back is the shape a real decline writes.
-    fn decline(home: &Path, run_id: &str) {
+    fn decline(home: &Path, run_id: &str, name: &str) {
         let holder = GrantHolder::Run(run_id.to_string());
         let installed = super::super::dir::ConnectorDir::new(home.join("connectors"));
         let values: JsonDecisionStore<Connection> =
@@ -624,7 +652,7 @@ mod tests {
         let grants: JsonDecisionStore<RunDecision> =
             JsonDecisionStore::new(home.join("connector-grants.json"));
         ConnectorStore::new(&installed, &values, &grants)
-            .decide(&holder, "some-provider", RunDecision::Declined)
+            .decide(&holder, name, RunDecision::Declined)
             .expect("record a decline");
     }
 
@@ -647,7 +675,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         install_one(home.path(), "api.some-provider.example");
-        decline(home.path(), RUN);
+        decline(home.path(), RUN, "some-provider");
         assert!(offers_for_run(RUN).is_empty(), "this run has declined");
         assert_eq!(
             served_by(offers_for_run(OTHER_RUN)),
@@ -1281,6 +1309,30 @@ mod tests {
 
     #[test]
     #[serial(env, global_runs)]
+    fn only_the_connector_this_run_granted_fills_a_variable() {
+        // A decline is the run's standing no, and an install on its own consents to nothing: the grant is what puts a marker in the environment.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_filling(home.path(), "some-provider", "SOME_TOKEN");
+        install_filling(home.path(), "other-provider", "OTHER_TOKEN");
+        install_filling(home.path(), "third-provider", "THIRD_TOKEN");
+        grant_recorded(RUN, "some-provider");
+        decline(home.path(), RUN, "other-provider");
+
+        assert_eq!(
+            connector_env_for(RUN).filled,
+            [filled(
+                "SOME_TOKEN",
+                "some-provider",
+                "some-provider-LNSPLACEHOLDER000"
+            )]
+            .into(),
+            "the declined connector and the undecided one each fill nothing"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
     fn the_variables_a_grant_fills_are_the_ones_no_other_source_may_set() {
         // A variable missing from this map is one a `-e` can shadow, putting a real secret where the boundary substitutes a placeholder.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1295,11 +1347,19 @@ mod tests {
         assert_eq!(
             variables_a_grant_fills(RUN),
             [
-                ("OTHER_TOKEN".to_string(), "other-provider".to_string()),
-                ("SOME_TOKEN".to_string(), "some-provider".to_string()),
+                filled(
+                    "OTHER_TOKEN",
+                    "other-provider",
+                    "other-provider-LNSPLACEHOLDER000"
+                ),
+                filled(
+                    "SOME_TOKEN",
+                    "some-provider",
+                    "some-provider-LNSPLACEHOLDER00"
+                ),
             ]
             .into(),
-            "every granted connector contributes, and a credential with no envVar sets no variable"
+            "every granted connector contributes its marker, and a credential with no envVar sets no variable"
         );
         assert!(
             variables_a_grant_fills(OTHER_RUN).is_empty(),

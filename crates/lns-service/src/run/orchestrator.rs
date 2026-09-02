@@ -217,11 +217,11 @@ async fn orchestrate(
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_else(|| args.env.clone());
-    // Dropped before the environment travels anywhere, so the supervisor, the audit chain and the workload all see what actually entered.
-    let filled_by_a_grant = crate::connector::real::variables_a_grant_fills(&run_id);
+    // Dropped before the environment travels anywhere, so no source shadows the marker the boundary substitutes for.
+    let connectors = crate::connector::real::connector_env_for(&run_id);
     let (env, refused_here) = crate::workload_env::without_what_a_grant_fills(
         &env,
-        &filled_by_a_grant,
+        &connectors,
         crate::workload_env::source_among(&args.env),
     );
     crate::run_registry::set_resolved_command_and_env(&run_id, &cmd, &env);
@@ -546,7 +546,7 @@ async fn orchestrate(
             user_env: &env,
             workdir: workdir.as_deref(),
             tools: &tool_runtime,
-            filled_by_a_grant: &filled_by_a_grant,
+            connectors: &connectors,
         },
     );
     // Both sources first, then one answer: warning from each in turn would name one variable twice, with two remedies.

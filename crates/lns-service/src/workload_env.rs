@@ -1,9 +1,35 @@
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
+
+/// Each variable a granted method fills for this run, by the connector that fills it: no other source may set it (§3.2.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConnectorEnv {
+    pub filled: BTreeMap<String, Filled>,
+}
+
+impl ConnectorEnv {
+    /// The connector filling a variable, unless the value there is already the marker it would write — an exec joins a run that already holds it, and calling that a displaced value would name a remedy for something nobody did.
+    fn displaced_by(&self, key: &str, value: &str) -> Option<&str> {
+        self.filled
+            .get(key)
+            .filter(|_| claimable(key))
+            .filter(|filled| filled.placeholder != value)
+            .map(|filled| filled.connector.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Filled {
+    pub connector: String,
+    /// The marker the workload reads there; the boundary substitutes the real value on the wire.
+    pub placeholder: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkloadEnv {
     pub env: Vec<String>,
-    /// The variables dropped because a grant fills them; the caller names each one on the run's own log.
+    /// The variables whose value a grant displaced; the caller names each one on the run's own log.
     pub refused: Vec<Refused>,
 }
 
@@ -35,16 +61,16 @@ pub fn refusal_warning(refused: &Refused) -> String {
     let retract = format!("`lns connector forget {connector} --run <run>`");
     match refused.source {
         EnvSource::Flag => format!(
-            "{key} not set: {connector} fills it for this run — run {retract}, or drop the -e"
+            "{key} holds {connector}'s placeholder for this run, not your value — run {retract}, or drop the -e"
         ),
         EnvSource::Definition => format!(
-            "{key} not set: {connector} fills it for this run — run {retract}, or drop {key} from spec.env"
+            "{key} holds {connector}'s placeholder for this run, not your value — run {retract}, or drop {key} from spec.env"
         ),
         EnvSource::Run => format!(
-            "{key} not set: {connector} fills it for this run — run {retract} and start the run again"
+            "{key} holds {connector}'s placeholder for this run, not the value the run started with — run {retract} and start the run again"
         ),
         EnvSource::Image => format!(
-            "{key} not set from the image: {connector} fills it for this run — run {retract} to use the image's value"
+            "{key} holds {connector}'s placeholder for this run, not the image's value — run {retract} to use the image's value"
         ),
     }
 }
@@ -83,21 +109,21 @@ pub fn injected_env(user_env: &[String]) -> Option<Map<String, Value>> {
 /// `source_of` says where each key came from, because a run's environment is its definition's `spec.env` and the command line in one vector by the time it reaches here, and the two have different remedies.
 pub fn without_what_a_grant_fills(
     run_env: &[String],
-    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+    connectors: &ConnectorEnv,
     source_of: impl Fn(&str) -> EnvSource,
 ) -> (Vec<String>, Vec<Refused>) {
     let mut kept = Vec::new();
     let mut refused = Vec::new();
     for kv in run_env {
-        let key = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv);
-        let Some(connector) = filled_by_a_grant.get(key) else {
+        let (key, value) = kv.split_once('=').unwrap_or((kv, ""));
+        let Some(connector) = connectors.displaced_by(key, value) else {
             kept.push(kv.clone());
             continue;
         };
         refused.push(Refused {
             key: key.to_string(),
             source: source_of(key),
-            connector: connector.clone(),
+            connector: connector.to_string(),
         });
     }
     (kept, refused)
@@ -117,29 +143,29 @@ pub fn source_among(command_line: &[String]) -> impl Fn(&str) -> EnvSource + '_ 
     }
 }
 
-/// `filled_by_a_grant` maps a variable to the connector whose granted method supplies it: the workload reads a placeholder there and the boundary substitutes the real value, so a value from any other source is dropped rather than allowed to shadow it.
-pub fn compose_workload_env(
+/// A variable a granted method fills holds that method's placeholder and nothing else (§3.2.4).
+fn compose_workload_env(
     image_env: Option<&[String]>,
     user_env: &[String],
-    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+    connectors: &ConnectorEnv,
 ) -> WorkloadEnv {
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut refused: Vec<Refused> = Vec::new();
-    let mut refuse = |key: &str, source: EnvSource| {
-        let Some(connector) = filled_by_a_grant.get(key) else {
+    let mut refuse = |key: &str, value: &str, source: EnvSource| {
+        let Some(connector) = connectors.displaced_by(key, value) else {
             return false;
         };
         refused.push(Refused {
             key: key.to_string(),
             source,
-            connector: connector.clone(),
+            connector: connector.to_string(),
         });
         true
     };
     if let Some(image) = image_env {
         for kv in image {
             if let Some((k, v)) = kv.split_once('=').filter(|(k, _)| !is_internal(k))
-                && !refuse(k, EnvSource::Image)
+                && !refuse(k, v, EnvSource::Image)
             {
                 upsert(&mut entries, k, v);
             }
@@ -149,10 +175,13 @@ pub fn compose_workload_env(
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
-        if is_internal(k) || refuse(k, EnvSource::Flag) {
+        if is_internal(k) || refuse(k, v, EnvSource::Flag) {
             continue;
         }
         upsert(&mut entries, k, v);
+    }
+    for (key, filled) in connectors.filled.iter().filter(|(k, _)| claimable(k)) {
+        upsert(&mut entries, key, &filled.placeholder);
     }
     WorkloadEnv {
         env: entries
@@ -214,7 +243,7 @@ fn proxy_env() -> [(&'static str, &'static str); 6] {
 pub fn exec_session_env(
     exec_environment: &crate::run_registry::ExecEnvironment,
     exec_env: &[String],
-    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+    connectors: &ConnectorEnv,
 ) -> WorkloadEnv {
     let joined: Vec<String> = exec_environment
         .session_env
@@ -228,7 +257,7 @@ pub fn exec_session_env(
         .filter(|entry| !is_session_only(entry))
         .cloned()
         .collect();
-    let mut composed = compose_workload_env(Some(&joined), &caller, filled_by_a_grant);
+    let mut composed = compose_workload_env(Some(&joined), &caller, connectors);
     // The composer's image slot here is the run's own environment, and telling this caller to edit an image that set nothing sends them nowhere.
     for refused in &mut composed.refused {
         if refused.source == EnvSource::Image {
@@ -321,9 +350,9 @@ pub fn run_workload_env(
     agent_command: Option<&str>,
     workdir: Option<&str>,
     tools: &ToolRuntime,
-    filled_by_a_grant: &std::collections::BTreeMap<String, String>,
+    connectors: &ConnectorEnv,
 ) -> WorkloadEnv {
-    let mut composed = compose_workload_env(image_env, user_env, filled_by_a_grant);
+    let mut composed = compose_workload_env(image_env, user_env, connectors);
     // The broker's last-wins putenv would otherwise let the image PATH shadow the tool dirs.
     compose_guest_tool_env(&mut composed.env, tools);
     if let Some(agent_command) = agent_command {
@@ -346,6 +375,11 @@ pub fn run_workload_env(
         }
     }
     composed
+}
+
+/// A connector may not take a variable the guest itself composes: the supervisor's own channel, the PATH that finds every binary the workload runs, or the identity a session lands in.
+fn claimable(key: &str) -> bool {
+    !is_internal(key) && key != "PATH" && !IDENTITY_ENV_KEYS.contains(&key)
 }
 
 /// The supervisor reads its own instructions out of this prefix, so no image or `-e` may write one.
@@ -380,6 +414,21 @@ mod tests {
         refused_from(key, EnvSource::Flag)
     }
 
+    const MARKER: &str = "some_LNSPLACEHOLDER0000000000";
+
+    fn fills(key: &str) -> ConnectorEnv {
+        ConnectorEnv {
+            filled: [(
+                key.to_string(),
+                Filled {
+                    connector: "some-provider".to_string(),
+                    placeholder: MARKER.to_string(),
+                },
+            )]
+            .into(),
+        }
+    }
+
     fn refused_from(key: &str, source: EnvSource) -> Refused {
         Refused {
             key: key.to_string(),
@@ -398,38 +447,43 @@ mod tests {
     #[test]
     fn a_user_override_of_a_variable_a_grant_fills_is_dropped_and_named() {
         // The workload reads a placeholder for that variable and the boundary substitutes the real value; a -e would put the real secret inside the sandbox, which is the one thing the design does not do.
-        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
         let c = compose_workload_env(
             None,
             &["SOME_TOKEN=sk-live-real".into(), "SAFE=1".into()],
-            &filled,
+            &fills("SOME_TOKEN"),
         );
-        assert_eq!(env(&c), ["SAFE=1"], "the real secret must not reach it");
+        assert_eq!(
+            env(&c),
+            ["SAFE=1", &format!("SOME_TOKEN={MARKER}")],
+            "the real secret must not reach it, and the marker the boundary substitutes for must"
+        );
         assert_eq!(c.refused, [flag("SOME_TOKEN")]);
         assert_eq!(
             refusal_warning(&flag("SOME_TOKEN")),
-            "SOME_TOKEN not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>`, or drop the -e"
+            "SOME_TOKEN holds some-provider's placeholder for this run, not your value — run `lns connector forget some-provider --run <run>`, or drop the -e"
         );
     }
 
     #[test]
     fn a_variable_no_grant_fills_is_carried_as_it_always_was() {
-        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
-        let c = compose_workload_env(None, &["SAFE=1".into()], &filled);
-        assert_eq!(env(&c), ["SAFE=1"]);
+        let c = compose_workload_env(None, &["SAFE=1".into()], &fills("OTHER_TOKEN"));
+        assert_eq!(env(&c), ["SAFE=1", &format!("OTHER_TOKEN={MARKER}")]);
         assert!(c.refused.is_empty());
     }
 
     #[test]
     fn an_image_env_var_a_grant_fills_is_dropped_too() {
         // The image is not the user, but a value it ships under that name shadows the placeholder exactly the same way.
-        let filled = [("SOME_TOKEN".to_string(), "some-provider".to_string())].into();
-        let c = compose_workload_env(Some(&["SOME_TOKEN=from-image".into()]), &[], &filled);
-        assert!(env(&c).is_empty());
+        let c = compose_workload_env(
+            Some(&["SOME_TOKEN=from-image".into()]),
+            &[],
+            &fills("SOME_TOKEN"),
+        );
+        assert_eq!(env(&c), [format!("SOME_TOKEN={MARKER}")]);
         assert_eq!(c.refused, [refused_from("SOME_TOKEN", EnvSource::Image)]);
         assert_eq!(
             refusal_warning(&c.refused[0]),
-            "SOME_TOKEN not set from the image: some-provider fills it for this run — run `lns connector forget some-provider --run <run>` to use the image's value",
+            "SOME_TOKEN holds some-provider's placeholder for this run, not the image's value — run `lns connector forget some-provider --run <run>` to use the image's value",
             "there is no -e here, so telling the user to drop one sends them nowhere"
         );
     }
@@ -477,11 +531,19 @@ mod tests {
                 "FROM_SPEC=1".into(),
                 "NOTANASSIGNMENT".into(),
             ],
-            &[
-                ("SOME_TOKEN".to_string(), "some-provider".to_string()),
-                ("FROM_SPEC".to_string(), "some-provider".to_string()),
-            ]
-            .into(),
+            &ConnectorEnv {
+                filled: ["SOME_TOKEN", "FROM_SPEC"]
+                    .map(|key| {
+                        (
+                            key.to_string(),
+                            Filled {
+                                connector: "some-provider".to_string(),
+                                placeholder: MARKER.to_string(),
+                            },
+                        )
+                    })
+                    .into(),
+            },
             source_among(&typed),
         );
         assert_eq!(kept, ["SAFE=1", "NOTANASSIGNMENT"]);
@@ -494,13 +556,120 @@ mod tests {
         );
         assert_eq!(
             refusal_warning(&refused[1]),
-            "FROM_SPEC not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>`, or drop FROM_SPEC from spec.env",
+            "FROM_SPEC holds some-provider's placeholder for this run, not your value — run `lns connector forget some-provider --run <run>`, or drop FROM_SPEC from spec.env",
             "no -e set this one, so telling the user to drop one sends them nowhere"
         );
         assert_eq!(
             injected_env(&kept).and_then(|e| e.get("SOME_TOKEN").cloned()),
             None
         );
+    }
+
+    #[test]
+    fn a_granted_credential_puts_its_marker_in_the_variable_that_declares_it() {
+        // §3.2.4: the variable holds the placeholder and the boundary substitutes the real value. Leaving it unset tells a tool that reads it that it is signed out, and it never makes the request the grant was given for.
+        let c = compose_workload_env(None, &[], &fills("SOME_TOKEN"));
+        assert_eq!(env(&c), [format!("SOME_TOKEN={MARKER}")]);
+        assert!(
+            c.refused.is_empty(),
+            "nothing was displaced: {:?}",
+            c.refused
+        );
+    }
+
+    #[test]
+    fn an_exec_joins_the_marker_the_run_already_holds_without_calling_it_a_displaced_value() {
+        // The run composed this marker at its start, so an exec that warned about it would name a remedy for something nobody did.
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec![format!("SOME_TOKEN={MARKER}")],
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&run, &[], &fills("SOME_TOKEN"));
+
+        assert!(joining.env.contains(&format!("SOME_TOKEN={MARKER}")));
+        assert!(joining.refused.is_empty(), "got: {:?}", joining.refused);
+    }
+
+    #[test]
+    fn no_connector_may_write_the_supervisors_own_control_channel() {
+        // The supervisor reads its instructions out of this prefix, and an image and a `-e` are already refused it. A grant is consent to a credential, not to the channel the supervisor takes its orders from.
+        let c = run_workload_env(
+            None,
+            &[],
+            None,
+            None,
+            &Default::default(),
+            &fills("LENS_SANDBOX_WORKLOAD_HOME"),
+        );
+        assert!(
+            !c.env.iter().any(|kv| kv.starts_with("LENS_SANDBOX_")),
+            "a connector reached the supervisor's control channel: {:?}",
+            c.env
+        );
+    }
+
+    #[test]
+    fn no_connector_may_claim_the_variable_that_finds_the_guests_binaries() {
+        // A placeholder passes as a path — 16 characters carrying "lns" — so a credential named PATH would otherwise leave the workload one directory to find every binary in.
+        let c = run_workload_env(None, &[], None, None, &Default::default(), &fills("PATH"));
+        assert!(
+            !c.env.iter().any(|kv| kv.starts_with("PATH=")),
+            "the guest default PATH must stand: {:?}",
+            c.env
+        );
+    }
+
+    #[test]
+    fn a_connector_that_may_not_fill_path_may_not_empty_it_either() {
+        // Refusing a value it cannot replace leaves the run without the directory the user asked for, and the warning names a remedy for a variable the connector may not fill.
+        let c = compose_workload_env(None, &["PATH=/opt/mybin".into()], &fills("PATH"));
+        assert_eq!(env(&c), ["PATH=/opt/mybin"]);
+        assert!(c.refused.is_empty(), "got: {:?}", c.refused);
+    }
+
+    #[test]
+    fn no_connector_may_claim_the_identity_the_guest_composes() {
+        // An exec strips HOME and USER so the guest identity fills them. A placeholder refilling that slot tells the broker the author declared a home, and the exec lands on a marker string.
+        let run = crate::run_registry::ExecEnvironment {
+            session_env: vec!["HOME=/home/node".into(), "USER=node".into()],
+            ..Default::default()
+        };
+
+        let joining = exec_session_env(&run, &[], &fills("HOME"));
+
+        assert!(
+            !joining.env.iter().any(|kv| kv.starts_with("HOME=")),
+            "the guest identity owns this slot: {:?}",
+            joining.env
+        );
+    }
+
+    #[test]
+    fn the_warning_says_the_variable_holds_a_placeholder_rather_than_calling_it_unset() {
+        // The variable IS set — to the marker the boundary substitutes for. Telling the user it is not set sends someone debugging a tool that reads it to look for a variable that is there.
+        let c = compose_workload_env(
+            None,
+            &["SOME_TOKEN=sk-live-real".into()],
+            &fills("SOME_TOKEN"),
+        );
+        assert_eq!(env(&c), [format!("SOME_TOKEN={MARKER}")]);
+        for source in [
+            EnvSource::Flag,
+            EnvSource::Definition,
+            EnvSource::Run,
+            EnvSource::Image,
+        ] {
+            let warning = refusal_warning(&refused_from("SOME_TOKEN", source));
+            assert!(
+                !warning.contains("not set"),
+                "the variable holds the placeholder: {warning}"
+            );
+            assert!(
+                warning.contains("placeholder"),
+                "and the warning must say so: {warning}"
+            );
+        }
     }
 
     #[test]
@@ -701,19 +870,19 @@ mod tests {
 
     #[test]
     fn an_exec_cannot_set_from_outside_what_the_run_itself_refused() {
-        // `lns exec` joins a live run; letting its caller set a variable the run dropped would put the real secret in beside the placeholder the boundary substitutes.
+        // `lns exec` joins a live run; letting its caller replace a value the run displaced would put the real secret where the workload reads the placeholder.
         let run = crate::run_registry::ExecEnvironment::default();
 
         let joining = exec_session_env(
             &run,
             &["SOME_TOKEN=sk-live-real".into(), "SAFE=1".into()],
-            &[("SOME_TOKEN".to_string(), "some-provider".to_string())].into(),
+            &fills("SOME_TOKEN"),
         );
 
         let env = &joining.env;
         assert!(
-            !env.iter().any(|kv| kv.starts_with("SOME_TOKEN=")),
-            "the run refused this variable, and an exec is not a way around that: {env:?}"
+            env.contains(&format!("SOME_TOKEN={MARKER}")),
+            "the run refused the caller's value, and an exec is not a way around that: it reads the same marker the workload does: {env:?}"
         );
         assert!(env.contains(&"SAFE=1".to_string()));
         assert_eq!(
@@ -731,11 +900,7 @@ mod tests {
             ..Default::default()
         };
 
-        let joining = exec_session_env(
-            &run,
-            &[],
-            &[("SOME_TOKEN".to_string(), "some-provider".to_string())].into(),
-        );
+        let joining = exec_session_env(&run, &[], &fills("SOME_TOKEN"));
 
         assert_eq!(
             joining.refused,
@@ -743,7 +908,7 @@ mod tests {
         );
         assert_eq!(
             refusal_warning(&joining.refused[0]),
-            "SOME_TOKEN not set: some-provider fills it for this run — run `lns connector forget some-provider --run <run>` and start the run again"
+            "SOME_TOKEN holds some-provider's placeholder for this run, not the value the run started with — run `lns connector forget some-provider --run <run>` and start the run again"
         );
     }
 
