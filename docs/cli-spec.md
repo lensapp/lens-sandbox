@@ -417,9 +417,9 @@ lns volume prune [-f]
 
 | Verb | What it does |
 |---|---|
-| `ls` | Lists volumes with their on-disk size, age, and the sandbox holding each. |
+| `ls` | Lists volumes with their on-disk size, age, and every sandbox that holds each. |
 | `create` | Creates a volume ahead of its first attach. No-op if it exists. |
-| `inspect` | Shows capacity, on-disk bytes, creation time, and holder. |
+| `inspect` | Shows capacity, on-disk bytes, creation time, and every sandbox that holds it. |
 | `rm` | Removes a volume and its data. Refused while a sandbox holds it. |
 | `prune` | Removes every volume no sandbox holds. Lists them and asks, unless `-f`/`--force`. |
 
@@ -593,12 +593,13 @@ there is no separate `--json` switch.
 - A list is a **bare array of objects**, pretty-printed. A command that answers
   about one thing emits a **single object**.
 - Keys are **camelCase** and **always present**. A key with no value is `null`,
-  never omitted, so `jq .inUseBy` needs no guard.
+  never omitted, so `jq .policy` needs no guard.
 - Numbers are **raw**: `sizeBytes: 92274688`, not `"88.0 MiB"`. Timestamps pass
   through as the service reports them.
 - The **exit code is the same** in both formats: `lns config get` on an unset key
   exits `1` either way, printing nothing as a table and `null` as JSON.
-- An empty list is `[]`. A single thing that does not exist is `null`.
+- An empty list is `[]`, at the top level and as a key's value. A single thing
+  that does not exist is `null`.
 - JSON may carry **more** fields than the table has room for. The table is a
   summary; the JSON is the record.
 
