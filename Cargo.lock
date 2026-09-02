@@ -3377,6 +3377,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "hex",
+ "lns-placement",
  "lns-policy",
  "lns-spec",
  "oci-client",
@@ -3469,6 +3470,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lns-placement"
+version = "0.1.0"
+
+[[package]]
 name = "lns-policy"
 version = "0.0.0"
 dependencies = [
@@ -3506,6 +3511,7 @@ dependencies = [
  "lns-audit",
  "lns-ipc",
  "lns-ocsf",
+ "lns-placement",
  "lns-policy",
  "lns-session",
  "lns-spec",

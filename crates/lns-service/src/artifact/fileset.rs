@@ -25,7 +25,7 @@ pub fn stage_what_a_mount_would_hide(
         let under_a_writable_volume = volumes
             .iter()
             .filter(|volume| !volume.read_only)
-            .any(|volume| lns_artifact::sandbox::encloses(&volume.target, &spec.guest_path));
+            .any(|volume| lns_placement::encloses(&volume.target, &spec.guest_path));
         let inside_a_mask = binds.iter().any(|bind| masks(bind, &spec.guest_path));
         if under_a_writable_volume || inside_a_mask {
             spec.guest_path = format!("{DEFERRED_ROOT}{}", spec.guest_path);
@@ -33,17 +33,15 @@ pub fn stage_what_a_mount_would_hide(
     }
 }
 
-fn mask_path(bind: &lns_ipc::BindMount, entry: &str) -> String {
-    format!("{}/{entry}", bind.target.trim_end_matches('/'))
+fn placement_of(bind: &lns_ipc::BindMount, guest_path: &str) -> lns_placement::Placement {
+    lns_placement::place(&bind.target, &bind.excluded_paths, guest_path)
 }
 
-/// An exclude leaves a guest-local mask, so a write there never reaches the share and never outlives the run (§3.1.11).
 fn masks(bind: &lns_ipc::BindMount, guest_path: &str) -> bool {
-    bind.excluded_paths.iter().any(|entry| {
-        let mask = mask_path(bind, entry);
-        lns_artifact::sandbox::same_path(&mask, guest_path)
-            || lns_artifact::sandbox::encloses(&mask, guest_path)
-    })
+    matches!(
+        placement_of(bind, guest_path),
+        lns_placement::Placement::Masked { .. }
+    )
 }
 
 /// The excluded paths of this bind that a fileset writes into: the guest leaves each one unmounted so the write lands in a guest-local directory (§3.1.11).
@@ -51,11 +49,9 @@ pub fn seeded_paths(bind: &lns_ipc::BindMount, specs: &[RuntimeFileSpec]) -> Vec
     bind.excluded_paths
         .iter()
         .filter(|entry| {
-            let mask = mask_path(bind, entry);
-            specs.iter().any(|spec| {
-                lns_artifact::sandbox::same_path(&mask, &spec.guest_path)
-                    || lns_artifact::sandbox::encloses(&mask, &spec.guest_path)
-            })
+            specs
+                .iter()
+                .any(|spec| lns_placement::mask_covers(&bind.target, entry, &spec.guest_path))
         })
         .cloned()
         .collect()
@@ -78,7 +74,7 @@ pub fn refuse_writes_a_mount_would_hide(
         );
     for (kind, target, bind) in covering {
         let hidden = specs.iter().find(|spec| {
-            lns_artifact::sandbox::encloses(target, &spec.guest_path)
+            lns_placement::encloses(target, &spec.guest_path)
                 && !bind.is_some_and(|bind| masks(bind, &spec.guest_path))
         });
         if let Some(hidden) = hidden {
@@ -617,6 +613,17 @@ mod tests {
         assert_eq!(
             seeded_paths(&bind, &specs),
             vec!["settings.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_exclude_covering_a_write_is_seeded_because_the_outer_one_is_what_stays_unmounted() {
+        let specs = [spec_at("/root/.claude/sub/inner/x")];
+        let bind = bind_excluding("/root/.claude", &["sub/inner", "sub"]);
+        assert_eq!(
+            seeded_paths(&bind, &specs),
+            vec!["sub/inner".to_string(), "sub".to_string()],
+            "seeding only the inner one would remount the outer entry over the write"
         );
     }
 

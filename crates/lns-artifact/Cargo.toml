@@ -11,6 +11,7 @@ name = "lns_artifact"
 path = "src/lib.rs"
 
 [dependencies]
+lns-placement = { path = "../lns-placement" }
 anyhow = "1"
 flate2 = "1"
 lns-policy = { path = "../lns-policy" }

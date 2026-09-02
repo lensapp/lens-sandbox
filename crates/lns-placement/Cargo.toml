@@ -1,0 +1,10 @@
+[package]
+name = "lns-placement"
+version = "0.1.0"
+edition = "2024"
+description = "Where a written file lands against a run's mounts — the one rule the document check, the pre-boot check, the grant check, and the guest all decide by."
+repository = "https://github.com/lensapp/lens-sandbox"
+
+# No dependencies, on purpose: lns-init carries this rule into the guest, and its
+# binary is the whole initramfs payload.
+[dependencies]
