@@ -262,7 +262,7 @@ methods:
     auth: { kind: token }
     credentials:
       - envVar: SOME_TOKEN
-        placeholder: other_LNSPLACEHOLDER000000000
+        placeholder: some_LNSPLACEHOLDER0000000000
 "#,
         );
         assert_eq!(variables_claimed(&candidate).len(), 1);

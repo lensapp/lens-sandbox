@@ -188,6 +188,27 @@ fn validate(
             bail!("duplicate connector method {:?}", method.name);
         }
     }
+    refuse_one_variable_carrying_two_markers(connector)
+}
+
+/// §4.1: a run moves between methods and `env` reaches only later workloads, so the methods that share a variable must agree on the marker its live sessions hold.
+fn refuse_one_variable_carrying_two_markers(connector: &ConnectorSpec) -> Result<()> {
+    let mut marker: BTreeMap<&str, &str> = BTreeMap::new();
+    for credential in connector
+        .methods
+        .iter()
+        .flat_map(|method| &method.credentials)
+    {
+        let Some(variable) = credential.env_var.as_deref() else {
+            continue;
+        };
+        let held = marker.entry(variable).or_insert(&credential.placeholder);
+        if *held != credential.placeholder {
+            bail!(
+                "{variable} carries two placeholders across this connector's methods: a run that moves to the other method leaves its live sessions holding the first marker"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -878,6 +899,18 @@ mod tests {
         ))
         .expect(
             "methods are alternatives and only one ever enters the merge, so a token method and a sign-in method serve the same variable of the same service",
+        );
+    }
+
+    #[test]
+    fn two_methods_serving_one_variable_with_two_markers_are_refused() {
+        let err = parse(&with_methods(
+            r#"[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]},{"name":"sso","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"other_LNSPLACEHOLDER000000000"}]}]"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("two placeholders"),
+            "a run that moves between these methods would leave its live sessions holding the other method's marker; got: {err:#}"
         );
     }
 
