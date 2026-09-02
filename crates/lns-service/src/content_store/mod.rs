@@ -217,14 +217,16 @@ fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("install path {} has no parent", final_path.display()))?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("create_dir_all {}", parent.display()))?;
-    let tmp = unique_tmp(final_path);
+    atomic_write_via_tmp(final_path, &unique_tmp(final_path), bytes)
+}
 
+fn atomic_write_via_tmp(final_path: &Path, tmp: &Path, bytes: &[u8]) -> Result<()> {
     let write_result = (|| -> Result<()> {
         let mut f = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&tmp)
+            .open(tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("writing {} bytes to {}", bytes.len(), tmp.display()))?;
@@ -232,11 +234,11 @@ fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<()> {
         Ok(())
     })();
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp);
         return Err(e);
     }
 
-    std::fs::rename(&tmp, final_path)
+    std::fs::rename(tmp, final_path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), final_path.display()))?;
     Ok(())
 }
@@ -675,34 +677,24 @@ mod tests {
         assert!(msg.contains("rename"), "msg: {msg}");
     }
 
-    #[cfg(unix)]
+    // O_EXCL against an existing file denies root too, unlike a mode bit.
     #[test]
-    fn install_from_bytes_cleans_up_when_tmp_open_fails() {
-        use std::os::unix::fs::PermissionsExt;
+    fn atomic_write_via_tmp_removes_a_tmp_it_could_not_open() {
         let d = tempdir();
-        let store = ContentStore::new(d.path());
         let dir = d.path().join("sha256");
         std::fs::create_dir(&dir).unwrap();
-        let original = std::fs::metadata(&dir).unwrap().permissions();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = store.install_from_bytes(b"locked-out");
-        std::fs::set_permissions(&dir, original).unwrap();
+        let tmp = dir.join(".tmp.taken");
+        std::fs::write(&tmp, b"someone-got-here-first").unwrap();
 
-        let err = result.unwrap_err();
+        let err = atomic_write_via_tmp(&dir.join("blob"), &tmp, b"locked-out").unwrap_err();
+
         let msg = format!("{err:#}");
         assert!(msg.contains("creating"), "msg: {msg}");
-        std::fs::write(dir.join("decoy-not-a-blob"), b"").unwrap();
-        let stray: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|s| s.contains(".tmp."))
-                    .unwrap_or(false)
-            })
-            .collect();
-        assert!(stray.is_empty(), "stray tmp: {stray:?}");
+        assert!(!tmp.exists(), "the failed tmp must not survive");
+        assert!(
+            !dir.join("blob").exists(),
+            "no blob may land when the tmp never opened"
+        );
     }
 
     #[test]
