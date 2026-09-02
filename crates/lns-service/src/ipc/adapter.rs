@@ -250,7 +250,23 @@ impl super::StartHost for RealStartHost {
                 return Ok(());
             }
         };
-        serve_prepared_run(stream, run_id, args, prepared, mode).await
+        // The 2 MiB capture belongs to the sandbox, not to one boot, so a restart appends to what the last boot left.
+        let logs = match crate::cache::root() {
+            Ok(root) => {
+                crate::run_log::load_with(
+                    &crate::image_store::RealFs,
+                    &root,
+                    &run_id,
+                    crate::run_log::DEFAULT_CAPACITY_BYTES,
+                )
+                .await
+            }
+            Err(e) => {
+                log::warn!("earlier output not restored; no lns home: {e:#}");
+                crate::run_log::RunLogBuffer::default()
+            }
+        };
+        serve_prepared_run(stream, run_id, args, prepared, mode, Arc::new(logs)).await
     }
 }
 
@@ -287,13 +303,30 @@ async fn handle_logs(mut stream: UnixStream, run: String, follow: bool) -> anyho
             return Ok(());
         }
     };
-    let Some(buffer) = crate::run_registry::log_buffer(&run_id) else {
-        let _ = write_error(&mut stream, format!("no active run with id {run_id}")).await;
-        return Ok(());
+    let buffer = match logs_of(&run_id).await {
+        Some(buffer) => buffer,
+        None => {
+            let _ = write_error(&mut stream, format!("no run with id {run_id}")).await;
+            return Ok(());
+        }
     };
     let started = encode_frame(&Response::RunStarted { run_id })?;
     stream.write_all(&started).await?;
     crate::run_log::stream_to(&buffer, &mut stream, follow, 0).await
+}
+
+async fn logs_of(run_id: &str) -> Option<Arc<crate::run_log::RunLogBuffer>> {
+    let root = crate::cache::root()
+        .inspect_err(|e| log::warn!("logs unavailable; no lns home: {e:#}"))
+        .ok()?;
+    crate::run_log::buffer_for(
+        crate::run_registry::log_buffer(run_id),
+        crate::run_registry::status(run_id),
+        &crate::image_store::RealFs,
+        &root,
+        run_id,
+    )
+    .await
 }
 
 async fn handle_attach(mut stream: UnixStream, run: String) -> anyhow::Result<()> {
@@ -363,6 +396,7 @@ impl super::RunHost for RealRunHost {
             args,
             prepared,
             crate::run::LaunchMode::Fresh,
+            Arc::new(crate::run_log::RunLogBuffer::default()),
         )
         .await
     }
@@ -419,6 +453,7 @@ async fn serve_prepared_run<W>(
     args: lns_ipc::RunImageArgs,
     prepared: crate::run::PreparedRun,
     mode: crate::run::LaunchMode,
+    logs: Arc<crate::run_log::RunLogBuffer>,
 ) -> anyhow::Result<()>
 where
     W: AsyncWriteExt + Unpin,
@@ -440,7 +475,6 @@ where
     let requested_name = args.name.clone();
     let config = lns_ipc::RunConfig::from_run_args(&args);
 
-    let logs = Arc::new(crate::run_log::RunLogBuffer::default());
     let (task_frame_tx, tee_rx) = mpsc::channel::<WireFrame>(FRAME_CHAN_BUF);
     tokio::spawn(crate::run_log::tee_frames(
         tee_rx,
