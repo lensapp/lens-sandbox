@@ -973,7 +973,7 @@ pub struct BindSpec {
     pub host_source: String,
     pub target: String,
     pub read_only: bool,
-    /// Subpaths the definition excluded, unioned with any `.lensignore` before the secret scan.
+    /// Subpaths the definition excluded, unioned with any `.lnsignore` before the secret scan.
     pub exclude: Vec<String>,
     /// True when an absent host source skips the bind instead of refusing the run.
     pub optional: bool,

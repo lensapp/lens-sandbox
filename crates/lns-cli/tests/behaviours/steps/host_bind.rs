@@ -67,7 +67,7 @@ fn resolved_binds_are(world: &mut BehaviourWorld, expected: String) -> Result<()
 
 struct FakeDir {
     entries: Vec<String>,
-    lensignore: Option<String>,
+    lnsignore: Option<String>,
     missing: bool,
     not_a_dir: bool,
 }
@@ -82,8 +82,8 @@ impl DirScan for FakeDir {
         self.entries.clone()
     }
     fn read_to_string(&self, path: &Path) -> Option<String> {
-        if path.ends_with(".lensignore") {
-            self.lensignore.clone()
+        if path.ends_with(".lnsignore") {
+            self.lnsignore.clone()
         } else {
             None
         }
@@ -113,7 +113,7 @@ fn parsed_bind_specs(flags: &str) -> Vec<lns_ipc::BindSpec> {
 fn dir_from(world: &BehaviourWorld) -> FakeDir {
     FakeDir {
         entries: world.host_bind.entries.clone(),
-        lensignore: world.host_bind.lensignore.clone(),
+        lnsignore: world.host_bind.lnsignore.clone(),
         missing: world.host_bind.missing,
         not_a_dir: world.host_bind.not_a_dir,
     }
@@ -216,9 +216,9 @@ fn keep_decision_recorded(world: &mut BehaviourWorld, path: String) {
         .insert(path, SecretDisposition::Keep);
 }
 
-#[given(regex = r#"^the host directory "([^"]+)" has a "\.lensignore" listing "([^"]+)"$"#)]
-fn lensignore_lists(world: &mut BehaviourWorld, _dir: String, name: String) {
-    world.host_bind.lensignore = Some(format!("{name}\n"));
+#[given(regex = r#"^the host directory "([^"]+)" has a "\.lnsignore" listing "([^"]+)"$"#)]
+fn lnsignore_lists(world: &mut BehaviourWorld, _dir: String, name: String) {
+    world.host_bind.lnsignore = Some(format!("{name}\n"));
 }
 
 #[given(regex = r#"^the operator will answer the secret prompt with "([^"]+)"$"#)]

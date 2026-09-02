@@ -50,7 +50,7 @@ fn secret_shaped_top_level(scan: &dyn DirScan, root: &Path) -> Vec<String> {
     found
 }
 
-/// `.lensignore`-listed paths that exist in the bind, dropped with no prompt; a nested entry is honored so an explicit "never expose this" reaches a secret the top-level scan can't see.
+/// `.lnsignore`-listed paths that exist in the bind, dropped with no prompt; a nested entry is honored so an explicit "never expose this" reaches a secret the top-level scan can't see.
 fn ignored_paths_present(
     scan: &dyn DirScan,
     root: &Path,
@@ -58,7 +58,7 @@ fn ignored_paths_present(
 ) -> Result<Vec<String>> {
     let mut found = Vec::new();
     for entry in ignore {
-        validate_lensignore_entry(entry)?;
+        validate_lnsignore_entry(entry)?;
         if scan.exists(&root.join(entry)) {
             found.push(entry.clone());
         }
@@ -67,19 +67,19 @@ fn ignored_paths_present(
     Ok(found)
 }
 
-/// A `.lensignore` entry is masked at `target/<entry>` in the guest, so an absolute or `..`-bearing entry would escape the bind — refuse it loudly rather than silently expose the file the operator listed.
-fn validate_lensignore_entry(entry: &str) -> Result<()> {
+/// A `.lnsignore` entry is masked at `target/<entry>` in the guest, so an absolute or `..`-bearing entry would escape the bind — refuse it loudly rather than silently expose the file the operator listed.
+fn validate_lnsignore_entry(entry: &str) -> Result<()> {
     if entry.starts_with('/') {
-        bail!(".lensignore entry {entry:?} must be relative to the bind, not an absolute path");
+        bail!(".lnsignore entry {entry:?} must be relative to the bind, not an absolute path");
     }
     if entry.split('/').any(|seg| seg == "." || seg == "..") {
-        bail!(".lensignore entry {entry:?} must not contain `.` or `..` path segments");
+        bail!(".lnsignore entry {entry:?} must not contain `.` or `..` path segments");
     }
     Ok(())
 }
 
-pub fn lensignore_patterns(scan: &dyn DirScan, root: &Path) -> Vec<String> {
-    let Some(content) = scan.read_to_string(&root.join(".lensignore")) else {
+pub fn lnsignore_patterns(scan: &dyn DirScan, root: &Path) -> Vec<String> {
+    let Some(content) = scan.read_to_string(&root.join(".lnsignore")) else {
         return Vec::new();
     };
     content
@@ -116,7 +116,7 @@ impl ResolvedBind {
     }
 }
 
-/// Resolves a KEEP/DROP for every secret-shaped file in each bind (and every `.lensignore`-listed path, whatever its shape) — `.lensignore` and recorded decisions drop silently, the rest prompt or default to DROP when there is no terminal.
+/// Resolves a KEEP/DROP for every secret-shaped file in each bind (and every `.lnsignore`-listed path, whatever its shape) — `.lnsignore` and recorded decisions drop silently, the rest prompt or default to DROP when there is no terminal.
 pub fn resolve_binds(
     specs: &[lns_ipc::BindSpec],
     scan: &dyn DirScan,
@@ -147,7 +147,7 @@ pub fn resolve_binds(
             );
         }
         // One de-duplicated set: two masks over one guest path would stack, and an author exclude must drop silently rather than become a per-machine decision.
-        let mut ignore = lensignore_patterns(scan, root);
+        let mut ignore = lnsignore_patterns(scan, root);
         for entry in &spec.exclude {
             if !ignore.contains(entry) {
                 ignore.push(entry.clone());
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(
             found,
             vec!["notes.txt".to_string(), "packages/api/.env".to_string()],
-            "a nested .lensignore path is honored, not silently ignored"
+            "a nested .lnsignore path is honored, not silently ignored"
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
             ignored_paths_present(&dir, Path::new("/proj"), &["ghost.env".to_string()]).unwrap();
         assert!(
             found.is_empty(),
-            "a .lensignore rule for an absent file is a no-op, not a phantom drop"
+            "a .lnsignore rule for an absent file is a no-op, not a phantom drop"
         );
     }
 
@@ -402,31 +402,31 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains(".lensignore entry"),
+                err.contains(".lnsignore entry"),
                 "{bad} must be refused loudly: {err}"
             );
         }
     }
 
     #[test]
-    fn lensignore_patterns_skips_blanks_and_comments() {
+    fn lnsignore_patterns_skips_blanks_and_comments() {
         let mut files = HashMap::new();
         files.insert(
-            "/proj/.lensignore".to_string(),
+            "/proj/.lnsignore".to_string(),
             "# secrets\n.env\n\n  .npmrc  \n".to_string(),
         );
         let dir = FakeDir {
             files,
             ..Default::default()
         };
-        let patterns = lensignore_patterns(&dir, Path::new("/proj"));
+        let patterns = lnsignore_patterns(&dir, Path::new("/proj"));
         assert_eq!(patterns, vec![".env".to_string(), ".npmrc".to_string()]);
     }
 
     #[test]
-    fn lensignore_patterns_empty_when_file_absent() {
+    fn lnsignore_patterns_empty_when_file_absent() {
         let dir = FakeDir::default();
-        assert!(lensignore_patterns(&dir, Path::new("/proj")).is_empty());
+        assert!(lnsignore_patterns(&dir, Path::new("/proj")).is_empty());
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
     fn real_dir_scan_reads_entries_and_files_from_disk() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
-        std::fs::write(dir.path().join(".lensignore"), ".env\n").unwrap();
+        std::fs::write(dir.path().join(".lnsignore"), ".env\n").unwrap();
         let scan = RealDirScan;
         assert!(scan.exists(&dir.path().join(".env")));
         assert!(!scan.exists(&dir.path().join("absent")));
@@ -451,7 +451,7 @@ mod tests {
         );
         assert!(scan.entries(dir.path()).contains(&".env".to_string()));
         assert_eq!(
-            scan.read_to_string(&dir.path().join(".lensignore")),
+            scan.read_to_string(&dir.path().join(".lnsignore")),
             Some(".env\n".to_string())
         );
         assert_eq!(scan.read_to_string(&dir.path().join("absent")), None);
@@ -466,10 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn an_exclude_and_a_lensignore_naming_the_same_path_drop_it_once() {
+    fn an_exclude_and_a_lnsignore_naming_the_same_path_drop_it_once() {
         let dir = FakeDir {
             entries: vec![".cargo".into()],
-            files: HashMap::from([("/proj/.lensignore".to_string(), ".cargo\n".to_string())]),
+            files: HashMap::from([("/proj/.lnsignore".to_string(), ".cargo\n".to_string())]),
             ..Default::default()
         };
         let store = FakeStore::default();
@@ -622,9 +622,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binds_lensignore_drops_without_prompting() {
+    fn resolve_binds_lnsignore_drops_without_prompting() {
         let mut files = HashMap::new();
-        files.insert("/proj/.lensignore".to_string(), ".env\n".to_string());
+        files.insert("/proj/.lnsignore".to_string(), ".env\n".to_string());
         let dir = FakeDir {
             entries: vec![".env".into()],
             files,
@@ -633,18 +633,18 @@ mod tests {
         let store = FakeStore::default();
         let (out, prompt) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
         assert_eq!(out.unwrap()[0].dropped, vec![".env".to_string()]);
-        assert!(prompt.is_empty(), ".lensignore must pre-empt the prompt");
+        assert!(prompt.is_empty(), ".lnsignore must pre-empt the prompt");
         assert_eq!(
             *store.saves.lock().unwrap(),
             0,
-            ".lensignore is not a decision"
+            ".lnsignore is not a decision"
         );
     }
 
     #[test]
-    fn resolve_binds_lensignore_drops_a_non_secret_shaped_file_too() {
+    fn resolve_binds_lnsignore_drops_a_non_secret_shaped_file_too() {
         let mut files = HashMap::new();
-        files.insert("/proj/.lensignore".to_string(), "notes.txt\n".to_string());
+        files.insert("/proj/.lnsignore".to_string(), "notes.txt\n".to_string());
         let dir = FakeDir {
             entries: vec!["notes.txt".into(), "src".into()],
             files,
@@ -655,16 +655,16 @@ mod tests {
         assert_eq!(
             out.unwrap()[0].dropped,
             vec!["notes.txt".to_string()],
-            ".lensignore must drop any listed file, not only secret-shaped ones"
+            ".lnsignore must drop any listed file, not only secret-shaped ones"
         );
-        assert!(prompt.is_empty(), "a .lensignore drop never prompts");
+        assert!(prompt.is_empty(), "a .lnsignore drop never prompts");
     }
 
     #[test]
-    fn resolve_binds_lensignore_drops_a_nested_path_without_prompting() {
+    fn resolve_binds_lnsignore_drops_a_nested_path_without_prompting() {
         let mut files = HashMap::new();
         files.insert(
-            "/proj/.lensignore".to_string(),
+            "/proj/.lnsignore".to_string(),
             "packages/api/.env\n".to_string(),
         );
         let dir = FakeDir {
@@ -677,16 +677,16 @@ mod tests {
         assert_eq!(
             out.unwrap()[0].dropped,
             vec!["packages/api/.env".to_string()],
-            "a nested .lensignore entry must drop the file, not silently expose it"
+            "a nested .lnsignore entry must drop the file, not silently expose it"
         );
-        assert!(prompt.is_empty(), "a .lensignore drop never prompts");
+        assert!(prompt.is_empty(), "a .lnsignore drop never prompts");
     }
 
     #[test]
-    fn resolve_binds_refuses_a_lensignore_entry_that_escapes_the_bind() {
+    fn resolve_binds_refuses_a_lnsignore_entry_that_escapes_the_bind() {
         let mut files = HashMap::new();
         files.insert(
-            "/proj/.lensignore".to_string(),
+            "/proj/.lnsignore".to_string(),
             "../../etc/shadow\n".to_string(),
         );
         let dir = FakeDir {
@@ -697,7 +697,7 @@ mod tests {
         let store = FakeStore::default();
         let (out, _) = resolve(&[bind("/proj", "/work")], &dir, &store, true, "");
         let err = out.unwrap_err().to_string();
-        assert!(err.contains(".lensignore entry"), "got: {err}");
+        assert!(err.contains(".lnsignore entry"), "got: {err}");
     }
 
     #[test]
