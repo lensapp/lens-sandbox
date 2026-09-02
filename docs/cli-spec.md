@@ -65,9 +65,10 @@ The rest of the surface manages neither a document nor a guest:
 handling — `push`, `pull`, `tag`, `validate`, `inspect`, and `rm` read that from
 the document. There is no `lns connector pull` and no `lns mixin push`.
 
-`lns artifact init` is the exception: it writes a document that does not exist
-yet, so the kind is an argument — `--kind sandbox` (the default), `--kind mixin`,
-or `--kind connector`.
+Two commands write a document that does not exist yet, so each takes the kind as
+an argument. `lns artifact init` takes `--kind sandbox` (the default),
+`--kind mixin`, or `--kind connector`. `lns sandbox save` takes `--kind sandbox`
+(the default) or `--kind mixin`.
 
 ### 1.3 Two names for one command
 
@@ -205,9 +206,10 @@ lns artifact prune [-f]
 | `rm` | `lns rm` | Removes one cached artifact and frees its now-unreferenced layers. Refused while a sandbox holds it — running or stopped — and the message names the holder. |
 | `prune` | | Removes every cached artifact nothing holds, and — when no sandbox is live — the provisioned tool cache, which any running sandbox may still be using. Lists them and asks, unless `-f`/`--force`. |
 
-`-f`/`--file` selects a document other than `./lns.yaml`; its directory is the
-project, so it roots the document's relative binds and filesets and holds the
-project's own mixin ([§3.2.3](#323-the-projects-own-mixin)).
+`-f`/`--file` selects a document other than `./lns.yaml`. The **document's own**
+directory is the project, so it roots that document's relative binds and
+filesets. The working directory and the document's directory decide nothing else
+([§3.2.3](#323-the-runs-decisions-and-saving-them)).
 
 A mixin and a connector are documents you write in an editor. Every artifact verb
 here works on them exactly as it works on a sandbox, because each reads the kind
@@ -227,6 +229,7 @@ lns sandbox logs <RUN> [-f]
 lns sandbox attach <RUN> [--detach-keys <CHORD>]
 lns sandbox ls [-a] [--format <table|json>]
 lns sandbox inspect <RUN> [--format <table|json>]
+lns sandbox save <RUN> -f <FILE> [--kind <sandbox|mixin>]
 lns sandbox rm <RUN> [-f]
 lns sandbox prune [-f]
 ```
@@ -257,7 +260,7 @@ keeping its `ENTRYPOINT`; `--` is accepted but not required.
 | `-t`, `--tty` | `true` | Allocate a PTY; pipe mode is selected automatically when stdin is not a terminal. Turn off with `--tty=false`. |
 | `-d`, `--detach` | `false` | Return once the sandbox is started. Conflicts with `-i` and `-t`. |
 | `--detach-keys <CHORD>` | `ctrl-p,ctrl-q` | Detach chord: single characters or `ctrl-X`, comma-separated. |
-| `--rm` | `false` | Remove the sandbox once the workload exits, writable layer included. |
+| `--rm` | `false` | Remove the sandbox once the workload exits, writable layer included. What the run decided goes with it ([§3.2.3](#323-the-runs-decisions-and-saving-them)). |
 | `-u`, `--user <USER[:GROUP]>` | image `USER`, else `sandbox` | Run-as user or uid inside the sandbox. Outranks `spec.user`, which outranks the image. `HOME` and `USER` follow that user's guest passwd entry unless `env:` or `-e` sets them. |
 | `--entrypoint <COMMAND>` | image `ENTRYPOINT` | Override the image entrypoint; the `COMMAND` after the reference becomes its arguments. `--entrypoint ""` clears it. |
 | `-h`, `--hostname <NAME>` | | Guest hostname for this sandbox. |
@@ -270,9 +273,10 @@ Two things a run does without being asked to:
   statement that the sandbox serves on that port, so it is published on loopback
   — the `host` value when the entry names one, the container number otherwise.
   `-p` adds to that, and overrides an entry for the same container port.
-- **It resolves this project's own mixin.** The `lns-local-mixin.yaml` beside the
-  document is always present and always last in the merge, so the decisions you
-  made here apply without naming a file.
+- **It gives the run its own decisions file.** Every run has one, in the run's
+  own directory, always last in the merge. What you answer at a prompt is written
+  there, so it applies for the rest of that run and never leaks into the next
+  one.
 
 Before anything boots, `lns run` prints what it resolved: the image, the mixins,
 the egress, the credentials, the mounts, the tools, the ports, and the `pre-start`
@@ -291,35 +295,55 @@ contributed it. That summary is the one thing you approve.
 | `attach` | `lns attach` | Re-joins the live session, most useful after `run -d`. The detach chord leaves the sandbox running and returns you to your shell; no signal is sent. Stdin reaches the workload only if the sandbox was started with stdin open. |
 | `ls` | `lns ps` | Lists running sandboxes with their state, CPU, and memory. `-a` includes stopped ones. |
 | `inspect` | `lns inspect` | Prints one sandbox's live state and launch configuration, with its resolved mixin embedded. |
-| `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. What it granted and declined goes with it. `-f`/`--force` stops a running one first. |
-| `prune` | | Removes every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks, unless `-f`/`--force`. |
+| `save` | | Writes one sandbox out as a document you keep ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--file` names the file and is required; `--kind mixin` writes what the run decided instead of the run as it resolved. Works on a running or a stopped sandbox. |
+| `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. What it granted, declined, and decided goes with it, so save anything worth keeping first ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--force` stops a running one first. |
+| `prune` | | Removes every stopped sandbox, writable layers included, and what each granted, declined, and decided. Lists them and asks, unless `-f`/`--force`. |
 
 Interrupting `lns` at the terminal (`Ctrl-C`) stops the sandbox. The detach chord
 does not: it returns your terminal, exits `0`, and leaves the workload running.
 
-#### 3.2.3 The project's own mixin
+#### 3.2.3 The run's decisions, and saving them
 
-Every project directory has one mixin nobody publishes: `lns-local-mixin.yaml`,
-beside the document. It holds what you decided here — the destinations you
-approved or refused — and every run in that directory resolves it last, so
-neither what you pulled nor what you connected can overrule it.
+Every run has one mixin nobody publishes: `decisions.yaml`, in the run's own
+directory. It holds what that run decided — the destinations you approved or
+refused — and the run resolves it last, so neither what you pulled nor what you
+connected can overrule it.
 
 - **The run writes it.** A destination no rule decides is asked about at first
   use, and your answer is appended as an `egress` entry. There is no command to
   run: answering the prompt is what records the decision.
-- **You can edit it, and commit it.** It is a `kind: mixin` document, so
-  `lns artifact validate` checks it and `lns artifact inspect` renders it. A
-  project's agreed destinations are reviewable in a pull request instead of
-  rediscovered by every developer.
+- **It belongs to that run.** A second `lns run` is a second run and starts with
+  an empty file, so it asks for itself. `lns start` and `lns exec` rejoin the
+  same run and keep what it decided.
+- **It goes when the run goes.** `lns rm` and `lns prune` take it with the run.
 - **Order is behaviour.** The guest stops at the first entry that matches a
   destination, so an entry placed after a `deny` — or after an entry that
-  restricts which callers or requests it permits — does not apply. When you edit
-  by hand, put the specific entry first.
-- **`deny: '*'` closes the project.** Nothing unlisted gets out, and nothing
-  prompts.
+  restricts which callers or requests it permits — does not apply.
+- **`deny: '*'` closes the run.** Nothing unlisted gets out, and nothing prompts.
 
-`lns run --mixin <PATH>` layers another mixin on top for one run, which is how you
-try a rule set without writing it here.
+`lns sandbox save` is how a decision outlives the run that made it.
+
+```bash
+lns sandbox save <RUN> -f <FILE> [--kind <sandbox|mixin>]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-f`, `--file <FILE>` | — | Where to write. **Required**: `lns` never picks a path in your directory for you. Refuses to overwrite an existing file. |
+| `--kind <KIND>` | `sandbox` | What to write. `sandbox` writes what the documents resolved to: image, command, `env`, `workdir`, `user`, mounts, ports, resources, tools, filesets, credentials, and the `egress` every document source decided, this run's own decisions included. What a connector granted stays out — a teammate is asked on their own machine ([`sandbox-spec.md` §8.6](sandbox-spec.md#86-where-a-connector-grant-goes)). Every path it carries is written absolute, so the document means the same thing from any directory. `mixin` writes what the run decided and nothing else. |
+
+The document's `name` is the stem of the file you name, in both kinds. A stem
+that is not a legal document name refuses the save and says which characters a
+name takes, rather than writing a document `lns artifact validate` would reject.
+
+What it writes is an ordinary document from that point on: `lns artifact validate`
+checks it, `lns artifact inspect` renders it, and `lns artifact push` publishes
+it. A saved mixin is committable, and the `sandbox` that needs it names it in
+`spec.mixins` — which is how an agreed rule set reaches a teammate. Nothing
+applies because a file sits in a directory.
+
+`lns run --mixin <PATH>` layers a mixin on top for one run, which is how you try a
+rule set before you save one.
 
 ### 3.3 `lns connector`
 
@@ -350,8 +374,8 @@ lns connector forget <ID> --run <RUN>
 Four verbs bound the decision, across two scopes. On the machine: `install`
 makes a connector offerable, and `connect` signs in and stores a connection. On a
 run: `grant` lets it use one method, and `forget` takes that back. The working
-directory is not a scope here — it decides which local mixin resolves, and
-nothing about consent.
+directory is not a scope here — it roots the paths a reference resolves against,
+and nothing about consent.
 
 **`--as` naming a connection that already exists re-authenticates that one in
 place.** Where the authentication comes back with different authority, the grants
@@ -662,7 +686,7 @@ Every value a sandbox runs with is decided by this chain. Earlier wins; later
 fills the gap.
 
 1. **A command-line flag.**
-2. **A resolved mixin**, with this project's own mixin last of all.
+2. **A resolved mixin**, with the run's own decisions last of all.
 3. **The document's `spec`.**
 4. **The base image** — `USER`, `WORKDIR`, `ENTRYPOINT`, `CMD`.
 5. **Your `lns config` default**, for the keys that have one.
@@ -705,15 +729,20 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 
 One directory, one thing to back up, one thing `lns uninstall --purge` removes.
 
-The project keeps two files, both in the directory you work in:
+A run keeps its own decisions with the run, in `~/.lns/`, and not in your project:
 
 | Path | Holds |
 |---|---|
-| `./lns.yaml` | The sandbox document. |
-| `./lns-local-mixin.yaml` | What you decided here: the egress rules you approved. Committable — which is why a connector grant is not in it. |
+| `~/.lns/runs/<RUN>/decisions.yaml` | What that run decided: the egress rules you approved at its prompts. It goes when the run does; `lns sandbox save --kind mixin` writes it somewhere you keep. |
+
+**`lns` writes no file you did not point it at.** Two commands write into your
+project: `lns artifact init`, to `./lns.yaml` or the `-f` you give it, and
+`lns sandbox save`, to the `-f` it requires. No other command creates a file
+there. The directory is read for the document you point at, and for
+nothing else.
 
 Secrets are never written to the project. A credential value is bound per machine,
-and what a project records is the decision, not the value.
+and what a run records is the decision, not the value.
 
 ---
 
@@ -737,7 +766,7 @@ The product is pre-1.0 and carries no compatibility shims. A rename is a rename.
   runs.
 - [Running workloads](running-workloads.md) — the guide to `run`, `ps`, `exec`,
   and `stop`.
-- [Policy and approvals](policy.md) — the destination grammar, and how the
-  project's own mixin records what you approve.
+- [Policy and approvals](policy.md) — the destination grammar, and how a run's
+  decisions record what you approve.
 - [Audit](audit.md) — the chain `lns audit` reads.
 - [The background service](service.md) — what `lns` is a client of.
