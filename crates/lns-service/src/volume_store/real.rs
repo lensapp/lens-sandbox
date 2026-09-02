@@ -2,10 +2,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::traits::{FileMeta, Fs};
+use super::traits::{FileMeta, Fs, Holders};
 use crate::upperfs::{Plan, write_ext4};
 
 pub(super) struct RealFs;
+
+pub(super) struct RegistryHolders;
+
+impl Holders for RegistryHolders {
+    fn claims_on(&self, name: &str) -> super::VolumeClaims {
+        crate::run_registry::volume_claims(name)
+    }
+}
 
 fn unix_secs(t: io::Result<SystemTime>) -> u64 {
     t.ok()

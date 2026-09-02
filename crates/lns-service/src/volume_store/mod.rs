@@ -1,7 +1,7 @@
 mod real;
 mod traits;
 
-pub use traits::{FileMeta, Fs};
+pub use traits::{FileMeta, Fs, Holders, VolumeClaims};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -190,6 +190,60 @@ fn take_lease(registry: &Arc<LeaseRegistry>, name: &str, run_id: &str) -> Result
 
 const MAINTENANCE_HOLDER_RUN_ID: &str = "maintenance";
 
+/// What stands between a volume and its removal, split by the remedy: `lns rm` clears a sandbox, only repairing a run dir clears the rest.
+enum Blocked {
+    Sandboxes(String),
+    Repair(String),
+}
+
+impl Blocked {
+    fn message(&self) -> &str {
+        match self {
+            Blocked::Sandboxes(m) | Blocked::Repair(m) => m,
+        }
+    }
+}
+
+/// A volume's data belongs to the sandboxes that declare it, so it outlives every one of them and not one boot less.
+fn blocking_claim<H: Holders>(holders: &H, name: &str) -> Option<Blocked> {
+    let claims = holders.claims_on(name);
+    if let Some(run_id) = claims.unreadable.first() {
+        let short = lns_ipc::short_run_id(run_id);
+        return Some(Blocked::Repair(format!(
+            "volume {name:?} may be in use: run {short}'s record cannot be read; repair or delete ~/.lns/runs/{run_id}, then restart the service"
+        )));
+    }
+    if let Some(run_id) = claims.damaged.first() {
+        let short = lns_ipc::short_run_id(run_id);
+        return Some(Blocked::Repair(format!(
+            "volume {name:?} is in use by run {short}, which this build cannot run; repair or delete ~/.lns/runs/{run_id}, then restart the service"
+        )));
+    }
+    match claims.held_by.len() {
+        0 => None,
+        1 => Some(Blocked::Sandboxes(format!(
+            "volume {name:?} is in use by sandbox {:?}; remove the sandbox first",
+            claims.held_by[0]
+        ))),
+        n => Some(Blocked::Sandboxes(format!(
+            "volume {name:?} is in use by {n} sandboxes: {}; remove them first",
+            claims
+                .held_by
+                .iter()
+                .map(|h| format!("{h:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+fn refuse_while_held<H: Holders>(holders: &H, name: &str) -> Result<()> {
+    match blocking_claim(holders, name) {
+        None => Ok(()),
+        Some(blocked) => bail!("{}", blocked.message()),
+    }
+}
+
 /// A declared size is a floor: an absent volume is created at it, a smaller one grows to it, and a larger one is already past it and is left alone.
 async fn ensure_image<F: Fs>(
     fs: &F,
@@ -209,9 +263,9 @@ async fn ensure_image<F: Fs>(
     Ok(image_path)
 }
 
-async fn info_for<F: Fs>(
+async fn info_for<F: Fs, H: Holders>(
     fs: &F,
-    registry: &LeaseRegistry,
+    holders: &H,
     image_path: &Path,
     name: &str,
 ) -> Result<lns_ipc::VolumeInfo> {
@@ -221,7 +275,7 @@ async fn info_for<F: Fs>(
         size_bytes: meta.size_bytes,
         disk_bytes: meta.allocated_bytes,
         created: crate::time_fmt::rfc3339_from_unix(meta.created_unix_secs),
-        in_use_by: registry.holder(name),
+        in_use_by: holders.claims_on(name).held_by,
     })
 }
 
@@ -235,9 +289,9 @@ fn is_not_found(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
-pub async fn list_with<F: Fs>(
+pub async fn list_with<F: Fs, H: Holders>(
     fs: &F,
-    registry: &Arc<LeaseRegistry>,
+    holders: &H,
     store_root: &Path,
 ) -> Result<Vec<lns_ipc::VolumeInfo>> {
     let entries = match fs.read_dir(store_root).await {
@@ -249,7 +303,7 @@ pub async fn list_with<F: Fs>(
     names.sort();
     let mut out = Vec::with_capacity(names.len());
     for name in &names {
-        match info_for(fs, registry, &image_path_in(store_root, name), name).await {
+        match info_for(fs, holders, &image_path_in(store_root, name), name).await {
             Ok(info) => out.push(info),
             Err(e) if is_not_found(&e) => continue,
             Err(e) => return Err(e),
@@ -258,9 +312,10 @@ pub async fn list_with<F: Fs>(
     Ok(out)
 }
 
-pub async fn create_with<F: Fs>(
+pub async fn create_with<F: Fs, H: Holders>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
+    holders: &H,
     store_root: &Path,
     name: &str,
 ) -> Result<lns_ipc::VolumeInfo> {
@@ -270,12 +325,12 @@ pub async fn create_with<F: Fs>(
         let _guard = take_lease(registry, name, MAINTENANCE_HOLDER_RUN_ID)?;
         ensure_image(fs, store_root, name, VOLUME_DEFAULT_SIZE_BYTES).await?;
     }
-    info_for(fs, registry, &image_path, name).await
+    info_for(fs, holders, &image_path, name).await
 }
 
-pub async fn inspect_with<F: Fs>(
+pub async fn inspect_with<F: Fs, H: Holders>(
     fs: &F,
-    registry: &Arc<LeaseRegistry>,
+    holders: &H,
     store_root: &Path,
     name: &str,
 ) -> Result<lns_ipc::VolumeInfo> {
@@ -284,16 +339,18 @@ pub async fn inspect_with<F: Fs>(
     if !fs.exists(&image_path).await {
         bail!("no such volume: {name}");
     }
-    info_for(fs, registry, &image_path, name).await
+    info_for(fs, holders, &image_path, name).await
 }
 
-pub async fn remove_with<F: Fs>(
+pub async fn remove_with<F: Fs, H: Holders>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
+    holders: &H,
     store_root: &Path,
     name: &str,
 ) -> Result<()> {
     validate_name(name)?;
+    refuse_while_held(holders, name)?;
     let _guard = take_lease(registry, name, MAINTENANCE_HOLDER_RUN_ID)?;
     let image_path = image_path_in(store_root, name);
     if !fs.exists(&image_path).await {
@@ -315,13 +372,26 @@ pub struct PruneReport {
     pub failed: Vec<lns_ipc::VolumePruneFailure>,
 }
 
-pub async fn prune_with<F: Fs>(
+pub async fn prune_with<F: Fs, H: Holders>(
     fs: &F,
     registry: &Arc<LeaseRegistry>,
+    holders: &H,
     store_root: &Path,
 ) -> Result<PruneReport> {
     let mut report = PruneReport::default();
-    for info in list_with(fs, registry, store_root).await? {
+    for info in list_with(fs, holders, store_root).await? {
+        // A sandbox holding a volume is the ordinary case prune skips quietly; anything else is a failure the user must hear about.
+        match blocking_claim(holders, &info.name) {
+            None => {}
+            Some(Blocked::Sandboxes(_)) => continue,
+            Some(blocked @ Blocked::Repair(_)) => {
+                report.failed.push(lns_ipc::VolumePruneFailure {
+                    name: info.name,
+                    error: blocked.message().to_string(),
+                });
+                continue;
+            }
+        }
         let Ok(_guard) = take_lease(registry, &info.name, MAINTENANCE_HOLDER_RUN_ID) else {
             continue;
         };
@@ -340,23 +410,43 @@ pub async fn prune_with<F: Fs>(
 }
 
 pub async fn list() -> Result<Vec<lns_ipc::VolumeInfo>> {
-    list_with(&real::RealFs, &global(), &store_root()?).await
+    list_with(&real::RealFs, &real::RegistryHolders, &store_root()?).await
 }
 
 pub async fn create(name: &str) -> Result<lns_ipc::VolumeInfo> {
-    create_with(&real::RealFs, &global(), &store_root()?, name).await
+    create_with(
+        &real::RealFs,
+        &global(),
+        &real::RegistryHolders,
+        &store_root()?,
+        name,
+    )
+    .await
 }
 
 pub async fn inspect(name: &str) -> Result<lns_ipc::VolumeInfo> {
-    inspect_with(&real::RealFs, &global(), &store_root()?, name).await
+    inspect_with(&real::RealFs, &real::RegistryHolders, &store_root()?, name).await
 }
 
 pub async fn remove(name: &str) -> Result<()> {
-    remove_with(&real::RealFs, &global(), &store_root()?, name).await
+    remove_with(
+        &real::RealFs,
+        &global(),
+        &real::RegistryHolders,
+        &store_root()?,
+        name,
+    )
+    .await
 }
 
 pub async fn prune() -> Result<PruneReport> {
-    prune_with(&real::RealFs, &global(), &store_root()?).await
+    prune_with(
+        &real::RealFs,
+        &global(),
+        &real::RegistryHolders,
+        &store_root()?,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -364,6 +454,23 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::io;
+
+    struct Idle;
+    impl Holders for Idle {
+        fn claims_on(&self, _: &str) -> VolumeClaims {
+            VolumeClaims::default()
+        }
+    }
+
+    struct HeldBy(&'static [&'static str]);
+    impl Holders for HeldBy {
+        fn claims_on(&self, _: &str) -> VolumeClaims {
+            VolumeClaims {
+                held_by: self.0.iter().map(|s| s.to_string()).collect(),
+                ..VolumeClaims::default()
+            }
+        }
+    }
 
     const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
     const FAKE_ALLOCATED_BYTES: u64 = 4 * 1024 * 1024;
@@ -478,6 +585,21 @@ mod tests {
         Arc::new(LeaseRegistry::new())
     }
 
+    /// `holder` serves the restart preflight (`ipc::adapter`), which refuses a start while a live run has the image open.
+    #[test]
+    fn the_lease_holder_is_the_live_run_that_took_it_and_nobody_once_it_ends() {
+        let registry = reg();
+        assert_eq!(registry.holder("prism-data"), None);
+        let lease = take_lease(&registry, "prism-data", "aa07").expect("a free volume");
+        assert_eq!(registry.holder("prism-data"), Some("aa07".to_string()));
+        drop(lease);
+        assert_eq!(
+            registry.holder("prism-data"),
+            None,
+            "a run that ends releases the image for the next boot"
+        );
+    }
+
     #[tokio::test]
     async fn acquiring_unknown_name_creates_the_backing_image() {
         let fs = FakeFs::default();
@@ -501,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn removing_a_volume_takes_the_marker_an_interrupted_grow_left_with_it() {
         let fs = FakeFs::with(&["/store/prism-data.img", "/store/prism-data.img.growing"]);
-        remove_with(&fs, &reg(), Path::new("/store"), "prism-data")
+        remove_with(&fs, &reg(), &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap();
         assert!(
@@ -893,7 +1015,7 @@ mod tests {
             "/store/notes.txt",
             "/store",
         ]);
-        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let got = list_with(&fs, &Idle, Path::new("/store")).await.unwrap();
         let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "zeta"]);
     }
@@ -913,14 +1035,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let got = list_with(&fs, &registry, Path::new("/store"))
+        let got = list_with(&fs, &HeldBy(&["reviewer"]), Path::new("/store"))
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].size_bytes, VOLUME_DEFAULT_SIZE_BYTES);
         assert_eq!(got[0].disk_bytes, 1024);
         assert_eq!(got[0].created, "2025-12-06T12:00:00Z");
-        assert_eq!(got[0].in_use_by, Some("aa07".to_string()));
+        assert_eq!(got[0].in_use_by, vec!["reviewer".to_string()]);
     }
 
     #[tokio::test]
@@ -929,7 +1051,7 @@ mod tests {
             read_dir_missing: true,
             ..Default::default()
         };
-        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let got = list_with(&fs, &Idle, Path::new("/store")).await.unwrap();
         assert!(got.is_empty());
     }
 
@@ -939,7 +1061,7 @@ mod tests {
             fail_read_dir: true,
             ..Default::default()
         };
-        let err = list_with(&fs, &reg(), Path::new("/store"))
+        let err = list_with(&fs, &Idle, Path::new("/store"))
             .await
             .unwrap_err()
             .to_string();
@@ -957,7 +1079,7 @@ mod tests {
             fail_metadata: true,
             ..Default::default()
         };
-        let err = list_with(&fs, &reg(), Path::new("/store"))
+        let err = list_with(&fs, &Idle, Path::new("/store"))
             .await
             .unwrap_err()
             .to_string();
@@ -968,7 +1090,7 @@ mod tests {
     async fn list_skips_a_volume_that_vanishes_before_its_metadata_read() {
         let fs = FakeFs::with(&["/store/alpha.img", "/store/zeta.img"]);
         fs.vanish("/store/zeta.img");
-        let got = list_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let got = list_with(&fs, &Idle, Path::new("/store")).await.unwrap();
         let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(
             names,
@@ -991,10 +1113,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let info = create_with(&fs, &registry, Path::new("/store"), "prism-data")
-            .await
-            .unwrap();
-        assert_eq!(info.in_use_by, Some("aa07".to_string()));
+        let info = create_with(
+            &fs,
+            &registry,
+            &HeldBy(&["reviewer"]),
+            Path::new("/store"),
+            "prism-data",
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.in_use_by, vec!["reviewer".to_string()]);
         assert_eq!(fs.created_images().len(), 1, "no second image");
     }
 
@@ -1003,7 +1131,7 @@ mod tests {
         let registry = reg();
         let fs = FakeFs::default();
         let _held = take_lease(&registry, "prism-data", "aa09").unwrap();
-        let err = create_with(&fs, &registry, Path::new("/store"), "prism-data")
+        let err = create_with(&fs, &registry, &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
@@ -1017,7 +1145,7 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_an_invalid_name_without_touching_disk() {
         let fs = FakeFs::default();
-        let err = create_with(&fs, &reg(), Path::new("/store"), "../etc")
+        let err = create_with(&fs, &reg(), &Idle, Path::new("/store"), "../etc")
             .await
             .unwrap_err()
             .to_string();
@@ -1028,7 +1156,7 @@ mod tests {
     #[tokio::test]
     async fn inspect_of_an_unknown_volume_names_it() {
         let fs = FakeFs::default();
-        let err = inspect_with(&fs, &reg(), Path::new("/store"), "prism-data")
+        let err = inspect_with(&fs, &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
@@ -1038,7 +1166,7 @@ mod tests {
     #[tokio::test]
     async fn inspect_rejects_an_invalid_name() {
         let fs = FakeFs::default();
-        let err = inspect_with(&fs, &reg(), Path::new("/store"), "a/b")
+        let err = inspect_with(&fs, &Idle, Path::new("/store"), "a/b")
             .await
             .unwrap_err()
             .to_string();
@@ -1048,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn remove_rejects_an_invalid_name() {
         let fs = FakeFs::default();
-        let err = remove_with(&fs, &reg(), Path::new("/store"), "a b")
+        let err = remove_with(&fs, &reg(), &Idle, Path::new("/store"), "a b")
             .await
             .unwrap_err()
             .to_string();
@@ -1069,7 +1197,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+        let err = remove_with(&fs, &registry, &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
@@ -1081,7 +1209,7 @@ mod tests {
     async fn remove_of_an_unknown_volume_errors_and_releases_the_maintenance_lease() {
         let registry = reg();
         let fs = FakeFs::default();
-        let err = remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+        let err = remove_with(&fs, &registry, &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap_err()
             .to_string();
@@ -1103,7 +1231,7 @@ mod tests {
             fail_remove: true,
             ..Default::default()
         };
-        remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+        remove_with(&fs, &registry, &Idle, Path::new("/store"), "prism-data")
             .await
             .expect_err("remove should fail");
         registry
@@ -1115,7 +1243,7 @@ mod tests {
     async fn remove_frees_the_name_for_an_immediate_reattach() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/prism-data.img"]);
-        remove_with(&fs, &registry, Path::new("/store"), "prism-data")
+        remove_with(&fs, &registry, &Idle, Path::new("/store"), "prism-data")
             .await
             .unwrap();
         assert!(!fs.exists(Path::new("/store/prism-data.img")).await);
@@ -1146,7 +1274,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let report = prune_with(&fs, &registry, Path::new("/store"))
+        let report = prune_with(&fs, &registry, &Idle, Path::new("/store"))
             .await
             .unwrap();
         assert_eq!(report.removed, vec!["idle".to_string()]);
@@ -1159,7 +1287,7 @@ mod tests {
     async fn prune_releases_its_maintenance_leases() {
         let registry = reg();
         let fs = FakeFs::with(&["/store/idle.img"]);
-        prune_with(&fs, &registry, Path::new("/store"))
+        prune_with(&fs, &registry, &Idle, Path::new("/store"))
             .await
             .unwrap();
         registry
@@ -1172,7 +1300,9 @@ mod tests {
         let fs = FakeFs::with(&["/store/bad.img", "/store/good.img"]);
         fs.set_allocated("/store/good.img", 4096);
         fs.refuse_remove("/store/bad.img");
-        let report = prune_with(&fs, &reg(), Path::new("/store")).await.unwrap();
+        let report = prune_with(&fs, &reg(), &Idle, Path::new("/store"))
+            .await
+            .unwrap();
         assert_eq!(report.removed, vec!["good".to_string()]);
         assert_eq!(report.reclaimed_bytes, 4096);
         assert_eq!(report.failed.len(), 1, "got {:?}", report.failed);
@@ -1234,7 +1364,7 @@ mod tests {
                 .iter()
                 .any(|v| v.name == "cov-lifecycle")
         );
-        assert_eq!(inspect("cov-lifecycle").await.unwrap().in_use_by, None);
+        assert!(inspect("cov-lifecycle").await.unwrap().in_use_by.is_empty());
         remove("cov-lifecycle").await.unwrap();
         drop(create("cov-prune").await.unwrap());
         let report = prune().await.unwrap();

@@ -437,7 +437,8 @@ pub struct VolumeInfo {
     pub size_bytes: u64,
     pub disk_bytes: u64,
     pub created: String,
-    pub in_use_by: Option<String>,
+    /// Every sandbox that declares this volume — several can, because a stopped sandbox holds its data until it is removed.
+    pub in_use_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1500,7 +1501,7 @@ mod tests {
             size_bytes: 10 * 1024 * 1024 * 1024,
             disk_bytes: 32 * 1024 * 1024,
             created: "2026-06-10T12:00:00Z".into(),
-            in_use_by: Some("1a2b3c4d0000000000000000000000aa".into()),
+            in_use_by: vec!["reviewer".into(), "auditor".into()],
         };
         for resp in [
             Response::VolumeList {
@@ -1531,16 +1532,16 @@ mod tests {
     }
 
     #[test]
-    fn volume_info_serializes_idle_holder_as_null() {
+    fn volume_info_serializes_an_idle_volume_with_no_holders() {
         let info = VolumeInfo {
             name: "prism-data".into(),
             size_bytes: 4096,
             disk_bytes: 1024,
             created: "2026-06-10T12:00:00Z".into(),
-            in_use_by: None,
+            in_use_by: Vec::new(),
         };
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["in_use_by"], serde_json::Value::Null);
+        assert_eq!(json["in_use_by"], serde_json::json!([]));
         assert_eq!(json["name"], "prism-data");
         assert_eq!(json["disk_bytes"], 1024);
     }

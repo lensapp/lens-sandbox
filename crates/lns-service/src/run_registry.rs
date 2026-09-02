@@ -17,6 +17,14 @@ static NEXT_NAME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 static ACTIVE: Mutex<Option<HashMap<String, RunEntry>>> = Mutex::new(None);
 
+/// What a boot could not read or would not run, kept because such a run's claims still stand even though it is not listed.
+static DAMAGED: Mutex<Vec<DamagedClaim>> = Mutex::new(Vec::new());
+
+struct DamagedClaim {
+    run_id: String,
+    declared_volumes: Option<Vec<lns_ipc::VolumeMount>>,
+}
+
 /// A listed run: alive with a session behind it, or stopped with only its record — restartable until removed.
 pub enum RunEntry {
     Live(RunHandle),
@@ -143,6 +151,72 @@ pub fn transition_to_live(run_id: &str, mut handle: RunHandle) -> Result<String,
         }
         Some(_) => Err(format!("run {run_id} is already running")),
         None => Err(format!("no such run: {run_id}")),
+    }
+}
+
+/// A run this boot will not list still claims what its record says, so its claims are remembered rather than dropped.
+pub fn remember_damaged(damaged: &[crate::run_record::DamagedRecord]) {
+    let mut g = DAMAGED.lock().expect("DAMAGED poisoned");
+    *g = damaged
+        .iter()
+        .map(|d| DamagedClaim {
+            run_id: d.run_id.clone(),
+            declared_volumes: d.declared_volumes.clone(),
+        })
+        .collect();
+}
+
+/// A stopped sandbox declares its volume just as a live one does, because the data outlives the boot that wrote it.
+pub fn volume_claims(name: &str) -> crate::volume_store::VolumeClaims {
+    let active = ACTIVE.lock().expect("ACTIVE poisoned");
+    let damaged = DAMAGED.lock().expect("DAMAGED poisoned");
+    claims_in(active.as_ref(), &damaged, name)
+}
+
+fn claims_in(
+    map: Option<&HashMap<String, RunEntry>>,
+    damaged: &[DamagedClaim],
+    name: &str,
+) -> crate::volume_store::VolumeClaims {
+    let mut held_by = volume_holders_in(map, name);
+    let mut damaged_ids = Vec::new();
+    let mut unreadable = Vec::new();
+    for claim in damaged {
+        match &claim.declared_volumes {
+            Some(volumes) if volumes.iter().any(|v| v.name == name) => {
+                damaged_ids.push(claim.run_id.clone())
+            }
+            Some(_) => {}
+            None => unreadable.push(claim.run_id.clone()),
+        }
+    }
+    held_by.sort();
+    damaged_ids.sort();
+    unreadable.sort();
+    crate::volume_store::VolumeClaims {
+        held_by,
+        damaged: damaged_ids,
+        unreadable,
+    }
+}
+
+fn volume_holders_in(map: Option<&HashMap<String, RunEntry>>, name: &str) -> Vec<String> {
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    let mut holders: Vec<String> = map
+        .values()
+        .filter(|e| declared_volumes(e).iter().any(|v| v.name == name))
+        .map(|e| e.name().to_string())
+        .collect();
+    holders.sort();
+    holders
+}
+
+fn declared_volumes(e: &RunEntry) -> &[lns_ipc::VolumeMount] {
+    match e {
+        RunEntry::Live(h) => &h.config.volumes,
+        RunEntry::Stopped(s) => &s.record.args.volumes,
     }
 }
 
@@ -1575,6 +1649,114 @@ mod tests {
         record.exit_code = Some(3);
         record.finished_at = Some("2026-08-18T00:01:00Z".into());
         record
+    }
+
+    fn mount(name: &str) -> lns_ipc::VolumeMount {
+        lns_ipc::VolumeMount {
+            name: name.to_string(),
+            target: "/data".into(),
+            read_only: false,
+            size_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_volume_is_held_by_every_listed_sandbox_that_declares_it() {
+        let mut map = HashMap::new();
+        let (mut live, _rx) = make_handle();
+        live.name = "runner".to_string();
+        live.config.volumes = vec![mount("cache")];
+        map.insert("aa08".to_string(), RunEntry::Live(live));
+        let mut stopped = stopped_record("aa07", "reviewer");
+        stopped.args.volumes = vec![mount("cache")];
+        map.insert(
+            "aa07".to_string(),
+            RunEntry::Stopped(StoppedRun { record: stopped }),
+        );
+        let mut other = stopped_record("aa09", "auditor");
+        other.args.volumes = vec![mount("scratch")];
+        map.insert(
+            "aa09".to_string(),
+            RunEntry::Stopped(StoppedRun { record: other }),
+        );
+        assert_eq!(
+            volume_holders_in(Some(&map), "cache"),
+            vec!["reviewer".to_string(), "runner".to_string()],
+            "a stopped sandbox holds its volume just as a live one does"
+        );
+        assert_eq!(volume_holders_in(Some(&map), "scratch"), vec!["auditor"]);
+    }
+
+    fn damaged(run_id: &str, volumes: Option<&[&str]>) -> DamagedClaim {
+        DamagedClaim {
+            run_id: run_id.to_string(),
+            declared_volumes: volumes
+                .map(|names| names.iter().map(|n| mount(n)).collect::<Vec<_>>()),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_boot_remembers_what_a_damaged_run_claims_so_the_store_can_ask() {
+        remember_damaged(&[
+            crate::run_record::DamagedRecord {
+                run_id: "aa07".into(),
+                reason: "version drift".into(),
+                declared_volumes: Some(vec![mount("cache")]),
+            },
+            crate::run_record::DamagedRecord {
+                run_id: "aa08".into(),
+                reason: "not json".into(),
+                declared_volumes: None,
+            },
+        ]);
+        let claims = volume_claims("cache");
+        assert_eq!(claims.damaged, vec!["aa07".to_string()]);
+        assert_eq!(claims.unreadable, vec!["aa08".to_string()]);
+        remember_damaged(&[]);
+        assert_eq!(
+            volume_claims("cache"),
+            crate::volume_store::VolumeClaims::default()
+        );
+    }
+
+    #[test]
+    fn a_damaged_records_legible_volume_claims_are_kept_apart_from_a_listed_sandbox() {
+        let claims = claims_in(None, &[damaged("aa07", Some(&["cache"]))], "cache");
+        assert_eq!(claims.damaged, vec!["aa07".to_string()]);
+        assert!(
+            claims.held_by.is_empty(),
+            "no `lns rm` can clear it, so it must not be reported as a listed sandbox"
+        );
+        assert!(
+            claims.unreadable.is_empty(),
+            "a record this build will not run is still a record it can read"
+        );
+        assert!(
+            claims_in(None, &[damaged("aa07", Some(&["cache"]))], "scratch")
+                .damaged
+                .is_empty(),
+            "it claims what it declared, not everything"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_record_stands_in_the_way_of_every_volume() {
+        for volume in ["cache", "scratch"] {
+            let claims = claims_in(None, &[damaged("aa07", None)], volume);
+            assert!(claims.held_by.is_empty());
+            assert_eq!(
+                claims.unreadable,
+                vec!["aa07".to_string()],
+                "nothing about this run is legible, so no volume can be certified free"
+            );
+        }
+    }
+
+    #[test]
+    fn a_volume_no_sandbox_declares_has_no_holder() {
+        assert!(volume_holders_in(None, "cache").is_empty());
+        assert!(volume_holders_in(Some(&HashMap::new()), "cache").is_empty());
     }
 
     #[test]

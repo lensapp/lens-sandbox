@@ -17,6 +17,31 @@ async fn live_run_holds(w: &mut BehaviourWorld, name: String) {
     w.volume().hold(&name).await;
 }
 
+#[given(expr = "the live sandbox {string} holds volume {string}")]
+async fn live_sandbox_holds(w: &mut BehaviourWorld, sandbox: String, name: String) {
+    w.volume().hold_as(&sandbox, &name).await;
+}
+
+#[given(expr = "the stopped sandbox {string} declares volume {string}")]
+async fn stopped_sandbox_declares(w: &mut BehaviourWorld, sandbox: String, name: String) {
+    w.volume().declare(&sandbox, &name);
+}
+
+#[given(expr = "run {string} declares volume {string} in a record this build will not run")]
+async fn damaged_run_declares(w: &mut BehaviourWorld, run_id: String, name: String) {
+    w.volume().damaged_record_declaring(&run_id, &name);
+}
+
+#[given(expr = "the record of run {string} cannot be read")]
+async fn unreadable_record(w: &mut BehaviourWorld, run_id: String) {
+    w.volume().unreadable_record(&run_id);
+}
+
+#[given(expr = "the sandbox {string} is removed")]
+async fn sandbox_removed(w: &mut BehaviourWorld, sandbox: String) {
+    w.volume().forget_sandbox(&sandbox);
+}
+
 #[given(expr = "a run held volume {string} and has since ended")]
 async fn held_then_ended(w: &mut BehaviourWorld, name: String) {
     let rig = w.volume();
@@ -151,10 +176,28 @@ async fn spec_marks_ro(w: &mut BehaviourWorld, name: String) {
     assert!(att.read_only, "attachment must be read-only");
 }
 
+#[then(expr = "the request is refused")]
+async fn refused(w: &mut BehaviourWorld) {
+    assert!(
+        w.volume().last_error.is_some(),
+        "expected the request to be refused"
+    );
+}
+
+#[then(expr = "the refusal tells the user to repair run {string} and restart the service")]
+async fn refusal_names_repair(w: &mut BehaviourWorld, run_id: String) {
+    let err = w.volume().last_error.clone().expect("an error");
+    assert!(err.contains(&run_id), "refusal must name the run: {err}");
+    assert!(
+        err.contains("restart the service"),
+        "a repaired record is only re-read at boot, so the refusal must say so: {err}"
+    );
+}
+
 #[then(expr = "the request is refused because the volume is in use")]
 async fn refused_in_use(w: &mut BehaviourWorld) {
     let err = w.volume().last_error.clone().expect("an error");
-    assert!(err.contains("in use by run "), "got: {err}");
+    assert!(err.contains("in use by"), "got: {err}");
 }
 
 #[then(expr = "the first run's hold on {string} is unaffected")]

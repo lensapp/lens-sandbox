@@ -387,15 +387,21 @@ unprivileged still holds root-owned files, and a tool that checks ownership (git
 Manage the store with `lns volume`:
 
 ```bash
-lns volume ls                  # list volumes: on-disk size, age, holding run
+lns volume ls                  # list volumes: on-disk size, age, holding sandboxes
 lns volume create build-cache  # provision a volume before its first run
 lns volume inspect build-cache # full details as JSON
-lns volume rm build-cache      # delete one volume (refused while a run holds it)
-lns volume prune               # delete every volume no running sandbox holds
+lns volume rm build-cache      # delete one volume (refused while a sandbox holds it)
+lns volume prune               # delete every volume no sandbox holds
 ```
 
-`rm` and `prune` never touch a volume that a live run has attached, and `prune`
-asks for confirmation unless you pass `-f`/`--force`. A volume is the one place
+`rm` and `prune` never touch a volume a sandbox holds, and `prune` asks for
+confirmation unless you pass `-f`/`--force`. A **stopped** sandbox holds its
+volumes too: the data belongs to the sandbox, so the volume outlives every
+sandbox that declares it. Remove those sandboxes first, and `ls` names each one
+that stands in the way. A run whose record `lns` cannot read is a claim it cannot
+check, so it refuses to remove any volume — and `ls` names nobody — until you
+repair or delete that run's directory and restart the service. The refusal says
+which directory. A volume is the one place
 data persists *across* runs; a run's own writable layer persists only with its
 stopped sandbox, until `lns rm` sweeps both away — so removing a volume is
 permanent.

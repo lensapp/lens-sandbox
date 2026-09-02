@@ -77,7 +77,7 @@ Feature: machine-readable output from the list verbs
     And the output is a JSON array of 1 rows
     And JSON row 0 has "name" set to "prism-data"
     And JSON row 0 has "diskBytes" set to 33554432
-    And JSON row 0 has a null "inUseBy"
+    And JSON row 0 has an empty "inUseBy"
 
   Scenario: volume ls with no volumes is an empty array
     Given the service reports no volumes

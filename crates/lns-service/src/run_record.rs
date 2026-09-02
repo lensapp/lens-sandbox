@@ -73,6 +73,8 @@ pub struct RecordScan {
 pub struct DamagedRecord {
     pub run_id: String,
     pub reason: String,
+    /// What the run declared, when the record parsed but this build will not run it; `None` means nothing about it is legible.
+    pub declared_volumes: Option<Vec<lns_ipc::VolumeMount>>,
 }
 
 pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<RecordScan> {
@@ -100,6 +102,7 @@ pub async fn load_all_with<F: Fs>(fs: &F, cache_root: &Path) -> Result<RecordSca
             Err(e) => scan.damaged.push(DamagedRecord {
                 run_id: id.to_string(),
                 reason: format!("its record cannot be read: {e}"),
+                declared_volumes: None,
             }),
         }
     }
@@ -117,10 +120,12 @@ fn scan_record(scan: &mut RecordScan, id: &str, bytes: &[u8]) {
                 "its record is format version {}, but this build reads version {CURRENT_VERSION}",
                 record.version
             ),
+            declared_volumes: Some(record.args.volumes),
         }),
         Err(e) => scan.damaged.push(DamagedRecord {
             run_id: id.to_string(),
             reason: format!("its record does not parse: {e}"),
+            declared_volumes: None,
         }),
     }
 }
@@ -387,6 +392,38 @@ mod tests {
         let scan = load_all_with(&fs, Path::new("/cache")).await.unwrap();
         assert!(scan.records.is_empty());
         assert!(scan.damaged.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_version_record_keeps_the_volume_claims_this_build_can_still_read() {
+        let mut record = sample_record("aa07");
+        record.version = CURRENT_VERSION + 1;
+        record.args.volumes = vec![lns_ipc::VolumeMount {
+            name: "cache".into(),
+            target: "/data".into(),
+            read_only: false,
+            size_bytes: None,
+        }];
+        let mut scan = RecordScan {
+            records: Vec::new(),
+            damaged: Vec::new(),
+        };
+        scan_record(&mut scan, "aa07", &serde_json::to_vec(&record).unwrap());
+        let volumes = scan.damaged[0]
+            .declared_volumes
+            .as_ref()
+            .expect("a record that parsed still names what it declared");
+        assert_eq!(volumes[0].name, "cache");
+    }
+
+    #[test]
+    fn a_record_that_does_not_parse_names_nothing_it_declared() {
+        let mut scan = RecordScan {
+            records: Vec::new(),
+            damaged: Vec::new(),
+        };
+        scan_record(&mut scan, "aa07", b"not json");
+        assert!(scan.damaged[0].declared_volumes.is_none());
     }
 
     #[tokio::test]

@@ -139,7 +139,7 @@ struct VolumeRow {
     size_bytes: u64,
     disk_bytes: u64,
     created: String,
-    in_use_by: Option<String>,
+    in_use_by: Vec<String>,
 }
 
 impl VolumeRow {
@@ -161,7 +161,7 @@ impl VolumeRow {
             ("CAPACITY", format_size(self.size_bytes)),
             ("ON DISK", format_size(self.disk_bytes)),
             ("CREATED", crate::service::friendly_started(&self.created)),
-            ("IN USE", in_use_str(self.in_use_by.as_deref())),
+            ("IN USE", in_use_str(&self.in_use_by)),
         ]
     }
 }
@@ -174,7 +174,7 @@ impl crate::output::TableRow for VolumeRow {
             self.name.clone(),
             format_size(self.disk_bytes),
             crate::service::friendly_started(&self.created),
-            in_use_str(self.in_use_by.as_deref()),
+            in_use_str(&self.in_use_by),
         ]
     }
 }
@@ -280,7 +280,7 @@ async fn unused_volume_names(svc: &dyn VolumeService) -> Result<Vec<String>> {
         Response::VolumeList { volumes } => {
             let mut names: Vec<String> = volumes
                 .into_iter()
-                .filter(|volume| volume.in_use_by.is_none())
+                .filter(|volume| volume.in_use_by.is_empty())
                 .map(|volume| volume.name)
                 .collect();
             names.sort_unstable();
@@ -305,11 +305,11 @@ async fn confirm_prune(
     Ok(yes)
 }
 
-fn in_use_str(holder: Option<&str>) -> String {
-    match holder {
-        Some(run_id) => format!("run {}", lns_ipc::short_run_id(run_id)),
-        None => "-".to_string(),
+fn in_use_str(holders: &[String]) -> String {
+    if holders.is_empty() {
+        return "-".to_string();
     }
+    holders.join(", ")
 }
 
 pub(crate) fn format_size(bytes: u64) -> String {
@@ -364,7 +364,7 @@ mod tests {
             size_bytes: 10 * 1024_u64.pow(3),
             disk_bytes: 32 * 1024 * 1024,
             created: "2026-06-01T12:00:00Z".to_string(),
-            in_use_by: None,
+            in_use_by: Vec::new(),
         }
     }
 
@@ -439,7 +439,7 @@ mod tests {
     async fn prune_without_force_says_so_when_every_volume_is_held() {
         let svc = CannedService::with([Some(Response::VolumeList {
             volumes: vec![VolumeInfo {
-                in_use_by: Some("aa07".into()),
+                in_use_by: vec!["reviewer".into()],
                 ..volume("held")
             }],
         })]);
@@ -546,11 +546,13 @@ mod tests {
     }
 
     #[test]
-    fn in_use_str_names_the_holder_or_dashes() {
+    fn in_use_str_names_every_holder_or_dashes() {
+        assert_eq!(in_use_str(&["reviewer".to_string()]), "reviewer");
         assert_eq!(
-            in_use_str(Some("1a2b3c4d0000000000000000000000aa")),
-            "run 1a2b3c4d0000"
+            in_use_str(&["reviewer".to_string(), "auditor".to_string()]),
+            "reviewer, auditor",
+            "a stopped sandbox holds a volume too, so several can hold one at once"
         );
-        assert_eq!(in_use_str(None), "-");
+        assert_eq!(in_use_str(&[]), "-");
     }
 }

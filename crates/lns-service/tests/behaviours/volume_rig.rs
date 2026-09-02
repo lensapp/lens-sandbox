@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lns_service::vm::VolumeAttachment;
-use lns_service::volume_store::{FileMeta, Fs, LeaseRegistry, PruneReport, VolumeLease};
+use lns_service::volume_store::{
+    FileMeta, Fs, Holders, LeaseRegistry, PruneReport, VolumeClaims, VolumeLease,
+};
 
 pub const FAKE_CREATED_UNIX_SECS: u64 = 1_765_022_400;
 pub const FAKE_ALLOCATED_BYTES: u64 = 4 * 1024 * 1024;
@@ -87,9 +89,68 @@ impl Fs for TrackingFs {
     }
 }
 
+/// The sandboxes a volume belongs to, as the run registry would report them.
+#[derive(Debug, Default, Clone)]
+pub struct FakeHolders {
+    by_volume: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    damaged: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    unreadable: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeHolders {
+    pub fn declare(&self, volume: &str, sandbox: &str) {
+        let mut g = self.by_volume.lock().unwrap();
+        let names = g.entry(volume.to_string()).or_default();
+        names.push(sandbox.to_string());
+        names.sort();
+    }
+
+    pub fn forget(&self, sandbox: &str) {
+        for names in self.by_volume.lock().unwrap().values_mut() {
+            names.retain(|n| n != sandbox);
+        }
+    }
+
+    pub fn declare_damaged(&self, volume: &str, run_id: &str) {
+        self.damaged
+            .lock()
+            .unwrap()
+            .entry(volume.to_string())
+            .or_default()
+            .push(run_id.to_string());
+    }
+
+    pub fn unreadable(&self, run_id: &str) {
+        self.unreadable.lock().unwrap().push(run_id.to_string());
+    }
+}
+
+impl Holders for FakeHolders {
+    fn claims_on(&self, name: &str) -> VolumeClaims {
+        VolumeClaims {
+            held_by: self
+                .by_volume
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+            damaged: self
+                .damaged
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+            unreadable: self.unreadable.lock().unwrap().clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct VolumeRig {
     pub registry: Arc<LeaseRegistry>,
+    pub holders: FakeHolders,
     pub fs: TrackingFs,
     pub store_root: PathBuf,
     pub audit_file: PathBuf,
@@ -100,6 +161,7 @@ pub struct VolumeRig {
     pub last_error: Option<String>,
     next_run_id: u32,
     pub holder_run_id: Option<String>,
+    pub holder_name: Option<String>,
     pub last_list: Option<Vec<lns_ipc::VolumeInfo>>,
     pub last_inspect: Option<lns_ipc::VolumeInfo>,
     pub last_prune: Option<PruneReport>,
@@ -112,6 +174,7 @@ impl VolumeRig {
         let audit_file = tmp.path().join("audit.jsonl");
         Self {
             registry: Arc::new(LeaseRegistry::new()),
+            holders: FakeHolders::default(),
             fs: TrackingFs::default(),
             store_root,
             audit_file,
@@ -122,6 +185,7 @@ impl VolumeRig {
             last_error: None,
             next_run_id: 1,
             holder_run_id: None,
+            holder_name: None,
             last_list: None,
             last_inspect: None,
             last_prune: None,
@@ -151,6 +215,11 @@ impl VolumeRig {
     }
 
     pub async fn hold(&mut self, name: &str) {
+        self.hold_as("holding-run", name).await;
+    }
+
+    /// A live sandbox: it takes the boot-time lease and declares the volume, the way a running run does both.
+    pub async fn hold_as(&mut self, sandbox: &str, name: &str) {
         let id = self.alloc_run_id();
         let acq = lns_service::volume_store::acquire_with(
             &self.fs,
@@ -163,11 +232,37 @@ impl VolumeRig {
         .await
         .expect("hold acquire");
         self.held_leases.push(acq.lease);
+        self.holders.declare(name, sandbox);
         self.holder_run_id = Some(id);
+        self.holder_name = Some(sandbox.to_string());
     }
 
     pub fn release_held(&mut self) {
         self.held_leases.clear();
+        if let Some(sandbox) = self.holder_name.clone() {
+            self.holders.forget(&sandbox);
+        }
+    }
+
+    /// A run whose record parses but which this build will not run; it still claims what the record names.
+    pub fn damaged_record_declaring(&mut self, run_id: &str, volume: &str) {
+        self.preexisting_image(volume);
+        self.holders.declare_damaged(volume, run_id);
+    }
+
+    /// A run whose record this build cannot read at all, so what it claims is unknown.
+    pub fn unreadable_record(&mut self, run_id: &str) {
+        self.holders.unreadable(run_id);
+    }
+
+    /// A sandbox that declares a volume without booting — what a stopped run is to the store.
+    pub fn declare(&mut self, sandbox: &str, volume: &str) {
+        self.preexisting_image(volume);
+        self.holders.declare(volume, sandbox);
+    }
+
+    pub fn forget_sandbox(&mut self, sandbox: &str) {
+        self.holders.forget(sandbox);
     }
 
     pub async fn request(&mut self, name: &str, target: &str, read_only: bool) {
@@ -223,7 +318,7 @@ impl VolumeRig {
     }
 
     pub async fn list(&mut self) {
-        match lns_service::volume_store::list_with(&self.fs, &self.registry, &self.store_root).await
+        match lns_service::volume_store::list_with(&self.fs, &self.holders, &self.store_root).await
         {
             Ok(volumes) => {
                 self.last_list = Some(volumes);
@@ -237,6 +332,7 @@ impl VolumeRig {
         match lns_service::volume_store::create_with(
             &self.fs,
             &self.registry,
+            &self.holders,
             &self.store_root,
             name,
         )
@@ -250,7 +346,7 @@ impl VolumeRig {
     pub async fn inspect(&mut self, name: &str) {
         match lns_service::volume_store::inspect_with(
             &self.fs,
-            &self.registry,
+            &self.holders,
             &self.store_root,
             name,
         )
@@ -268,6 +364,7 @@ impl VolumeRig {
         match lns_service::volume_store::remove_with(
             &self.fs,
             &self.registry,
+            &self.holders,
             &self.store_root,
             name,
         )
@@ -279,8 +376,13 @@ impl VolumeRig {
     }
 
     pub async fn prune(&mut self) {
-        match lns_service::volume_store::prune_with(&self.fs, &self.registry, &self.store_root)
-            .await
+        match lns_service::volume_store::prune_with(
+            &self.fs,
+            &self.registry,
+            &self.holders,
+            &self.store_root,
+        )
+        .await
         {
             Ok(report) => {
                 self.last_prune = Some(report);
