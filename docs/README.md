@@ -1,6 +1,6 @@
-# Lens Sandbox documentation
+# LNS documentation
 
-Lens Sandbox runs AI agents, commands, OCI images, and other untrusted workloads
+LNS runs AI agents, commands, OCI images, and other untrusted workloads
 inside a local microVM. The workload gets a real Linux environment for installs,
 builds, and long-running work, but every connection it opens is checked against a
 policy you control. Known requests are allowed or denied immediately; anything

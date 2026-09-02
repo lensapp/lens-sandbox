@@ -1,6 +1,6 @@
 ## Product Vision
 
-Lens Sandbox is a local desktop app for running AI agents, commands, OCI images, and other untrusted workloads inside a microVM. Tagline: "The sandbox you'll actually leave running." One-liner: "Run AI agents, commands, and OCI images locally. Control access into and out of the sandbox."
+LNS is a local desktop app for running AI agents, commands, OCI images, and other untrusted workloads inside a microVM. Tagline: "The sandbox you'll actually leave running." One-liner: "Run AI agents, commands, and OCI images locally. Control access into and out of the sandbox."
 
 - **Start here:** `docs/README.md` — the first-party user documentation index.
 - **Product language:** the Product Vision above and `docs/` are the source of truth for terminology and framing; keep naming consistent with them. `docs/` is user-facing documentation only — no internal sales/marketing material lives in this repo.

@@ -170,7 +170,7 @@ node, not `lns`. `-it` and `-ti` expand to `-i -t`.
   A name is never all lowercase hex, so an id or id prefix that resolves to
   nothing is an error there, never a reservation.
 - A bare `REF` is qualified, never guessed: `--registry`, then your
-  `run.registry` default, then the Lens hub (`hub.lns.run`). A fully-qualified
+  `run.registry` default, then the LNS hub (`hub.lns.run`). A fully-qualified
   reference is used as written.
 
 ---

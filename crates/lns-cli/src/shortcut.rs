@@ -291,7 +291,7 @@ mod tests {
         let store = [cached("hub.lns.run/redis:latest")];
         assert!(
             cache_holds(&store, "redis", None),
-            "a bare reference lives on the Lens hub, exactly where lns pull would put it"
+            "a bare reference lives on the LNS hub, exactly where lns pull would put it"
         );
         assert!(cache_holds(&store, "hub.lns.run/redis:latest", None));
         assert!(

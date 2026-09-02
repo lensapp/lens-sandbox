@@ -6,7 +6,7 @@ Feature: resource limits are honored inside the guest
   only match real workload output, never the echoed command line.
 
   Scenario: --cpus sets the processor count the guest sees
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs a microVM command "/bin/sh -c 'echo nproc=$(/.lens/guest-tools/bin/busybox nproc)'" with 2 vCPUs
     Then the exit code is 0
     And the output contains "nproc=2"

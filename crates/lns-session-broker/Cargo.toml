@@ -2,7 +2,7 @@
 name = "lns-session-broker"
 version = "0.1.0"
 edition = "2024"
-description = "Lens Sandbox guest-side session broker — listens on vsock and forks workload children for `lns run` / `lns exec` sessions."
+description = "LNS guest-side session broker — listens on vsock and forks workload children for `lns run` / `lns exec` sessions."
 repository = "https://github.com/lensapp/lens-sandbox"
 
 # Static-musl ELF, built with the workspace's `release-init` profile so

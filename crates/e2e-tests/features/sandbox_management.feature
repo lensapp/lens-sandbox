@@ -7,7 +7,7 @@ Feature: cached sandbox management end to end
 
   Background:
     Given a clean lns cache home
-    And the Lens Sandbox service is running in that home
+    And the LNS service is running in that home
 
   Scenario: listing an empty cache says so rather than printing a bare header
     When I run "lns artifact ls"

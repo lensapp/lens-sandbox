@@ -21,7 +21,7 @@ Everything written — in docs, in specs, in this conversation — is a current 
 
 **Before asking the user anything**, read the product documentation to build your own understanding:
 
-1. Read `docs/getting-started.md` and `docs/README.md` — understand what Lens Sandbox is, what it owns, and what it doesn't.
+1. Read `docs/getting-started.md` and `docs/README.md` — understand what LNS is, what it owns, and what it doesn't.
 2. Read the Product Vision in the repo-root `CLAUDE.md` — use its terminology and framing consistently.
 3. Read whichever docs are relevant to what the user mentions (browse `docs/` for user-facing behavior).
 4. Identify which crate this work belongs to. Read that crate's `CLAUDE.md` (or the repo-root `CLAUDE.md` conventions) for development workflow and conventions.
@@ -143,8 +143,8 @@ Before handing off, verify the thinking holds up against what's already written 
 Cross-check:
 
 1. **Scenarios vs product docs.** Do the agreed scenarios conflict with `docs/` or the Product Vision in the repo-root `CLAUDE.md`? Flag any conflict explicitly — either the docs change, or the scenarios do.
-2. **Approach vs product docs.** Does the chosen direction fit what Lens Sandbox is documented to be and do? An approach that drifts outside the product shape is a warning sign.
-3. **Ownership boundary.** Do the scenarios stay within what Lens Sandbox owns? If this is about how agents *think and act* rather than where they *run and what they can reach*, it probably doesn't belong here.
+2. **Approach vs product docs.** Does the chosen direction fit what LNS is documented to be and do? An approach that drifts outside the product shape is a warning sign.
+3. **Ownership boundary.** Do the scenarios stay within what LNS owns? If this is about how agents *think and act* rather than where they *run and what they can reach*, it probably doesn't belong here.
 4. **Terminology.** Names in the scenarios and approach match the canonical terminology in `docs/` and the repo-root `CLAUDE.md`. Correct non-canonical terms.
 
 Do NOT open the target crate's source code here. Code-level checks (existing `.feature` overlap, approach vs the crate's current structure, re-checking assumptions against source) belong in `/problem-first-impl` Phase 4. Keep this check at the doc/product level.

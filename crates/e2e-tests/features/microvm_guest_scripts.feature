@@ -9,7 +9,7 @@ Feature: a pre-start script prepares a real guest without holding the boot
   quiet install does not give.
 
   Scenario: a script that reads its stdin does not hold the boot
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And the project definition declares a pre-start script "cat > /dev/null"
     And the project definition sets command "/bin/sh -c '/.lens/guest-tools/bin/busybox echo the workload ran'"
     When the user runs the sandbox definition

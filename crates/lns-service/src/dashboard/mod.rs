@@ -195,7 +195,7 @@ pub fn apply_theme(ctx: &egui::Context) {
 
 pub fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
-        .with_title("Lens Sandbox — Audit")
+        .with_title("LNS — Audit")
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)

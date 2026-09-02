@@ -1,12 +1,12 @@
 use crate::E2eWorld;
 use cucumber::{given, then, when};
 
-#[given("no Lens Sandbox tray icon is visible")]
+#[given("no LNS tray icon is visible")]
 fn no_tray_icon_visible(_world: &mut E2eWorld) {
     unreachable!("`filter_run` excludes @gui scenarios in headless suites");
 }
 
-#[given("the Lens Sandbox tray icon is visible")]
+#[given("the LNS tray icon is visible")]
 fn tray_icon_visible(_world: &mut E2eWorld) {
     unreachable!("`filter_run` excludes @gui scenarios in headless suites");
 }
@@ -31,7 +31,7 @@ fn no_tray_icon(_world: &mut E2eWorld) {
     // no-op: covered by "no service is started as a side effect" (no service = no tray).
 }
 
-#[then("a Lens Sandbox tray icon appears in my OS tray")]
+#[then("an LNS tray icon appears in my OS tray")]
 fn tray_icon_appears(_world: &mut E2eWorld) {
     unreachable!("`filter_run` excludes @gui scenarios in headless suites");
 }
@@ -56,7 +56,7 @@ fn tray_disappears(_world: &mut E2eWorld) {
     unreachable!("`filter_run` excludes @gui scenarios in headless suites");
 }
 
-#[then("no Lens Sandbox service remains running")]
+#[then("no LNS service remains running")]
 fn no_service_remains(_world: &mut E2eWorld) {
     unreachable!("`filter_run` excludes @gui scenarios in headless suites");
 }

@@ -8,7 +8,7 @@ Feature: a detached run's lifecycle is driven against a real guest
   ring buffer is exercised without a live relay.)
 
   Scenario: inspecting a live detached run reports it running
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
     Then the exit code is 0
     When the user inspects that run
@@ -16,7 +16,7 @@ Feature: a detached run's lifecycle is driven against a real guest
     And the output contains "running"
 
   Scenario: stopping a detached run tears down the guest and frees its volume
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'" with volume "e2e-vol-stop" at "/data"
     Then the exit code is 0
     When the user stops that run
@@ -24,7 +24,7 @@ Feature: a detached run's lifecycle is driven against a real guest
     And volume "e2e-vol-stop" is released
 
   Scenario: killing a detached run tears down the guest and frees its volume
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'" with volume "e2e-vol-kill" at "/data"
     Then the exit code is 0
     When the user kills that run
@@ -32,7 +32,7 @@ Feature: a detached run's lifecycle is driven against a real guest
     And volume "e2e-vol-kill" is released
 
   Scenario: ps lists a live detached run with its resource usage
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user starts a detached microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox sleep 60'"
     Then the exit code is 0
     When the user lists running sandboxes

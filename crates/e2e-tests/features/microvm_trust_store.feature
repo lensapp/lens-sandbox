@@ -10,14 +10,14 @@ Feature: every workload guest can verify a TLS peer
   with its own keeps every root it added.
 
   Scenario: a rootfs that carries no trust store gets the pinned public roots
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a base image that ships no trust store
     When the user runs a microVM command "/bin/sh -c 'grep -m1 BEGIN.CERTIFICATE /etc/ssl/certs/ca-certificates.crt'"
     Then the exit code is 0
     And the output contains "BEGIN CERTIFICATE"
 
   Scenario: a rootfs that carries its own trust store keeps it
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a base image that ships no trust store
     And the project declares inline file "ca-certificates.crt" with content `e2e-image-root` mounted at "/etc/ssl/certs"
     When the user runs a microVM command "/bin/sh -c 'cat /etc/ssl/certs/ca-certificates.crt'"

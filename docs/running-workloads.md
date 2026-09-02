@@ -296,7 +296,7 @@ lns run -w /workspace ghcr.io/acme/agent
 ### Naming a run
 
 Every run has a numeric id (`run #7`) **and** a name. Pass `--name` to choose
-one; omit it and Lens Sandbox assigns a memorable `adjective_noun` name. Either
+one; omit it and LNS assigns a memorable `adjective_noun` name. Either
 handle works anywhere a run id is accepted:
 
 ```bash
@@ -458,7 +458,7 @@ different sizes, the volume takes the largest.
 A relative bind source is resolved from the directory containing the local
 `lns.yaml`. For a published sandbox it is resolved from the directory where the
 consumer invokes `lns run`; this keeps `source: .` aligned with one directory =
-one project. Sources are paths, not shell expressions: Lens Sandbox performs no
+one project. Sources are paths, not shell expressions: LNS performs no
 shell or environment-variable interpolation, so use `source: .`, not `$PWD`.
 Paths are normalized, and a relative source cannot escape the project with
 `..`.
@@ -493,7 +493,7 @@ A skipped bind reaches nothing downstream — not the secret scan, not the guest
 not the audit record. `optional` applies to a bind only; a named volume is
 created on demand and is never absent.
 
-Launch flags are the final override layer. Lens Sandbox starts with the mounts
+Launch flags are the final override layer. LNS starts with the mounts
 from `lns.yaml`, replaces a declarative mount when an explicit `--volume` or
 `--mount` targets the same guest path, and keeps mounts with other targets.
 
@@ -1048,7 +1048,7 @@ lns push ghcr.io/acme/reviewer:1.0.0
 ```
 
 A reference that names no registry (`lns push acme/reviewer:1.0.0`) resolves
-against the Lens hub, `hub.lns.run` — set `run.registry` (or pass `--registry`
+against the LNS hub, `hub.lns.run` — set `run.registry` (or pass `--registry`
 on `lns run`) to point bare references somewhere else:
 
 ```bash
@@ -1061,7 +1061,7 @@ prints the digests that would publish, layers included
 (`npm publish --dry-run`-style), so you can preview a release offline.
 
 A `README.md` next to your `lns.yaml` publishes with the artifact, as a
-`text/markdown` layer — it's what the Lens hub renders on the repository page.
+`text/markdown` layer — it's what the LNS hub renders on the repository page.
 Every digest carries exactly the README that shipped with it, so updating the
 page is just editing the file and pushing again; there is no separate
 description to maintain on the hub. No `README.md`, no layer. The file is
@@ -1076,7 +1076,7 @@ resolve; it notes when declared tools mean the published digest may differ from
 the preview.
 
 Pushing needs a stored login with **push access** for the registry — sign in once
-with `lns login`; on registries that offer browser login (the Lens hub does), a
+with `lns login`; on registries that offer browser login (the LNS hub does), a
 plain `lns login` opens your browser and issues the token for you. For `ghcr.io`
 that's a GitHub token with the `write:packages`
 scope, pushed to a repository path you own; the GitHub CLI mints one directly:

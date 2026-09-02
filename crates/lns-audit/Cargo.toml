@@ -2,7 +2,7 @@
 name = "lns-audit"
 version = "0.1.0"
 edition = "2024"
-description = "Shared audit-timeline reader for Lens Sandbox — merges per-run logs and the connection ledger into one chronological view"
+description = "Shared audit-timeline reader for LNS — merges per-run logs and the connection ledger into one chronological view"
 license = "Apache-2.0"
 publish = false
 

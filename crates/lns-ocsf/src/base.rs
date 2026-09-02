@@ -1,9 +1,9 @@
 use serde_json::{Map, Value, json};
 
 const VERSION: &str = "1.7.0";
-const PRODUCT_NAME: &str = "lens-sandbox";
+const PRODUCT_NAME: &str = "lns";
 const PRODUCT_VENDOR: &str = "Mirantis";
-const CLOUD_PROVIDER: &str = "lens-sandbox";
+const CLOUD_PROVIDER: &str = "lns";
 
 pub mod class {
     pub const AUTHENTICATION: u32 = 3002;
@@ -268,8 +268,8 @@ pub(crate) fn assert_schema_valid(ev: &Value) {
         "type_name must read as 'class: activity'"
     );
     assert_eq!(o["metadata"]["version"], "1.7.0");
-    assert!(o["metadata"]["product"]["name"].is_string());
-    assert!(o["cloud"]["provider"].is_string());
+    assert_eq!(o["metadata"]["product"]["name"], "lns");
+    assert_eq!(o["cloud"]["provider"], "lns");
     assert!(o["osint"].is_array());
     assert!(o["time"].as_i64().expect("time is an integer") >= 0);
     assert!(o["unmapped"]["lns_kind"].is_string());

@@ -335,7 +335,7 @@ fn legacy_entries(cfg: &ConfigFile) -> Vec<&'static str> {
     present
 }
 
-/// The registry a bare reference addresses when `run.registry` is unset — the Lens hub, so publishing a sandbox never silently targets Docker Hub.
+/// The registry a bare reference addresses when `run.registry` is unset — the LNS hub, so publishing a sandbox never silently targets Docker Hub.
 pub const DEFAULT_REGISTRY: &str = "hub.lns.run";
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -921,16 +921,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_registry_falls_back_to_the_lens_hub_not_docker_hub() {
+    fn resolve_default_registry_falls_back_to_the_lns_hub_not_docker_hub() {
         assert_eq!(
             resolve_default_registry("hchen/claude-code", None),
             "hub.lns.run/hchen/claude-code",
-            "an unconfigured bare reference must address the Lens hub; docker.io would push someone's sandbox to Docker Hub"
+            "an unconfigured bare reference must address the LNS hub; docker.io would push someone's sandbox to Docker Hub"
         );
     }
 
     #[test]
-    fn run_defaults_report_the_lens_hub_when_no_registry_is_configured() {
+    fn run_defaults_report_the_lns_hub_when_no_registry_is_configured() {
         assert_eq!(RunDefaults::default().registry_or_default(), "hub.lns.run");
         assert_eq!(
             RunDefaults {
@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_run_defaults_qualifies_a_bare_image_with_the_lens_hub_when_nothing_is_configured() {
+    fn apply_run_defaults_qualifies_a_bare_image_with_the_lns_hub_when_nothing_is_configured() {
         let resolved = apply_run_defaults(bare_run_args(), RunDefaults::default());
         assert_eq!(resolved.image.as_deref(), Some("hub.lns.run/alpine"));
     }

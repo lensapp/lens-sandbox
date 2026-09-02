@@ -174,8 +174,8 @@ the `./lns.yaml` definition with its command overridden.
 | `-m`, `--mem`, `--memory <SIZE>` | `512`        | RAM in MiB, or with a unit suffix (`-m 2g`, `-m 512m`, `-m 38Gi` — the same sizes `spec.resources.memory` accepts, all binary, rounded up to a whole MiB). Without it the document's `spec.resources` decides, then the `run.mem` config default, then `512`. |
 | `-f`, `--file <FILE>`        | `./lns.yaml`     | Definition file to run instead of `./lns.yaml` (e.g. `lns.dev.yaml`); its directory is the project, so it roots the definition's relative binds and filesets and holds the decisions file. Cannot be combined with `REF`. |
 | `--name <NAME>`              | auto             | Name the run, addressable by every `lns sandbox` verb in place of its id. Auto-generated (`adjective_noun`) when omitted; must not be all digits. |
-| `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the Lens hub. A fully-qualified reference is used as-is. |
-| `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Takes a reference or a directory. A bare reference is qualified by `--registry`, else `run.registry`, else the Lens hub; a directory is a local document and stays a path. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`, and a directory shows its absolute path. |
+| `--registry <HOST>`          | `hub.lns.run`    | Registry to qualify a bare published-sandbox reference (e.g. `ghcr.io`); falls back to the `run.registry` config default, else the LNS hub. A fully-qualified reference is used as-is. |
+| `--mixin <REF>`              |                  | Merge a mixin into this run, after the ones the document declares (repeatable, in flag order — a later one wins). Takes a reference or a directory. A bare reference is qualified by `--registry`, else `run.registry`, else the LNS hub; a directory is a local document and stays a path. A tag is allowed and is pinned before the run reports it; the summary shows `tag → digest`, and a directory shows its absolute path. |
 | `-w`, `--workdir <DIR>`      | `spec.workdir`, then image `WORKDIR` | Working directory inside the sandbox (absolute path; created if missing). |
 | `-e`, `--env <KEY=VALUE>`    |                  | Set a non-secret environment variable (repeatable). A variable a connector this run granted fills is dropped instead, and the run names the connector: the workload reads a placeholder there. |
 | `--env-file <FILE>`          |                  | Read `KEY=VALUE` lines from a file into the workload env (repeatable; later files and `-e` win). |
@@ -218,7 +218,7 @@ lns artifact prune [-f]
 
 `REF` is a registry coordinate (`ghcr.io/team/hermes:1.4.0`, `you/agent`,
 `name@sha256:…`) or a path to a local document (`.`, `./dir`, `lns.dev.yaml`). A
-bare reference is qualified by `run.registry`, else the Lens hub (`hub.lns.run`).
+bare reference is qualified by `run.registry`, else the LNS hub (`hub.lns.run`).
 
 | Subcommand | Shortcut     | Meaning |
 | ---------- | ------------ | ------- |
@@ -328,7 +328,7 @@ lns connector forget <ID> --run <RUN>
 holding the connector's `lns.yaml`, or the document itself under any name. A path
 is `.` or `..`, or starts with `./`, `../` or `/`; anything else is a reference,
 so `acme/docs:1` reaches a registry rather than your disk, qualified by
-`run.registry`, else the Lens hub (`hub.lns.run`). A relative path is resolved
+`run.registry`, else the LNS hub (`hub.lns.run`). A relative path is resolved
 against your working directory. The digest a local install records is the one
 publishing that directory would produce, so a grant survives the publish, and
 naming the document records the same digest as naming its directory.
@@ -376,7 +376,7 @@ lns logout <REGISTRY>
 ```
 
 A plain `lns login` — no credential flags — uses browser login on registries
-that offer it (the Lens hub does): it prints a one-time confirmation code, opens
+that offer it (the LNS hub does): it prints a one-time confirmation code, opens
 your browser to the registry's authorize page, and waits for you to approve the
 login there; the registry then issues a fresh token for your account, which is
 verified and stored like any other credential. Registries without browser
@@ -389,7 +389,7 @@ login (such as `ghcr.io`) still take the flag-driven forms below.
 | `lns logout [REGISTRY]`               | Remove the stored credential for `REGISTRY`.                            |
 
 The registry is matched by host: a bare published-sandbox reference uses the
-`run.registry` default (or the Lens hub), while a fully-qualified
+`run.registry` default (or the LNS hub), while a fully-qualified
 `lns run ghcr.io/org/app` always targets that registry and uses its stored login if present. Credentials live in
 a per-user file (`~/.lns/registry-auth.json`, `0600`), separate from any
 shareable policy.
@@ -482,7 +482,7 @@ lns config list
 | ------------- | ------------- | ---------------------------------------------------------- |
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
-| `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the Lens hub, `hub.lns.run`. |
+| `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the LNS hub, `hub.lns.run`. |
 
 The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment
 variables, volumes, and ports are properties of a sandbox, not persistent config —

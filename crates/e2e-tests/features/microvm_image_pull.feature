@@ -11,13 +11,13 @@ Feature: a real OCI image is pulled and booted end to end
   so it matches only real workload output, not the echoed image reference.
 
   Scenario: a pulled image's filesystem is the workload root
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When the user runs image "public.ecr.aws/docker/library/alpine:3.20" with command "/bin/sh -c 'echo rel=$(cat /etc/alpine-release)'"
     Then the exit code is 0
     And the output contains "rel=3.20"
 
   Scenario: pulling a plain OCI image from a real registry is refused
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     When I run lns "pull public.ecr.aws/docker/library/alpine:3.20" against the service
     Then the exit code is non-zero
     And the output contains "is an OCI image, not a published sandbox"

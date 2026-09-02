@@ -9,7 +9,7 @@ Feature: host bind mounts expose live host files inside the guest
   alpine base.
 
   Scenario: a writable host bind exposes host files and writes land back on the host
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a host directory with a file "greeting" containing "from-host"
     When the user runs a microVM command "/bin/sh -c 'read v < /work/greeting; echo got=$v; echo from-guest > /work/created'" with a host bind at "/work"
     Then the exit code is 0
@@ -17,7 +17,7 @@ Feature: host bind mounts expose live host files inside the guest
     And the host bind directory has a file "created" containing "from-guest"
 
   Scenario: a read-only host bind exposes data but rejects writes
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a host directory with a file "secret" containing "ro-data"
     When the user runs a microVM command "/bin/sh -c 'read v < /work/secret; echo read=$v; if echo blocked > /work/blocked 2>/dev/null; then echo WROTE; else echo BLOCKED; fi'" with a read-only host bind at "/work"
     Then the exit code is 0

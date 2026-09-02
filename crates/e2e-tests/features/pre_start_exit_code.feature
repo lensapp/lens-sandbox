@@ -7,24 +7,24 @@ Feature: a run or exec that fails before the workload answers 125
 
   Scenario: lns run answers 125 when the service is unreachable
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns run some-image"
     Then the exit code is 125
 
   Scenario: lns sandbox run is the same command, 125 included
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns sandbox run some-image"
     Then the exit code is 125
 
   Scenario: lns exec answers 125 when the service is unreachable
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns exec 1 -- true"
     Then the exit code is 125
 
   Scenario: lns sandbox exec is the same command, 125 included
     Given a clean lns cache home
-    And no Lens Sandbox service is running
+    And no LNS service is running
     When I run "lns sandbox exec 1 -- true"
     Then the exit code is 125

@@ -13,7 +13,7 @@ Feature: the network cage blocks denied egress from a real guest
   real-internet host, whose reachability makes the test flaky.
 
   Scenario: a deny-all policy blocks the workload's outbound connection
-    Given the Lens Sandbox service is running
+    Given the LNS service is running
     And a network policy that denies all egress
     When the user runs a microVM command "/bin/sh -c '/.lens/guest-tools/bin/busybox wget -T 5 -q -O /dev/null http://1.1.1.1/ && echo reached-$((3*3)) || echo blocked-$((1+1))'"
     Then the exit code is 0

@@ -1,6 +1,6 @@
 # Policy and approvals
 
-A policy decides what a workload may reach over the network. Lens Sandbox checks
+A policy decides what a workload may reach over the network. LNS checks
 every outbound connection the workload opens against the policy and does one of
 three things: **allow** it, **deny** it at the boundary, or — when no rule matches
 — **ask** you.
@@ -114,7 +114,7 @@ A `match` pattern can be:
 ### Raw TCP destinations
 
 Not everything a workload connects to speaks HTTP. A Postgres client, a Redis
-client, an SSH session — Lens Sandbox cannot read those, so it cannot apply
+client, an SSH session — LNS cannot read those, so it cannot apply
 `egress.http` rules to them. `egress.tcp` is where you name the ones you want to
 allow anyway:
 
@@ -143,9 +143,9 @@ Three things are worth knowing:
   list changes nothing.
 - **Every `tcp` rule must name a port.** `db.internal` is rejected;
   `db.internal:5432` is a rule. Because the traffic is passed through unread,
-  "any port on this host" is not a grant Lens Sandbox will write. IPv6 uses
+  "any port on this host" is not a grant LNS will write. IPv6 uses
   bracket notation: `[2001:db8::1]:5432`, `[2001:db8::/32]:5432`.
-- **You do not have to declare one to be asked.** A connection Lens Sandbox cannot
+- **You do not have to declare one to be asked.** A connection LNS cannot
   read — Postgres, Redis, SSH — cannot be matched against `egress.http` rules at
   all, so rather than dropping it silently, it raises an approval card naming the
   address and port. Answering "always allow" writes the `egress.tcp` rule for you.
@@ -325,7 +325,7 @@ destinations they name — the catch-all only answers for whatever is left.
 
 Closing `egress.http` closes raw traffic too, so `egress.tcp` needs no counterpart:
 a raw destination no `tcp` rule names falls through to the catch-all, and a
-connection Lens Sandbox cannot read is refused rather than raising a card.
+connection LNS cannot read is refused rather than raising a card.
 
 Two things worth knowing:
 
@@ -364,8 +364,8 @@ already holds the very rule the answer would write, stranded behind another rule
 gate reaches first: rather than reorder a file you wrote, the window tells you where
 the rule is so you can move it ahead yourself.
 
-A card for a connection Lens Sandbox cannot read is marked **RAW** and says
-so in as many words: Lens Sandbox cannot inspect that traffic or inject
+A card for a connection LNS cannot read is marked **RAW** and says
+so in as many words: LNS cannot inspect that traffic or inject
 credentials into it. Allowing it always writes a port-scoped rule —
 `db.internal:5432`, never `db.internal` — and names any `egress.http` rule that
 stops applying to that traffic, since a raw splice is read by nothing.

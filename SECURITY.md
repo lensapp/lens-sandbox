@@ -1,6 +1,6 @@
 # Security Policy
 
-Lens Sandbox is security-sensitive software. Its job is to run untrusted workloads — AI agents, commands, OCI images, generated code — inside a microVM while controlling access into and out of the sandbox. The host/guest isolation boundary, the policy-enforcement path, credential handling, and the audit chain are all security boundaries.
+LNS is security-sensitive software. Its job is to run untrusted workloads — AI agents, commands, OCI images, generated code — inside a microVM while controlling access into and out of the sandbox. The host/guest isolation boundary, the policy-enforcement path, credential handling, and the audit chain are all security boundaries.
 
 ## Reporting Vulnerabilities
 
@@ -36,6 +36,6 @@ Security-sensitive areas include:
 
 ## Security Boundaries
 
-Lens Sandbox runs untrusted workloads on a developer's machine. The intended boundary is: the workload runs inside the microVM with controlled inbound and outbound access; the host stays outside the blast radius; real secrets stay outside the workload; and every run produces a tamper-evident audit record.
+LNS runs untrusted workloads on a developer's machine. The intended boundary is: the workload runs inside the microVM with controlled inbound and outbound access; the host stays outside the blast radius; real secrets stay outside the workload; and every run produces a tamper-evident audit record.
 
 When in doubt, treat any change touching the microVM boundary, policy enforcement, credential exchange, the audit chain, or the host IPC surface as security-sensitive.

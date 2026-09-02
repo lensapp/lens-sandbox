@@ -2,7 +2,7 @@
 name = "lns-artifact"
 version = "0.1.0"
 edition = "2024"
-description = "Lens Sandbox typed OCI artifact model — shared spec types, parsers, and producer-side validation"
+description = "LNS typed OCI artifact model — shared spec types, parsers, and producer-side validation"
 license = "Apache-2.0"
 publish = false
 

@@ -2,7 +2,7 @@
 name = "lns-service"
 version = "0.23.0"
 edition = "2024"
-description = "Lens Sandbox background service — tray-resident process exposing local IPC and orchestrating microVM runs"
+description = "LNS background service — tray-resident process exposing local IPC and orchestrating microVM runs"
 license = "Apache-2.0"
 publish = false
 

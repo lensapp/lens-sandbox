@@ -1,12 +1,12 @@
-# Lens Sandbox
+# LNS
 
-_This README describes the Lens Sandbox we're building toward._
+_This README describes where LNS is going._
 
 > **The sandbox you'll actually leave running.**
 >
 > Run AI agents, commands, and OCI images locally. Control access into and out of the sandbox.
 
-Lens Sandbox is a local desktop app for running AI agents, commands, OCI images, scripts, generated code, and build jobs inside a local microVM. Inbound ports and services, outbound network calls, API calls, package downloads, container and service calls, and credential-backed actions are checked against policy. When there's no rule yet, Lens Sandbox starts an approval flow. Decisions can be exported to a policy file and loaded by future sandbox runs.
+LNS is a local desktop app for running AI agents, commands, OCI images, scripts, generated code, and build jobs inside a local microVM. Inbound ports and services, outbound network calls, API calls, package downloads, container and service calls, and credential-backed actions are checked against policy. When there's no rule yet, LNS starts an approval flow. Decisions can be exported to a policy file and loaded by future sandbox runs.
 
 ```bash
 $ cd ~/dev/my-app
@@ -17,10 +17,10 @@ $ lns run ghcr.io/anthropic/claude-code
   > _
 ```
 
-A few seconds later the workload tries something with no matching rule. Lens Sandbox asks:
+A few seconds later the workload tries something with no matching rule. LNS asks:
 
 ```
-┌─ lens sandbox ────────────────────────────────────────────┐
+┌─ lns ─────────────────────────────────────────────────────┐
 │  claude-code wants to:                                    │
 │    POST https://api.linear.app/graphql                    │
 │                                                           │
@@ -33,7 +33,7 @@ A few seconds later the workload tries something with no matching rule. Lens San
 
 The workload retries and continues. Your decision is remembered for this directory — next time anything reaches Linear here, no prompt.
 
-Lens Sandbox runs _any_ workload that needs a sandbox boundary: an AI coding agent, a CI script, a Python interpreter, a dev container, that sketchy `npm install` you'd rather not run on your laptop:
+LNS runs _any_ workload that needs a sandbox boundary: an AI coding agent, a CI script, a Python interpreter, a dev container, that sketchy `npm install` you'd rather not run on your laptop:
 
 ```bash
 lns run ghcr.io/anthropic/claude-code     # an AI agent
@@ -68,7 +68,7 @@ cd ~/dev/your-repo
 lns run ghcr.io/anthropic/claude-code
 ```
 
-The workload boots, you start working. When it tries something with no matching rule, Lens Sandbox asks `allow once / always allow / deny`. Click. The workload retries and proceeds.
+The workload boots, you start working. When it tries something with no matching rule, LNS asks `allow once / always allow / deny`. Click. The workload retries and proceeds.
 
 Every "always allow" answer is remembered for this directory and applies forever after. The first run is the noisiest. By the third, the sandbox is mostly silent — and the policy is real.
 
@@ -96,7 +96,7 @@ audit       watch what it's reaching for
 stop        end the session
 ```
 
-If you remember those, you know Lens Sandbox. Everything else is progressive disclosure.
+If you remember those, you know LNS. Everything else is progressive disclosure.
 
 ---
 
@@ -109,7 +109,7 @@ Every outbound call, inbound port, file access, and credential lookup goes throu
 3. **Your answer is recorded.** `allow once` covers this attempt; `always allow` is remembered for this directory so it never asks again.
 
 ```
-┌─ lens sandbox ────────────────────────────────────────────┐
+┌─ lns ─────────────────────────────────────────────────────┐
 │  claude-code wants to:                                    │
 │    POST https://api.linear.app/graphql                    │
 │                                                           │
@@ -126,7 +126,7 @@ Every outbound call, inbound port, file access, and credential lookup goes throu
 Real secrets stay outside the workload. When something inside the sandbox runs `gh auth status` and gets "not signed in", you see:
 
 ```
-┌─ lens sandbox ────────────────────────────────────────────┐
+┌─ lns ─────────────────────────────────────────────────────┐
 │  claude-code wants a credential:                          │
 │    github                                                 │
 │                                                           │
@@ -134,7 +134,7 @@ Real secrets stay outside the workload. When something inside the sandbox runs `
 └───────────────────────────────────────────────────────────┘
 ```
 
-The workload receives a credential-shaped placeholder so software behaves normally. Real tokens, keys, and credential material stay outside the workload. Lens Sandbox exchanges placeholders for real credentials at the boundary when policy allows the request.
+The workload receives a credential-shaped placeholder so software behaves normally. Real tokens, keys, and credential material stay outside the workload. LNS exchanges placeholders for real credentials at the boundary when policy allows the request.
 
 ---
 
@@ -149,7 +149,7 @@ Scope is hierarchical:
 | Scope | What it's for | Travels with |
 |-------|---------------|--------------|
 | **IT-managed** | Constraints your organization or IT enforces on this machine | Your machine (set by your IT) |
-| **User defaults** | Decisions and preferences you want everywhere you use Lens Sandbox | Your machine |
+| **User defaults** | Decisions and preferences you want everywhere you use LNS | Your machine |
 | **Team baseline** | Allow/deny/credential references shared by everyone working on it | The repo |
 | **Personal directory** | Your "always allow" clicks for this specific directory | Your machine, this directory |
 
@@ -199,7 +199,7 @@ lns audit claude-code --denied        # just the blocks
 
 ## How the microVM works
 
-Lens Sandbox embeds a microVM driver (`Vz`, `KVM`, `firecracker` — depending on platform). There is no Docker, no Apple Container CLI, no Lima, no other dependency. The binary you installed is the entire runtime.
+LNS embeds a microVM driver (`Vz`, `KVM`, `firecracker` — depending on platform). There is no Docker, no Apple Container CLI, no Lima, no other dependency. The binary you installed is the entire runtime.
 
 Each `lns run` boots a fresh, ephemeral microVM, fetches the OCI image, runs it, and tears the microVM down on exit. Container tooling can run inside the microVM when needed, so the workload can do real development work — local containers, services, build tools, test runners, databases, package managers — without touching the host container runtime. CPU, memory, and disk are configurable per run.
 
@@ -207,7 +207,7 @@ Each `lns run` boots a fresh, ephemeral microVM, fetches the OCI image, runs it,
 
 ## Behind the CLI
 
-When you run a `lns` command, the CLI is a thin client that talks to a user-level Lens Sandbox process. That process does the real work — supervises microVMs, enforces policy, coordinates state across runs so `lns attach`, `lns status`, and the prompt surface see the same thing. It starts on first use, runs as you (not root, never system-wide), and exits after an idle timeout when nothing's left. No Docker daemon, no always-on service.
+When you run a `lns` command, the CLI is a thin client that talks to a user-level LNS process. That process does the real work — supervises microVMs, enforces policy, coordinates state across runs so `lns attach`, `lns status`, and the prompt surface see the same thing. It starts on first use, runs as you (not root, never system-wide), and exits after an idle timeout when nothing's left. No Docker daemon, no always-on service.
 
 ---
 
@@ -240,13 +240,13 @@ Empty by default.
 
 ## Relationship to Lens Agents
 
-Lens Sandbox is the local product. It runs on a developer's machine. Lens Agents is the centrally managed platform for IT teams that need managed hosting, central administration, central audit, and governed execution across many sandboxes. Lens Sandbox is not a feature of Lens Agents — both adopt the same policy model, so the same policy can span from one developer's decision to organizational governance without a migration step.
+LNS is the local product. It runs on a developer's machine. Lens Agents is the centrally managed platform for IT teams that need managed hosting, central administration, central audit, and governed execution across many sandboxes. LNS is not a feature of Lens Agents — both adopt the same policy model, so the same policy can span from one developer's decision to organizational governance without a migration step.
 
 ---
 
 ## Philosophy
 
-1. **The secure path is the easy path.** A sandbox you turn off protects nothing. Lens Sandbox is built so you don't turn it off.
+1. **The secure path is the easy path.** A sandbox you turn off protects nothing. LNS is built so you don't turn it off.
 2. **Asks at the right moment, not before.** No upfront policy archaeology. You don't have to predict what the workload will need.
 3. **Remembers what you decided.** The first run is the noisiest. By the third, the sandbox is mostly silent — and the policy is real.
 4. **Ephemeral by default.** Each run boots a fresh microVM and tears it down on exit. State persists only when you ask for it.

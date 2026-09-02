@@ -106,7 +106,7 @@ fn render_systemd_unit(service_bin: &str) -> Result<String, String> {
     }
     let lines = [
         "[Unit]".to_string(),
-        "Description=Lens Sandbox background service".to_string(),
+        "Description=LNS background service".to_string(),
         "After=graphical-session.target".to_string(),
         String::new(),
         "[Service]".to_string(),

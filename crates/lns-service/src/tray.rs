@@ -44,7 +44,7 @@ fn build_tray_icon(
         .context("failed to append audit menu item")?;
     let audit_id = audit_item.id().clone();
     let quit_item = MenuItem::new(
-        "Quit Lens Sandbox",
+        "Quit LNS",
         true,
         Some(Accelerator::new(Some(Modifiers::META), Code::KeyQ)),
     );
@@ -55,7 +55,7 @@ fn build_tray_icon(
     let icon = load_icon().context("load embedded tray icon")?;
     let builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("Lens Sandbox")
+        .with_tooltip("LNS")
         .with_icon(icon);
     // Template rendering (monochrome mask adapting to the menu bar) is a macOS concept; on Linux the recolored icon is shown as-is.
     #[cfg(target_os = "macos")]
@@ -109,7 +109,7 @@ fn spawn_gtk_tray(shutdown: Arc<Shutdown>) -> std::thread::JoinHandle<()> {
 
 fn approval_viewport() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
-        .with_title("Lens Sandbox")
+        .with_title("LNS")
         .with_position([0.0, 0.0])
         .with_visible(false)
         .with_decorations(false)

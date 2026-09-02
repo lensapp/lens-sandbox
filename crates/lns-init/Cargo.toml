@@ -2,7 +2,7 @@
 name = "lns-init"
 version = "0.1.0"
 edition = "2024"
-description = "Lens Sandbox micro-init — PID 1 inside the guest initramfs. Open-codes the composefs + ext4-upper mount sequence and pivots into the supervisor."
+description = "LNS micro-init — PID 1 inside the guest initramfs. Open-codes the composefs + ext4-upper mount sequence and pivots into the supervisor."
 repository = "https://github.com/lensapp/lens-sandbox"
 
 # Static musl binary. The output ELF is the entire initramfs payload at
