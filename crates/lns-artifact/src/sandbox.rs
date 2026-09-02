@@ -578,6 +578,23 @@ pub fn encloses(outer: &str, inner: &str) -> bool {
         && inner_segments.next().is_some()
 }
 
+/// The paths a fileset writes: an inline entry writes one per key, and the other two kinds write whatever the `guestPath` names (§3.1.11).
+fn fileset_claims(fileset: &FilesetEntry) -> Vec<String> {
+    let Some(files) = &fileset.inline else {
+        return vec![fileset.guest_path.clone()];
+    };
+    let base = fileset.guest_path.trim_end_matches('/');
+    files.keys().map(|key| format!("{base}/{key}")).collect()
+}
+
+fn one_claim(left: &str, right: &str) -> bool {
+    claimed_path(left) == claimed_path(right)
+}
+
+fn shares_a_path_with(target: &str, claim: &str) -> bool {
+    one_claim(target, claim) || encloses(target, claim) || encloses(claim, target)
+}
+
 /// A fileset nested under a volume target reaches the workload only because lns-init copies it into the volume once mounted (§3.1.11), and these two kinds of volume take no such copy.
 fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
     for volume in &spec.volumes {
@@ -588,13 +605,14 @@ fn refuse_a_fileset_no_mount_can_carry(spec: &SandboxSpec) -> Result<()> {
             (_, true) => "a read-only volume takes no write, so the file could never land",
             _ => continue,
         };
-        for fileset in &spec.filesets {
-            if encloses(&volume.target, &fileset.guest_path)
-                || encloses(&fileset.guest_path, &volume.target)
-            {
+        for claim in spec.filesets.iter().flat_map(fileset_claims) {
+            if shares_a_path_with(&volume.target, &claim) {
+                let relation = match one_claim(&volume.target, &claim) {
+                    true => "collides with",
+                    false => "is nested with",
+                };
                 bail!(
-                    "fileset guestPath {} is nested with volume target {}: {refusal}",
-                    fileset.guest_path,
+                    "the fileset writes {claim}, which {relation} volume target {}: {refusal}",
                     volume.target
                 );
             }
@@ -2391,6 +2409,39 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("/work/inner"), "got: {err:#}");
+    }
+
+    #[test]
+    fn an_inline_key_beside_a_bind_target_is_a_sibling_of_it_rather_than_a_nesting() {
+        parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude"}],"filesets":[{"inline":{".claude.json":"{}"},"guestPath":"/root"}]}"#,
+        ))
+        .expect("/root/.claude.json is beside /root/.claude, so no write of it reaches the bind");
+    }
+
+    #[test]
+    fn an_inline_key_that_does_land_under_a_bind_target_is_still_refused() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude"}],"filesets":[{"inline":{".claude/settings.json":"{}"},"guestPath":"/root"}]}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/root/.claude/settings.json"),
+            "the refusal names the claim, not the guestPath directory: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_inline_key_that_lands_exactly_on_a_bind_target_is_refused_too() {
+        let err = parse(&def_json(
+            r#"{"image":"x:1","volumes":[{"type":"bind","source":"~/.claude","target":"/root/.claude.json"}],"filesets":[{"inline":{".claude.json":"{}"},"guestPath":"/root"}]}"#,
+        ))
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("/root/.claude.json") && message.contains("host filesystem"),
+            "a claim landing exactly on the mount point is buried by it too: {message}"
+        );
     }
 
     #[test]
