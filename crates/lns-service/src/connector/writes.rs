@@ -7,19 +7,30 @@ use crate::runtime_layer::{RuntimeFileSpec, RuntimeSource};
 /// Where the guest reads the claims: only it resolves `~`, so only it can decide which bind entries to leave unmounted.
 pub const CLAIMS_MANIFEST_PATH: &str = "/.lens/connector-claims";
 
+/// One path an installed connector would write, and the connector to name when a bind leaves no room for it (§3.1.11).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Claim {
+    pub connector: String,
+    pub path: String,
+}
+
 /// Every `~/`-anchored path a method of an installed connector would write, in the spelling the grant itself uses; a method this version cannot offer is never granted, so it claims nothing.
-pub fn installed_claims(definitions: &[ConnectorDefinition]) -> Vec<String> {
-    let mut claims: Vec<String> = definitions
+pub fn installed_claims(definitions: &[ConnectorDefinition]) -> Vec<Claim> {
+    let mut claims: Vec<Claim> = definitions
         .iter()
-        .flat_map(|definition| &definition.spec.methods)
-        .filter(|method| method.is_offerable())
-        .flat_map(|method| &method.filesets)
-        .flat_map(|fileset| {
-            fileset
-                .inline
+        .flat_map(|definition| {
+            definition
+                .spec
+                .methods
                 .iter()
-                .flatten()
-                .map(|(name, _)| lns_artifact::connector::guest_file(&fileset.guest_path, name))
+                .filter(|method| method.is_offerable())
+                .flat_map(|method| &method.filesets)
+                .flat_map(|fileset| {
+                    fileset.inline.iter().flatten().map(|(name, _)| Claim {
+                        connector: definition.name.clone(),
+                        path: lns_artifact::connector::guest_file(&fileset.guest_path, name),
+                    })
+                })
         })
         .collect();
     claims.sort();
@@ -28,11 +39,14 @@ pub fn installed_claims(definitions: &[ConnectorDefinition]) -> Vec<String> {
 }
 
 /// No installed connector writes a file, so the guest has nothing to make room for and gets no manifest.
-pub fn claims_manifest(claims: &[String]) -> Option<RuntimeFileSpec> {
+pub fn claims_manifest(claims: &[Claim]) -> Option<RuntimeFileSpec> {
     if claims.is_empty() {
         return None;
     }
-    let body: String = claims.iter().map(|claim| format!("{claim}\n")).collect();
+    let body: String = claims
+        .iter()
+        .map(|claim| format!("{}\t{}\n", claim.connector, claim.path))
+        .collect();
     Some(RuntimeFileSpec {
         guest_path: CLAIMS_MANIFEST_PATH.into(),
         mode: 0o444,
@@ -43,6 +57,13 @@ pub fn claims_manifest(claims: &[String]) -> Option<RuntimeFileSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn claim(connector: &str, path: &str) -> Claim {
+        Claim {
+            connector: connector.into(),
+            path: path.into(),
+        }
+    }
 
     const PLACEHOLDER: &str = "some_LNSPLACEHOLDER0000000000";
 
@@ -62,7 +83,11 @@ mod tests {
     #[test]
     fn a_claim_is_the_path_the_grant_writes_so_the_boot_and_the_grant_cannot_drift() {
         let claims = installed_claims(&[definition("claude", "~/.claude", &[".credentials.json"])]);
-        assert_eq!(claims, ["~/.claude/.credentials.json"]);
+        assert_eq!(
+            claims,
+            [claim("claude", "~/.claude/.credentials.json")],
+            "the refusal has to name the connector, so the path travels with it"
+        );
     }
 
     #[test]
@@ -78,9 +103,9 @@ mod tests {
         assert_eq!(
             claims,
             [
-                "~/.claude/.credentials.json",
-                "~/.claude/settings.json",
-                "~/.other/auth.json",
+                claim("claude", "~/.claude/.credentials.json"),
+                claim("claude", "~/.claude/settings.json"),
+                claim("other", "~/.other/auth.json"),
             ],
             "the boot makes room for every method, because any of them may be the one granted"
         );
@@ -92,7 +117,14 @@ mod tests {
             definition("a", "~/.agent", &["auth.json"]),
             definition("b", "~/.agent", &["auth.json"]),
         ]);
-        assert_eq!(claims, ["~/.agent/auth.json"]);
+        assert_eq!(
+            claims,
+            [
+                claim("a", "~/.agent/auth.json"),
+                claim("b", "~/.agent/auth.json")
+            ],
+            "one path two connectors write is two claims, because either may be the one refused"
+        );
     }
 
     #[test]
@@ -108,13 +140,16 @@ mod tests {
 
     #[test]
     fn the_manifest_carries_one_claim_per_line_for_the_guest_to_resolve() {
-        let spec = claims_manifest(&["~/.claude/.credentials.json".into(), "~/.a/b".into()])
-            .expect("claims make a manifest");
+        let spec = claims_manifest(&[
+            claim("claude", "~/.claude/.credentials.json"),
+            claim("other", "~/.a/b"),
+        ])
+        .expect("claims make a manifest");
         assert_eq!(spec.guest_path, CLAIMS_MANIFEST_PATH);
         match spec.source {
             RuntimeSource::Bytes(body) => assert_eq!(
                 String::from_utf8(body).expect("utf8"),
-                "~/.claude/.credentials.json\n~/.a/b\n"
+                "claude\t~/.claude/.credentials.json\nother\t~/.a/b\n"
             ),
             other => panic!("the manifest must be inline bytes, got {other:?}"),
         }

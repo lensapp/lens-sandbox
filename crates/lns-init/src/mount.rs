@@ -37,6 +37,8 @@ const DEV_FD_LINKS: &[(&str, &str)] = &[
     ("/proc/self/fd/2", "/dev/stderr"),
 ];
 const EXPLODED_BIND_SHARES: &str = "/.lens/binds";
+/// The paths installed connectors would write, `~/`-anchored because only this side resolves the home they hang off (§3.1.11).
+const CONNECTOR_CLAIMS: &str = "/.lens/connector-claims";
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const TMP: &str = "/tmp";
@@ -129,6 +131,7 @@ pub(crate) trait Syscalls {
     fn path_exists(&self, path: &CStr) -> bool;
     fn is_dir(&self, path: &CStr) -> bool;
     fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<ShareEntry>>;
+    fn read_to_string(&self, path: &CStr) -> std::io::Result<Option<String>>;
     fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd>;
     fn fexecve(&self, fd: RawFd, argv0: &CStr) -> std::io::Error;
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
@@ -156,10 +159,26 @@ pub enum MountError {
     IncompleteVolume(usize),
     IncompleteBind(usize),
     InteriorNul(&'static str),
-    Syscall { op: String, err: std::io::Error },
-    DescriptorDigestMismatch { expected: String, actual: String },
+    Syscall {
+        op: String,
+        err: std::io::Error,
+    },
+    DescriptorDigestMismatch {
+        expected: String,
+        actual: String,
+    },
     DescriptorRead(std::io::Error),
     SeededPathUnderSymlink(String),
+    ClaimWritesThroughBind {
+        connector: String,
+        claim: String,
+        target: String,
+    },
+    ClaimUnderVolume {
+        connector: String,
+        claim: String,
+        target: String,
+    },
     UnresolvableUser(String),
     UnresolvableGroup(String),
 }
@@ -182,9 +201,29 @@ impl fmt::Display for MountError {
                  dropped path (likely a truncated cmdline); refusing to boot rather than \
                  risk exposing a secret the operator chose to drop"
             ),
+            Self::ClaimWritesThroughBind {
+                connector,
+                claim,
+                target,
+            } => write!(
+                f,
+                "connector {connector} writes {claim}, which lands inside the bind mounted at \
+                 {target}; a granted file never reaches the host, so add that path to the \
+                 bind's exclude or uninstall {connector}"
+            ),
+            Self::ClaimUnderVolume {
+                connector,
+                claim,
+                target,
+            } => write!(
+                f,
+                "connector {connector} writes {claim}, which lands inside the volume mounted at \
+                 {target}; a volume takes no exclude, so there is nowhere guest-local for that \
+                 file — move the volume off that path or uninstall {connector}"
+            ),
             Self::SeededPathUnderSymlink(path) => write!(
                 f,
-                "the bind entry {path} on the way to a path a fileset writes is a symlink; \
+                "the bind entry {path} on the way to a path a fileset or a granted connector writes is a symlink; \
                  refusing to boot rather than follow it and write somewhere the document \
                  did not name"
             ),
@@ -673,13 +712,110 @@ fn reconcile_volume_owner(sys: &dyn Syscalls, target: &str, run_ids: Option<(u32
     lchown_logged(sys, target, uid, gid);
 }
 
+/// One connector's write, resolved against this guest's home.
+#[derive(Debug)]
+struct Claim {
+    connector: String,
+    path: String,
+}
+
+/// A run whose user has no home takes no method that writes a file, so it makes room for none (§3.1.11).
+fn connector_claims(
+    sys: &dyn Syscalls,
+    newroot: &str,
+    home: Option<&str>,
+) -> Result<Vec<Claim>, MountError> {
+    let Some(home) = home else {
+        return Ok(Vec::new());
+    };
+    let path = format!("{newroot}{CONNECTOR_CLAIMS}");
+    let body = match sys.read_to_string(&cstring(&path, "claims-path")?) {
+        Ok(Some(body)) => body,
+        Ok(None) => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(MountError::Syscall {
+                op: format!("read {path}"),
+                err,
+            });
+        }
+    };
+    Ok(body
+        .lines()
+        .filter_map(|line| claim_of(line, home))
+        .collect())
+}
+
+/// A line the producer did not write is a claim of nothing, and re-anchoring it under the home would name a path no grant writes.
+fn claim_of(line: &str, home: &str) -> Option<Claim> {
+    let (connector, path) = line.trim().split_once('\t')?;
+    let rest = path.strip_prefix("~/")?;
+    Some(Claim {
+        connector: connector.to_string(),
+        path: format!("{}/{rest}", home.trim_end_matches('/')),
+    })
+}
+
+/// A volume takes no `exclude`, so a claim landing under one has nowhere guest-local to go (§3.1.11).
+fn refuse_a_claim_a_volume_would_take(
+    volumes: &[crate::cmdline::VolumeParam],
+    claims: &[Claim],
+) -> Result<(), MountError> {
+    for volume in volumes {
+        for claim in claims {
+            if lns_placement::place(&volume.target, &[] as &[&str], &claim.path)
+                != lns_placement::Placement::Free
+            {
+                return Err(MountError::ClaimUnderVolume {
+                    connector: claim.connector.clone(),
+                    claim: claim.path.clone(),
+                    target: volume.target.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every exclude of this bind a claim needs left unmounted, and a refusal for a claim no exclude covers (§3.1.11).
+fn seeds_the_claims_need(
+    bind: &crate::cmdline::BindParam,
+    claims: &[Claim],
+) -> Result<Vec<String>, MountError> {
+    let mut seeds = Vec::new();
+    for claim in claims {
+        match lns_placement::place(&bind.target, &bind.excluded_paths, &claim.path) {
+            lns_placement::Placement::Free => continue,
+            lns_placement::Placement::WritesThrough => {
+                return Err(MountError::ClaimWritesThroughBind {
+                    connector: claim.connector.clone(),
+                    claim: claim.path.clone(),
+                    target: bind.target.clone(),
+                });
+            }
+            lns_placement::Placement::Masked { .. } => {
+                for entry in &bind.excluded_paths {
+                    if lns_placement::mask_covers(&bind.target, entry, &claim.path)
+                        && !seeds.contains(entry)
+                    {
+                        seeds.push(entry.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(seeds)
+}
+
 fn mount_binds(
     sys: &dyn Syscalls,
     binds: &[crate::cmdline::BindParam],
+    volumes: &[crate::cmdline::VolumeParam],
     newroot: &str,
     run_ids: Option<(u32, u32)>,
     home: Option<&str>,
 ) -> Result<(), MountError> {
+    let claims = connector_claims(sys, newroot, home)?;
+    refuse_a_claim_a_volume_would_take(volumes, &claims)?;
     for (index, bind) in binds.iter().enumerate() {
         let target = format!("{newroot}{}", bind.target);
         let made = made_by_mkdir_p(sys, &target, 0o755)?;
@@ -688,12 +824,18 @@ fn mount_binds(
             true => MountFlags::read_only().nosuid().nodev(),
             false => MountFlags::none().nosuid().nodev(),
         };
-        if bind.seeded_paths.is_empty() {
+        let mut seeds = seeds_the_claims_need(bind, &claims)?;
+        for seeded in &bind.seeded_paths {
+            if !seeds.contains(seeded) {
+                seeds.push(seeded.clone());
+            }
+        }
+        if seeds.is_empty() {
             do_mount(sys, &bind.tag, &target, "virtiofs", flags, None)?;
             mask_each_dropped_path(sys, &target, &bind.dropped_paths)?;
             continue;
         }
-        explode_bind(sys, bind, index, newroot, &target, flags)?;
+        explode_bind(sys, bind, index, newroot, &target, flags, &seeds)?;
     }
     Ok(())
 }
@@ -717,16 +859,13 @@ fn explode_bind(
     newroot: &str,
     target: &str,
     flags: MountFlags,
+    seeds: &[String],
 ) -> Result<(), MountError> {
     let share = format!("{newroot}{EXPLODED_BIND_SHARES}/{index}");
     made_by_mkdir_p(sys, &share, 0o700)?;
     do_mount(sys, &bind.tag, &share, "virtiofs", flags, None)?;
     mask_each_dropped_path(sys, &share, &bind.dropped_paths)?;
-    let spine: Vec<Vec<&str>> = bind
-        .seeded_paths
-        .iter()
-        .map(|path| path_segments(path))
-        .collect();
+    let spine: Vec<Vec<&str>> = seeds.iter().map(|path| path_segments(path)).collect();
     bind_the_entries_beside(sys, &share, target, &spine)
 }
 
@@ -1117,13 +1256,8 @@ fn mount_composefs_and_exec_broker_inner(
 
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
-    mount_binds(
-        sys,
-        &params.binds,
-        newroot,
-        run_ids,
-        identity.as_ref().and_then(|i| i.home.as_deref()),
-    )?;
+    let home = identity.as_ref().and_then(|i| i.home.as_deref());
+    mount_binds(sys, &params.binds, &params.volumes, newroot, run_ids, home)?;
 
     land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, run_ids)?;
 
@@ -1645,6 +1779,9 @@ mod tests {
         ReadDir {
             path: String,
         },
+        ReadToString {
+            path: String,
+        },
         Mkdir {
             path: String,
             mode: u32,
@@ -1702,6 +1839,7 @@ mod tests {
         ptmx_exists: bool,
         dir_paths: Vec<String>,
         dir_entries: BTreeMap<String, Vec<ShareEntry>>,
+        files: BTreeMap<String, String>,
         fail_when: FailWhen,
         digest_result: RefCell<Option<Result<(), MountError>>>,
     }
@@ -1713,6 +1851,7 @@ mod tests {
                 ptmx_exists: true,
                 dir_paths: Vec::new(),
                 dir_entries: BTreeMap::new(),
+                files: BTreeMap::new(),
                 fail_when: Box::new(|_| None),
                 digest_result: RefCell::new(None),
             }
@@ -1720,6 +1859,11 @@ mod tests {
 
         fn with_dir(mut self, path: &str) -> Self {
             self.dir_paths.push(path.to_string());
+            self
+        }
+
+        fn with_file(mut self, path: &str, body: &str) -> Self {
+            self.files.insert(path.to_string(), body.to_string());
             self
         }
 
@@ -1820,6 +1964,12 @@ mod tests {
         }
         fn is_dir(&self, path: &CStr) -> bool {
             self.dir_paths.iter().any(|p| p == path.to_str().unwrap())
+        }
+
+        fn read_to_string(&self, path: &CStr) -> std::io::Result<Option<String>> {
+            let path = path.to_string_lossy().into_owned();
+            self.record(Call::ReadToString { path: path.clone() })?;
+            Ok(self.files.get(&path).cloned())
         }
 
         fn read_dir(&self, path: &CStr) -> std::io::Result<Vec<ShareEntry>> {
@@ -3062,6 +3212,7 @@ mod tests {
             read_only,
             dropped_paths: drops.iter().map(|s| s.to_string()).collect(),
             seeded_paths: Vec::new(),
+            excluded_paths: Vec::new(),
         }
     }
 
@@ -3074,6 +3225,17 @@ mod tests {
         crate::cmdline::BindParam {
             seeded_paths: seeds.iter().map(|s| s.to_string()).collect(),
             ..bind_param(tag, target, false, drops)
+        }
+    }
+
+    fn bind_param_excluding(
+        tag: &str,
+        target: &str,
+        excludes: &[&str],
+    ) -> crate::cmdline::BindParam {
+        crate::cmdline::BindParam {
+            excluded_paths: excludes.iter().map(|s| s.to_string()).collect(),
+            ..bind_param(tag, target, false, &[])
         }
     }
 
@@ -3123,6 +3285,7 @@ mod tests {
                 &[],
                 seeds,
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3218,6 +3381,7 @@ mod tests {
                 &[".env"],
                 &["settings.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3243,6 +3407,7 @@ mod tests {
                 &["projects/.env"],
                 &["settings.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3277,6 +3442,7 @@ mod tests {
                 &[],
                 &["settings.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3322,6 +3488,7 @@ mod tests {
                 &[],
                 &["settings.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3350,6 +3517,7 @@ mod tests {
                 &[],
                 &["agent/token.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3377,6 +3545,7 @@ mod tests {
                 &[],
                 &["settings.json"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3408,6 +3577,7 @@ mod tests {
                 &[],
                 &["agent"],
             )],
+            &[],
             "/newroot",
             None,
             None,
@@ -3419,12 +3589,213 @@ mod tests {
         );
     }
 
+    const CLAIMS_FILE: &str = "/newroot/.lens/connector-claims";
+
+    fn ran_with_claims(
+        bind: crate::cmdline::BindParam,
+        claims: &str,
+        home: Option<&str>,
+    ) -> (FakeSyscalls, Result<(), MountError>) {
+        let sys = FakeSyscalls::new()
+            .with_file(CLAIMS_FILE, claims)
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[
+                    dir_entry("projects"),
+                    file_entry(".credentials.json"),
+                    file_entry("settings.json"),
+                ],
+            );
+        let out = mount_binds(&sys, &[bind], &[], "/newroot", None, home);
+        (sys, out)
+    }
+
+    #[test]
+    fn a_connector_claim_an_exclude_covers_leaves_that_entry_unmounted_for_the_grant() {
+        let (sys, out) = ran_with_claims(
+            bind_param_excluding("lns-bind-0", "/root/.claude", &[".credentials.json"]),
+            "claude\t~/.claude/.credentials.json\n",
+            Some("/root"),
+        );
+        out.expect("the exclude covers the claim, so the bind splits instead of refusing");
+        let mounts = mounts_of(&sys);
+        assert!(
+            mounts.contains(&("lns-bind-0".into(), "/newroot/.lens/binds/0".into())),
+            "the share goes to the private path, so the claim's parent stays guest-local: {mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|(_, target)| target == "/newroot/root/.claude/.credentials.json"),
+            "the claimed path is left for the grant to write: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_connector_claim_no_exclude_covers_refuses_the_boot_rather_than_writing_to_the_host() {
+        let (_, out) = ran_with_claims(
+            bind_param_excluding("lns-bind-0", "/root/.claude", &["projects"]),
+            "claude\t~/.claude/settings.json\n",
+            Some("/root"),
+        );
+        let err = out.expect_err("a granted file must never reach the share");
+        let message = format!("{err}");
+        assert!(
+            message.contains("/root/.claude/settings.json")
+                && message.contains("bind mounted at /root/.claude"),
+            "the refusal names the claim and the bind: {message}"
+        );
+        assert!(message.contains("exclude"), "it names the fix: {message}");
+        assert!(
+            message.contains("claude"),
+            "the developer has to know which connector to act on: {message}"
+        );
+    }
+
+    #[test]
+    fn a_connector_claim_outside_every_bind_changes_nothing() {
+        let (sys, out) = ran_with_claims(
+            bind_param_excluding("lns-bind-0", "/work", &[]),
+            "claude\t~/.claude/.credentials.json\n",
+            Some("/root"),
+        );
+        out.expect("a claim beside the bind is no concern of it");
+        assert_eq!(
+            mounts_of(&sys),
+            [("lns-bind-0".to_string(), "/newroot/work".to_string())],
+            "no claim under the bind means no split"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_user_has_no_home_counts_no_claim_because_it_can_take_no_such_method() {
+        let (sys, out) = ran_with_claims(
+            bind_param_excluding("lns-bind-0", "/root/.claude", &["projects"]),
+            "claude\t~/.claude/settings.json\n",
+            None,
+        );
+        out.expect("with no home there is nothing to resolve a claim against");
+        assert_eq!(
+            mounts_of(&sys),
+            [(
+                "lns-bind-0".to_string(),
+                "/newroot/root/.claude".to_string()
+            )],
+            "the bind is mounted whole, as it would be with no connector installed"
+        );
+    }
+
+    #[test]
+    fn a_document_seed_and_a_connector_claim_split_one_bind_together() {
+        let sys = FakeSyscalls::new()
+            .with_file(CLAIMS_FILE, "claude\t~/.claude/.credentials.json\n")
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[
+                    dir_entry("projects"),
+                    dir_entry("agent"),
+                    file_entry(".credentials.json"),
+                ],
+            );
+        let bind = crate::cmdline::BindParam {
+            seeded_paths: vec!["agent".into()],
+            excluded_paths: vec![".credentials.json".into(), "agent".into()],
+            ..bind_param("lns-bind-0", "/root/.claude", false, &[])
+        };
+        mount_binds(&sys, &[bind], &[], "/newroot", None, Some("/root"))
+            .expect("both writers get their path left alone");
+        let mounts = mounts_of(&sys);
+        assert!(
+            mounts.contains(&(
+                "/newroot/.lens/binds/0/projects".into(),
+                "/newroot/root/.claude/projects".into()
+            )),
+            "the entries beside both seeds are still bound in: {mounts:?}"
+        );
+        for left in ["agent", ".credentials.json"] {
+            assert!(
+                !mounts
+                    .iter()
+                    .any(|(_, target)| target == &format!("/newroot/root/.claude/{left}")),
+                "{left} is left for its writer, not bound from the share: {mounts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_claims_manifest_the_guest_cannot_read_refuses_the_boot_rather_than_dropping_the_guard() {
+        let sys = FakeSyscalls::new().fail_when(|call| match call {
+            Call::ReadToString { path } if path == CLAIMS_FILE => Some(ErrorKind::PermissionDenied),
+            _ => None,
+        });
+        let err = mount_binds(
+            &sys,
+            &[bind_param_excluding("lns-bind-0", "/root/.claude", &[])],
+            &[],
+            "/newroot",
+            None,
+            Some("/root"),
+        )
+        .expect_err("an unreadable manifest is not the same as no connectors installed");
+        assert!(
+            format!("{err}").contains("/newroot/.lens/connector-claims"),
+            "the refusal names what it could not read: {err}"
+        );
+        assert!(
+            mounts_of(&sys).is_empty(),
+            "nothing is mounted before the guard is known to hold"
+        );
+    }
+
+    #[test]
+    fn a_claims_path_that_cannot_be_a_c_string_refuses_the_boot() {
+        let sys = FakeSyscalls::new();
+        let err = connector_claims(&sys, "/new\0root", Some("/root"))
+            .expect_err("a path with an interior NUL reaches no file");
+        assert!(
+            matches!(err, MountError::InteriorNul("claims-path")),
+            "the refusal names the field: {err}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_line_the_producer_did_not_write_claims_nothing() {
+        let sys = FakeSyscalls::new().with_file(CLAIMS_FILE, "no-tab-here\nclaude\t/absolute\n\n");
+        let claims = connector_claims(&sys, "/newroot", Some("/root")).expect("readable");
+        assert!(
+            claims.is_empty(),
+            "re-anchoring a line this side did not recognise would name a path no grant writes"
+        );
+    }
+
+    #[test]
+    fn a_claim_under_a_volume_refuses_the_boot_because_a_volume_takes_no_exclude() {
+        let sys = FakeSyscalls::new().with_file(CLAIMS_FILE, "claude\t~/.claude/settings.json\n");
+        let volume = crate::cmdline::VolumeParam {
+            dev: "/dev/vdc".into(),
+            target: "/root/.claude".into(),
+            read_only: true,
+        };
+        let err = mount_binds(&sys, &[], &[volume], "/newroot", None, Some("/root"))
+            .expect_err("a volume leaves no guest-local room for a granted file");
+        let message = format!("{err}");
+        assert!(
+            message.contains("/root/.claude/settings.json") && message.contains("claude"),
+            "the refusal names the claim and the connector: {message}"
+        );
+        assert!(
+            message.contains("volume mounted at") && !message.contains("bind"),
+            "naming it a bind would send the developer to a field a volume does not have: {message}"
+        );
+    }
+
     #[test]
     fn a_bind_with_no_seed_is_mounted_whole_as_one_mount() {
         let sys = FakeSyscalls::new();
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[])],
+            &[],
             "/newroot",
             None,
             None,
@@ -3468,6 +3839,7 @@ mod tests {
                 false,
                 &[],
             )],
+            &[],
             "/newroot",
             Some((1000, 1000)),
             Some("/home/agent"),
@@ -3497,6 +3869,7 @@ mod tests {
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", target, false, &[])],
+            &[],
             "/newroot",
             Some((1000, 1000)),
             Some(home),
@@ -3535,6 +3908,7 @@ mod tests {
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[])],
+            &[],
             "/newroot",
             None,
             None,
@@ -3557,6 +3931,7 @@ mod tests {
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/cfg", true, &[])],
+            &[],
             "/newroot",
             None,
             None,
@@ -3576,6 +3951,7 @@ mod tests {
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[".env"])],
+            &[],
             "/newroot",
             None,
             None,
@@ -3597,6 +3973,7 @@ mod tests {
         mount_binds(
             &sys,
             &[bind_param("lns-bind-0", "/work", false, &[".ssh"])],
+            &[],
             "/newroot",
             None,
             None,

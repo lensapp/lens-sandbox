@@ -616,6 +616,16 @@ spec:
         guestPath: /root/.agent/session
   ```
 
+  A [connector](cli-reference.md#lns-connector) writes into an excluded path the
+  same way. That is how a method seeds a credentials file the client reads from
+  disk: the placeholder lands in the mask, never on your host copy. The run works
+  this out as it boots, and counts every connector installed at that moment. A run
+  that binds a directory an installed method writes into refuses to start unless
+  the bind excludes that path. A connector installed after a run started cannot be
+  granted to it. Only a boot can make the room, so restart the run and grant it
+  there. A named volume takes no `exclude`, so a method writing under one refuses
+  the run too. Move the volume off that path, or uninstall the connector.
+
   The bind pays for it. To keep the mask writable without touching the host, the
   guest mounts that bind's entries one at a time instead of the directory whole,
   following the excluded path down. At each of those levels every entry is its own
