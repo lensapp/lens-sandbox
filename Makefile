@@ -340,7 +340,8 @@ install-hooks:
 	@echo "  commit-msg  conventional-commit check (commitlint)"
 	@echo "  pre-commit  cargo fmt --check, and markdownlint"
 	@echo "  pre-push    lint + complexity + coverage-affected"
-	@if [ ! -x node_modules/.bin/commitlint ] || [ ! -x node_modules/.bin/markdownlint-cli2 ] || ! command -v node >/dev/null 2>&1; then \
+	@if ! sh -c '. scripts/hooks/lib.sh; [ -n "$$(node_bin commitlint)" ] && [ -n "$$(node_bin markdownlint-cli2)" ]' \
+		|| ! command -v node >/dev/null 2>&1; then \
 		echo "  note: commitlint and markdownlint are skipped until \`npm install\` and a reachable node."; \
 	fi
 	@echo "Bypass when needed: git push --no-verify"
