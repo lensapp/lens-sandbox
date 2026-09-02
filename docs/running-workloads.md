@@ -999,6 +999,12 @@ than missing. A tool that probes for `~/.cargo` will find it — and find nothin
 it. virtio-fs shares the whole tree, so masking is the lever available; if a workload
 must not know a path exists at all, bind a narrower source instead.
 
+One exclusion is writable instead of unwritable: the path a
+[fileset](#filesets--files-shipped-inside-the-artifact), or a granted connector, writes
+into. The guest gets a plain directory there, holding what the document ships, and
+the write still never reaches the host. That case, and what it costs the rest of the
+bind, is described with the filesets above.
+
 Declarative binds use this exact scan, prompt, remembered KEEP/DROP decision,
 masking, validation, and audit path. A published sandbox is inspected and pinned
 before launch so its bind declarations can be shown and approved on the consumer

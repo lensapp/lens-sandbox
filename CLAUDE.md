@@ -45,6 +45,7 @@ Monorepo. A Cargo workspace (production crates, two operator tools, two test/cov
 | `crates/lns-ipc` | Shared `Request`/`Response` types and wire-format codec for the lns-cli ↔ lns-service contract. |
 | `crates/lns-spec` | The `lns.run/v1` document grammar — the shared definitions every `kind` is built from (`docs/sandbox-spec.md`). |
 | `crates/lns-policy` | Policy schema — file-format types shared between lns-service (enforcement) and lns-cli (run-summary introspection). |
+| `crates/lns-placement` | Where a written file lands against one mount — the rule the document check, the pre-boot check, the grant check, and the guest all decide by. No dependencies: lns-init carries it into the initramfs. |
 | `crates/lns-artifact` | Typed OCI artifact model — spec types, parsers, and producer-side validation. |
 | `crates/lns-audit` | Audit-timeline reader — merges per-run logs and the connection ledger into one chronological view. |
 | `crates/lns-ocsf` | OCSF v1.7.0 event builders for the audit logs. |
