@@ -238,10 +238,10 @@ async fn orchestrate(
     crate::run_registry::set_resolved_command_and_env(&run_id, &cmd, &env);
 
     // The grant port is armed inside the join below, so what this run counted has to be on the record before it.
-    let connector_claims = crate::connector::real::installed_claims()?;
-    crate::run_registry::record_counted_claims(
+    let connector_writes = crate::connector::real::paths_installed_connectors_write()?;
+    crate::run_registry::record_paths_counted_at_boot(
         &run_id,
-        connector_claims.iter().map(|c| c.path.clone()).collect(),
+        connector_writes.iter().map(|c| c.path.clone()).collect(),
     );
 
     let tools_then_session = async {
@@ -419,7 +419,9 @@ async fn orchestrate(
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
     fileset_specs.extend(workload_ca_spec);
-    fileset_specs.extend(crate::connector::writes::claims_manifest(&connector_claims));
+    fileset_specs.extend(crate::connector::writes::written_paths_manifest(
+        &connector_writes,
+    ));
     crate::artifact::fileset::refuse_writes_a_mount_would_hide(
         &fileset_specs,
         &args.volumes,

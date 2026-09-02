@@ -37,8 +37,6 @@ const DEV_FD_LINKS: &[(&str, &str)] = &[
     ("/proc/self/fd/2", "/dev/stderr"),
 ];
 const EXPLODED_BIND_SHARES: &str = "/.lens/binds";
-/// The paths installed connectors would write, `~/`-anchored because only this side resolves the home they hang off (§3.1.11).
-const CONNECTOR_CLAIMS: &str = "/.lens/connector-claims";
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const TMP: &str = "/tmp";
@@ -728,7 +726,7 @@ fn connector_claims(
     let Some(home) = home else {
         return Ok(Vec::new());
     };
-    let path = format!("{newroot}{CONNECTOR_CLAIMS}");
+    let path = format!("{newroot}{}", lns_placement::CONNECTOR_WRITES_MANIFEST);
     let body = match sys.read_to_string(&cstring(&path, "claims-path")?) {
         Ok(Some(body)) => body,
         Ok(None) => return Ok(Vec::new()),
@@ -3589,7 +3587,9 @@ mod tests {
         );
     }
 
-    const CLAIMS_FILE: &str = "/newroot/.lens/connector-claims";
+    fn claims_file() -> String {
+        format!("/newroot{}", lns_placement::CONNECTOR_WRITES_MANIFEST)
+    }
 
     fn ran_with_claims(
         bind: crate::cmdline::BindParam,
@@ -3597,7 +3597,7 @@ mod tests {
         home: Option<&str>,
     ) -> (FakeSyscalls, Result<(), MountError>) {
         let sys = FakeSyscalls::new()
-            .with_file(CLAIMS_FILE, claims)
+            .with_file(&claims_file(), claims)
             .with_entries(
                 "/newroot/.lens/binds/0",
                 &[
@@ -3688,7 +3688,7 @@ mod tests {
     #[test]
     fn a_document_seed_and_a_connector_claim_split_one_bind_together() {
         let sys = FakeSyscalls::new()
-            .with_file(CLAIMS_FILE, "claude\t~/.claude/.credentials.json\n")
+            .with_file(&claims_file(), "claude\t~/.claude/.credentials.json\n")
             .with_entries(
                 "/newroot/.lens/binds/0",
                 &[
@@ -3725,7 +3725,7 @@ mod tests {
     #[test]
     fn a_claims_manifest_the_guest_cannot_read_refuses_the_boot_rather_than_dropping_the_guard() {
         let sys = FakeSyscalls::new().fail_when(|call| {
-            matches!(call, Call::ReadToString { path } if path == CLAIMS_FILE)
+            matches!(call, Call::ReadToString { path } if path == &claims_file())
                 .then_some(ErrorKind::PermissionDenied)
         });
         let err = mount_binds(
@@ -3760,7 +3760,8 @@ mod tests {
 
     #[test]
     fn a_manifest_line_the_producer_did_not_write_claims_nothing() {
-        let sys = FakeSyscalls::new().with_file(CLAIMS_FILE, "no-tab-here\nclaude\t/absolute\n\n");
+        let sys =
+            FakeSyscalls::new().with_file(&claims_file(), "no-tab-here\nclaude\t/absolute\n\n");
         let claims = connector_claims(&sys, "/newroot", Some("/root")).expect("readable");
         assert!(
             claims.is_empty(),
@@ -3770,7 +3771,8 @@ mod tests {
 
     #[test]
     fn a_claim_under_a_volume_refuses_the_boot_because_a_volume_takes_no_exclude() {
-        let sys = FakeSyscalls::new().with_file(CLAIMS_FILE, "claude\t~/.claude/settings.json\n");
+        let sys =
+            FakeSyscalls::new().with_file(&claims_file(), "claude\t~/.claude/settings.json\n");
         let volume = crate::cmdline::VolumeParam {
             dev: "/dev/vdc".into(),
             target: "/root/.claude".into(),
