@@ -3,15 +3,16 @@
 use std::io;
 use std::path::Path;
 
-/// Guest writes a volume mount would have covered: the host stages them here instead, and `land` copies them onto the paths they name once the volumes are mounted.
+/// Guest writes a mount would have covered: the host stages them here instead, and `land` copies them onto the paths they name once the mounts are up.
 pub const STAGED_ROOT: &str = "/.lens/fileset-deferred";
 
-pub fn land(newroot: &str, volume_targets: &[String]) -> io::Result<()> {
+/// `boot_owned` names each mount root whose subtree this boot laid out itself — a volume target, and the target of a bind it split.
+pub fn land(newroot: &str, boot_owned: &[String]) -> io::Result<()> {
     let staged = Path::new(newroot).join(&STAGED_ROOT[1..]);
     if !staged.is_dir() {
         return Ok(());
     }
-    land_tree(&staged, Path::new(newroot), "", volume_targets)?;
+    land_tree(&staged, Path::new(newroot), "", boot_owned)?;
     consume(&staged);
     Ok(())
 }
@@ -23,7 +24,7 @@ fn consume(staged: &Path) {
     }
 }
 
-fn land_tree(from: &Path, onto: &Path, guest: &str, volumes: &[String]) -> io::Result<()> {
+fn land_tree(from: &Path, onto: &Path, guest: &str, boot_owned: &[String]) -> io::Result<()> {
     for entry in from.read_dir().map_err(|err| blaming(from, err))? {
         let entry = entry.map_err(|err| blaming(from, err))?;
         let staged = entry.path();
@@ -34,11 +35,11 @@ fn land_tree(from: &Path, onto: &Path, guest: &str, volumes: &[String]) -> io::R
             .map_err(|err| blaming(&staged, err))?
             .is_dir();
         if staged_is_dir {
-            if inside_a_volume(&guest_path, volumes) {
+            if inside_what_the_boot_laid_out(&guest_path, boot_owned) {
                 unlink_a_symlink_in_the_way(&landing).map_err(|err| blaming(&landing, err))?;
             }
             create_dir_if_absent(&landing).map_err(|err| blaming(&landing, err))?;
-            land_tree(&staged, &landing, &guest_path, volumes)?;
+            land_tree(&staged, &landing, &guest_path, boot_owned)?;
         } else {
             replace(&staged, &landing).map_err(|err| blaming(&landing, err))?;
         }
@@ -46,11 +47,11 @@ fn land_tree(from: &Path, onto: &Path, guest: &str, volumes: &[String]) -> io::R
     Ok(())
 }
 
-/// Only a volume carries what a previous run wrote, so only there is a symlink at a directory position the last workload's doing rather than the image's own layout.
-fn inside_a_volume(guest_path: &str, volumes: &[String]) -> bool {
-    volumes
+/// Inside one of these the layout is this boot's own and what a previous run wrote survives, so a symlink at a directory position is the last workload's doing; above them it is the image's, and the mount stands at the path it resolves to.
+fn inside_what_the_boot_laid_out(guest_path: &str, boot_owned: &[String]) -> bool {
+    boot_owned
         .iter()
-        .any(|target| segments(guest_path).starts_with(&segments(target)))
+        .any(|root| segments(guest_path).starts_with(&segments(root)))
 }
 
 fn segments(path: &str) -> Vec<&str> {
@@ -59,7 +60,7 @@ fn segments(path: &str) -> Vec<&str> {
         .collect()
 }
 
-/// A symlink the last run planted inside its volume must not redirect where root writes.
+/// A symlink the last run planted inside a mount this boot laid out must not redirect where root writes.
 fn unlink_a_symlink_in_the_way(path: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_symlink()) {
         return std::fs::remove_file(path);
@@ -184,6 +185,29 @@ mod tests {
             "a root-driven write must land where the document says, not where the workload pointed"
         );
         assert_eq!(std::fs::read(volume.join(".config/tool.md")).unwrap(), b"x");
+    }
+
+    /// A split bind's target is guest-local and preserved across a restart, exactly as a volume is, so the last workload could have left a symlink at the mask a fileset writes into.
+    #[test]
+    fn a_symlink_the_last_run_left_in_a_split_binds_mask_does_not_redirect_the_landing() {
+        let root = tempfile::tempdir().unwrap();
+        let bind = root.path().join("root/.agent");
+        std::fs::create_dir_all(&bind).unwrap();
+        let elsewhere = root.path().join("work");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, bind.join("session")).unwrap();
+        stage(root.path(), "/root/.agent/session/state.json", b"x", 0o644);
+
+        land(root.path().to_str().unwrap(), &["/root/.agent".to_string()]).unwrap();
+
+        assert!(
+            !elsewhere.join("state.json").exists(),
+            "the link's target is a bound host directory, so following it writes the file to the host"
+        );
+        assert_eq!(
+            std::fs::read(bind.join("session/state.json")).unwrap(),
+            b"x"
+        );
     }
 
     #[test]

@@ -37,6 +37,8 @@ const DEV_FD_LINKS: &[(&str, &str)] = &[
     ("/proc/self/fd/2", "/dev/stderr"),
 ];
 const EXPLODED_BIND_SHARES: &str = "/.lens/binds";
+/// Where the boot reads the lower stack on its own, with no writable layer over it.
+const LOWER_VIEW_MOUNT: &str = "/mnt/lower";
 const RUN: &str = "/run";
 const RUN_LOCK: &str = "/run/lock";
 const TMP: &str = "/tmp";
@@ -133,6 +135,8 @@ pub(crate) trait Syscalls {
     fn open_ro(&self, path: &CStr) -> std::io::Result<RawFd>;
     fn fexecve(&self, fd: RawFd, argv0: &CStr) -> std::io::Error;
     fn lchown(&self, path: &CStr, uid: u32, gid: u32) -> std::io::Result<()>;
+    /// Removes the path when it is a symlink, without following it.
+    fn unlink_if_symlink(&self, path: &CStr) -> std::io::Result<()>;
     fn umount(&self, target: &CStr) -> std::io::Result<()>;
     fn write_root_file(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
     fn write_sysctl(&self, path: &str, value: &str) -> std::io::Result<()>;
@@ -263,6 +267,11 @@ pub fn overlay_options() -> String {
          workdir={UPPER_MOUNTPOINT}/work,\
          redirect_dir=on,metacopy=on"
     )
+}
+
+/// The same stack with no `upperdir`, which makes it read-only: what the host shipped, before any write a previous boot's workload left in the layer this run preserves.
+fn lower_view_options() -> String {
+    format!("lowerdir={COMPOSEFS_META}::{CONTENT},redirect_dir=on,metacopy=on")
 }
 
 pub fn verify_descriptor_digest(device_path: &str, expected_hex: &str) -> Result<(), MountError> {
@@ -449,9 +458,11 @@ fn land_writes_the_mounts_would_have_hidden(
     sys: &dyn Syscalls,
     newroot: &str,
     volumes: &[crate::cmdline::VolumeParam],
+    split_binds: &[String],
     run_ids: Option<(u32, u32)>,
 ) -> Result<(), MountError> {
-    let targets: Vec<String> = volumes.iter().map(|vol| vol.target.clone()).collect();
+    let mut targets: Vec<String> = volumes.iter().map(|vol| vol.target.clone()).collect();
+    targets.extend_from_slice(split_binds);
     crate::staged::land(newroot, &targets).map_err(|err| MountError::Syscall {
         op: format!(
             "landing the writes staged under {}",
@@ -710,6 +721,40 @@ fn reconcile_volume_owner(sys: &dyn Syscalls, target: &str, run_ids: Option<(u32
     lchown_logged(sys, target, uid, gid);
 }
 
+/// A file the host shipped in the runtime layer, read from the lower stack alone, because the writable layer a run preserves is one a previous boot's workload could have deleted or rewritten its copy in.
+fn read_from_the_lower_stack(
+    sys: &dyn Syscalls,
+    guest_path: &str,
+) -> Result<Option<String>, MountError> {
+    let path = format!("{LOWER_VIEW_MOUNT}{guest_path}");
+    let path_c = cstring(&path, "lower-view-path")?;
+    do_mkdir(sys, LOWER_VIEW_MOUNT, 0o700)?;
+    do_mount(
+        sys,
+        "overlay",
+        LOWER_VIEW_MOUNT,
+        "overlay",
+        MountFlags::read_only().nosuid().nodev().noexec(),
+        Some(&lower_view_options()),
+    )?;
+    let body = sys.read_to_string(&path_c);
+    do_umount(sys, LOWER_VIEW_MOUNT)?;
+    body.map_err(|err| MountError::Syscall {
+        op: format!("read {path}"),
+        err,
+    })
+}
+
+/// A landing belongs to the boot that makes it, so a symlink standing at one — a write a previous boot's workload left in the preserved writable layer — is unlinked rather than followed: following it lets the workload choose where root writes and mounts.
+fn clear_a_symlink_standing_at(sys: &dyn Syscalls, landing: &str) -> Result<(), MountError> {
+    let landing_c = cstring(landing, "landing-path")?;
+    sys.unlink_if_symlink(&landing_c)
+        .map_err(|err| MountError::Syscall {
+            op: format!("unlink the symlink standing at {landing}"),
+            err,
+        })
+}
+
 /// One connector's write, resolved against this guest's home.
 #[derive(Debug)]
 struct Claim {
@@ -718,24 +763,13 @@ struct Claim {
 }
 
 /// A run whose user has no home takes no method that writes a file, so it makes room for none (§3.1.11).
-fn connector_claims(
-    sys: &dyn Syscalls,
-    newroot: &str,
-    home: Option<&str>,
-) -> Result<Vec<Claim>, MountError> {
+fn connector_claims(sys: &dyn Syscalls, home: Option<&str>) -> Result<Vec<Claim>, MountError> {
     let Some(home) = home else {
         return Ok(Vec::new());
     };
-    let path = format!("{newroot}{}", lns_placement::CONNECTOR_WRITES_MANIFEST);
-    let body = match sys.read_to_string(&cstring(&path, "claims-path")?) {
-        Ok(Some(body)) => body,
-        Ok(None) => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(MountError::Syscall {
-                op: format!("read {path}"),
-                err,
-            });
-        }
+    let Some(body) = read_from_the_lower_stack(sys, lns_placement::CONNECTOR_WRITES_MANIFEST)?
+    else {
+        return Ok(Vec::new());
     };
     Ok(body
         .lines()
@@ -804,6 +838,7 @@ fn seeds_the_claims_need(
     Ok(seeds)
 }
 
+/// The targets of the binds this boot split, whose masks are guest-local directories a staged write lands in.
 fn mount_binds(
     sys: &dyn Syscalls,
     binds: &[crate::cmdline::BindParam],
@@ -811,31 +846,41 @@ fn mount_binds(
     newroot: &str,
     run_ids: Option<(u32, u32)>,
     home: Option<&str>,
-) -> Result<(), MountError> {
-    let claims = connector_claims(sys, newroot, home)?;
+) -> Result<Vec<String>, MountError> {
+    let nothing_can_bury_a_claim = binds.is_empty() && volumes.is_empty();
+    let claims = match nothing_can_bury_a_claim {
+        true => Vec::new(),
+        false => connector_claims(sys, home)?,
+    };
     refuse_a_claim_a_volume_would_take(volumes, &claims)?;
+    let mut split = Vec::new();
     for (index, bind) in binds.iter().enumerate() {
-        let target = format!("{newroot}{}", bind.target);
-        let made = made_by_mkdir_p(sys, &target, 0o755)?;
-        hand_new_home_dirs_to_workload(sys, newroot, home, run_ids, &made);
-        let flags = match bind.read_only {
-            true => MountFlags::read_only().nosuid().nodev(),
-            false => MountFlags::none().nosuid().nodev(),
-        };
         let mut seeds = seeds_the_claims_need(bind, &claims)?;
         for seeded in &bind.seeded_paths {
             if !seeds.contains(seeded) {
                 seeds.push(seeded.clone());
             }
         }
+        let target = format!("{newroot}{}", bind.target);
+        // A whole bind covers whatever stands at its target, so only a split one needs the target to be the boot's own directory.
+        if !seeds.is_empty() {
+            clear_a_symlink_standing_at(sys, &target)?;
+        }
+        let made = made_by_mkdir_p(sys, &target, 0o755)?;
+        hand_new_home_dirs_to_workload(sys, newroot, home, run_ids, &made);
+        let flags = match bind.read_only {
+            true => MountFlags::read_only().nosuid().nodev(),
+            false => MountFlags::none().nosuid().nodev(),
+        };
         if seeds.is_empty() {
             do_mount(sys, &bind.tag, &target, "virtiofs", flags, None)?;
             mask_each_dropped_path(sys, &target, &bind.dropped_paths)?;
             continue;
         }
         explode_bind(sys, bind, index, newroot, &target, flags, &seeds)?;
+        split.push(bind.target.clone());
     }
-    Ok(())
+    Ok(split)
 }
 
 fn mask_each_dropped_path(
@@ -890,6 +935,7 @@ fn bind_the_entries_beside(
             .collect();
         let source = format!("{from}/{}", entry.name);
         let landing = format!("{onto}/{}", entry.name);
+        clear_a_symlink_standing_at(sys, &landing)?;
         if deeper.is_empty() {
             place_one_entry(sys, &entry, &source, &landing)?;
         } else if !deeper.iter().any(Vec::is_empty) {
@@ -1255,9 +1301,9 @@ fn mount_composefs_and_exec_broker_inner(
     mount_volumes(sys, &params.volumes, newroot, run_ids)?;
 
     let home = identity.as_ref().and_then(|i| i.home.as_deref());
-    mount_binds(sys, &params.binds, &params.volumes, newroot, run_ids, home)?;
+    let split_binds = mount_binds(sys, &params.binds, &params.volumes, newroot, run_ids, home)?;
 
-    land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, run_ids)?;
+    land_writes_the_mounts_would_have_hidden(sys, newroot, &params.volumes, &split_binds, run_ids)?;
 
     seed_loopback_names(newroot);
 
@@ -1804,6 +1850,9 @@ mod tests {
             uid: u32,
             gid: u32,
         },
+        UnlinkIfSymlink {
+            path: String,
+        },
         Umount(String),
         WriteRootFile {
             path: String,
@@ -1838,6 +1887,8 @@ mod tests {
         dir_paths: Vec<String>,
         dir_entries: BTreeMap<String, Vec<ShareEntry>>,
         files: BTreeMap<String, String>,
+        /// Symlinks standing in the rootfs before this boot, by the path they stand at and what they point to.
+        symlinks: RefCell<BTreeMap<String, String>>,
         fail_when: FailWhen,
         digest_result: RefCell<Option<Result<(), MountError>>>,
     }
@@ -1850,6 +1901,7 @@ mod tests {
                 dir_paths: Vec::new(),
                 dir_entries: BTreeMap::new(),
                 files: BTreeMap::new(),
+                symlinks: RefCell::new(BTreeMap::new()),
                 fail_when: Box::new(|_| None),
                 digest_result: RefCell::new(None),
             }
@@ -1868,6 +1920,18 @@ mod tests {
         fn with_entries(mut self, path: &str, entries: &[ShareEntry]) -> Self {
             self.dir_entries.insert(path.to_string(), entries.to_vec());
             self
+        }
+
+        /// A symlink a previous boot's workload left in the preserved writable layer: `mkdir` and `symlink` fail on it as they do on any existing path, and a write through it lands on what it points to.
+        fn with_symlink_left_behind(self, path: &str, points_to: &str) -> Self {
+            self.symlinks
+                .borrow_mut()
+                .insert(path.to_string(), points_to.to_string());
+            self
+        }
+
+        fn stands_at(&self, path: &str) -> bool {
+            self.symlinks.borrow().contains_key(path)
         }
 
         fn fail_when(mut self, f: impl Fn(&Call) -> Option<std::io::ErrorKind> + 'static) -> Self {
@@ -1923,16 +1987,25 @@ mod tests {
             })
         }
         fn mkdir(&self, path: &CStr, mode: u32) -> std::io::Result<()> {
-            self.record(Call::Mkdir {
-                path: path.to_str().unwrap().to_string(),
-                mode,
-            })
+            let path = path.to_str().unwrap().to_string();
+            let occupied = self.stands_at(&path);
+            self.record(Call::Mkdir { path, mode })?;
+            match occupied {
+                true => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
+                false => Ok(()),
+            }
         }
         fn symlink(&self, target: &CStr, linkpath: &CStr) -> std::io::Result<()> {
+            let linkpath = linkpath.to_str().unwrap().to_string();
+            let occupied = self.stands_at(&linkpath);
             self.record(Call::Symlink {
                 target: target.to_str().unwrap().to_string(),
-                linkpath: linkpath.to_str().unwrap().to_string(),
-            })
+                linkpath,
+            })?;
+            match occupied {
+                true => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
+                false => Ok(()),
+            }
         }
         fn mknod_char(
             &self,
@@ -1990,12 +2063,25 @@ mod tests {
                 gid,
             })
         }
+        fn unlink_if_symlink(&self, path: &CStr) -> std::io::Result<()> {
+            let path = path.to_str().unwrap().to_string();
+            self.record(Call::UnlinkIfSymlink { path: path.clone() })?;
+            self.symlinks.borrow_mut().remove(&path);
+            Ok(())
+        }
         fn umount(&self, target: &CStr) -> std::io::Result<()> {
             self.record(Call::Umount(target.to_str().unwrap().to_string()))
         }
         fn write_root_file(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()> {
+            // O_CREAT|O_TRUNC follows a symlink, so the write lands on what the link points to.
+            let landed = self
+                .symlinks
+                .borrow()
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_string());
             self.record(Call::WriteRootFile {
-                path: path.to_string(),
+                path: landed,
                 contents: contents.to_vec(),
                 mode,
             })
@@ -2693,7 +2779,8 @@ mod tests {
         std::fs::write(format!("{staged}/tool.md"), b"read me").unwrap();
         let sys = FakeSyscalls::new();
 
-        land_writes_the_mounts_would_have_hidden(&sys, &newroot, &[], Some((1000, 1000))).unwrap();
+        land_writes_the_mounts_would_have_hidden(&sys, &newroot, &[], &[], Some((1000, 1000)))
+            .unwrap();
 
         assert_eq!(
             std::fs::read(format!("{newroot}/home/node/tool.md")).unwrap(),
@@ -2710,6 +2797,51 @@ mod tests {
         );
     }
 
+    /// The mask a split bind leaves is guest-local and the writable layer survives a restart, so the boot has to name that bind to the staged landing exactly as it names a volume.
+    #[test]
+    fn a_staged_write_into_a_split_binds_mask_lands_there_and_not_through_the_last_runs_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap().to_string();
+        let stands_in_for_the_host = format!("{newroot}/work");
+        std::fs::create_dir_all(&stands_in_for_the_host).unwrap();
+        let mask = format!("{newroot}/root/.agent");
+        std::fs::create_dir_all(&mask).unwrap();
+        std::os::unix::fs::symlink(&stands_in_for_the_host, format!("{mask}/session")).unwrap();
+        let staged = format!(
+            "{newroot}{}/root/.agent/session",
+            crate::staged::STAGED_ROOT
+        );
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(format!("{staged}/state.json"), b"from-the-document").unwrap();
+
+        let params = CmdlineParams {
+            binds: vec![bind_param_seeding(
+                "lns-bind-0",
+                "/root/.agent",
+                &[],
+                &["session"],
+            )],
+            ..full_params()
+        };
+        let _ = mount_composefs_and_exec_broker_inner(
+            &params,
+            None,
+            &newroot,
+            FULL_CMDLINE,
+            &FakeSyscalls::new(),
+        );
+
+        assert!(
+            !std::path::Path::new(&format!("{stands_in_for_the_host}/state.json")).exists(),
+            "the link's target stands in for a bound host share, so following it writes the file to the host"
+        );
+        assert_eq!(
+            std::fs::read(format!("{mask}/session/state.json")).unwrap(),
+            b"from-the-document",
+            "the write belongs in the mask the document named"
+        );
+    }
+
     #[test]
     fn a_staged_write_that_cannot_land_refuses_the_boot() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2720,9 +2852,14 @@ mod tests {
         std::fs::create_dir_all(format!("{newroot}/home")).unwrap();
         std::fs::write(format!("{newroot}/home/node"), b"in the way").unwrap();
 
-        let err =
-            land_writes_the_mounts_would_have_hidden(&FakeSyscalls::new(), &newroot, &[], None)
-                .unwrap_err();
+        let err = land_writes_the_mounts_would_have_hidden(
+            &FakeSyscalls::new(),
+            &newroot,
+            &[],
+            &[],
+            None,
+        )
+        .unwrap_err();
 
         let refusal = format!("{err}");
         assert!(
@@ -3261,6 +3398,14 @@ mod tests {
             .collect()
     }
 
+    /// The mounts the run itself gets, without the read-only view of the lower stack the boot reads a manifest through and releases again.
+    fn run_mounts_of(sys: &FakeSyscalls) -> Vec<(String, String)> {
+        mounts_of(sys)
+            .into_iter()
+            .filter(|(_, target)| target != LOWER_VIEW_MOUNT)
+            .collect()
+    }
+
     fn exploded_claude_bind(seeds: &[&str]) -> FakeSyscalls {
         let sys = FakeSyscalls::new()
             .with_entries(
@@ -3587,15 +3732,360 @@ mod tests {
         );
     }
 
+    fn cleared(sys: &FakeSyscalls, landing: &str) -> Option<usize> {
+        sys.calls()
+            .iter()
+            .position(|call| matches!(call, Call::UnlinkIfSymlink { path } if path == landing))
+    }
+
+    /// The bind target, and every landing under it, is a directory this boot makes and the previous boot's workload could have replaced with a symlink in the preserved writable layer. Following one would let the workload steer where root writes and mounts.
+    #[test]
+    fn a_symlink_left_at_an_entry_landing_never_takes_the_write_that_makes_the_mountpoint() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[file_entry("settings.json")])
+            .with_symlink_left_behind(
+                "/newroot/root/.claude/settings.json",
+                "/newroot/work/host-file",
+            );
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the landing is cleared and the entry still reaches the workload");
+        let written: Vec<String> = sys
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::WriteRootFile { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !written.contains(&"/newroot/work/host-file".to_string()),
+            "creating the mountpoint through the link truncates the host file it points at: {written:?}"
+        );
+        assert!(
+            written.contains(&"/newroot/root/.claude/settings.json".to_string()),
+            "the mountpoint is still made at the path the document names: {written:?}"
+        );
+    }
+
+    /// The split leaves its own symlinks behind in the preserved writable layer, and `symlink(2)` fails on an existing path, so the next boot has to clear the leftover to lay the same link down again.
+    #[test]
+    fn a_link_this_boot_recreates_replaces_the_one_the_last_boot_left_at_that_landing() {
+        let sys = FakeSyscalls::new()
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[ShareEntry {
+                    name: "link".into(),
+                    kind: EntryKind::Symlink("/etc".into()),
+                }],
+            )
+            .with_symlink_left_behind("/newroot/root/.claude/link", "/newroot/work");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("a restart lays the share's own link down again rather than refusing");
+        assert!(
+            sys.calls().into_iter().any(|call| matches!(
+                call,
+                Call::Symlink { linkpath, .. } if linkpath == "/newroot/root/.claude/link"
+            )),
+            "symlink(2) fails on an existing path, so the leftover has to go first"
+        );
+    }
+
+    #[test]
+    fn a_symlink_left_on_the_spine_goes_before_root_binds_the_entries_below_it() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("agent")])
+            .with_entries(
+                "/newroot/.lens/binds/0/agent",
+                &[file_entry("token.json"), dir_entry("cache")],
+            )
+            .with_symlink_left_behind("/newroot/root/.claude/agent", "/newroot/work");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent/token.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the spine is cleared and the split goes on");
+        let calls = sys.calls();
+        let unlinked =
+            cleared(&sys, "/newroot/root/.claude/agent").expect("the spine landing is cleared");
+        let bound = calls
+            .iter()
+            .position(|call| {
+                matches!(call, Call::Mount { target, .. } if target == "/newroot/root/.claude/agent/cache")
+            })
+            .expect("the seed's siblings are still bound in");
+        assert!(
+            unlinked < bound,
+            "root would bind the share's entries wherever the workload pointed: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_left_at_the_target_of_a_split_bind_goes_before_anything_lands_in_it() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[file_entry("settings.json")])
+            .with_symlink_left_behind("/newroot/root/.claude", "/newroot/work");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the target is cleared and the split goes on");
+        let unlinked = cleared(&sys, "/newroot/root/.claude")
+            .expect("the split bind's own target is guest-local, so a symlink there is cleared");
+        let mkdir = sys
+            .calls()
+            .iter()
+            .position(
+                |call| matches!(call, Call::Mkdir { path, .. } if path == "/newroot/root/.claude"),
+            )
+            .expect("the target is still made");
+        assert!(
+            unlinked < mkdir,
+            "the whole split lands under this path, so the link goes before the directory is made"
+        );
+        assert!(
+            !sys.calls().into_iter().any(|call| matches!(
+                call,
+                Call::WriteRootFile { path, .. } if path.starts_with("/newroot/work")
+            )),
+            "every landing under the target would otherwise be a path the workload chose"
+        );
+    }
+
+    #[test]
+    fn a_bind_mounted_whole_leaves_a_symlink_at_its_target_alone_and_owns_no_landing() {
+        let sys = FakeSyscalls::new();
+        let split = mount_binds(
+            &sys,
+            &[bind_param("lns-bind-0", "/work", false, &[])],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("an ordinary bind is untouched by the split");
+        assert!(
+            cleared(&sys, "/newroot/work").is_none(),
+            "a whole bind covers whatever stands at its target, and an image may ship a symlink there"
+        );
+        assert!(
+            split.is_empty(),
+            "no write is staged past a whole bind, so it owns no landing"
+        );
+    }
+
+    #[test]
+    fn a_symlink_the_boot_cannot_clear_refuses_rather_than_writing_through_it() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[file_entry("settings.json")])
+            .with_symlink_left_behind(
+                "/newroot/root/.claude/settings.json",
+                "/newroot/work/host-file",
+            )
+            .fail_when(|call| match call {
+                Call::UnlinkIfSymlink { path } if path == "/newroot/root/.claude/settings.json" => {
+                    Some(ErrorKind::PermissionDenied)
+                }
+                _ => None,
+            });
+        let err = mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["agent"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect_err("a landing that may still be a link is one root must not write");
+        assert!(
+            format!("{err}")
+                .contains("unlink the symlink standing at /newroot/root/.claude/settings.json"),
+            "the refusal names the landing: {err}"
+        );
+    }
+
+    #[test]
+    fn a_split_bind_is_named_to_the_staged_writes_so_they_land_where_the_document_says() {
+        let split = mount_binds(
+            &FakeSyscalls::new().with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")]),
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the bind splits");
+        assert_eq!(
+            split,
+            ["/root/.claude".to_string()],
+            "the mask under a split bind is guest-local, so a symlink the last run left there must not redirect a staged write"
+        );
+    }
+
     fn claims_file() -> String {
+        format!(
+            "{LOWER_VIEW_MOUNT}{}",
+            lns_placement::CONNECTOR_WRITES_MANIFEST
+        )
+    }
+
+    fn tampered_claims_file() -> String {
         format!("/newroot{}", lns_placement::CONNECTOR_WRITES_MANIFEST)
+    }
+
+    /// The manifest lives in the runtime layer the host built, and the run's writable layer is preserved across a restart — so a workload that deletes or rewrites its copy must not be the one that decides where a granted file lands.
+    #[test]
+    fn the_claims_manifest_is_read_from_the_lower_stack_and_not_the_workload_s_copy() {
+        let sys = FakeSyscalls::new()
+            .with_file(&claims_file(), "claude\t~/.claude/.credentials.json\n")
+            .with_file(&tampered_claims_file(), "claude\t~/.claude/projects/x\n")
+            .with_entries(
+                "/newroot/.lens/binds/0",
+                &[file_entry(".credentials.json"), dir_entry("projects")],
+            );
+        mount_binds(
+            &sys,
+            &[bind_param_excluding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[".credentials.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            Some("/root"),
+        )
+        .expect("the manifest the host shipped covers its claim, so the boot stands");
+    }
+
+    #[test]
+    fn a_manifest_a_workload_deleted_from_the_writable_layer_still_guards_the_boot() {
+        let sys = FakeSyscalls::new()
+            .with_file(&claims_file(), "claude\t~/.claude/settings.json\n")
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")]);
+        mount_binds(
+            &sys,
+            &[bind_param_excluding(
+                "lns-bind-0",
+                "/root/.claude",
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            Some("/root"),
+        )
+        .expect("the claim is covered, so the bind splits");
+        assert!(
+            mounts_of(&sys).contains(&("lns-bind-0".into(), "/newroot/.lens/binds/0".into())),
+            "reading only the writable layer would find no claim, mount the bind whole, and let the granted file reach the host"
+        );
+    }
+
+    #[test]
+    fn the_lower_stack_view_carries_no_writable_layer_and_is_released_before_the_boot_goes_on() {
+        let sys = FakeSyscalls::new()
+            .with_file(&claims_file(), "claude\t~/.claude/settings.json\n")
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")]);
+        mount_binds(
+            &sys,
+            &[bind_param_excluding(
+                "lns-bind-0",
+                "/root/.claude",
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            Some("/root"),
+        )
+        .expect("the claim is covered");
+        let view = sys
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Mount { target, data, .. } if target == LOWER_VIEW_MOUNT => Some(data),
+                _ => None,
+            })
+            .flatten()
+            .expect("the lower stack is mounted on its own to be read");
+        assert!(
+            !view.contains("upperdir") && view.contains("lowerdir=/composefs-meta::/content"),
+            "an upper layer here is the very layer the workload writes: {view}"
+        );
+        assert!(
+            sys.calls()
+                .contains(&Call::Umount(LOWER_VIEW_MOUNT.to_string())),
+            "the view is the boot's own, and the workload must not inherit it"
+        );
+    }
+
+    #[test]
+    fn a_path_in_the_lower_view_that_cannot_be_a_c_string_refuses_the_boot() {
+        let err = read_from_the_lower_stack(&FakeSyscalls::new(), "/.lens/clai\0ms")
+            .expect_err("a path with an interior NUL reaches no file");
+        assert!(
+            matches!(err, MountError::InteriorNul("lower-view-path")),
+            "the refusal names the field: {err}"
+        );
     }
 
     fn ran_with_claims(
         bind: crate::cmdline::BindParam,
         claims: &str,
         home: Option<&str>,
-    ) -> (FakeSyscalls, Result<(), MountError>) {
+    ) -> (FakeSyscalls, Result<Vec<String>, MountError>) {
         let sys = FakeSyscalls::new()
             .with_file(&claims_file(), claims)
             .with_entries(
@@ -3661,7 +4151,7 @@ mod tests {
         );
         out.expect("a claim beside the bind is no concern of it");
         assert_eq!(
-            mounts_of(&sys),
+            run_mounts_of(&sys),
             [("lns-bind-0".to_string(), "/newroot/work".to_string())],
             "no claim under the bind means no split"
         );
@@ -3738,23 +4228,14 @@ mod tests {
         )
         .expect_err("an unreadable manifest is not the same as no connectors installed");
         assert!(
-            format!("{err}").contains("/newroot/.lens/connector-claims"),
+            format!("{err}").contains(&claims_file()),
             "the refusal names what it could not read: {err}"
         );
         assert!(
-            mounts_of(&sys).is_empty(),
-            "nothing is mounted before the guard is known to hold"
-        );
-    }
-
-    #[test]
-    fn a_claims_path_that_cannot_be_a_c_string_refuses_the_boot() {
-        let sys = FakeSyscalls::new();
-        let err = connector_claims(&sys, "/new\0root", Some("/root"))
-            .expect_err("a path with an interior NUL reaches no file");
-        assert!(
-            matches!(err, MountError::InteriorNul("claims-path")),
-            "the refusal names the field: {err}"
+            !mounts_of(&sys)
+                .iter()
+                .any(|(source, _)| source == "lns-bind-0"),
+            "no share of the run's own stands before the guard is known to hold"
         );
     }
 
@@ -3762,7 +4243,7 @@ mod tests {
     fn a_manifest_line_the_producer_did_not_write_claims_nothing() {
         let sys =
             FakeSyscalls::new().with_file(&claims_file(), "no-tab-here\nclaude\t/absolute\n\n");
-        let claims = connector_claims(&sys, "/newroot", Some("/root")).expect("readable");
+        let claims = connector_claims(&sys, Some("/root")).expect("readable");
         assert!(
             claims.is_empty(),
             "re-anchoring a line this side did not recognise would name a path no grant writes"
