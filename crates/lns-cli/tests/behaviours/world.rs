@@ -140,7 +140,6 @@ use lns_policy::host_bind_decisions::SecretDisposition;
 #[derive(Debug, Default)]
 pub struct HostBindRig {
     pub entries: Vec<String>,
-    pub lnsignore: Option<String>,
     pub missing: bool,
     pub not_a_dir: bool,
     pub decisions: std::collections::HashMap<String, SecretDisposition>,

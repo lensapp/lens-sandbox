@@ -52,6 +52,13 @@ Feature: applying declarative sandbox launch settings
     Then ".cargo" is dropped from the bind
     And no KEEP or DROP prompt is shown
 
+  Scenario: a declared exclude pre-empts the prompt for a secret-shaped path
+    Given an lns.yaml declaring a bind excluding ".env"
+    And the host directory "/work" contains ".env"
+    When the declarative host binds are resolved interactively
+    Then ".env" is dropped from the bind
+    And no KEEP or DROP prompt is shown
+
   Scenario: a published sandbox's declared exclude drops the subpath too
     Given an lns.yaml declaring a bind excluding ".cargo"
     And the host directory "/work" contains ".cargo"
