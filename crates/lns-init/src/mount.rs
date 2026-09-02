@@ -745,6 +745,23 @@ fn read_from_the_lower_stack(
     })
 }
 
+/// A directory inside the sandbox's own `/.lens` namespace, made component by component: every one of them belongs to this boot, and a check on the leaf alone resolves through a link left at a parent.
+fn the_boots_own_directory(
+    sys: &dyn Syscalls,
+    newroot: &str,
+    in_root: &str,
+    mode: u32,
+) -> Result<String, MountError> {
+    let mut path = String::from(newroot);
+    for component in in_root.split('/').filter(|c| !c.is_empty()) {
+        path.push('/');
+        path.push_str(component);
+        clear_a_symlink_standing_at(sys, &path)?;
+        do_mkdir(sys, &path, mode)?;
+    }
+    Ok(path)
+}
+
 /// A landing belongs to the boot that makes it, so a symlink standing at one — a write a previous boot's workload left in the preserved writable layer — is unlinked rather than followed: following it lets the workload choose where root writes and mounts.
 fn clear_a_symlink_standing_at(sys: &dyn Syscalls, landing: &str) -> Result<(), MountError> {
     let landing_c = cstring(landing, "landing-path")?;
@@ -904,8 +921,12 @@ fn explode_bind(
     flags: MountFlags,
     seeds: &[String],
 ) -> Result<(), MountError> {
-    let share = format!("{newroot}{EXPLODED_BIND_SHARES}/{index}");
-    made_by_mkdir_p(sys, &share, 0o700)?;
+    let share = the_boots_own_directory(
+        sys,
+        newroot,
+        &format!("{EXPLODED_BIND_SHARES}/{index}"),
+        0o700,
+    )?;
     do_mount(sys, &bind.tag, &share, "virtiofs", flags, None)?;
     mask_each_dropped_path(sys, &share, &bind.dropped_paths)?;
     let spine: Vec<Vec<&str>> = seeds.iter().map(|path| path_segments(path)).collect();
@@ -1922,16 +1943,12 @@ mod tests {
             self
         }
 
-        /// A symlink a previous boot's workload left in the preserved writable layer: `mkdir` and `symlink` fail on it as they do on any existing path, and a write through it lands on what it points to.
+        /// A symlink a previous boot's workload left in the preserved writable layer: a write through it lands on what it points to, until something unlinks it.
         fn with_symlink_left_behind(self, path: &str, points_to: &str) -> Self {
             self.symlinks
                 .borrow_mut()
                 .insert(path.to_string(), points_to.to_string());
             self
-        }
-
-        fn stands_at(&self, path: &str) -> bool {
-            self.symlinks.borrow().contains_key(path)
         }
 
         fn fail_when(mut self, f: impl Fn(&Call) -> Option<std::io::ErrorKind> + 'static) -> Self {
@@ -1987,25 +2004,16 @@ mod tests {
             })
         }
         fn mkdir(&self, path: &CStr, mode: u32) -> std::io::Result<()> {
-            let path = path.to_str().unwrap().to_string();
-            let occupied = self.stands_at(&path);
-            self.record(Call::Mkdir { path, mode })?;
-            match occupied {
-                true => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
-                false => Ok(()),
-            }
+            self.record(Call::Mkdir {
+                path: path.to_str().unwrap().to_string(),
+                mode,
+            })
         }
         fn symlink(&self, target: &CStr, linkpath: &CStr) -> std::io::Result<()> {
-            let linkpath = linkpath.to_str().unwrap().to_string();
-            let occupied = self.stands_at(&linkpath);
             self.record(Call::Symlink {
                 target: target.to_str().unwrap().to_string(),
-                linkpath,
-            })?;
-            match occupied {
-                true => Err(std::io::Error::from(ErrorKind::AlreadyExists)),
-                false => Ok(()),
-            }
+                linkpath: linkpath.to_str().unwrap().to_string(),
+            })
         }
         fn mknod_char(
             &self,
@@ -3805,12 +3813,89 @@ mod tests {
             None,
         )
         .expect("a restart lays the share's own link down again rather than refusing");
+        let unlinked = cleared(&sys, "/newroot/root/.claude/link")
+            .expect("the leftover is removed before the share's own link is laid down");
+        let relinked = sys
+            .calls()
+            .iter()
+            .position(|call| {
+                matches!(call, Call::Symlink { linkpath, .. } if linkpath == "/newroot/root/.claude/link")
+            })
+            .expect("the share's link still reaches the workload");
         assert!(
-            sys.calls().into_iter().any(|call| matches!(
-                call,
-                Call::Symlink { linkpath, .. } if linkpath == "/newroot/root/.claude/link"
-            )),
+            unlinked < relinked,
             "symlink(2) fails on an existing path, so the leftover has to go first"
+        );
+    }
+
+    /// A boot that splits no bind leaves nothing under `/.lens/binds` mounted, so a root workload can replace any component of it with a link; `symlink_metadata` follows a parent, so checking the leaf alone would clear a path inside the link's target and mount the share there.
+    #[test]
+    fn every_component_of_the_private_share_path_is_cleared_because_a_parent_link_is_followed() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")])
+            .with_symlink_left_behind("/newroot/.lens/binds", "/newroot/work");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the parent is cleared and the split goes on");
+        let mounted = sys
+            .calls()
+            .iter()
+            .position(|call| {
+                matches!(call, Call::Mount { target, .. } if target == "/newroot/.lens/binds/0")
+            })
+            .expect("the share is still mounted");
+        for component in ["/newroot/.lens", "/newroot/.lens/binds"] {
+            let unlinked = cleared(&sys, component)
+                .unwrap_or_else(|| panic!("{component} is the boot's own to make"));
+            assert!(
+                unlinked < mounted,
+                "a link at {component} sends the share into the workload's tree"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_left_where_the_private_share_mounts_goes_before_the_share_is_mounted() {
+        let sys = FakeSyscalls::new()
+            .with_entries("/newroot/.lens/binds/0", &[dir_entry("projects")])
+            .with_symlink_left_behind("/newroot/.lens/binds/0", "/newroot/work");
+        mount_binds(
+            &sys,
+            &[bind_param_seeding(
+                "lns-bind-0",
+                "/root/.claude",
+                &[],
+                &["settings.json"],
+            )],
+            &[],
+            "/newroot",
+            None,
+            None,
+        )
+        .expect("the share's own mount point is cleared and the split goes on");
+        let unlinked = cleared(&sys, "/newroot/.lens/binds/0")
+            .expect("the share mount point is the boot's to make");
+        let mounted = sys
+            .calls()
+            .iter()
+            .position(|call| {
+                matches!(call, Call::Mount { target, .. } if target == "/newroot/.lens/binds/0")
+            })
+            .expect("the share is still mounted");
+        assert!(
+            unlinked < mounted,
+            "mounting through the link puts the share where the workload chose"
         );
     }
 
