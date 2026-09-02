@@ -49,7 +49,6 @@ crates/lns-session-broker/src/forward/real.rs            serve/accept/splice/pum
 crates/lns-session-broker/src/volumes/real.rs            RealVolumeSyscalls libc leaf (umount / mount MS_REMOUNT|MS_RDONLY) + the cfg(linux) release_volumes composition root; the release order, busy fallback and both-failed reporting are host-tested at 100% in volumes.rs via FakeVolumeSyscalls. Pinned end-to-end by the @microvm volumes scenario.
 crates/lns-supervisor/src/main.rs                        guest supervisor entry (tokio bootstrap + network lockdown + privilege drop); only runs inside the microVM
 crates/lns-supervisor/src/dispatcher/runtime.rs          agent PTY/fork/termios/SIGWINCH + process-spawn runtime (RealAgentRunner, RealStepRunner, ExitBeforeWorkload); only runs inside the microVM. Host-testable orchestration lives in dispatcher/agent.rs at 100%.
-crates/lns-supervisor/src/scripts/ids/real.rs             GuestPasswd leaf: nix NSS lookups of the guest's own passwd/group. The USER[:GROUP] resolution ladder that reads it is host-tested at 100% in scripts/ids.rs against a fake.
 crates/lns-supervisor/src/config/mod.rs                  load_config: process env + argv + external lens-sandbox-core loader wiring; the arg-quoting logic is unit-tested in config/quote.rs
 
 # Vendored / host-build glue — not our source.

@@ -3216,7 +3216,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lens-sandbox-core"
 version = "0.1.0"
-source = "git+https://github.com/lensapp/lens-sandbox-core?rev=a0a957862c4af523c837ce30a32030d5d9afff37#a0a957862c4af523c837ce30a32030d5d9afff37"
+source = "git+https://github.com/lensapp/lens-sandbox-core?rev=71e3c1c1bda626a036d126e1660ac32279d4ec57#71e3c1c1bda626a036d126e1660ac32279d4ec57"
 dependencies = [
  "apollo-parser",
  "async-trait",
@@ -3581,7 +3581,6 @@ dependencies = [
  "libc",
  "lns-policy",
  "lns-session",
- "nix 0.29.0",
  "rustls",
  "serde_json",
  "serial_test",
@@ -3793,18 +3792,6 @@ version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9c8f4c88952507d9df9400a6a2e48640fb460e21dcb2b4716eb3ff156d6db9e"
 dependencies = [
- "libc",
-]
-
-[[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.11.0",
- "cfg-if",
- "cfg_aliases",
  "libc",
 ]
 
