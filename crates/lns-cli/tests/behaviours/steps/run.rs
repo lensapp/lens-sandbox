@@ -10,7 +10,6 @@ use lns_cli::service::{
 use lns_ipc::{
     LogLevel, Response, WireFrame, encode_frame, encode_wire_frame, read_frame_bytes_async,
 };
-use lns_policy::{Policy, RouteRule};
 use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
 
@@ -130,14 +129,6 @@ fn emit_started_run_42(world: &mut BehaviourWorld) {
     }
 }
 
-fn require_cwd(world: &BehaviourWorld) -> &std::path::Path {
-    world
-        .cwd
-        .as_ref()
-        .expect("Background did not initialise a working directory")
-        .path()
-}
-
 fn parse_argv(argv: &[String]) -> RunArgs {
     let mut full = vec!["lns".to_string()];
     full.extend(argv.iter().cloned());
@@ -154,29 +145,6 @@ fn user_invokes_lns_run(world: &mut BehaviourWorld, image_and_flags: String) {
 
 #[given(regex = r"^the working directory is `[^`]+`$")]
 fn working_directory_is(_world: &mut BehaviourWorld) {}
-
-#[given(regex = r"^the working directory contains `\./lns-local-mixin\.yaml`$")]
-fn cwd_contains_policy_file(world: &mut BehaviourWorld) {
-    let _ = require_cwd(world);
-}
-
-#[given(regex = r#"^that policy has (\d+) allow rules?, and (\d+) deny rules?$"#)]
-fn that_policy_has(world: &mut BehaviourWorld, allows: usize, denies: usize) {
-    let cwd = require_cwd(world).to_path_buf();
-    let mut policy = Policy::default();
-    for i in 0..allows {
-        policy.add_rule(RouteRule::allow_host(format!("allow-{i}.example")));
-    }
-    for i in 0..denies {
-        policy.add_rule(RouteRule::deny_host(format!("deny-{i}.example")));
-    }
-    policy
-        .save_atomic(&cwd.join("lns-local-mixin.yaml"))
-        .expect("save_atomic");
-}
-
-#[given(regex = r"^no `lns-local-mixin\.yaml` exists in the working directory$")]
-fn no_policy_in_cwd(_world: &mut BehaviourWorld) {}
 
 #[given(regex = r"^the command is `lns run ([^`]+)`$")]
 fn the_command_is(world: &mut BehaviourWorld, args_after_run: String) {
@@ -198,13 +166,11 @@ fn the_command_is(world: &mut BehaviourWorld, args_after_run: String) {
 
 #[when(regex = r"^(?:the command starts|the summary is printed|the run starts)$")]
 async fn the_run_starts(world: &mut BehaviourWorld) {
-    let cwd = require_cwd(world).to_path_buf();
     let args = parse_argv(&world.argv);
     let mut buf = Vec::<u8>::new();
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
         &mut buf,
     )
     .expect("print_run_summary");
@@ -259,9 +225,9 @@ fn summary_is_printed(world: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
-#[then(regex = r"^the summary lists Image, Resources, Flags, and a Policy block$")]
+#[then(regex = r"^the summary lists Image, Resources, Flags, and a Decisions line$")]
 fn summary_lists_all_fields(world: &mut BehaviourWorld) -> Result<(), String> {
-    for label in ["Image:", "Resources:", "Flags:", "Policy:"] {
+    for label in ["Image:", "Resources:", "Flags:", "Decisions:"] {
         if !world.summary_output.contains(label) {
             return Err(format!("missing {label} in:\n{}", world.summary_output));
         }
@@ -281,69 +247,9 @@ fn resolving_placeholder_present(world: &mut BehaviourWorld) -> Result<(), Strin
     }
 }
 
-#[then(regex = r"^the Policy block shows the file path$")]
-fn policy_block_shows_file_path(world: &mut BehaviourWorld) -> Result<(), String> {
-    let cwd = require_cwd(world);
-    let expected = cwd.join("lns-local-mixin.yaml");
-    let needle = format!("file: {}", expected.display());
-    if world.summary_output.contains(&needle) {
-        Ok(())
-    } else {
-        Err(format!("missing {needle:?} in:\n{}", world.summary_output))
-    }
-}
-
-#[then(regex = r"^what happens to a destination no rule names$")]
-fn unmatched_line_present(world: &mut BehaviourWorld) -> Result<(), String> {
-    if world.summary_output.contains("unmatched destinations: ask") {
-        Ok(())
-    } else {
-        Err(format!(
-            "missing `unmatched destinations:` line in:\n{}",
-            world.summary_output
-        ))
-    }
-}
-
-#[then(regex = r#"^a one-line rule summary: "([^"]+)"$"#)]
-fn rule_summary_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    if world.summary_output.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected rule summary {expected:?} in:\n{}",
-            world.summary_output
-        ))
-    }
-}
-
-#[then(regex = r#"^the provenance line: "([^"]+)"$"#)]
-fn provenance_line_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    if world.summary_output.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected provenance {expected:?} in:\n{}",
-            world.summary_output
-        ))
-    }
-}
-
-#[then(regex = r#"^the Policy block source line reads "([^"]+)"$"#)]
-fn source_line_reads(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    if world.summary_output.contains(&expected) {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected source line {expected:?} in:\n{}",
-            world.summary_output
-        ))
-    }
-}
-
-#[then(regex = r#"^a destination no rule names is "([^"]+)"ed$"#)]
-fn unmatched_destination_is(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
-    let needle = format!("unmatched destinations: {expected}");
+#[then(regex = r#"^the Decisions line reads "([^"]+)"$"#)]
+fn decisions_line_reads(world: &mut BehaviourWorld, expected: String) -> Result<(), String> {
+    let needle = format!("Decisions: {expected}");
     if world.summary_output.contains(&needle) {
         Ok(())
     } else {
@@ -494,13 +400,11 @@ fn image_cannot_be_resolved(_world: &mut BehaviourWorld) {}
 
 #[when(regex = r"^resolution fails$")]
 async fn resolution_fails(world: &mut BehaviourWorld) {
-    let cwd = require_cwd(world).to_path_buf();
     let args = parse_argv(&world.argv);
     let mut sbuf = Vec::<u8>::new();
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
         &mut sbuf,
     )
     .expect("print_run_summary");

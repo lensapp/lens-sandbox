@@ -70,22 +70,6 @@ fn request_carries_variant_definition(w: &mut BehaviourWorld, _name: String) -> 
     Ok(())
 }
 
-#[then(regex = r#"^the run reads its decisions from "([^"]+)"$"#)]
-fn run_reads_decisions_from(w: &mut BehaviourWorld, path: String) -> Result<(), String> {
-    let found = w
-        .sandbox_run
-        .decisions
-        .as_ref()
-        .ok_or("the run resolved no decisions file")?;
-    if found != &PathBuf::from(&path) {
-        return Err(format!(
-            "one directory is one project, so a definition somewhere else is governed by the decisions beside it; expected {path}, got {}",
-            found.display()
-        ));
-    }
-    Ok(())
-}
-
 #[then(regex = r#"^the service request roots the bind and fileset at "([^"]+)"$"#)]
 fn request_roots_sources_at(w: &mut BehaviourWorld, dir: String) -> Result<(), String> {
     let value = wire_definition(w)?;

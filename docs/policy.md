@@ -7,31 +7,31 @@ three things: **allow** it, **deny** it at the boundary, or — when no rule mat
 
 ## The policy file
 
-Policy lives in a human-readable YAML file. By default that's
-`lns-local-mixin.yaml` beside the definition being run — the directory you run
-from, unless you name a definition in another one — and the first `lns run` in a
-directory without one creates it:
+Policy lives in a human-readable YAML file. Every run has one of its own, at
+`~/.lns/runs/<RUN>/decisions.yaml`. `lns run` creates it empty and writes your
+answers into it as you give them:
 
 ```yaml
 apiVersion: lns.run/v1
 kind: mixin
-name: lns-local-mixin
+name: decisions
 spec:
   egress:
     http: []
     tcp: []
 ```
 
-`lns run` writes this starter file for you, so you only deal with it by hand if you
-choose to edit the file directly.
+You never name this file, and nothing is created in the directory you work in.
 
 The file is a **mixin** — the same document format a
-[sandbox definition](running-workloads.md#defining-a-sandbox) layers on. Every
-run in the directory resolves it without being named, after every other source,
-so nothing you pulled overrules what you decided. Because it is a source like any
-other, the summary a run prints before booting lists its rules and names the file
-they came from — so a rule of yours that overrules one the sandbox shipped is
-visible while you can still stop the run.
+[sandbox definition](running-workloads.md#defining-a-sandbox) layers on. The run
+resolves it after every other source, so nothing you pulled overrules what you
+decided.
+
+The summary a run prints before booting lists the rules the **documents**
+decided — the sandbox's own and every mixin layered on it — each named by the
+source that decided it. This file is empty at that point, because the run has
+not asked you anything yet. What you answer goes in here as you answer it.
 
 The rules the run enforces are folded from this file as it stands, not from a copy
 taken at launch: a rule an approval appends mid-run applies at once, and one you
@@ -39,23 +39,37 @@ delete mid-run stops applying.
 
 Being a mixin also means the file is not limited to `egress`. Any block a mixin
 can declare, this one can declare too — a tool, a mount, another mixin to layer
-on — and it reaches every run in this directory:
+on.
 
-```yaml
-apiVersion: lns.run/v1
-kind: mixin
-name: lns-local-mixin
-spec:
-  tools:
-    - ripgrep@14
-  egress:
-    http: []
-    tcp: []
+**The file belongs to the run.** A second `lns run` is a second run, and it
+starts with an empty file, so it asks for itself. `lns start` and `lns exec`
+rejoin the same run and keep what it decided. `lns rm` takes the file with the
+run.
+
+## Keeping what a run decided
+
+`lns sandbox save` writes a run out as a document you keep:
+
+```bash
+lns sandbox save reviewer --kind mixin -f ./team-egress.yaml
 ```
 
-One directory, one policy file — it sits next to the project it governs, and
-nothing names it. A definition you run from another directory is governed by
-that directory's file, not by the one where you typed the command.
+That writes what the run decided, and nothing else, as a `kind: mixin` document
+named after the file. `-f` is required — `lns` never picks a path in your
+directory for you — and it refuses to overwrite a file that is already there.
+Drop `--kind mixin` to write the run as a whole instead.
+
+What you save is an ordinary document from that point on. Commit it, and have the
+`lns.yaml` that needs it name it in `spec.mixins`:
+
+```yaml
+spec:
+  mixins:
+    - ./team-egress.yaml
+```
+
+That is how an agreed rule set reaches a teammate. A rule applies because a
+document names it, never because a file sits in a directory.
 
 ### What the file decides, and what it doesn't
 
@@ -216,10 +230,11 @@ section before using it.
 ## Editing the file
 
 No command edits the rules. A decision is recorded one of two ways: you answer the
-card a run raises, or you open `lns-local-mixin.yaml` and write the rule yourself.
+card a run raises, or you write the rule in a mixin of your own and layer it on
+with `--mixin`.
 Both write the same document, and because it is a `kind: mixin` document,
-`lns artifact validate -f lns-local-mixin.yaml` checks what you wrote and
-`lns artifact inspect -f lns-local-mixin.yaml` renders it.
+`lns artifact validate -f <FILE>` checks what you wrote and
+`lns artifact inspect -f <FILE>` renders it.
 
 ### Add an allow or deny rule
 
@@ -378,10 +393,11 @@ If no one responds, the request times out and is treated as a denial.
 
 ## Sharing policy
 
-Because policy is a plain file, it travels. Commit `lns-local-mixin.yaml` to the
-repo so everyone running the project shares the same rules, or hand it to a
-teammate to drop beside their own document. A run loads the file at startup, so
-shared approvals are already in place — no one has to re-approve them.
+Because policy is a plain file, it travels. Save it with `lns sandbox save
+--kind mixin`, then commit the result so everyone running the project shares the
+same rules. Have the `lns.yaml` name it in `spec.mixins`, or pass it per run with
+`--mixin`. Either way the run resolves it at startup, so shared approvals are
+already in place and nobody has to re-approve them.
 
 ## See also
 

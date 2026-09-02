@@ -4,17 +4,17 @@ LNS is a local desktop app for running AI agents, commands, OCI images, and othe
 
 - **Start here:** `docs/README.md` — the first-party user documentation index.
 - **Product language:** the Product Vision above and `docs/` are the source of truth for terminology and framing; keep naming consistent with them. `docs/` is user-facing documentation only — no internal sales/marketing material lives in this repo.
-- **Concepts:** approvals drive policy authoring; a per-directory decisions file (`lns-local-mixin.yaml`, a `kind: mixin` document auto-created empty; a destination no rule decides is asked about) holds the network rules; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload.
+- **Concepts:** approvals drive policy authoring; a per-run decisions file (`~/.lns/runs/<RUN>/decisions.yaml`, a `kind: mixin` document created empty with the run; a destination no rule decides is asked about) holds the network rules, and `lns sandbox save` writes a run out as a document to keep; `Vz` on macOS / `KVM` on Linux is the only runtime; real secrets stay outside the workload.
 - **Target format:** `docs/sandbox-spec.md` is the normative specification for the `lns.run/v1` document format and the decisions behind it. **The code does not implement all of it** — see [Transitional mode](#transitional-mode) before you touch a document-format surface.
 - **Sibling product:** Lens Agents is the centrally managed counterpart for IT teams. Same policy model.
 
-Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **disposable, never leaky** (a run's state never escapes the sandbox; stopped runs persist until removed, and one `prune` sweeps them all away), **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **one directory = one project**, **real secrets stay outside the workload**. A small user-launched background service (the tray-resident `lns-service`, started by `lns service start` and stoppable via the tray Quit menu or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
+Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **disposable, never leaky** (a run's state never escapes the sandbox; stopped runs persist until removed, and one `prune` sweeps them all away), **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **the working directory only roots relative paths**, **real secrets stay outside the workload**. A small user-launched background service (the tray-resident `lns-service`, started by `lns service start` and stoppable via the tray Quit menu or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
 
 ## Transitional mode
 
 **The document format has an agreed target that the code has not reached.** `docs/sandbox-spec.md` states that target and states it as settled. This section is the contributor rule for the gap between them. It is temporary and shrinks as the gap closes.
 
-Read this before changing anything that parses, validates, publishes, resolves, or merges an `lns.yaml` or the per-directory decisions file.
+Read this before changing anything that parses, validates, publishes, resolves, or merges an `lns.yaml` or a run's decisions file.
 
 ### Which document wins
 

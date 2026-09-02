@@ -158,7 +158,8 @@ pub fn read_kind(config_json: &[u8]) -> Result<Kind> {
     Kind::from_kind_str(&kind).ok_or_else(|| anyhow::anyhow!("unknown artifact kind {kind:?}"))
 }
 
-pub(crate) fn is_valid_name(name: &str) -> bool {
+/// The `sandbox-spec.md` §2 `name` grammar, which every document must satisfy before anything writes or loads it.
+pub fn is_valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
         return false;

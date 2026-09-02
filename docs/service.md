@@ -37,7 +37,7 @@ Two environment variables override the defaults (mostly useful for development):
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
 - `LNS_HEADLESS=1` — run without the tray or approval window even when a
   display is present. Interactive prompts can't be shown headless, so
-  approvals need pre-authorized rules in `lns-local-mixin.yaml`.
+  approvals need pre-authorized rules in a mixin the run names.
 
 ## Updating
 

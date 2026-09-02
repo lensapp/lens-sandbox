@@ -56,9 +56,10 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 
 One directory, one thing to back up, one thing `lns uninstall --purge` removes.
 
-The project keeps two files, both in the directory you work in: `./lns.yaml`, the
-sandbox document, and `./lns-local-mixin.yaml`, what you decided here. Secrets are
-never written to the project.
+The project keeps one file in the directory you work in: `./lns.yaml`, the
+sandbox document. What a run decides lives with the run, at
+`~/.lns/runs/<RUN>/decisions.yaml`, and `lns sandbox save` writes it out where you
+name. Secrets are never written to the project.
 
 ## Machine-readable output
 
@@ -161,8 +162,7 @@ a directory holding one, or a path-shaped `.yaml`/`.yml` file naming the
 definition itself (`./lns.dev.yaml`); omit it to run the `./lns.yaml` in the
 current directory, or select another file with `-f`/`--file` (exclusive with
 `REF`). A path-named definition's directory is the project: it roots the relative binds
-and filesets, compose-style, and holds the `lns-local-mixin.yaml` the run
-resolves. A
+and filesets, compose-style. That is all it decides. A
 `COMMAND` after the reference overrides the sandbox base image's default command
 (`lns run ghcr.io/acme/agent:1 echo hi`) while keeping its `ENTRYPOINT`; an explicit `--`
 separator is still accepted. A command with no `REF` (`lns run -- echo hi`) runs
@@ -353,9 +353,9 @@ the document, but nothing sends it to a workload yet. A method whose filesets
 are written inline is offered and applied like any other.
 
 `Never here` on that card is the same standing no `lns connector forget` clears.
-Closing the card answers nothing, so the next run asks again. A `deny` you wrote
-in `lns-local-mixin.yaml` still decides: the connector is source 4 and your own
-file is source 5.
+Closing the card answers nothing, so the next run asks again. A `deny` this run
+already decided still decides: the connector is source 4 and the run's own
+decisions are source 5.
 
 The connector document format is specified in
 [Sandbox specification §3.2](sandbox-spec.md#32-kind-connector).

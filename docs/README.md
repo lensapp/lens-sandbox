@@ -23,7 +23,7 @@ You drive everything through one binary: the `lns` CLI.
   and the stopped-run lifecycle.
 - **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
   manifest, seed config, and network allowlist.
-- **[Policy and approvals](policy.md)** — the `lns-local-mixin.yaml` file, being asked
+- **[Policy and approvals](policy.md)** — a run's own `decisions.yaml`, being asked
   about what no rule decides, closing a directory, the approval window, and editing
   the rules by hand.
 - **[Audit](audit.md)** — the per-run audit chain and verifying it with

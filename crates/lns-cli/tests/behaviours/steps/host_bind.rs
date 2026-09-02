@@ -3,8 +3,7 @@ use cucumber::{given, then, when};
 use lns_cli::cli::{RunArgs, split_mounts};
 use lns_cli::command::parse_args;
 use lns_cli::run::host_bind::{DirScan, ResolvedBind, resolve_binds};
-use lns_cli::run::summary::{PolicySource, format_bind_dispositions, format_summary};
-use lns_policy::Policy;
+use lns_cli::run::summary::{format_bind_dispositions, format_summary};
 use lns_policy::decision_store::DecisionStore;
 use lns_policy::host_bind_decisions::{HostBindDecisionFile, SecretDisposition};
 use std::path::Path;
@@ -142,9 +141,6 @@ fn run_resolve(world: &mut BehaviourWorld, flags: &str, interactive: bool) {
             let mut text = format_summary(
                 &args,
                 lns_cli::run::summary::resolved_size(Default::default(), &args),
-                &Policy::default(),
-                Path::new("./lns-local-mixin.yaml"),
-                &PolicySource::Found,
             );
             text.push_str(&format_bind_dispositions(resolved));
             text

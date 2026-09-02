@@ -93,16 +93,16 @@ Feature: managing running sandboxes from the CLI
     And the output contains "running"
     And the output contains "memMib"
 
-  Scenario: inspect embeds the policy file when it is readable
-    Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
+  Scenario: inspect embeds the run's decisions file when it is readable
+    Given the service reports run 3 with policy path "/home/dev/.lns/runs/aa01/decisions.yaml"
     And the policy file parses with one allow rule
     When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "egress"
-    And the output contains "/work/lns-local-mixin.yaml"
+    And the output contains "/home/dev/.lns/runs/aa01/decisions.yaml"
 
-  Scenario: inspect marks an unreadable policy file instead of failing
-    Given the service reports run 3 with policy path "/work/lns-local-mixin.yaml"
+  Scenario: inspect marks an unreadable decisions file instead of failing
+    Given the service reports run 3 with policy path "/home/dev/.lns/runs/aa01/decisions.yaml"
     When the user runs sandbox command "inspect 3 --format json"
     Then the exit code is 0
     And the output contains "policy file could not be read"
@@ -132,3 +132,34 @@ Feature: managing running sandboxes from the CLI
     Then the exit code is 5
     And the workload stdout contains "live output"
     And the service received an AttachRun request for run 3
+
+  Scenario: save writes the run out as a document at the path the user named
+    Given the service renders run 3 as "apiVersion: lns.run/v1\nkind: sandbox\nname: out\n"
+    When the user runs sandbox command "save 3 -f ./out.yaml"
+    Then the exit code is 0
+    And the document written to "./out.yaml" contains "kind: sandbox"
+    And the output contains "saved sandbox 3"
+
+  Scenario: save names the document after the file it lands in
+    Given the service renders run 3 as "apiVersion: lns.run/v1\nkind: mixin\nname: agreed\n"
+    When the user runs sandbox command "save 3 -f ./agreed.yaml --kind mixin"
+    Then the exit code is 0
+    And the service received a SaveRun request for run 3 naming the document "agreed"
+
+  Scenario: save refuses to overwrite a file that is already there
+    Given "./out.yaml" already exists
+    When the user runs sandbox command "save 3 -f ./out.yaml"
+    Then the command fails with an exit code other than 0
+    And the output contains "already exists"
+    And no document was written
+
+  Scenario: save without a file to write to is refused by the grammar
+    When the grammar is given sandbox command "save 3"
+    Then the exit code is 2
+    And the output contains "--file"
+
+  Scenario: save into a file whose name a document cannot carry is refused
+    When the user runs sandbox command "save 3 -f ./Team_Rules.yaml"
+    Then the command fails with an exit code other than 0
+    And the output contains "lowercase"
+    And no document was written

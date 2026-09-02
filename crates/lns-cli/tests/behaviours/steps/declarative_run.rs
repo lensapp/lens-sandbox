@@ -160,13 +160,7 @@ fn compose_summary(world: &mut BehaviourWorld, defaults: Defaults, flags: &str) 
     let args: RunArgs = parse_args(&argv).expect("override flags must parse");
     let size = lns_cli::run::summary::resolved_size(defaults.size, &args);
     world.resolved_run = Some(ResolvedRunView {
-        summary: lns_cli::run::summary::format_summary(
-            &args,
-            size,
-            &lns_policy::Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &lns_cli::run::summary::PolicySource::Found,
-        ),
+        summary: lns_cli::run::summary::format_summary(&args, size),
         ..Default::default()
     });
 }

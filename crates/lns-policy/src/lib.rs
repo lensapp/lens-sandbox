@@ -434,7 +434,8 @@ impl Policy {
         Ok(policy)
     }
 
-    pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
+    /// The `mixin` document this policy is, named for the file it will be read from when it carries no name of its own.
+    pub fn document_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
         let document = LocalMixinDocument {
             api_version: API_VERSION.to_string(),
             kind: KIND.to_string(),
@@ -444,9 +445,13 @@ impl Policy {
                 rest: self.rest.clone(),
             },
         };
-        let yaml = serde_yaml::to_string(&document)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        crate::secure_file::write_yaml_document_atomic(path, yaml.as_bytes())
+        serde_yaml::to_string(&document)
+            .map(String::into_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
+        crate::secure_file::write_yaml_document_atomic(path, &self.document_bytes(path)?)
     }
 
     pub fn add_rule(&mut self, rule: RouteRule) {

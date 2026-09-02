@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use std::time::Instant;
 
 use crate::log;
@@ -564,28 +565,13 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition,
             project_dir,
             mixins,
-            decisions,
         } => image_response(
-            crate::artifact::real::resolve_definition(
-                definition,
-                project_dir,
-                mixins,
-                decisions.as_deref().map(std::path::Path::new),
-            )
-            .await,
+            crate::artifact::real::resolve_definition(definition, project_dir, mixins).await,
         ),
-        Request::InspectImage {
-            image,
-            mixins,
-            decisions,
-        } => image_response(
-            crate::artifact::real::inspect(
-                image,
-                mixins,
-                decisions.as_deref().map(std::path::Path::new),
-            )
-            .await
-            .map(|inspection| Response::ImageInspected { inspection }),
+        Request::InspectImage { image, mixins } => image_response(
+            crate::artifact::real::inspect(image, mixins)
+                .await
+                .map(|inspection| Response::ImageInspected { inspection }),
         ),
         Request::TagImage { from, to } => {
             image_response(crate::image_store::tag(from, to).await.map(|()| {
@@ -615,10 +601,30 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             Err(message) => Response::Error { message },
         },
         Request::PruneRuns => image_response(prune_runs_request().await),
+        Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
         },
     }
+}
+
+/// `docs/cli-spec.md` §3.2.3: the service renders the document, and the caller writes the file it named.
+fn save_run_request(run: &str, kind: lns_ipc::SaveKind, name: &str) -> anyhow::Result<Response> {
+    let run_id = crate::run_registry::resolve(run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cache_dir = crate::cache::root()?;
+    let bytes = std::fs::read(crate::run_record::record_path(&cache_dir, &run_id))
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("no run record for {run}"))?;
+    let record: crate::run_record::RunRecord = serde_json::from_slice(&bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("parsing the run record for {run}"))?;
+    let decisions_path = crate::cache::decisions_path(&cache_dir, &run_id);
+    let decisions = lns_policy::Policy::load_or_default(&decisions_path)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("reading what {run} decided"))?;
+    Ok(Response::RunSaved {
+        document: crate::run::render_saved(&record, &decisions, kind, name)?,
+    })
 }
 
 async fn kill_request(run: &str, signal: lns_ipc::SignalKind) -> Response {
@@ -1242,7 +1248,6 @@ mod tests {
                 mem_explicit: false,
                 cpus_config: None,
                 mem_config: None,
-                policy_path: None,
                 sandbox_user: None,
                 sandbox_uid: None,
                 entrypoint: None,
@@ -2432,6 +2437,173 @@ mod tests {
             Response::Acknowledged,
             "killing an exited run is already satisfied and must not forward to a dead session"
         );
+    }
+
+    /// A stopped run with a record on disk, which is what `save` reads: the record is written for every run before its session begins.
+    #[cfg(test)]
+    fn stopped_run_with_a_record(home: &std::path::Path, run_id: &str) -> String {
+        let record = crate::run_record::test_record(run_id);
+        let name = record.name.clone();
+        std::fs::create_dir_all(crate::cache::run_dir(home, run_id)).expect("run dir");
+        std::fs::write(
+            crate::run_record::record_path(home, run_id),
+            serde_json::to_vec(&record).expect("serialize"),
+        )
+        .expect("record");
+        crate::run_registry::register_stopped(crate::run_registry::StoppedRun { record });
+        name
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn inspecting_a_run_names_the_decisions_file_in_that_run_s_own_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let run_id = "aa0000000000000000000000000000fb";
+        let name = stopped_run_with_a_record(home.path(), run_id);
+        match handle_request(&Request::InspectRun { run: name }, Instant::now()).await {
+            Response::RunInspect { details } => assert_eq!(
+                details.config.policy_path,
+                Some(
+                    crate::cache::decisions_path(home.path(), run_id)
+                        .display()
+                        .to_string()
+                ),
+                "§8.3 puts a run's decisions in its own directory, and inspect is where the user reads what that run decided"
+            ),
+            other => unreachable!("expected RunInspect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn saving_a_run_renders_the_document_and_writes_no_file() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let name = stopped_run_with_a_record(home.path(), "aa0000000000000000000000000000ff");
+        match handle_request(
+            &Request::SaveRun {
+                run: name,
+                kind: lns_ipc::SaveKind::Sandbox,
+                name: "kept".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::RunSaved { document } => {
+                assert!(
+                    document.contains("kind: sandbox") && document.contains("name: kept"),
+                    "§8.4 renders the run under the name the caller took from its file; got: {document}"
+                );
+            }
+            other => unreachable!("expected RunSaved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn saving_a_run_reads_what_that_run_decided() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let run_id = "aa0000000000000000000000000000fe";
+        let name = stopped_run_with_a_record(home.path(), run_id);
+        std::fs::write(
+            crate::cache::decisions_path(home.path(), run_id),
+            "apiVersion: lns.run/v1\nkind: mixin\nname: decisions\nspec:\n  egress:\n    http:\n      - match: git.example.test\n        verdict: allow\n",
+        )
+        .expect("decisions");
+        match handle_request(
+            &Request::SaveRun {
+                run: name,
+                kind: lns_ipc::SaveKind::Mixin,
+                name: "agreed".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::RunSaved { document } => {
+                assert!(
+                    document.contains("git.example.test"),
+                    "saving what a run decided is the point of the verb; got: {document}"
+                );
+            }
+            other => unreachable!("expected RunSaved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn saving_a_run_whose_record_is_gone_says_which_run() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let record = crate::run_record::test_record("aa0000000000000000000000000000fd");
+        let name = record.name.clone();
+        crate::run_registry::register_stopped(crate::run_registry::StoppedRun { record });
+        match handle_request(
+            &Request::SaveRun {
+                run: name.clone(),
+                kind: lns_ipc::SaveKind::Sandbox,
+                name: "kept".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::Error { message } => assert!(
+                message.contains(&name),
+                "a run whose record is unreadable must name itself rather than fail anonymously; got: {message}"
+            ),
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn saving_an_unknown_run_reports_no_such_run() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        match handle_request(
+            &Request::SaveRun {
+                run: "ghost".into(),
+                kind: lns_ipc::SaveKind::Sandbox,
+                name: "kept".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::Error { message } => {
+                assert!(message.contains("no such run: ghost"), "got: {message}")
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn saving_a_run_whose_record_does_not_parse_says_so() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let run_id = "aa0000000000000000000000000000fc";
+        let name = stopped_run_with_a_record(home.path(), run_id);
+        std::fs::write(crate::run_record::record_path(home.path(), run_id), b"{").expect("damage");
+        match handle_request(
+            &Request::SaveRun {
+                run: name,
+                kind: lns_ipc::SaveKind::Sandbox,
+                name: "kept".into(),
+            },
+            Instant::now(),
+        )
+        .await
+        {
+            Response::Error { message } => {
+                assert!(message.contains("parsing the run record"), "got: {message}")
+            }
+            other => unreachable!("expected Error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -4075,7 +4247,6 @@ mod tests {
                     definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1"}}"#.into(),
                     project_dir: "/work".into(),
                     mixins: Vec::new(),
-                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -4104,7 +4275,6 @@ mod tests {
                     definition: r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg"]}}"#.into(),
                     project_dir: "work".into(),
                     mixins: Vec::new(),
-                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -4128,7 +4298,6 @@ mod tests {
                     definition: "{}".into(),
                     project_dir: "/work".into(),
                     mixins: Vec::new(),
-                    decisions: None,
                 },
                 Instant::now(),
             )
@@ -4151,7 +4320,6 @@ mod tests {
                 &Request::InspectImage {
                     image: "###".into(),
                     mixins: Vec::new(),
-                    decisions: None,
                 },
                 Instant::now(),
             )

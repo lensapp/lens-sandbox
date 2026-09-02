@@ -18,6 +18,8 @@ pub(crate) struct ResolvedForRun {
     reference: String,
     pub(crate) digest: String,
     resolved: crate::artifact::assembly::ResolvedSandbox,
+    /// The merged sandbox document, kept so the run can be written back out as one document (`docs/sandbox-spec.md` §8.4).
+    pub(crate) document: Vec<u8>,
 }
 
 /// Peek a run reference's manifest and, when it is a published sandbox, resolve it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
@@ -68,6 +70,7 @@ pub(crate) async fn resolve_for_run(
                 reference: image_ref.to_string(),
                 digest,
                 resolved,
+                document: resolution.document,
             }))
         }
     }
@@ -84,6 +87,7 @@ pub(crate) async fn plan_resolved(
         reference,
         digest,
         resolved,
+        document: _,
     } = resolved;
     record_sandbox_run(run_id, microvm, &reference, &digest, &resolved);
     crate::image_store::record_artifact_run(&reference, &digest, &resolved.base_image)
@@ -224,7 +228,7 @@ impl crate::artifact::fileset::HostFileProbe for RealSnapshotDir {
     }
 }
 
-/// The directory's own decisions as a merge source, read off this machine; a run that named no decisions file resolves without one.
+/// The run's own decisions as a merge source, read off this machine; a boot that names no decisions file resolves without one.
 fn local_source(
     decisions: Option<&std::path::Path>,
 ) -> Result<Option<crate::artifact::mixin::LocalSource>> {
@@ -363,7 +367,6 @@ pub(crate) async fn resolve_definition(
     definition: &str,
     project_dir: &str,
     mixins: &[String],
-    decisions: Option<&std::path::Path>,
 ) -> Result<lns_ipc::Response> {
     let project_dir = std::path::Path::new(project_dir);
     crate::artifact::mixin::require_a_rooted_project_dir(project_dir)?;
@@ -373,7 +376,7 @@ pub(crate) async fn resolve_definition(
         mixins,
         &home,
         &RegistryMixins,
-        local_source(decisions)?,
+        None,
     )
     .await
     .with_context(|| format!("resolving the definition in {}", project_dir.display()))?;
@@ -399,11 +402,7 @@ pub(crate) async fn resolve_definition(
     })
 }
 
-pub(crate) async fn inspect(
-    image_ref: &str,
-    mixins: &[String],
-    decisions: Option<&std::path::Path>,
-) -> Result<ArtifactInspection> {
+pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<ArtifactInspection> {
     let reference: Reference = image_ref
         .parse()
         .with_context(|| format!("invalid image reference {image_ref}"))?;
@@ -421,7 +420,7 @@ pub(crate) async fn inspect(
         mixins,
         &crate::artifact::mixin::Locator::Reference(image_ref.to_string()),
         &RegistryMixins,
-        local_source(decisions)?,
+        None,
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;

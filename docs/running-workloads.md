@@ -118,10 +118,9 @@ lns run ghcr.io/acme/agent:latest        # run a published sandbox by reference
 ```
 
 One directory is one project, and the definition you run names which: the
-`lns-local-mixin.yaml` that governs a run sits beside the `lns.yaml` being run, so
-`lns run ../other-project` reads and writes that project's decisions rather than
-yours. A published reference has no directory of its own, so a run of one is
-governed by the directory you start it in.
+directory of the `lns.yaml` being run roots the relative paths that document
+spells. That is all it decides. What a run decides is recorded in the run, not in
+any directory, so `lns run ../other-project` leaves both directories untouched.
 
 To expose your actual host files to the workload, bind-mount a directory with
 `-v /host/path:/guest/path` (see [Host bind mounts](#host-bind-mounts)); for
@@ -639,12 +638,12 @@ lns pull ghcr.io/acme/observability:2      # cache it and the mixins it names
 **The last source to say something about a thing wins.** Sources are ordered:
 the sandbox first, then each entry in `spec.mixins` in order with that mixin's
 own mixins expanded right after it, then each `--mixin` the user passed, and
-last the directory's own
-[`lns-local-mixin.yaml`](policy.md#the-policy-file) — so nothing you pulled
-overrules what you decided here. Every block of that file merges like any other
-source's, including its `egress`, so the summary lists your rules beside the ones
-they overruled. What the running sandbox enforces is folded from the file itself,
-so a rule you add or delete mid-run applies or stops applying at once.
+last the run's own
+[`decisions.yaml`](policy.md#the-policy-file) — so nothing you pulled overrules
+what you decided. Every block of that file merges like any other source's,
+including its `egress`, so the summary lists your rules beside the ones they
+overruled. What the running sandbox enforces is folded from the file itself, so a
+rule you add or delete mid-run applies or stops applying at once.
 
 A local entry is read from this machine, relative to the document that names it.
 It may name the directory — whose `lns.yaml` is read — or the document itself,
@@ -704,10 +703,10 @@ where each line came from — and lists the rules and credentials the merge
 produced, which an uncomposed run has no second author to attribute:
 
 ```
-  Mixins:    /work/mixins/debug-tools, lns-local-mixin.yaml
+  Mixins:    /work/mixins/debug-tools, /work/mixins/team-egress.yaml
   Volume:    cache → /home/agent/.cache  [from /work/mixins/debug-tools]
   Tools:     node@22  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…, replaced node@20 from the sandbox]
-  Rules:     allow docs.vendor.example  [from lns-local-mixin.yaml]  approved during a run
+  Rules:     allow docs.vendor.example  [from /work/mixins/team-egress.yaml]  approved during a run
              allow api.vendor.example  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]
              deny docs.vendor.example  [from the sandbox]
   Credentials: SOME_TOKEN  [from ghcr.io/acme/observability@sha256:c41e8b7d20a9…]

@@ -680,7 +680,7 @@ mod tests {
             &root,
             &extra,
             Some(Source {
-                label: "lns-local-mixin.yaml",
+                label: "decisions.yaml",
                 spec: &local,
             }),
             &graph,
@@ -688,7 +688,7 @@ mod tests {
         .expect("every reference resolves");
         assert_eq!(
             labels(&sources),
-            [ROOT_LABEL, "own", "flag", "lns-local-mixin.yaml"],
+            [ROOT_LABEL, "own", "flag", "decisions.yaml"],
             "the developer's own decisions are last, so nothing they pulled can overrule them (docs/sandbox-spec.md §8.1)"
         );
     }
@@ -702,7 +702,7 @@ mod tests {
             &root,
             &[],
             Some(Source {
-                label: "lns-local-mixin.yaml",
+                label: "decisions.yaml",
                 spec: &local,
             }),
             &graph,
@@ -710,7 +710,7 @@ mod tests {
         .expect("every reference resolves");
         assert_eq!(
             labels(&sources),
-            [ROOT_LABEL, "locals-own", "lns-local-mixin.yaml"],
+            [ROOT_LABEL, "locals-own", "decisions.yaml"],
             "§3.3.2 puts a mixin's own mixins after it, but §8.1 says the local one is last outright, and what it pulled is still something pulled"
         );
     }
@@ -972,7 +972,7 @@ mod tests {
             &root,
             &[],
             Some(Source {
-                label: "lns-local-mixin.yaml",
+                label: "decisions.yaml",
                 spec: &local,
             }),
             &graph,

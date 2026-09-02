@@ -143,12 +143,10 @@ fn run_summary_discloses_tools(w: &mut BehaviourWorld) -> Result<(), String> {
     if w.cwd.is_none() {
         w.cwd = Some(tempfile::TempDir::new().map_err(|e| e.to_string())?);
     }
-    let cwd = w.cwd.as_ref().ok_or("cwd")?.path().to_path_buf();
     let mut buf = Vec::<u8>::new();
     print_run_summary(
         &args,
         lns_cli::run::summary::resolved_size(Default::default(), &args),
-        &cwd,
         &mut buf,
     )
     .map_err(|e| format!("{e:#}"))?;

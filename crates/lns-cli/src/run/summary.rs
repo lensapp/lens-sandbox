@@ -1,41 +1,9 @@
 use std::fmt::Write as _;
 use std::io;
-use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use lns_policy::{Policy, Verdict};
+use anyhow::Result;
 
 use crate::cli::RunArgs;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PolicySource {
-    Found,
-    AutoCreated,
-}
-
-pub const DEFAULT_POLICY_FILENAME: &str = "lns-local-mixin.yaml";
-
-/// The project's own mixin is found beside the document and never named, so a definition run from another directory is governed by that directory's decisions rather than the one you typed in.
-pub fn policy_path(project: &Path) -> PathBuf {
-    project.join(DEFAULT_POLICY_FILENAME)
-}
-
-pub fn resolve_policy(project: &Path) -> Result<(PathBuf, PolicySource)> {
-    let path = policy_path(project);
-    match std::fs::metadata(&path) {
-        Ok(md) if md.is_file() => Ok((path, PolicySource::Found)),
-        Ok(_) => anyhow::bail!(
-            "{} exists but is not a regular file; remove it so the run can record what you decide",
-            path.display()
-        ),
-        Err(_) => {
-            lns_policy::Policy::default()
-                .save_atomic(&path)
-                .with_context(|| format!("creating default policy at {}", path.display()))?;
-            Ok((path, PolicySource::AutoCreated))
-        }
-    }
-}
 
 /// The size the run will boot with: an explicit flag outranks what the definition declared, which outranks this machine's config defaults, which outrank the built-in size.
 pub fn resolved_size(
@@ -94,15 +62,10 @@ pub fn drop_overridden_mounts(args: &mut RunArgs, overridden: &[String]) {
 pub fn print_run_summary(
     args: &RunArgs,
     size: lns_artifact::resources::VmSize,
-    project: &Path,
     writer: &mut impl io::Write,
-) -> Result<PathBuf> {
-    let (path, source) = resolve_policy(project)?;
-    let policy = Policy::load_or_default(&path)
-        .with_context(|| format!("loading policy from {}", path.display()))?;
-    let body = format_summary(args, size, &policy, &path, &source);
-    writer.write_all(body.as_bytes())?;
-    Ok(path)
+) -> Result<()> {
+    writer.write_all(format_summary(args, size).as_bytes())?;
+    Ok(())
 }
 
 /// How an entry names the source that decided it, empty for a run that resolved no mixin; only for a block whose keys are unique, never for egress, where two sources may key alike.
@@ -326,13 +289,7 @@ fn entry_line(entry: &lns_ipc::SourceContribution, attributed: bool) -> String {
     format!("{}{attribution}{note}", entry.key)
 }
 
-pub fn format_summary(
-    args: &RunArgs,
-    size: lns_artifact::resources::VmSize,
-    policy: &Policy,
-    policy_path: &Path,
-    source: &PolicySource,
-) -> String {
+pub fn format_summary(args: &RunArgs, size: lns_artifact::resources::VmSize) -> String {
     let mut s = String::with_capacity(512);
     s.push_str("lns run\n");
     writeln!(s, "  Image:     {}", image_line(args)).unwrap();
@@ -392,11 +349,7 @@ pub fn format_summary(
     .unwrap();
     writeln!(s, "  Flags:     {}", flags_line(args)).unwrap();
     writeln!(s, "  Ports:     {}", ports_line(args)).unwrap();
-    s.push_str("  Policy:\n");
-    writeln!(s, "    file: {}", policy_path.display()).unwrap();
-    writeln!(s, "    unmatched destinations: {}", unmatched_line(policy)).unwrap();
-    writeln!(s, "    rules: {}", rules_line(policy)).unwrap();
-    writeln!(s, "    source: {}", source_line(source)).unwrap();
+    writeln!(s, "  Decisions: {DECISIONS_LINE}").unwrap();
     s.push('\n');
     s
 }
@@ -584,68 +537,17 @@ fn ports_line(args: &RunArgs) -> String {
         .join(", ")
 }
 
-fn unmatched_line(policy: &Policy) -> &'static str {
-    if policy.network.is_closed() {
-        "denied by the catch-all rule"
-    } else {
-        "ask"
-    }
-}
-
-fn rules_line(policy: &Policy) -> String {
-    let egress = &policy.network.egress;
-    if egress.http.is_empty() && egress.tcp.is_empty() {
-        return "none defined; anything else asks".to_string();
-    }
-    let (allows, denies) = tally(egress.http.iter().map(|r| r.verdict));
-    let raw = raw_counts(&egress.tcp);
-    let tail = if policy.network.is_closed() {
-        "anything else denied"
-    } else {
-        "anything else asks"
-    };
-    format!("{allows} allow, {denies} deny{raw}, {tail}")
-}
-
-/// Raw splices counted apart from the routes, since nothing inspects one and folded into the route count a splice would read as one more gated host. Empty when the table is, so a policy with no raw rules carries no zeros.
-fn raw_counts(tcp: &[lns_policy::TcpEgressRule]) -> String {
-    if tcp.is_empty() {
-        return String::new();
-    }
-    let (allows, denies) = tally(tcp.iter().map(|r| r.verdict));
-    format!(", {allows} raw allow, {denies} raw deny")
-}
-
-fn tally(verdicts: impl Iterator<Item = Verdict>) -> (u32, u32) {
-    verdicts.fold((0u32, 0u32), |(a, d), verdict| match verdict {
-        Verdict::Allow => (a + 1, d),
-        Verdict::Deny => (a, d + 1),
-    })
-}
-
-fn source_line(source: &PolicySource) -> String {
-    match source {
-        PolicySource::Found => "found in the project directory".to_string(),
-        PolicySource::AutoCreated => {
-            "auto-created (no policy in the project directory)".to_string()
-        }
-    }
-}
+/// `docs/sandbox-spec.md` §8.1: a fresh run starts with an empty decisions file, so the disclosure says where an answer goes rather than reporting rules nobody has made yet.
+const DECISIONS_LINE: &str = "recorded in this run, and removed with it";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use lns_artifact::resources::{DEFAULT_VM_SIZE, VmSize};
-    use lns_policy::{RouteRule, TcpEgressRule};
 
     /// Most lines are indifferent to the size, so they read the built-in default; the resources line has its own tests.
-    fn summary_of(
-        args: &RunArgs,
-        policy: &Policy,
-        policy_path: &Path,
-        source: &PolicySource,
-    ) -> String {
-        format_summary(args, DEFAULT_VM_SIZE, policy, policy_path, source)
+    fn summary_of(args: &RunArgs) -> String {
+        format_summary(args, DEFAULT_VM_SIZE)
     }
 
     fn spec_with_scripts(entries: &str) -> lns_artifact::sandbox::SandboxSpec {
@@ -856,12 +758,7 @@ mod tests {
     fn summary_with_publish(ports: Vec<lns_ipc::PortPublish>) -> String {
         let mut args = run_args(Some("prism"));
         args.publish = ports;
-        summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        )
+        summary_of(&args)
     }
 
     fn fileset_entry(path: Option<&str>) -> lns_artifact::sandbox::FilesetEntry {
@@ -1049,22 +946,12 @@ mod tests {
     fn the_mixins_line_names_what_a_composed_sandbox_resolved_into() {
         let mut args = run_args(Some("prism"));
         args.resolved_mixins = vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Mixins:    ghcr.io/acme/postgres-tools@sha256:c41e8b7d"),
             "the resolved document declares no mixins of its own, so without this line a composed sandbox reads as an authored one and a tool the user did not expect has nowhere to be traced to; got: {s}"
         );
-        let authored = summary_of(
-            &run_args(Some("prism")),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let authored = summary_of(&run_args(Some("prism")));
         assert!(!authored.contains("Mixins:"), "got: {authored}");
     }
 
@@ -1200,12 +1087,7 @@ mod tests {
                 &[("the sandbox", "node@20")],
             )],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("node@22  [from ghcr.io/acme/obs@sha256:cccccccccccc…, replaced node@20 from the sandbox]"),
             "a developer reading `node@22` has to be able to see that a mixin put it there over the version their own document asked for; got: {s}"
@@ -1226,12 +1108,7 @@ mod tests {
                 &[],
             )],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Credentials: SOME_TOKEN  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
             "got: {s}"
@@ -1259,12 +1136,7 @@ mod tests {
                 ),
             ],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         let first = s
             .lines()
             .find(|l| l.contains("SOME_TOKEN"))
@@ -1301,12 +1173,7 @@ mod tests {
                 ),
             ],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("\n             proxy.vendor.example  [from the sandbox]\n"),
             "a merged table is read as a table, so the second entry has to sit under the first rather than restate the label; got: {s}"
@@ -1323,12 +1190,7 @@ mod tests {
             size_bytes: None,
         })];
         composed(&mut args, Vec::new());
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Volume:    scratch \u{2192} /scratch\n"),
             "the user typed this one, so naming a source for it would invent an author; got: {s}"
@@ -1355,12 +1217,7 @@ mod tests {
             )],
         );
         drop_overridden_mounts(&mut args, &["/scratch".to_string()]);
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Volume:    mine \u{2192} /scratch\n"),
             "the mixin's mount is not what boots, so naming it as the author of the user's own mount inverts who decided this; got: {s}"
@@ -1388,12 +1245,7 @@ mod tests {
                 ),
             ],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains(
                 "Rules:     allow api.vendor.example  [from ghcr.io/acme/obs@sha256:cccccccccccc…]"
@@ -1425,12 +1277,7 @@ mod tests {
                 &[],
             )],
         );
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("[from ghcr.io/acme/obs@sha256:cccccccccccc…]"),
             "a mixin opening a host socket is a thing the developer is approving, so it has to name who asked; got: {s}"
@@ -1450,12 +1297,7 @@ mod tests {
             )],
         );
         args.tools = vec!["node@22".into()];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("some/dir@sha256:a\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{2026}"),
             "a directory the user named is theirs to spell, so shortening it by bytes would panic on a run that is otherwise fine; got: {s}"
@@ -1466,12 +1308,7 @@ mod tests {
     fn an_uncomposed_run_prints_exactly_what_it_printed_before_attribution_existed() {
         let mut args = run_args(Some("prism"));
         args.tools = vec!["node@22".into()];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Tools:     node@22\n"), "got: {s}");
         assert!(
             !s.contains("[from") && !s.contains("Rules:") && !s.contains("Credentials:"),
@@ -1492,15 +1329,7 @@ mod tests {
                 displaced: Vec::new(),
             })
             .collect();
-        let mut closed = Policy::default();
-        closed.add_rule(RouteRule::deny_host("*"));
-
-        let s = summary_of(
-            &args,
-            &closed,
-            Path::new("./lns-policy.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
 
         assert!(
             s.contains("Rules:")
@@ -1518,12 +1347,7 @@ mod tests {
     fn tools_line_lists_declared_tools_and_is_absent_without_them() {
         let mut args = run_args(Some("prism"));
         args.tools = vec!["node@22.11.0".into(), "python@3.12.6".into()];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Tools:     node@22.11.0, python@3.12.6"),
             "got: {s}"
@@ -1572,18 +1396,16 @@ mod tests {
     }
 
     #[test]
-    fn summary_lists_image_resources_flags_and_policy_block() {
+    fn summary_lists_image_resources_flags_and_the_decisions_line() {
         let args = run_args(Some("ubuntu"));
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/home/dev/my-app/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Image:"), "missing Image line: {s}");
         assert!(s.contains("Resources:"), "missing Resources line: {s}");
         assert!(s.contains("Flags:"), "missing Flags line: {s}");
-        assert!(s.contains("Policy:"), "missing Policy block: {s}");
+        assert!(
+            s.contains("Decisions: recorded in this run, and removed with it"),
+            "§8.1 puts a run's answers in the run, so the disclosure has to say that before the first prompt: {s}"
+        );
     }
 
     #[test]
@@ -1603,12 +1425,7 @@ mod tests {
                 size_bytes: None,
             }),
         ];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Volume:    prism-data → /data"),
             "missing volume line: {s}"
@@ -1629,12 +1446,7 @@ mod tests {
             exclude: Vec::new(),
             optional: false,
         })];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Bind:      /Users/me/proj → /work (read-write)"),
             "missing bind line: {s}"
@@ -1651,12 +1463,7 @@ mod tests {
             exclude: Vec::new(),
             optional: false,
         })];
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(
             s.contains("Bind:      /Users/me/cfg → /cfg (read-only)"),
             "missing read-only bind line: {s}"
@@ -1693,58 +1500,33 @@ mod tests {
     fn summary_lists_the_requested_workdir() {
         let mut args = run_args(Some("ubuntu"));
         args.workdir = Some("/app".into());
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Workdir:   /app"), "missing workdir line: {s}");
     }
 
     #[test]
     fn summary_omits_workdir_line_when_unset() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&run_args(Some("ubuntu")));
         assert!(!s.contains("Workdir:"), "no workdir line expected: {s}");
     }
 
     #[test]
     fn summary_omits_volume_line_when_none_attached() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&run_args(Some("ubuntu")));
         assert!(!s.contains("Volume:"), "no volume line expected: {s}");
     }
 
     #[test]
     fn image_field_shows_resolving_placeholder_until_service_confirms_digest() {
         let args = run_args(Some("ubuntu"));
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("ubuntu (resolving…)"), "no placeholder: {s}");
     }
 
     #[test]
     fn no_reference_run_shows_the_local_definition_as_the_image() {
         let args = run_args(None);
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("./lns.yaml (resolving…)"), "got: {s}");
         assert!(
             !s.contains("imageless"),
@@ -1756,24 +1538,14 @@ mod tests {
     fn a_file_selector_run_shows_the_selected_definition_as_the_image() {
         let mut args = run_args(None);
         args.file = Some(std::path::PathBuf::from("lns.dev.yaml"));
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("lns.dev.yaml (resolving…)"), "got: {s}");
         assert!(!s.contains("./lns.yaml"), "got: {s}");
     }
 
     #[test]
     fn resources_line_renders_the_size_the_run_will_boot_with() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&run_args(Some("ubuntu")));
         assert!(s.contains("1 vCPU · 512 MiB"), "resources line wrong: {s}");
     }
 
@@ -1791,9 +1563,6 @@ mod tests {
                 mem_mib: 6144,
                 disk_bytes: 40 << 30,
             },
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
         );
         assert!(s.contains("3 vCPU · 6144 MiB"), "resources line wrong: {s}");
     }
@@ -1839,9 +1608,6 @@ mod tests {
                 mem_mib: 512,
                 disk_bytes: 40 << 30,
             },
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
         );
         assert!(s.contains("40 GiB disk"), "resources line wrong: {s}");
     }
@@ -1852,12 +1618,7 @@ mod tests {
         args.interactive = true;
         args.tty = true;
         args.detach = false;
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Flags:     -i -t"), "flags line wrong: {s}");
     }
 
@@ -1867,12 +1628,7 @@ mod tests {
         args.interactive = false;
         args.tty = false;
         args.detach = true;
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Flags:     -d"), "flags line wrong: {s}");
     }
 
@@ -1880,12 +1636,7 @@ mod tests {
     fn flags_line_includes_auto_remove_when_set() {
         let mut args = run_args(Some("ubuntu"));
         args.auto_remove = true;
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Flags:     -i -t --rm"), "flags line wrong: {s}");
     }
 
@@ -1895,206 +1646,7 @@ mod tests {
         args.interactive = false;
         args.tty = false;
         args.detach = false;
-        let s = summary_of(
-            &args,
-            &Policy::default(),
-            Path::new("/x/lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
+        let s = summary_of(&args);
         assert!(s.contains("Flags:     (none)"), "flags line wrong: {s}");
-    }
-
-    #[test]
-    fn a_closed_policy_does_not_claim_anything_still_asks() {
-        // The catch-all answers for whatever the named rules leave, so nothing is
-        // unmatched — telling the developer it asks would be false, not vague.
-        let mut policy = Policy::default();
-        policy.add_rule(RouteRule::allow_host("api.example.test"));
-        policy.add_rule(RouteRule::deny_host("*"));
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(
-            s.contains("unmatched destinations: denied by the catch-all rule"),
-            "got: {s}"
-        );
-        assert!(s.contains("anything else denied"), "got: {s}");
-    }
-
-    #[test]
-    fn policy_block_shows_the_file_path_and_a_rule_summary() {
-        let mut policy = Policy::default();
-        policy.add_rule(RouteRule::allow_host("api.linear.app"));
-        policy.add_rule(RouteRule::allow_host("api.example.com"));
-        policy.add_rule(RouteRule::allow_host("registry.npmjs.org"));
-        policy.add_rule(RouteRule::deny_host("evil.example"));
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(s.contains("file: ./lns-local-mixin.yaml"));
-        assert!(
-            s.contains("unmatched destinations: ask"),
-            "the default is no longer a field the file varies, so the summary states the rule: {s}"
-        );
-        assert!(s.contains("3 allow, 1 deny, anything else asks"));
-    }
-
-    #[test]
-    fn the_rules_line_counts_the_raw_splices_apart_from_the_inspected_routes() {
-        // The launch summary is the only surface that discloses this directory's own
-        // policy, and a raw splice is the widest grant it can express — folded into
-        // the route count it would read as one more inspected host.
-        let mut policy = Policy::default();
-        policy.add_rule(RouteRule::allow_host("api.example.test"));
-        policy
-            .network
-            .egress
-            .tcp
-            .push(TcpEgressRule::allow_destination("0.0.0.0/0:5432"));
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(
-            s.contains("1 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
-            "got: {s}"
-        );
-    }
-
-    #[test]
-    fn the_rules_line_reports_a_raw_only_policy_rather_than_none_defined() {
-        let mut policy = Policy::default();
-        policy
-            .network
-            .egress
-            .tcp
-            .push(TcpEgressRule::allow_destination("db.internal:5432"));
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(
-            s.contains("0 allow, 0 deny, 1 raw allow, 0 raw deny, anything else asks"),
-            "a file holding only raw rules is not a file holding none: {s}"
-        );
-    }
-
-    #[test]
-    fn rules_line_says_none_defined_for_an_empty_route_list() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(
-            s.contains("rules: none defined; anything else asks"),
-            "rules line wrong: {s}"
-        );
-    }
-
-    #[test]
-    fn rules_line_uses_singular_counts_at_one() {
-        let mut policy = Policy::default();
-        policy.add_rule(RouteRule::allow_host("api.linear.app"));
-        policy.add_rule(RouteRule::deny_host("evil.example"));
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &policy,
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(s.contains("1 allow, 1 deny, anything else asks"));
-    }
-
-    #[test]
-    fn source_line_for_a_found_file_names_the_project_directory() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::Found,
-        );
-        assert!(s.contains("source: found in the project directory"));
-    }
-
-    #[test]
-    fn source_line_for_auto_created_calls_out_no_policy_in_the_project_directory() {
-        let s = summary_of(
-            &run_args(Some("ubuntu")),
-            &Policy::default(),
-            Path::new("./lns-local-mixin.yaml"),
-            &PolicySource::AutoCreated,
-        );
-        assert!(s.contains("source: auto-created (no policy in the project directory)"));
-    }
-
-    #[test]
-    fn resolve_policy_finds_the_default_file_of_the_project_rather_than_of_the_cwd() {
-        // One directory is one project, so the run reads the decisions beside the definition it runs, wherever the developer started it.
-        let cwd = tempfile::TempDir::new().unwrap();
-        let project = tempfile::TempDir::new().unwrap();
-        let preexisting = project.path().join(DEFAULT_POLICY_FILENAME);
-        Policy::default().save_atomic(&preexisting).unwrap();
-        let (resolved, source) = resolve_policy(project.path()).unwrap();
-        assert_eq!(resolved, preexisting);
-        assert_eq!(source, PolicySource::Found);
-        assert!(!cwd.path().join(DEFAULT_POLICY_FILENAME).exists());
-    }
-
-    #[test]
-    fn resolve_policy_auto_creates_default_file_when_missing() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (resolved, source) = resolve_policy(dir.path()).unwrap();
-        assert_eq!(resolved, dir.path().join(DEFAULT_POLICY_FILENAME));
-        assert_eq!(source, PolicySource::AutoCreated);
-        let body = std::fs::read_to_string(&resolved).unwrap();
-        assert!(
-            !body.contains("defaultVerdict"),
-            "a file born with the key would be born with the one value the loader tells you to delete: {body}"
-        );
-        assert!(
-            body.contains("egress:") && body.contains("http: []"),
-            "the scaffold must name the table the guest reads, not the deprecated one:\n{body}"
-        );
-        assert!(!body.contains("allowedRoutes"), "got:\n{body}");
-        assert!(!body.contains("defaultTransport"), "got:\n{body}");
-        assert!(!body.contains("transport:"), "got:\n{body}");
-    }
-
-    #[test]
-    fn resolve_policy_errors_when_default_path_is_a_directory() {
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(DEFAULT_POLICY_FILENAME)).unwrap();
-        let err = resolve_policy(dir.path()).expect_err("must reject non-file");
-        assert!(format!("{err:#}").contains("not a regular file"));
-    }
-
-    #[test]
-    fn print_run_summary_writes_to_provided_writer_and_returns_resolved_path() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let args = run_args(Some("ubuntu"));
-        let mut buf = Vec::<u8>::new();
-        let path = print_run_summary(
-            &args,
-            resolved_size(Default::default(), &args),
-            dir.path(),
-            &mut buf,
-        )
-        .unwrap();
-        assert_eq!(path, dir.path().join(DEFAULT_POLICY_FILENAME));
-        let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("lns run"));
-        assert!(text.contains("Policy:"));
     }
 }

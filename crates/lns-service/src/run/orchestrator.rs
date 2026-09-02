@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -48,7 +48,7 @@ pub async fn prepare(run_id: &str, args: &RunImageArgs) -> Result<PreparedRun> {
                 image_ref,
                 args.verify_sandbox,
                 &args.mixins,
-                args.policy_path.as_deref().map(Path::new),
+                Some(cache::decisions_path(&cache::root()?, run_id).as_path()),
             )
             .await?
             {
@@ -160,29 +160,38 @@ async fn orchestrate(
     if matches!(mode, super::LaunchMode::Restart { .. }) {
         run_scratch.keep();
     }
-    let policy: Option<PathBuf> = args.policy_path.as_deref().map(PathBuf::from);
+    let decisions = cache::decisions_path(&cache_dir, &run_id);
+    super::decisions::ensure(&decisions)?;
+    let policy = Some(decisions);
 
     // A local definition plans directly; a published sandbox reference boots what it resolved to; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
+    let mut resolved_document: Option<String> = None;
     let sandbox_plan = match document {
-        PreparedDocument::Local(definition) => Some(
-            crate::artifact::real::plan_local(
-                &definition,
-                args.authored_egress.as_deref(),
-                &crate::artifact::packed_from_the_wire(&args.packed_filesets),
-                &args.denied_host_paths,
+        PreparedDocument::Local(definition) => {
+            resolved_document = Some(definition.clone());
+            Some(
+                crate::artifact::real::plan_local(
+                    &definition,
+                    args.authored_egress.as_deref(),
+                    &crate::artifact::packed_from_the_wire(&args.packed_filesets),
+                    &args.denied_host_paths,
+                )
+                .await?,
             )
-            .await?,
-        ),
-        PreparedDocument::Published(resolved) => Some(
-            crate::artifact::real::plan_resolved(
-                *resolved,
-                &run_id,
-                &microvm,
-                &args.denied_host_paths,
+        }
+        PreparedDocument::Published(resolved) => {
+            resolved_document = String::from_utf8(resolved.document.clone()).ok();
+            Some(
+                crate::artifact::real::plan_resolved(
+                    *resolved,
+                    &run_id,
+                    &microvm,
+                    &args.denied_host_paths,
+                )
+                .await?,
             )
-            .await?,
-        ),
+        }
         PreparedDocument::Imageless => None,
     };
     let tool_requests = match &sandbox_plan {
@@ -625,6 +634,7 @@ async fn orchestrate(
         run_id: run_id.clone(),
         name: microvm.clone(),
         args: record_args,
+        resolved_document,
         descriptor_sha256: recorded_descriptor_sha,
         layer_digests: recorded_layer_digests,
         image: image_label,

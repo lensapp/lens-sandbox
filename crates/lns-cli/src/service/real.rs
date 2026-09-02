@@ -286,6 +286,14 @@ impl SandboxService for RealSandboxService {
         let policy = lns_policy::Policy::load_or_default(path).ok()?;
         serde_json::to_value(&policy).ok()
     }
+
+    fn document_exists(&self, path: &std::path::Path) -> bool {
+        path.exists()
+    }
+
+    fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+        std::fs::write(path, contents)
+    }
 }
 
 #[cfg(test)]

@@ -95,16 +95,12 @@ lns run
   Resources: 1 vCPU · 512 MiB · 10 GiB disk
   Flags:     -i -t
   Ports:     (none)
-  Policy:
-    file: /Users/you/dev/my-app/lns-local-mixin.yaml
-    unmatched destinations: ask
-    rules: none defined; anything else asks
-    source: auto-created (no policy in the project directory)
+  Decisions: recorded in this run, and removed with it
 ```
 
-You run LNS from a project directory — that's where it looks for
-`lns-local-mixin.yaml`, creating an empty one the first time. Run a definition in
-another directory and it reads that project's file instead. To
+You run LNS from a project directory. That directory holds your `lns.yaml` and
+roots the relative paths it spells, and nothing else: `lns` creates no file
+there. What you approve is recorded in the run itself. To
 give the workload your actual project files, bind-mount the directory with
 `-v "$(pwd)":/work` (see [Running workloads](running-workloads.md)); for a
 portable definition use a declarative bind with `source: .`; for scratch
@@ -185,8 +181,9 @@ an approval window appears from the background service showing the host and the
 action (for example `CONNECT api.github.com:443`). You choose:
 
 - **Allow once** / **Deny once** — applies to this request only.
-- **Allow always** / **Deny always** — also writes a matching rule to
-  `lns-local-mixin.yaml`, so the same question isn't asked again.
+- **Allow always** / **Deny always** — also writes a matching rule into this
+  run's own decisions, so the same question isn't asked again for this run.
+  `lns sandbox save --kind mixin -f <FILE>` keeps those answers past the run.
 
 A denied request fails at the boundary the way a real network failure would — a
 refused connection or a failed DNS lookup — never a silent success.
@@ -213,8 +210,8 @@ lns uninstall --purge
 ```
 
 `--purge` deletes the whole data directory and shows the resolved directory in its
-confirmation prompt. Files in your projects, such as each directory's `lns.yaml`
-and `lns-local-mixin.yaml`, are never touched.
+confirmation prompt. Files in your projects, such as each directory's `lns.yaml`,
+are never touched.
 
 ## Where to go next
 

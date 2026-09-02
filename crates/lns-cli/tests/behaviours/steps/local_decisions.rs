@@ -1,14 +1,11 @@
-use std::path::Path;
-
 use cucumber::{given, then, when};
 use lns_cli::cli::RunArgs;
 use lns_cli::command::parse_args;
-use lns_cli::run::summary::{PolicySource, adopt_pinned_mixins, format_summary, resolved_size};
-use lns_policy::Policy;
+use lns_cli::run::summary::{adopt_pinned_mixins, format_summary, resolved_size};
 
 use crate::world::BehaviourWorld;
 
-/// What the service answers for a directory whose decisions the resolution reached: every egress entry of the merged document, in the order a first-match gate reads them.
+/// What the service answers for a run whose resolution reached a layered mixin: every egress entry of the merged document, in the order a first-match gate reads them.
 fn resolution(w: &mut BehaviourWorld, sources: &[&str], entries: &[(&str, &str)]) {
     w.decisions.sources = sources.iter().map(|s| (*s).to_string()).collect();
     w.decisions.contributions = entries
@@ -23,21 +20,21 @@ fn resolution(w: &mut BehaviourWorld, sources: &[&str], entries: &[(&str, &str)]
         .collect();
 }
 
-#[given(regex = r#"^the sandbox denies "([^"]+)" and this directory allows it$"#)]
-fn the_directory_allows_what_the_sandbox_denies(w: &mut BehaviourWorld, host: String) {
+#[given(regex = r#"^the sandbox denies "([^"]+)" and a layered mixin allows it$"#)]
+fn a_layered_mixin_allows_what_the_sandbox_denies(w: &mut BehaviourWorld, host: String) {
     resolution(
         w,
-        &["lns-local-mixin.yaml"],
+        &["team-egress.yaml"],
         &[
-            (&format!("allow {host}"), "lns-local-mixin.yaml"),
+            (&format!("allow {host}"), "team-egress.yaml"),
             (&format!("deny {host}"), "the sandbox"),
         ],
     );
 }
 
-#[given(regex = r#"^the sandbox denies "([^"]+)" and this directory allowed it during a run$"#)]
-fn the_directory_allowed_it_during_a_run(w: &mut BehaviourWorld, host: String) {
-    the_directory_allows_what_the_sandbox_denies(w, host.clone());
+#[given(regex = r#"^the sandbox denies "([^"]+)" and a layered mixin allowed it during a run$"#)]
+fn a_layered_mixin_allowed_it_during_a_run(w: &mut BehaviourWorld, host: String) {
+    a_layered_mixin_allows_what_the_sandbox_denies(w, host.clone());
     let approved = format!("allow {host}");
     for entry in w
         .decisions
@@ -49,14 +46,14 @@ fn the_directory_allowed_it_during_a_run(w: &mut BehaviourWorld, host: String) {
     }
 }
 
-#[given(regex = r#"^the sandbox denies "([^"]+)" and this directory decided nothing$"#)]
-fn the_directory_decided_nothing(w: &mut BehaviourWorld, host: String) {
+#[given(regex = r#"^the sandbox denies "([^"]+)" and nothing is layered on it$"#)]
+fn nothing_is_layered_on_it(w: &mut BehaviourWorld, host: String) {
     resolution(w, &[], &[(&format!("deny {host}"), "the sandbox")]);
 }
 
-#[given(regex = r#"^the sandbox denies "([^"]+)" with a note and this directory decided nothing$"#)]
+#[given(regex = r#"^the sandbox denies "([^"]+)" with a note and nothing is layered on it$"#)]
 fn the_sandbox_explains_what_it_denies(w: &mut BehaviourWorld, host: String) {
-    the_directory_decided_nothing(w, host);
+    nothing_is_layered_on_it(w, host);
     for entry in w.decisions.contributions.iter_mut() {
         entry.note = Some("the vendor mirrors the API here".to_string());
     }
@@ -73,13 +70,7 @@ fn compose_the_summary(w: &mut BehaviourWorld) {
     let sources = std::mem::take(&mut w.decisions.sources);
     let contributions = std::mem::take(&mut w.decisions.contributions);
     adopt_pinned_mixins(&mut args, &sources, &[], &contributions);
-    w.summary_output = format_summary(
-        &args,
-        resolved_size(Default::default(), &args),
-        &Policy::default(),
-        Path::new("./lns-local-mixin.yaml"),
-        &PolicySource::Found,
-    );
+    w.summary_output = format_summary(&args, resolved_size(Default::default(), &args));
 }
 
 #[then(regex = r#"^the run summary lists "([^"]+)"$"#)]
@@ -98,7 +89,7 @@ fn summary_attributes(w: &mut BehaviourWorld, entry: String, source: String) -> 
         Ok(())
     } else {
         Err(format!(
-            "a rule this directory decided that the disclosure cannot attribute leaves an override nobody intended invisible; expected {needle:?} in:\n{}",
+            "a rule a layered mixin decided that the disclosure cannot attribute leaves an override nobody intended invisible; expected {needle:?} in:\n{}",
             w.summary_output
         ))
     }

@@ -38,6 +38,8 @@ pub enum SandboxCommand {
     Ls(SandboxLsArgs),
     #[command(about = "Print one sandbox's live state and launch configuration.")]
     Inspect(SandboxInspectArgs),
+    #[command(about = "Write a sandbox out as a document you keep.")]
+    Save(SandboxSaveArgs),
     #[command(about = "Remove a sandbox: its record and its writable layer.")]
     Rm(SandboxRmArgs),
     #[command(about = "Remove every stopped sandbox, writable layers included.")]
@@ -177,6 +179,48 @@ pub struct SandboxRmArgs {
         help = "Stop a running sandbox first, then remove it."
     )]
     pub force: bool,
+}
+
+/// `docs/cli-spec.md` §3.2.3: `-f` is required, because `lns` never picks a path in the user's directory for them.
+#[derive(clap::Args)]
+pub struct SandboxSaveArgs {
+    #[arg(
+        value_name = "RUN",
+        help = "Sandbox id or name to write out; running or stopped."
+    )]
+    pub run: String,
+
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        required = true,
+        help = "Where to write the document. Refuses to overwrite an existing file."
+    )]
+    pub file: std::path::PathBuf,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = SaveDocumentKind::Sandbox,
+        help = "What to write: the run as it resolved, or only what it decided."
+    )]
+    pub kind: SaveDocumentKind,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveDocumentKind {
+    Sandbox,
+    Mixin,
+}
+
+impl From<SaveDocumentKind> for lns_ipc::SaveKind {
+    fn from(kind: SaveDocumentKind) -> Self {
+        match kind {
+            SaveDocumentKind::Sandbox => lns_ipc::SaveKind::Sandbox,
+            SaveDocumentKind::Mixin => lns_ipc::SaveKind::Mixin,
+        }
+    }
 }
 
 pub fn augment(app: clap::Command) -> clap::Command {
@@ -323,7 +367,59 @@ where
         SandboxCommand::Logs(args) => logs(svc, args, stdout, stderr).await,
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
+        SandboxCommand::Save(args) => save(svc, args, out).await,
     }
+}
+
+/// §8.4 has the service render what ran and this machine write where the user said, so a document nobody named is never created.
+async fn save<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxSaveArgs,
+    out: &mut W,
+) -> Result<i32> {
+    if svc.document_exists(&args.file) {
+        bail!("{} already exists; not overwriting it", args.file.display());
+    }
+    let name = document_name(&args.file)?;
+    match svc
+        .one_shot(Request::SaveRun {
+            run: args.run.clone(),
+            kind: args.kind.into(),
+            name,
+        })
+        .await?
+    {
+        Response::RunSaved { document } => {
+            svc.write_document(&args.file, &document)
+                .with_context(|| format!("writing {}", args.file.display()))?;
+            writeln!(out, "saved sandbox {} to {}", args.run, args.file.display())?;
+            Ok(0)
+        }
+        Response::Error { message } => Err(crate::service::reply::sandbox_failure(
+            "save", &args.run, &message,
+        )),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+/// §8.4 names the saved document for the file it lands in, so a stem that is not a legal §2 `name` is refused before the service renders anything.
+fn document_name(file: &std::path::Path) -> Result<String> {
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has no filename to name the document after",
+                file.display()
+            )
+        })?;
+    if !lns_artifact::spec::is_valid_name(stem) {
+        bail!(
+            "{stem} cannot name a document, so saving there would write one `lns artifact validate` refuses; a name is lowercase letters, digits and dashes, starts and ends with a letter or digit, and is at most 63 characters"
+        );
+    }
+    Ok(stem.to_string())
 }
 
 fn run_operand(cmd: &SandboxCommand) -> Option<(&'static str, &str)> {
@@ -336,6 +432,7 @@ fn run_operand(cmd: &SandboxCommand) -> Option<(&'static str, &str)> {
         SandboxCommand::Logs(args) => Some(("logs", args.run.as_str())),
         SandboxCommand::Attach(args) => Some(("attach", args.run.as_str())),
         SandboxCommand::Rm(args) => Some(("rm", args.run.as_str())),
+        SandboxCommand::Save(args) => Some(("save", args.run.as_str())),
         _ => None,
     }
 }
@@ -977,6 +1074,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_writes_the_rendered_document_through_the_service_it_was_given() {
+        let svc = CannedService::new(Response::RunSaved {
+            document: "apiVersion: lns.run/v1\nkind: mixin\nname: agreed\n".into(),
+        });
+        let cmd = SandboxCommand::Save(SandboxSaveArgs {
+            run: "reviewer".into(),
+            file: std::path::PathBuf::from("./agreed.yaml"),
+            kind: SaveDocumentKind::Mixin,
+        });
+        let mut out = Vec::new();
+        let code = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut ScriptedTerminal::absent(),
+            &mut out,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect("a rendered document lands where the user named");
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(out)
+                .expect("utf-8")
+                .contains("saved sandbox reviewer to ./agreed.yaml"),
+            "the user has to be told which file now holds the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_naming_a_run_the_service_does_not_know_says_which_verb_and_which_run() {
+        let svc = CannedService::new(Response::Error {
+            message: "no such run: ghost".into(),
+        });
+        let cmd = SandboxCommand::Save(SandboxSaveArgs {
+            run: "ghost".into(),
+            file: std::path::PathBuf::from("./out.yaml"),
+            kind: SaveDocumentKind::Sandbox,
+        });
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut ScriptedTerminal::absent(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("ghost"),
+            "a refusal has to name the run the user typed; got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_given_an_answer_that_is_not_a_document_refuses_rather_than_writing_it() {
+        let svc = CannedService::new(Response::Pong);
+        let cmd = SandboxCommand::Save(SandboxSaveArgs {
+            run: "reviewer".into(),
+            file: std::path::PathBuf::from("./out.yaml"),
+            kind: SaveDocumentKind::Sandbox,
+        });
+        let err = run_with_writers(
+            &cmd,
+            &svc,
+            TermInfo::default(),
+            &mut ScriptedTerminal::absent(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unexpected response"),
+            "writing whatever came back would put something other than a document in the user's directory; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_stem_is_not_a_legal_name_refuses_before_anything_is_written() {
+        let err = document_name(std::path::Path::new("./Team_Rules.yaml")).expect_err(
+            "§8.4 names the document for its file, so an illegal stem would write one §5 rejects",
+        );
+        assert!(
+            format!("{err:#}").contains("lowercase"),
+            "the refusal has to say what a name takes, or the user guesses again; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_filename_cannot_name_the_document_it_would_write() {
+        let err = document_name(std::path::Path::new("/")).expect_err(
+            "§8.4 names the saved document for its file, so a path with no stem names nothing",
+        );
+        assert!(format!("{err:#}").contains("no filename"), "got: {err:#}");
+    }
+
+    #[tokio::test]
     async fn run_with_writers_refuses_the_interactive_exec_verb() {
         let svc = CannedService::new(Response::Pong);
         let cmd = SandboxCommand::Exec(crate::cli::ExecArgs {
@@ -1498,7 +1697,7 @@ mod tests {
                     started: "2026-01-01T00:00:00Z".into(),
                 },
                 config: lns_ipc::RunConfig {
-                    policy_path: Some("/work/lns-local-mixin.yaml".into()),
+                    policy_path: Some("/home/dev/.lns/runs/aa01/decisions.yaml".into()),
                     ..Default::default()
                 },
             }),
@@ -1517,15 +1716,15 @@ mod tests {
 
     #[test]
     fn policy_doc_marks_an_unreadable_file() {
-        let doc = policy_doc("/work/lns-local-mixin.yaml", None);
-        assert_eq!(doc["path"], "/work/lns-local-mixin.yaml");
+        let doc = policy_doc("/home/dev/.lns/runs/aa01/decisions.yaml", None);
+        assert_eq!(doc["path"], "/home/dev/.lns/runs/aa01/decisions.yaml");
         assert!(doc["error"].as_str().unwrap().contains("could not be read"));
     }
 
     #[test]
     fn policy_doc_embeds_a_parsed_policy() {
         let doc = policy_doc(
-            "/work/lns-local-mixin.yaml",
+            "/home/dev/.lns/runs/aa01/decisions.yaml",
             Some(serde_json::json!({"network": {"egress": {"http": []}}})),
         );
         assert_eq!(

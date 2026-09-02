@@ -31,6 +31,9 @@ pub(crate) struct FakeSandboxService {
     unreachable: bool,
     policy: Option<serde_json::Value>,
     requests: Arc<Mutex<Vec<Request>>>,
+    /// Layer 2 writes no files, so a saved document lands here for the scenario to read.
+    existing_documents: Vec<PathBuf>,
+    written_documents: Arc<Mutex<Vec<(PathBuf, String)>>>,
 }
 
 impl SandboxService for FakeSandboxService {
@@ -120,6 +123,18 @@ impl SandboxService for FakeSandboxService {
 
     fn load_policy(&self, _path: &str) -> Option<serde_json::Value> {
         self.policy.clone()
+    }
+
+    fn document_exists(&self, path: &Path) -> bool {
+        self.existing_documents.iter().any(|p| p == path)
+    }
+
+    fn write_document(&self, path: &Path, contents: &str) -> std::io::Result<()> {
+        self.written_documents
+            .lock()
+            .expect("lock")
+            .push((path.to_path_buf(), contents.to_string()));
+        Ok(())
     }
 }
 
@@ -537,12 +552,32 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
         requests: w.sandbox.requests.clone(),
+        existing_documents: w.sandbox.existing_documents.clone(),
+        written_documents: w.sandbox.written_documents.clone(),
     }
 }
 
 #[when(regex = r#"^the user runs sandbox command "([^"]+)"$"#)]
 async fn run_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
     drive_sandbox_command(w, &cmd).await;
+}
+
+/// A verb the grammar turns away never reaches the service, so the scenario reads the parse refusal rather than a response.
+#[when(regex = r#"^the grammar is given sandbox command "([^"]+)"$"#)]
+fn parse_sandbox_command(w: &mut BehaviourWorld, cmd: String) {
+    let mut argv: Vec<&str> = vec!["lns", "sandbox"];
+    argv.extend(cmd.split_whitespace());
+    let parsed: Result<SandboxArgs, _> = parse_args(&argv);
+    w.result = Some(match parsed {
+        Ok(_) => CliRun {
+            exit_code: 0,
+            output: String::new(),
+        },
+        Err(e) => CliRun {
+            exit_code: 2,
+            output: e.to_string(),
+        },
+    });
 }
 
 pub(crate) async fn drive_sandbox_command(w: &mut BehaviourWorld, cmd: &str) {
@@ -754,6 +789,62 @@ fn then_logs_request(w: &mut BehaviourWorld, run_id: u32, mode: String) -> Resul
         Ok(())
     } else {
         Err(format!("expected {expected:?} among {requests:?}"))
+    }
+}
+
+#[given(regex = r#"^the service renders run (\d+) as "([^"]*)"$"#)]
+fn canned_saved_document(w: &mut BehaviourWorld, _run_id: u32, document: String) {
+    w.sandbox.response = Some(Response::RunSaved {
+        document: document.replace("\\n", "\n"),
+    });
+}
+
+#[given(regex = r#"^"([^"]+)" already exists$"#)]
+fn document_already_exists(w: &mut BehaviourWorld, path: String) {
+    w.sandbox.existing_documents.push(PathBuf::from(path));
+}
+
+#[then(regex = r#"^the document written to "([^"]+)" contains "([^"]+)"$"#)]
+fn then_document_written(
+    w: &mut BehaviourWorld,
+    path: String,
+    needle: String,
+) -> Result<(), String> {
+    let written = w.sandbox.written_documents.lock().expect("lock");
+    let target = PathBuf::from(&path);
+    match written.iter().find(|(p, _)| *p == target) {
+        Some((_, contents)) if contents.contains(&needle) => Ok(()),
+        Some((_, contents)) => Err(format!("expected {needle:?} in:\n{contents}")),
+        None => Err(format!("nothing was written to {path}; got {written:?}")),
+    }
+}
+
+#[then("no document was written")]
+fn then_no_document_written(w: &mut BehaviourWorld) -> Result<(), String> {
+    let written = w.sandbox.written_documents.lock().expect("lock");
+    if written.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "a refused save that still wrote would destroy the file it refused to overwrite; got {written:?}"
+        ))
+    }
+}
+
+#[then(
+    regex = r#"^the service received a SaveRun request for run (\d+) naming the document "([^"]+)"$"#
+)]
+fn then_save_request(w: &mut BehaviourWorld, run_id: u32, name: String) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().expect("lock");
+    let matched = requests.iter().any(|r| {
+        matches!(r, Request::SaveRun { run, name: n, .. } if run == &run_id.to_string() && n == &name)
+    });
+    if matched {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected a SaveRun naming {name:?} among {requests:?}"
+        ))
     }
 }
 
