@@ -12,3 +12,4 @@ pub mod real;
 mod registry;
 pub mod source;
 pub mod store;
+pub mod writes;

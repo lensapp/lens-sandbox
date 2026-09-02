@@ -52,6 +52,8 @@ pub struct BindAttachment {
     pub target: String,
     pub read_only: bool,
     pub dropped_paths: Vec<String>,
+    /// Every path the definition excluded, so the guest can decide which of them a connector's claim needs left unmounted.
+    pub excluded_paths: Vec<String>,
     /// Excluded paths a fileset writes into, so the guest leaves each one for the fileset instead of mounting the share over it.
     pub seeded_paths: Vec<String>,
 }
@@ -318,6 +320,10 @@ pub fn build_kernel_cmdline(
         for (j, seeded) in b.seeded_paths.iter().enumerate() {
             parts.push(format!("bind.{i}.seed.{j}={seeded}"));
         }
+        parts.push(format!("bind.{i}.excludes={}", b.excluded_paths.len()));
+        for (j, excluded) in b.excluded_paths.iter().enumerate() {
+            parts.push(format!("bind.{i}.exclude.{j}={excluded}"));
+        }
     }
     for (k, v) in &exec.kernel_env {
         debug_assert!(
@@ -564,6 +570,7 @@ mod tests {
                 target: "/work".into(),
                 read_only: false,
                 dropped_paths: vec![".env".into(), ".npmrc".into()],
+                excluded_paths: Vec::new(),
                 seeded_paths: Vec::new(),
             },
             BindAttachment {
@@ -571,6 +578,7 @@ mod tests {
                 target: "/cfg".into(),
                 read_only: true,
                 dropped_paths: vec![],
+                excluded_paths: Vec::new(),
                 seeded_paths: Vec::new(),
             },
         ];
