@@ -10,7 +10,8 @@ connector the user installs to reach a service.
 >
 > For what `lns` accepts today, read the guides:
 > **[Running workloads](running-workloads.md)** for authoring and publishing,
-> and **[Policy and approvals](policy.md)** for the per-directory policy file.
+> and **[Policy and approvals](policy.md)** for the network rule grammar and a
+> run's own decisions.
 >
 > The product is pre-1.0. Every gap between this document and the code closes as
 > a breaking, unversioned change with no compatibility shim.
@@ -677,9 +678,10 @@ what was behind it does not.
 An exclusion travels with the sandbox: a published bind masks what its author
 meant, on whatever machine runs it.
 
-A developer who wants to mask something the author did not name puts a bind with
-their own `exclude` in the [local mixin](#8-the-local-mixin). It is last in the
-merge, so a pulled document cannot undo it.
+A developer who wants to mask something the author did not name writes a mixin of
+their own with that `exclude`, and layers it with `--mixin` or from `spec.mixins`.
+A mixin the user names merges after a pulled document, so the pulled one cannot
+undo it ([§3.3.2](#332-merge-rules)).
 
 **`optional` — a source not every machine has.** A published sandbox names host
 paths that exist on the author's machine and not on every consumer's. `optional:
@@ -853,7 +855,7 @@ collision is caught at launch ([§5](#5-validation-summary)), and the run refuse
 naming both entries and the spelling each used.
 
 [§3.3.2](#332-merge-rules) keys the fileset union on the path **as written**, so a
-local mixin writing `/home/agent/.claude` does not override a connector method's
+mixin writing `/home/agent/.claude` does not override a connector method's
 `~/.claude` — both survive the merge and the run refuses for the collision above.
 To override an entry, match its spelling.
 
@@ -868,8 +870,8 @@ not. A document loaded from the developer's own directory is their own consent
 and is never asked about.
 
 The decision is per machine, so it lives beside the other per-machine state and
-not in the [local mixin](#8-the-local-mixin): the local mixin is a rule the
-directory keeps, and this is a risk accepted by one developer on one computer.
+not in the [run's decisions](#8-the-runs-decisions): that file is one run's
+answers, and this is a risk accepted by one developer on one computer.
 
 #### 3.1.12 `ports`
 
@@ -1278,7 +1280,7 @@ only makes its destinations ask ([§3.2.1](#321-serves)).
 3. **Apply the method.** Its `egress`, `credentials`, and `filesets` reach the
    running guest, and a grant is recorded for this run — the method, and the
    connection behind it where one exists
-   ([§8.4](#84-where-a-connector-grant-goes)).
+   ([§8.6](#86-where-a-connector-grant-goes)).
 
 Authentication that fails or is abandoned grants nothing and leaves the offer
 standing.
@@ -1295,9 +1297,10 @@ held request (`lns connector grant`). The trigger decides when the card
 appears, never whether consent must be informed.
 
 **A grant belongs to one run.** Not to a directory: the working directory
-decides which [local mixin](#8-the-local-mixin) resolves, and nothing about
-consent. A run keeps what it was granted across every stop and start. It loses
-that grant when the run is removed, and not before.
+roots the paths a reference resolves against, and nothing about consent
+([§8.5](#85-what-the-working-directory-decides)). A run keeps what it was granted
+across every stop and start. It loses that grant when the run is removed, and not
+before.
 
 **A grant MAY also be given ahead of the run**, to a name no run holds yet. It
 is then a **reservation**. Exactly one act takes a reservation: **creating a run
@@ -1342,8 +1345,8 @@ before or after it — a connector is source 4, and
 `allow`. The override MUST be named in the pre-boot
 disclosure ([§1.5](#15-one-disclosure)) and on the consent card that introduces
 it. A reservation is no exception: a run takes one as it is created, before the
-disclosure resolves. The [local mixin](#8-the-local-mixin) is unaffected: it is
-source 5, so a `deny` the developer typed still wins.
+disclosure resolves. The [run's decisions](#8-the-runs-decisions) are unaffected:
+they are source 5, so a `deny` the developer answered still wins.
 
 **The held request waits, and applying does not depend on it.** The request that
 triggered the offer stays held while the user chooses a connection and satisfies any
@@ -1362,7 +1365,7 @@ the next start of that run. It does **not** reach a fresh `lns run`: that is a
 different run, and it holds no grant.
 
 **Declining is one run's standing no**, remembered outside every document
-([§8.4](#84-where-a-connector-grant-goes)) and retractable there.
+([§8.6](#86-where-a-connector-grant-goes)) and retractable there.
 
 **A machine MAY hold several connections of one connector**, including several of
 one method. Two tokens for two accounts, or two sign-ins at different scopes, are
@@ -1536,7 +1539,7 @@ document that contributed it and showing the user it asks for
 ([§1.5](#15-one-disclosure)) — so a mixin that wants root gets it by saying so to
 the person running it, which is exactly what `spec.user` would have had to do.
 
-One mixin is never authored: every directory has a [local one](#8-the-local-mixin)
+One mixin is never authored: every run has [its own decisions](#8-the-runs-decisions)
 that the run writes as the developer answers prompts.
 
 #### 3.3.1 How a mixin enters a run
@@ -1600,8 +1603,8 @@ it:
 4. Each granted [connector](#32-kind-connector) — its **granted method** only, in
    grant order. User consent on this machine, so it beats anything a document
    shipped.
-5. The directory's [local mixin](#8-the-local-mixin) — the developer's own
-   decisions, so neither what they pulled nor what they connected can overrule
+5. The run's own [decisions](#8-the-runs-decisions) — the developer's own
+   answers, so neither what they pulled nor what they connected can overrule
    them.
 
 So `lns run claude --mixin first --mixin second` resolves as:
@@ -1614,7 +1617,7 @@ weakest ────────────────────────
 **A connector is the one source no document names**, so it is the one source
 whose position is not a consequence of where it was written down. It sits after
 every document because the user granted it here and now; it sits before the
-local mixin because a `deny` the developer typed by hand is still the last word.
+run's decisions because a `deny` the developer answered is still the last word.
 A connector shadowed that way is reported in the approval window, rather than
 silently taking no effect.
 
@@ -1642,7 +1645,7 @@ What "wins" means per block:
 | `tools` | Union by name. The last version declared wins. |
 | `volumes`, `filesets` | Union by guest path — a volume `target` and a fileset `guestPath` share one namespace, compared on path segments ([§3.1.10](#3110-volumes)). The last source to claim a path owns it. A named volume's [`size`](#3110-volumes) is the largest any surviving entry declares, because a size is a floor and every mount of that volume must clear it. |
 | `ports` | Union by `container`. The last mapping wins. |
-| `scripts` | **Append**, in source order. Not last-wins: every source's scripts run, the sandbox's own first and the local mixin's last. |
+| `scripts` | **Append**, in source order. Not last-wins: every source's scripts run, the sandbox's own first and the run's decisions last. |
 
 **`scripts` is the one block nothing overrides**, and the reason is that it has
 no key. Every other block names what it decides — an `envVar`, a tool, a guest
@@ -1651,7 +1654,7 @@ question. Two scripts state no question. Dropping one because another looked lik
 it would not be an override; it would be a missing dependency, discovered as a
 command not found somewhere inside the workload. So every script survives, and
 order is the only thing resolution decides about them — the source order above,
-which puts the sandbox's own preparation first and the local mixin's last. Later
+which puts the sandbox's own preparation first and the run's decisions last. Later
 still wins, in time rather than in precedence.
 
 Because a source many documents name merges at the last place the order names it,
@@ -1977,6 +1980,8 @@ Offline validation (`lns artifact validate`, and every load path including
   [§3.3.1](#331-how-a-mixin-enters-a-run). Whether a local entry is *publishable*
   is not an offline check on one document: it depends on the document that entry
   names ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
+  A local entry — and a `--mixin` — that resolves to a run's `decisions.yaml` is
+  refused, because that file is one run's own answers ([§8.1](#81-what-it-is)).
 
 Offline validation checks one document in isolation. Six checks cannot run
 there, because they depend on state no document carries — they run at launch:
@@ -2054,7 +2059,7 @@ because a repository is a publishing decision and a directory name is not one.
 | Tag | `sha256-<64 hex>`, where the hex is the child's manifest digest. It is **not a release**; only the tag the author types on `<REF>` is a release. |
 | Source | The author's document is **not** rewritten. Only the published bytes carry the digest, exactly as a resolved `tools[]` entry does. |
 | Cycle | Refused, naming the trail. A document reachable from itself has no digest to pin, because its digest would depend on itself. |
-| The local mixin | Refused. [§8.1](#81-what-it-is) makes `lns-local-mixin.yaml` never published, and an entry naming it cannot be honoured by publishing it. |
+| A run's decisions | Refused. [§8.1](#81-what-it-is) makes a run's `decisions.yaml` never published, and an entry naming it cannot be honoured by publishing it. A saved copy ([§8.4](#84-how-a-decision-leaves-the-run)) is an ordinary document and publishes like one. |
 
 **Why the child carries a tag at all.** The parent resolves it by digest and
 never reads the tag. The tag exists because a registry that prunes untagged
@@ -2187,7 +2192,7 @@ resumes that grant with no fresh consent prompt — the grant was bound to those
 bytes and those bytes came back. This is deliberate: uninstalling is housekeeping
 on the machine, and withdrawing consent is a decision about a run. A run
 retracts its own grant, or its decline, through the store that holds it
-([§8.4](#84-where-a-connector-grant-goes)).
+([§8.6](#86-where-a-connector-grant-goes)).
 
 **Uninstalling does drop every connection**, because they are machine state and the
 machine is what is being cleaned. So a reinstall resumes the grant and **not** the
@@ -2229,20 +2234,19 @@ resolve against nothing; a README SHOULD use absolute URLs.
 
 ---
 
-## 8. The local mixin
+## 8. The run's decisions
 
-Every directory has one mixin nobody wrote. The run fills it in as the developer
-works.
+Every run has one mixin nobody wrote. The run fills it in as the developer works.
 
 A destination no `egress` entry decides is asked about
 ([§1.3](#13-disclosure-before-boot)). The answer is a decision, and an unrecorded
 decision is the same question again tomorrow — so the run writes it down, as an
-`egress` entry, in a `mixin` document, in the directory the work is happening in.
+`egress` entry, in a `mixin` document, in the run's own directory.
 
 ```yaml
 apiVersion: lns.run/v1
 kind: mixin
-name: lns-local-mixin
+name: decisions
 spec:
   egress:
     http:
@@ -2258,17 +2262,23 @@ spec:
 - **A `mixin`.** The same grammar as [§3.3](#33-kind-mixin), so a decision is
   recorded in the shape the rest of the document already defines and stays
   readable by the person who made it.
-- **Always present.** A directory has one whether or not anyone created it, and
-  every run there resolves it without being named.
+- **One run's, and always present.** A run has one whether or not anything was
+  asked, and it resolves without being named. It is created with the run and
+  removed with it, so a run that is gone has no decisions left behind.
+- **Not the directory's.** Two runs started in one directory each answer for
+  themselves, and neither reads the other's file. The working directory decides
+  which paths a reference resolves against and nothing else
+  ([§8.5](#85-what-the-working-directory-decides)).
 - **Written by the run.** An approval appends to it. It holds only what is
   **new** — the decisions the developer made about things nothing had decided.
   Anything a `sandbox` or a `mixin` already declares stays in that document, where
   its author can see it.
 - **Local, and never published.** The one exception to
   [§1.1](#11-one-distribution-mechanism): every other artifact is addressed by
-  digest, and this one is a working file on disk. It holds one machine's answers,
-  so a `mixins` entry that names it is refused rather than published
-  ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)).
+  digest, and this one is a working file on disk. It holds one machine's answers
+  about one run, so a `mixins` entry or a `--mixin` that resolves to a run's
+  `decisions.yaml` MUST be refused. Saving it is the supported way to reuse it
+  ([§8.4](#84-how-a-decision-leaves-the-run)).
 - **Last in the merge.** It is the developer's own, so it sits after every other
   source in [§3.3.2](#332-merge-rules) — including a `--mixin`. Nothing they pulled
   can overrule what they decided, and that includes what this file itself pulls: a
@@ -2284,25 +2294,76 @@ answer.
 ### 8.2 Why a mixin rather than a format of its own
 
 Because it makes the file worth reading. A decision recorded in mixin grammar is a
-decision a developer can open, correct, and diff — and one they can **commit**, so
-a project's agreed destinations are reviewable in a pull request instead of
-rediscovered by each developer alone. A bespoke policy format would need its own
-parser, its own documentation, and its own answer to every question
-[§3](#3-artifact-kinds) already answers.
+decision a developer can open, correct, and diff — and one they can **keep**, by
+writing the run out as a document of its own
+([§8.4](#84-how-a-decision-leaves-the-run)), so a project's agreed destinations are
+reviewable in a pull request instead of rediscovered by each developer alone. A
+bespoke policy format would need its own parser, its own documentation, and its
+own answer to every question [§3](#3-artifact-kinds) already answers.
 
 It also stops the file being egress-only. If a decision ever needs to record
 something other than a destination, the blocks are already defined.
 
 ### 8.3 The name
 
-The file is `lns-local-mixin.yaml`. The old name described a file that held
-policy; this one holds decisions, in mixin grammar, and may hold more than
-egress — so it says what the file **is** rather than what it once carried, and it
-sorts beside the `lns.yaml` it layers on.
+The file is `decisions.yaml`, in the run's own directory. It holds decisions, in
+mixin grammar, and may hold more than egress — so it says what the file **is**
+rather than where it once sat.
 
 Its `name` is the file's own stem, because nobody is present to choose one.
 
-### 8.4 Where a connector grant goes
+### 8.4 How a decision leaves the run
+
+A decision is worth keeping past the run that made it. The run's directory is
+temporary: it goes when the run does.
+
+So a run can be written out as a document the developer names and puts where they
+want ([`cli-spec.md` §3.2.3](cli-spec.md#323-the-runs-decisions-and-saving-them)).
+
+- Written as a `mixin`, the document holds what the run decided and nothing else.
+- Written as a `sandbox`, it holds what the **documents** resolved to: image,
+  command, `env`, `workdir`, `user`, mounts, ports, resources, tools, filesets,
+  credentials, and the `egress` every document source decided, the run's own
+  decisions included. A mixin the run resolved is folded in, so the saved
+  document names none and resolves nothing; what it came from is in the run's
+  audit record, not in the file.
+- **A grant stays out of it.** What a connector granted is source 4
+  ([§3.3.2](#332-merge-rules)). It is one person's consent on one machine
+  ([§8.6](#86-where-a-connector-grant-goes)), so a saved `sandbox` MUST NOT carry
+  it. A teammate running the saved document is asked on their own machine.
+- **Every path is written absolute.** A relative `source` means the directory of
+  the document that declared it ([§3.3.1](#331-how-a-mixin-enters-a-run)), and a
+  saved document lands somewhere else. So a save MUST write the folded absolute
+  path the run resolved. The document then means the same thing from any
+  directory.
+- Either way the document's `name` is the stem of the file it is written to,
+  because someone is present to choose one — unlike the run's own
+  `decisions.yaml` ([§8.3](#83-the-name)). A stem that is not a legal
+  [`name`](#2-common-top-level-fields) MUST refuse the save rather than write a
+  document [§5](#5-validation-summary) would reject.
+
+From that point it is an ordinary document: validated, rendered, published, and
+named by a `mixins` entry like any other.
+
+**That is how a decision travels.** A rule applies because a document names it,
+never because a file sits in a directory. A team commits the saved mixin and the
+`sandbox` that needs it lists it in `spec.mixins`
+([§3.3.2](#332-merge-rules)) — the same resolution as every other mixin, with no
+path that only works from one directory.
+
+### 8.5 What the working directory decides
+
+The working directory decides nothing about a run's contents. It decides nothing
+about consent.
+
+It roots the relative paths the user types on the command line: a `-f`, a
+`--mixin`, a `-v` source, an `--env-file`. A relative `source` inside a document
+roots at the directory of the document that declared it, not at the working
+directory ([§3.3.1](#331-how-a-mixin-enters-a-run)).
+
+One thing follows: a rule applies because a document names it.
+
+### 8.6 Where a connector grant goes
 
 A connector grant does not live here, and this is the one place where "a
 connector is a mixin" stops short of the obvious. Writing the granted
@@ -2310,7 +2371,8 @@ connector's reference into this file's `mixins` would make every later run
 resolve it by the ordinary rules, with no special path anywhere — which is
 exactly why it is tempting, and exactly why it is wrong.
 
-**This file is committable.** A grant is consent to let a real value reach a real
+**This file can be saved out** ([§8.4](#84-how-a-decision-leaves-the-run)), and a
+saved document is committable. A grant is consent to let a real value reach a real
 destination ([§7.1](#71-connectors)), given by one person on one machine, and
 consent does not travel in a git clone. A teammate is asked on their own machine
 rather than inheriting an answer. Worse, the answer would not even work there:
@@ -2325,7 +2387,8 @@ source.
 
 **The working directory decides nothing about consent**
 ([§3.2.4](#324-installing-connecting-and-applying)). Two runs in one directory
-each answer for themselves.
+each answer for themselves. A run's decisions follow the same rule
+([§8.1](#81-what-it-is)), so one rule governs both.
 
 A decline lives beside it, and both are retractable: a run can forget what it
 decided about one connector, so the next run asks again. Neither is a document,
@@ -2337,6 +2400,6 @@ so neither is committed, and a mis-clicked deny is never permanent.
 
 - [Running workloads](running-workloads.md) — the authoring guide for this format.
 - [Policy and approvals](policy.md) — the `match` pattern grammar and the
-  per-directory `lns-local-mixin.yaml`.
+  run's own `decisions.yaml`.
 - [CLI reference](cli-reference.md) — `lns artifact init`, `validate`, `inspect`,
   `push`.
