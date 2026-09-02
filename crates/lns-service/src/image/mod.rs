@@ -1272,9 +1272,9 @@ mod tests {
             "b".repeat(64)
         );
         let manifest = OciImageManifest {
-            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.sandbox.v1+json".into()),
             config: OciDescriptor {
-                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                media_type: "application/vnd.lns.sandbox.config.v1+json".into(),
                 digest: sha256_hex(definition.as_bytes()),
                 size: definition.len() as i64,
                 ..Default::default()
@@ -1315,9 +1315,9 @@ mod tests {
     fn build_mixin_artifact() -> FakeImage {
         let document = r#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"postgres-tools","spec":{"tools":["node@22"]}}"#.to_string();
         let manifest = OciImageManifest {
-            artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.mixin.v1+json".into()),
             config: OciDescriptor {
-                media_type: "application/vnd.lens.mixin.config.v1+json".into(),
+                media_type: "application/vnd.lns.mixin.config.v1+json".into(),
                 digest: sha256_hex(document.as_bytes()),
                 size: document.len() as i64,
                 ..Default::default()
@@ -1335,9 +1335,9 @@ mod tests {
     fn build_connector_artifact() -> FakeImage {
         let document = r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"}}]}}"#.to_string();
         let manifest = OciImageManifest {
-            artifact_type: Some("application/vnd.lens.connector.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.connector.v1+json".into()),
             config: OciDescriptor {
-                media_type: "application/vnd.lens.connector.config.v1+json".into(),
+                media_type: "application/vnd.lns.connector.config.v1+json".into(),
                 digest: sha256_hex(document.as_bytes()),
                 size: document.len() as i64,
                 ..Default::default()
@@ -1581,9 +1581,9 @@ mod tests {
                 .to_string();
         let registry = FakeImage {
             manifest: OciImageManifest {
-                artifact_type: Some("application/vnd.lens.connector.v1+json".into()),
+                artifact_type: Some("application/vnd.lns.connector.v1+json".into()),
                 config: OciDescriptor {
-                    media_type: "application/vnd.lens.connector.config.v1+json".into(),
+                    media_type: "application/vnd.lns.connector.config.v1+json".into(),
                     digest: sha256_hex(document.as_bytes()),
                     size: document.len() as i64,
                     ..Default::default()
@@ -1776,8 +1776,8 @@ mod tests {
     async fn pull_inner_threads_manifest_artifact_type_and_config_media_type() {
         ensure_global_trace_subscriber();
         let mut img = build_two_layer_image();
-        img.manifest.artifact_type = Some("application/vnd.lens.sandbox.v1+json".into());
-        img.manifest.config.media_type = "application/vnd.lens.sandbox.config.v1+json".into();
+        img.manifest.artifact_type = Some("application/vnd.lns.sandbox.v1+json".into());
+        img.manifest.config.media_type = "application/vnd.lns.sandbox.config.v1+json".into();
         let registry = img.into_registry();
         let (_dir, cache) = cache();
         let pulled = pull_inner(&registry, "reg/sandbox:1", &cache)
@@ -1785,11 +1785,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             pulled.artifact_type.as_deref(),
-            Some("application/vnd.lens.sandbox.v1+json"),
+            Some("application/vnd.lns.sandbox.v1+json"),
             "the manifest's artifactType must be carried on the pulled image so run can dispatch",
         );
         assert_eq!(
-            pulled.config_media_type, "application/vnd.lens.sandbox.config.v1+json",
+            pulled.config_media_type, "application/vnd.lns.sandbox.config.v1+json",
             "the config descriptor's mediaType must be carried for the oras empty-artifactType fallback",
         );
     }

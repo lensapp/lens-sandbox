@@ -4443,9 +4443,9 @@ mod tests {
             r#"{{"apiVersion":"lns.run/v1","kind":"mixin","name":"{name}","spec":{spec}}}"#
         );
         let manifest = oci_client::manifest::OciImageManifest {
-            artifact_type: Some("application/vnd.lens.mixin.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.mixin.v1+json".into()),
             config: oci_client::manifest::OciDescriptor {
-                media_type: "application/vnd.lens.mixin.config.v1+json".into(),
+                media_type: "application/vnd.lns.mixin.config.v1+json".into(),
                 digest: format!("sha256:{:x}", sha2::Sha256::digest(document.as_bytes())),
                 size: document.len() as i64,
                 ..Default::default()
@@ -4520,9 +4520,9 @@ mod tests {
             r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"cached-lifecycle","spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
-            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.sandbox.v1+json".into()),
             config: oci_client::manifest::OciDescriptor {
-                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                media_type: "application/vnd.lns.sandbox.config.v1+json".into(),
                 digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
                 size: definition.len() as i64,
                 ..Default::default()
@@ -4689,9 +4689,9 @@ mod tests {
             r#"{{"apiVersion":"lns.run/v1","kind":"sandbox","name":"some-sandbox","spec":{{"image":"{base_ref}"}}}}"#
         );
         let artifact_manifest = oci_client::manifest::OciImageManifest {
-            artifact_type: Some("application/vnd.lens.sandbox.v1+json".into()),
+            artifact_type: Some("application/vnd.lns.sandbox.v1+json".into()),
             config: oci_client::manifest::OciDescriptor {
-                media_type: "application/vnd.lens.sandbox.config.v1+json".into(),
+                media_type: "application/vnd.lns.sandbox.config.v1+json".into(),
                 digest: format!("sha256:{:x}", sha2::Sha256::digest(definition.as_bytes())),
                 size: definition.len() as i64,
                 ..Default::default()

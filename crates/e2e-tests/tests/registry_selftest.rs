@@ -56,8 +56,8 @@ async fn build_push_and_pull_round_trip_through_the_local_registry() {
 
     assert_eq!(
         manifest.artifact_type.as_deref(),
-        Some("application/vnd.lens.sandbox.v1+json"),
-        "the pulled manifest must carry the lens artifactType"
+        Some("application/vnd.lns.sandbox.v1+json"),
+        "the pulled manifest must carry the lns artifactType"
     );
     let parsed = lns_artifact::sandbox::parse(config.as_bytes())
         .expect("the pulled config loads through the same reader run and inspect use");

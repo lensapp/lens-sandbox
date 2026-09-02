@@ -152,8 +152,8 @@ mod tests {
     async fn oci_branch_threads_the_artifact_type_for_dispatch() {
         let (_dir, cache) = empty_cache();
         let mut pulled = sample_pulled();
-        pulled.artifact_type = Some("application/vnd.lens.sandbox.v1+json".into());
-        pulled.config_media_type = "application/vnd.lens.sandbox.config.v1+json".into();
+        pulled.artifact_type = Some("application/vnd.lns.sandbox.v1+json".into());
+        pulled.config_media_type = "application/vnd.lns.sandbox.config.v1+json".into();
         let cell: Mutex<Option<PulledImage>> = Mutex::new(Some(pulled));
         let ingested = run(
             Some("reg/sandbox:1"),
@@ -166,12 +166,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             ingested.artifact_type.as_deref(),
-            Some("application/vnd.lens.sandbox.v1+json"),
+            Some("application/vnd.lns.sandbox.v1+json"),
             "the pulled manifest's artifactType must reach the ingest result so run can dispatch",
         );
         assert_eq!(
             ingested.config_media_type.as_deref(),
-            Some("application/vnd.lens.sandbox.config.v1+json"),
+            Some("application/vnd.lns.sandbox.config.v1+json"),
         );
     }
 
