@@ -320,8 +320,8 @@ audit:
 
 # ── Gate telemetry ────────────────────────────────────────────────────
 # scripts/gate-timing.sh records one row per gate step (pre-push wraps
-# each `make` call) plus the affected-crates verdict. The log is
-# .gate/timings.tsv; set LNS_GATE_TIMING=0 to stop recording.
+# each `make` call) plus the affected-crates verdict. The log lives in the
+# shared git dir so worktrees pool one history; LNS_GATE_TIMING=0 stops it.
 
 gate-report:
 	@./scripts/gate-timing.sh report

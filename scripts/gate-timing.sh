@@ -14,8 +14,9 @@
 # write, for something a step only learns about itself mid-run. `report`
 # summarises the log, over the last 30 days unless told otherwise.
 #
-# The log is TSV at $LNS_GATE_TIMING_LOG (default .gate/timings.tsv, which is
-# gitignored and outlives `cargo clean`). Columns:
+# The log is TSV at $LNS_GATE_TIMING_LOG. It defaults to
+# <git-common-dir>/lns-gate/timings.tsv, which every worktree of the repo
+# shares and no checkout tracks. Columns:
 #
 #   started_at  step  duration_s  exit_code  branch  commit  detail
 #
@@ -24,21 +25,48 @@
 
 set -eu
 
+# The git common dir, so every worktree of one repo appends to one history —
+# a per-worktree log would restart from nothing on each branch.
 log_path() {
     if [ -n "${LNS_GATE_TIMING_LOG:-}" ]; then
         echo "$LNS_GATE_TIMING_LOG"
         return
     fi
+    # git echoes an unknown flag back and exits 0, so only an absolute answer
+    # proves --path-format was understood.
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | tail -n 1)
+    case "$common" in
+        /*)
+            echo "$common/lns-gate/timings.tsv"
+            return
+            ;;
+    esac
     root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
     echo "$root/.gate/timings.tsv"
+}
+
+# A step's mid-run label is handed to the wrapper in the same process tree, so
+# it stays per worktree — two worktrees building at once must not trade labels.
+detail_dir() {
+    if [ -n "${LNS_GATE_DETAIL_FILE:-}" ]; then
+        echo "$LNS_GATE_DETAIL_FILE"
+        return
+    fi
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    echo "$root/.gate/detail"
 }
 
 # Telemetry never speaks for the step it measures, so it swallows its own I/O errors.
 append() {
     [ "${LNS_GATE_TIMING:-1}" = "0" ] && return 0
     log=$(log_path)
-    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
-    commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    # git can print a value *and* fail — an unborn branch does exactly that —
+    # so take the last line and default only when nothing came back. A row that
+    # spans two lines is a row the report cannot read.
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | tail -n 1)
+    commit=$(git rev-parse --short HEAD 2>/dev/null | tail -n 1)
+    [ -n "$branch" ] || branch=unknown
+    [ -n "$commit" ] || commit=unknown
     {
         mkdir -p "$(dirname "$log")" &&
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -47,11 +75,7 @@ append() {
 }
 
 detail_path() {
-    if [ -n "${LNS_GATE_DETAIL_FILE:-}" ]; then
-        echo "$LNS_GATE_DETAIL_FILE.$1"
-    else
-        echo "$(dirname "$(log_path)")/detail.$1"
-    fi
+    echo "$(detail_dir).$1"
 }
 
 # A step that learns something about itself mid-run — `make coverage` finding a
