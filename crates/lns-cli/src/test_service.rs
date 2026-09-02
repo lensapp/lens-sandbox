@@ -179,10 +179,6 @@ impl SandboxService for CannedService {
         None
     }
 
-    fn document_exists(&self, _path: &std::path::Path) -> bool {
-        false
-    }
-
     fn write_document(&self, _path: &std::path::Path, _contents: &str) -> std::io::Result<()> {
         Ok(())
     }

@@ -377,9 +377,6 @@ async fn save<W: std::io::Write>(
     args: &SandboxSaveArgs,
     out: &mut W,
 ) -> Result<i32> {
-    if svc.document_exists(&args.file) {
-        bail!("{} already exists; not overwriting it", args.file.display());
-    }
     let name = document_name(&args.file)?;
     match svc
         .one_shot(Request::SaveRun {
@@ -390,8 +387,7 @@ async fn save<W: std::io::Write>(
         .await?
     {
         Response::RunSaved { document } => {
-            svc.write_document(&args.file, &document)
-                .with_context(|| format!("writing {}", args.file.display()))?;
+            write_saved_document(svc, &args.file, &document)?;
             writeln!(out, "saved sandbox {} to {}", args.run, args.file.display())?;
             Ok(0)
         }
@@ -399,6 +395,21 @@ async fn save<W: std::io::Write>(
             "save", &args.run, &message,
         )),
         other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+/// Creating the file is the refusal: a check before the write is a window in which the file appears, and a path that is already there would be truncated in it.
+fn write_saved_document(
+    svc: &impl SandboxService,
+    file: &std::path::Path,
+    document: &str,
+) -> Result<()> {
+    match svc.write_document(file, document) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists; not overwriting it", file.display())
+        }
+        Err(e) => Err(e).with_context(|| format!("writing {}", file.display())),
     }
 }
 
