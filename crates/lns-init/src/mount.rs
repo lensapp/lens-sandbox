@@ -3724,9 +3724,9 @@ mod tests {
 
     #[test]
     fn a_claims_manifest_the_guest_cannot_read_refuses_the_boot_rather_than_dropping_the_guard() {
-        let sys = FakeSyscalls::new().fail_when(|call| match call {
-            Call::ReadToString { path } if path == CLAIMS_FILE => Some(ErrorKind::PermissionDenied),
-            _ => None,
+        let sys = FakeSyscalls::new().fail_when(|call| {
+            matches!(call, Call::ReadToString { path } if path == CLAIMS_FILE)
+                .then_some(ErrorKind::PermissionDenied)
         });
         let err = mount_binds(
             &sys,

@@ -146,13 +146,14 @@ mod tests {
         ])
         .expect("claims make a manifest");
         assert_eq!(spec.guest_path, CLAIMS_MANIFEST_PATH);
-        match spec.source {
-            RuntimeSource::Bytes(body) => assert_eq!(
-                String::from_utf8(body).expect("utf8"),
-                "claude\t~/.claude/.credentials.json\nother\t~/.a/b\n"
-            ),
-            other => panic!("the manifest must be inline bytes, got {other:?}"),
-        }
+        assert_eq!(
+            spec.source
+                .as_bytes()
+                .map(String::from_utf8_lossy)
+                .as_deref(),
+            Some("claude\t~/.claude/.credentials.json\nother\t~/.a/b\n"),
+            "one line per claim, each naming the connector"
+        );
     }
 
     #[test]
