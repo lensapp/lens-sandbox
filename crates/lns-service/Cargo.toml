@@ -1,6 +1,6 @@
 [package]
 name = "lns-service"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 description = "LNS background service — tray-resident process exposing local IPC and orchestrating microVM runs"
 license = "Apache-2.0"
