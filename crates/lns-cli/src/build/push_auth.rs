@@ -1,4 +1,5 @@
 use lns_policy::registry_auth::{RegistryAuthFile, credential_for};
+use oci_client::errors::{OciDistributionError, OciEnvelope, OciErrorCode};
 use oci_client::{Reference, secrets::RegistryAuth};
 
 /// Pick the push credential for `registry` from a loaded auth file, falling back to anonymous when the store couldn't be read or holds no entry for it.
@@ -15,71 +16,190 @@ pub(crate) fn select_auth(
     }
 }
 
-/// A 401/403 from any push phase is a credential refusal — bearer registries hand `auth()` a reduced-scope token and only refuse at upload — so it earns the recipe; every other failure surfaces verbatim.
-fn is_auth_refusal(err: &oci_client::errors::OciDistributionError) -> bool {
-    use oci_client::errors::OciDistributionError::{
-        AuthenticationFailure, ServerError, UnauthorizedError,
-    };
-    matches!(
-        err,
-        AuthenticationFailure(_)
-            | UnauthorizedError { .. }
-            | ServerError {
-                code: 401 | 403,
-                ..
-            }
-    )
+enum Refusal {
+    LoginCanFix(Option<String>),
+    Denied(String),
+    Unavailable(String),
 }
 
-/// Map the pre-flight `auth()` failure: a refusal earns the recipe, anything else reads as an unreachable registry.
+/// A 401/403 from any push phase is a refusal — bearer registries hand `auth()` a reduced-scope token and only refuse at upload — so it is answered here; every other failure surfaces verbatim.
+fn refusal(err: &OciDistributionError) -> Option<Refusal> {
+    match err {
+        OciDistributionError::AuthenticationFailure(body) => Some(token_body_refusal(body)),
+        OciDistributionError::UnauthorizedError { .. } => Some(Refusal::LoginCanFix(None)),
+        OciDistributionError::ServerError {
+            code: 401, message, ..
+        } => Some(Refusal::LoginCanFix(registry_words(message))),
+        OciDistributionError::ServerError {
+            code: 403, message, ..
+        } => Some(match registry_words(message) {
+            Some(words) => Refusal::Denied(words),
+            None => Refusal::LoginCanFix(None),
+        }),
+        OciDistributionError::RegistryError { envelope, .. } => {
+            envelope_words(envelope).map(Refusal::Denied)
+        }
+        _ => None,
+    }
+}
+
+/// `auth()` collapses every non-200 from `/token` into a bodyless-or-not string, so the body is all lns has to tell an outage from a refusal.
+fn token_body_refusal(body: &str) -> Refusal {
+    match registry_words(body) {
+        None => Refusal::LoginCanFix(None),
+        Some(words) if reports_server_status(body) => Refusal::Unavailable(words),
+        Some(words) => Refusal::Denied(words),
+    }
+}
+
+fn registry_words(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    if let Ok(envelope) = serde_json::from_str::<OciEnvelope>(body)
+        && let Some(words) = envelope_words(&envelope)
+    {
+        return Some(words);
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(json) => Some(explained_field(&json).unwrap_or_else(|| body.to_string())),
+        Err(_) => Some(body.to_string()),
+    }
+}
+
+fn explained_field(json: &serde_json::Value) -> Option<String> {
+    json.get("details")
+        .or_else(|| json.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn envelope_words(envelope: &OciEnvelope) -> Option<String> {
+    let lines: Vec<String> = envelope
+        .errors
+        .iter()
+        .map(|error| match error.message.trim() {
+            "" => code_label(&error.code),
+            message => format!("{}: {message}", code_label(&error.code)),
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
+fn code_label(code: &OciErrorCode) -> String {
+    let named = format!("{code:?}");
+    let mut label = String::with_capacity(named.len() + 4);
+    for (position, letter) in named.char_indices() {
+        if position != 0 && letter.is_uppercase() {
+            label.push('_');
+        }
+        label.push(letter.to_ascii_uppercase());
+    }
+    label
+}
+
+fn reports_server_status(body: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(json) => status_field(&json).is_some_and(is_server_status),
+        Err(_) => body
+            .split(|character: char| !character.is_ascii_digit())
+            .filter_map(|token| token.parse::<u16>().ok())
+            .any(is_server_status),
+    }
+}
+
+fn status_field(json: &serde_json::Value) -> Option<u16> {
+    let status = json.get("status").or_else(|| json.get("code"))?.as_u64()?;
+    u16::try_from(status).ok()
+}
+
+fn is_server_status(code: u16) -> bool {
+    (500..=599).contains(&code)
+}
+
+/// Map the pre-flight `auth()` failure: a refusal speaks in the registry's words, anything else reads as an unreachable registry.
 pub(crate) fn auth_error(
     reference: &Reference,
     auth: &RegistryAuth,
-    err: oci_client::errors::OciDistributionError,
+    err: OciDistributionError,
 ) -> anyhow::Error {
-    if is_auth_refusal(&err) {
-        auth_refused(reference, auth, err)
-    } else {
-        anyhow::Error::new(err).context(format!(
+    match token_refusal(&err) {
+        Some(refused_because) => refused(reference, auth, err, refused_because),
+        None => anyhow::Error::new(err).context(format!(
             "could not reach {} to authenticate the push",
             reference.registry()
-        ))
+        )),
     }
 }
 
-/// Map an upload-phase (`push_blob` / `push_manifest_raw`) failure: a refusal earns the recipe, anything else surfaces verbatim under `context`.
+/// A 5xx on the token handshake is an outage of the authorization itself, so it never earns the recipe.
+fn token_refusal(err: &OciDistributionError) -> Option<Refusal> {
+    match err {
+        OciDistributionError::ServerError {
+            code, message, url, ..
+        } if is_server_status(*code) => Some(Refusal::Unavailable(
+            registry_words(message)
+                .unwrap_or_else(|| format!("{url} answered HTTP {code} with no explanation")),
+        )),
+        _ => refusal(err),
+    }
+}
+
+/// Map an upload-phase (`push_blob` / `push_manifest_raw`) failure: a refusal speaks in the registry's words, anything else surfaces verbatim under `context`.
 pub(crate) fn push_error(
     reference: &Reference,
     auth: &RegistryAuth,
-    err: oci_client::errors::OciDistributionError,
+    err: OciDistributionError,
     context: String,
 ) -> anyhow::Error {
-    if is_auth_refusal(&err) {
-        auth_refused(reference, auth, err)
-    } else {
-        anyhow::Error::new(err).context(context)
+    match refusal(&err) {
+        Some(refused_because) => refused(reference, auth, err, refused_because),
+        None => anyhow::Error::new(err).context(context),
     }
 }
 
-fn auth_refused(
+fn refused(
     reference: &Reference,
     auth: &RegistryAuth,
     err: impl std::fmt::Display,
+    refusal: Refusal,
 ) -> anyhow::Error {
     crate::log::debug!(registry = %reference.registry(), error = %err, "registry refused the push auth");
-    auth_refused_message(reference, auth)
+    let registry = reference.registry();
+    match refusal {
+        Refusal::LoginCanFix(words) => login_refused_message(reference, auth, words),
+        Refusal::Denied(words) => anyhow::anyhow!(
+            "{registry} refused the push of {}\n\n{words}",
+            reference.repository()
+        ),
+        Refusal::Unavailable(words) => {
+            anyhow::anyhow!("{registry} cannot authorize the push right now\n\n{words}")
+        }
+    }
 }
 
-fn auth_refused_message(reference: &Reference, auth: &RegistryAuth) -> anyhow::Error {
+fn login_refused_message(
+    reference: &Reference,
+    auth: &RegistryAuth,
+    words: Option<String>,
+) -> anyhow::Error {
     let registry = reference.registry();
     let recipe = login_recipe(registry);
+    let said = match words {
+        Some(words) => format!("\n\n{words}"),
+        None => String::new(),
+    };
     match auth {
         RegistryAuth::Anonymous => anyhow::anyhow!(
-            "{registry} denied the push — no login is stored for it\n\n\
+            "{registry} denied the push — no login is stored for it{said}\n\n\
              Sign in with a token that has push access, then push again:\n\n{recipe}"
         ),
         _ => anyhow::anyhow!(
-            "{registry} denied the push — it refused the stored login\n\n\
+            "{registry} denied the push — it refused the stored login{said}\n\n\
              The token may be expired, missing push scope, or not allowed to\n\
              write {}. Refresh the login, then push again:\n\n{recipe}",
             reference.repository()
@@ -101,7 +221,7 @@ fn login_recipe(registry: &str) -> String {
 mod tests {
     use super::*;
     use lns_policy::registry_auth::{RegistryAuthFile, RegistryCredential};
-    use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
+    use oci_client::errors::OciError;
     use std::io;
 
     fn reference() -> Reference {
@@ -439,7 +559,9 @@ mod tests {
         );
         let text = format!("{err:#}");
         assert!(
-            text.contains("DENIED: the name acme belongs to another namespace; push to acme-2/hermes"),
+            text.contains(
+                "DENIED: the name acme belongs to another namespace; push to acme-2/hermes"
+            ),
             "an envelope renders as code: message lines: {text}"
         );
         assert!(
