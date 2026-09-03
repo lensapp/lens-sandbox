@@ -101,10 +101,25 @@ fn login_recipe(registry: &str) -> String {
 mod tests {
     use super::*;
     use lns_policy::registry_auth::{RegistryAuthFile, RegistryCredential};
+    use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
     use std::io;
 
     fn reference() -> Reference {
         "ghcr.io/acme/my-sandbox:1.0.0".parse().unwrap()
+    }
+
+    fn hub_reference() -> Reference {
+        "hub.lns.run/acme/hermes:1.0.0".parse().unwrap()
+    }
+
+    fn envelope(code: OciErrorCode, message: &str) -> OciEnvelope {
+        OciEnvelope {
+            errors: vec![OciError {
+                code,
+                message: message.into(),
+                detail: serde_json::Value::Null,
+            }],
+        }
     }
 
     #[test]
@@ -148,24 +163,28 @@ mod tests {
     }
 
     #[test]
-    fn an_anonymous_refusal_points_at_lns_login_without_the_raw_registry_error() {
-        let err = auth_refused(
+    fn an_anonymous_401_points_at_lns_login() {
+        let err = auth_error(
             &reference(),
             &RegistryAuth::Anonymous,
-            r#"{"code":"DENIED"}"#,
+            OciDistributionError::UnauthorizedError {
+                url: "https://ghcr.io/v2/".into(),
+            },
         );
         let text = format!("{err:#}");
         assert!(text.contains("ghcr.io denied the push"), "{text}");
         assert!(text.contains("no login is stored"), "{text}");
-        assert!(
-            !text.contains("DENIED"),
-            "the raw registry error belongs on the debug stream only: {text}"
-        );
     }
 
     #[test]
     fn a_ghcr_refusal_teaches_the_gh_cli_token_recipe() {
-        let err = auth_refused(&reference(), &RegistryAuth::Anonymous, "denied");
+        let err = auth_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::UnauthorizedError {
+                url: "https://ghcr.io/v2/".into(),
+            },
+        );
         let text = format!("{err:#}");
         assert!(
             text.contains("gh auth refresh --scopes write:packages"),
@@ -177,7 +196,13 @@ mod tests {
     #[test]
     fn a_generic_registry_refusal_gets_the_plain_login_recipe() {
         let reference: Reference = "registry.example.test/team/thing:1".parse().unwrap();
-        let err = auth_refused(&reference, &RegistryAuth::Anonymous, "denied");
+        let err = auth_error(
+            &reference,
+            &RegistryAuth::Anonymous,
+            OciDistributionError::UnauthorizedError {
+                url: "https://registry.example.test/v2/".into(),
+            },
+        );
         let text = format!("{err:#}");
         assert!(
             text.contains(
@@ -189,24 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn an_authentication_failure_gets_the_login_recipe() {
-        use oci_client::errors::OciDistributionError;
-        let err = auth_error(
-            &reference(),
-            &RegistryAuth::Anonymous,
-            OciDistributionError::UnauthorizedError {
-                url: "https://ghcr.io/v2/".into(),
-            },
-        );
-        assert!(
-            format!("{err:#}").contains("no login is stored"),
-            "a 401 must still point at `lns login`: {err:#}"
-        );
-    }
-
-    #[test]
     fn a_transport_failure_surfaces_the_error_without_the_login_recipe() {
-        use oci_client::errors::OciDistributionError;
         let err = auth_error(
             &reference(),
             &RegistryAuth::Anonymous,
@@ -224,9 +232,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_credential_refusal_names_scope_and_repository() {
+    fn a_stored_credential_401_names_scope_and_repository() {
         let auth = RegistryAuth::Basic("user".into(), "secret".into());
-        let err = auth_refused(&reference(), &auth, "DENIED");
+        let err = auth_error(
+            &reference(),
+            &auth,
+            OciDistributionError::UnauthorizedError {
+                url: "https://ghcr.io/v2/".into(),
+            },
+        );
         let text = format!("{err:#}");
         assert!(text.contains("it refused the stored login"), "{text}");
         assert!(text.contains("acme/my-sandbox"), "{text}");
@@ -237,8 +251,260 @@ mod tests {
     }
 
     #[test]
-    fn a_push_scope_refusal_at_upload_earns_the_login_recipe() {
-        use oci_client::errors::OciDistributionError;
+    fn an_empty_token_refusal_still_teaches_the_login_recipe() {
+        let err = auth_error(
+            &reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(String::new()),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no login is stored") && text.contains("lns login ghcr.io"),
+            "a bodyless token refusal is all lns knows, so it keeps the recipe: {text}"
+        );
+    }
+
+    #[test]
+    fn a_token_refusal_shows_the_registrys_own_words_instead_of_the_recipe() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Basic("user".into(), "secret".into()),
+            OciDistributionError::AuthenticationFailure(
+                r#"{"details":"the name acme belongs to another namespace; your organization is acme-2 on this hub, push to acme-2/hermes"}"#
+                    .into(),
+            ),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("your organization is acme-2 on this hub, push to acme-2/hermes"),
+            "the registry explained the refusal; that explanation is the message: {text}"
+        );
+        assert!(
+            !text.contains("lns login"),
+            "logging in again does not fix a name collision: {text}"
+        );
+        assert!(
+            !text.contains("details"),
+            "the JSON envelope is not part of the registry's words: {text}"
+        );
+    }
+
+    #[test]
+    fn a_token_5xx_says_the_registry_cannot_authorize_right_now() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Basic("user".into(), "secret".into()),
+            OciDistributionError::ServerError {
+                code: 503,
+                url: "https://hub.lns.run/token".into(),
+                message: r#"{"details":"the hub cannot confirm your Lens Business ID membership right now"}"#.into(),
+            },
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot authorize the push right now"),
+            "a 5xx from /token is an outage, not a credential refusal: {text}"
+        );
+        assert!(
+            text.contains("the hub cannot confirm your Lens Business ID membership right now"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("lns login"),
+            "a login cannot fix an outage: {text}"
+        );
+    }
+
+    #[test]
+    fn a_bodyless_token_5xx_still_reports_the_status() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::ServerError {
+                code: 502,
+                url: "https://hub.lns.run/token".into(),
+                message: String::new(),
+            },
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot authorize the push right now") && text.contains("502"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_token_body_that_reports_a_5xx_reads_as_an_outage() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(
+                "503 Service Temporarily Unavailable".into(),
+            ),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot authorize the push right now")
+                && text.contains("503 Service Temporarily Unavailable"),
+            "{text}"
+        );
+        assert!(!text.contains("lns login"), "{text}");
+    }
+
+    #[test]
+    fn a_json_status_field_of_503_reads_as_an_outage() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(
+                r#"{"status":503,"message":"the upstream is down"}"#.into(),
+            ),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot authorize the push right now")
+                && text.contains("the upstream is down"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_number_inside_a_json_message_is_not_a_status() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(
+                r#"{"details":"the manifest is over the 500 KiB cap"}"#.into(),
+            ),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("refused the push") && text.contains("over the 500 KiB cap"),
+            "a number in prose does not make a refusal an outage: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_token_body_surfaces_verbatim_but_trimmed() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure("  push a signed artifact  \n".into()),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("hub.lns.run refused the push"), "{text}");
+        assert!(
+            text.contains("\n\npush a signed artifact"),
+            "an unparseable body is still the registry's words: {text}"
+        );
+    }
+
+    #[test]
+    fn a_json_body_with_no_message_field_surfaces_verbatim() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(r#"{"errors":[]}"#.into()),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains(r#"{"errors":[]}"#), "{text}");
+    }
+
+    #[test]
+    fn a_token_body_that_is_an_oci_envelope_renders_as_code_and_message() {
+        let err = auth_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::AuthenticationFailure(
+                r#"{"errors":[{"code":"DENIED","message":"push to acme-2/hermes"}]}"#.into(),
+            ),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("DENIED: push to acme-2/hermes"), "{text}");
+    }
+
+    #[test]
+    fn a_403_envelope_at_upload_renders_as_code_and_message_lines() {
+        let err = push_error(
+            &hub_reference(),
+            &RegistryAuth::Basic("user".into(), "secret".into()),
+            OciDistributionError::RegistryError {
+                envelope: envelope(
+                    OciErrorCode::Denied,
+                    "the name acme belongs to another namespace; push to acme-2/hermes",
+                ),
+                url: "https://hub.lns.run/v2/acme/hermes/blobs/uploads/".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("DENIED: the name acme belongs to another namespace; push to acme-2/hermes"),
+            "an envelope renders as code: message lines: {text}"
+        );
+        assert!(
+            !text.contains("envelope:") && !text.contains("OCI API error"),
+            "the Debug-ish oci-client form must not reach the user: {text}"
+        );
+        assert!(
+            !text.contains("lns login"),
+            "an authenticated-but-not-allowed refusal is not a login problem: {text}"
+        );
+    }
+
+    #[test]
+    fn a_multi_word_envelope_code_renders_screaming_snake_case() {
+        let err = push_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::RegistryError {
+                envelope: envelope(OciErrorCode::NameUnknown, "no such repository"),
+                url: "https://hub.lns.run/v2/acme/hermes/blobs/uploads/".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        assert!(
+            format!("{err:#}").contains("NAME_UNKNOWN: no such repository"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_messageless_envelope_error_renders_its_code_alone() {
+        let err = push_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::RegistryError {
+                envelope: envelope(OciErrorCode::Denied, ""),
+                url: "https://hub.lns.run/v2/acme/hermes/blobs/uploads/".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("DENIED"), "{text}");
+        assert!(!text.contains("DENIED:"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_envelope_surfaces_under_its_push_context() {
+        let err = push_error(
+            &hub_reference(),
+            &RegistryAuth::Anonymous,
+            OciDistributionError::RegistryError {
+                envelope: OciEnvelope { errors: vec![] },
+                url: "https://hub.lns.run/v2/acme/hermes/blobs/uploads/".into(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("pushing blob sha256:abc"),
+            "an envelope with nothing in it has no words to show: {text}"
+        );
+    }
+
+    #[test]
+    fn a_403_with_a_message_at_upload_is_a_refusal_not_a_login_problem() {
         let auth = RegistryAuth::Basic("octocat".into(), "ghp_token".into());
         let err = push_error(
             &reference(),
@@ -246,41 +512,69 @@ mod tests {
             OciDistributionError::ServerError {
                 code: 403,
                 url: "https://ghcr.io/v2/acme/my-sandbox/blobs/uploads/".into(),
-                message: "denied".into(),
+                message: "installation not allowed to write package".into(),
             },
             "pushing blob sha256:abc".into(),
         );
         let text = format!("{err:#}");
-        assert!(text.contains("ghcr.io denied the push"), "{text}");
+        assert!(text.contains("ghcr.io refused the push"), "{text}");
         assert!(
-            text.contains("missing push scope"),
-            "a 403 at upload must reach the missing-push-scope recipe, not the raw blob-push context: {text}"
+            text.contains("installation not allowed to write package"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("lns login"),
+            "a 403 that explains itself is not a stale-login problem: {text}"
         );
         assert!(
             !text.contains("pushing blob"),
-            "the upload-phase context must not mask the recipe for a refusal: {text}"
+            "the upload-phase context must not mask the registry's words: {text}"
         );
     }
 
     #[test]
-    fn a_401_at_upload_is_also_a_refusal() {
-        use oci_client::errors::OciDistributionError;
+    fn a_bodyless_403_at_upload_earns_the_push_scope_recipe() {
+        let auth = RegistryAuth::Basic("octocat".into(), "ghp_token".into());
+        let err = push_error(
+            &reference(),
+            &auth,
+            OciDistributionError::ServerError {
+                code: 403,
+                url: "https://ghcr.io/v2/acme/my-sandbox/blobs/uploads/".into(),
+                message: String::new(),
+            },
+            "pushing blob sha256:abc".into(),
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("missing push scope") && text.contains("gh auth token | lns login"),
+            "with no explanation, a 403 is still best read as a scope problem: {text}"
+        );
+    }
+
+    #[test]
+    fn a_401_at_upload_shows_the_registrys_words_before_the_recipe() {
         let err = push_error(
             &reference(),
             &RegistryAuth::Anonymous,
             OciDistributionError::ServerError {
                 code: 401,
                 url: "https://ghcr.io/v2/".into(),
-                message: "unauthorized".into(),
+                message: "authentication required".into(),
             },
             "pushing manifest to ghcr.io/acme/my-sandbox:1.0.0".into(),
         );
-        assert!(format!("{err:#}").contains("no login is stored"), "{err:#}");
+        let text = format!("{err:#}");
+        let said = text
+            .find("authentication required")
+            .expect("the registry's words must surface");
+        let recipe = text.find("lns login").expect("a 401 keeps the recipe");
+        assert!(said < recipe, "the registry speaks first: {text}");
+        assert!(text.contains("no login is stored"), "{text}");
     }
 
     #[test]
     fn a_non_auth_upload_failure_surfaces_verbatim_under_its_context() {
-        use oci_client::errors::OciDistributionError;
         let err = push_error(
             &reference(),
             &RegistryAuth::Basic("u".into(), "p".into()),
@@ -294,7 +588,7 @@ mod tests {
         let text = format!("{err:#}");
         assert!(
             text.contains("pushing blob sha256:abc"),
-            "a 5xx keeps its push-phase context: {text}"
+            "a 5xx at upload keeps its push-phase context: {text}"
         );
         assert!(
             !text.contains("denied the push"),
@@ -307,20 +601,18 @@ mod tests {
     }
 
     #[test]
-    fn a_preflight_server_403_is_classified_as_a_refusal() {
-        use oci_client::errors::OciDistributionError;
+    fn a_preflight_403_shows_the_registrys_words() {
         let err = auth_error(
             &reference(),
             &RegistryAuth::Anonymous,
             OciDistributionError::ServerError {
                 code: 403,
                 url: "https://ghcr.io/token".into(),
-                message: "denied".into(),
+                message: "denied: no write access".into(),
             },
         );
-        assert!(
-            format!("{err:#}").contains("no login is stored"),
-            "a 403 from the pre-flight auth must also reach the recipe: {err:#}"
-        );
+        let text = format!("{err:#}");
+        assert!(text.contains("denied: no write access"), "{text}");
+        assert!(!text.contains("lns login"), "{text}");
     }
 }
