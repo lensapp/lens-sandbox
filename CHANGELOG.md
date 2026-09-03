@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.24.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.23.0...lns-v0.24.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** drop .lnsignore in favour of a bind's exclude
+* `lns-local-mixin.yaml` is gone. A rule reaches a run because a document names it in `spec.mixins` or on `--mixin`, never because a file sits in a directory.
+* **ipc:** on macOS the service socket moves to `<data-dir>/run.lns/service.sock`. An existing install leaves a stale socket file behind; delete the old directory. No run data is lost.
+* **cli:** rename a committed `.lensignore` to `.lnsignore`. The old name is no longer read, so the paths it listed would be exposed.
+* **artifact:** an artifact published under `application/vnd.lens.*` no longer resolves. Re-publish it.
+* OCSF audit records now carry `metadata.product.name` and `cloud.provider` of `lns` instead of `lens-sandbox`. A consumer that filters on either value must be updated.
+* **connectors:** connector-grants.json is keyed by run id, so every recorded grant and decline is unreadable and the run is asked again.
+* remove connectors and credentials
+
+### Features
+
+* a run's decisions live with the run, and lns sandbox save keeps them ([e2c11b8](https://github.com/lensapp/lens-sandbox/commit/e2c11b850b854afa267738a1f2ae3ddfe3e19df2))
+* **artifact:** a bind's own exclude admits a fileset that writes there ([d5658ee](https://github.com/lensapp/lens-sandbox/commit/d5658ee19fc583fc4479364691483f26d938c4c1))
+* **artifact:** a resolved sandbox keeps the credentials it declared ([b03afba](https://github.com/lensapp/lens-sandbox/commit/b03afbaea916b0a5892adbd083b5adfc9c272b95))
+* **artifact:** publish and read vnd.lns.* media types ([5773278](https://github.com/lensapp/lens-sandbox/commit/577327842f537df62f18ed6ac3bf5efd5a01af38))
+* **audit:** a run's connector decisions are written to the chain ([653ed25](https://github.com/lensapp/lens-sandbox/commit/653ed25381e319dd2607cba5116dcff11ab21a32)), closes [#354](https://github.com/lensapp/lens-sandbox/issues/354)
+* **cli:** the ignore file is .lnsignore ([04b7662](https://github.com/lensapp/lens-sandbox/commit/04b7662fa1b35ba8d86b3365b2111b6382c3e300))
+* **connectors:** a declared variable an installed connector claims boots with its marker ([6c7f28d](https://github.com/lensapp/lens-sandbox/commit/6c7f28d30e27b29c7ffb91c365d55ea8d27d17b6))
+* **connectors:** a dotted credentials file is secret-shaped ([d9edb0e](https://github.com/lensapp/lens-sandbox/commit/d9edb0e96531966936462e6325d4a72afd4955f2))
+* **connectors:** a fileset lands where a running guest can be given one ([5d2782c](https://github.com/lensapp/lens-sandbox/commit/5d2782cd00967b22307bb48065c1a900a46e43af))
+* **connectors:** a grant is keyed by the run that holds it ([4fed1f1](https://github.com/lensapp/lens-sandbox/commit/4fed1f175d76376f003504189487e276976e4aa3))
+* **connectors:** a grant may be reserved for a name no run holds ([a39fefe](https://github.com/lensapp/lens-sandbox/commit/a39fefe2b77ca848f9702a20f3872cbbbecef232))
+* **connectors:** a run holds what its project has not decided ([ac44727](https://github.com/lensapp/lens-sandbox/commit/ac44727d578f75ea71efdd7ede58243dcffe0d53))
+* **connectors:** a served destination is held and asked about ([609ba74](https://github.com/lensapp/lens-sandbox/commit/609ba743181ee40209cb76e1fc232e56f64c6a73))
+* **connectors:** a served destination offers to connect ([61c094c](https://github.com/lensapp/lens-sandbox/commit/61c094ce9ecad520d428499b7595d6b76b9138e1))
+* **connectors:** accept a connector document ([21a2d26](https://github.com/lensapp/lens-sandbox/commit/21a2d261fbc35cd2c09e9c6460a389f5c3c35ad0))
+* **connectors:** an inline fileset is offered and written ([431c3fd](https://github.com/lensapp/lens-sandbox/commit/431c3fd5f2595348c735adac1fc9b61748c3d4da))
+* **connectors:** connect, grant, disconnect and forget ([a236378](https://github.com/lensapp/lens-sandbox/commit/a236378531510b03bb246cdb32b37c1b6ffe187b))
+* **connectors:** install a connector by reference or by path ([4743664](https://github.com/lensapp/lens-sandbox/commit/4743664585675aa2fc834501f62fa73fc086a81a))
+* **connectors:** install keeps the directory a method packs ([3dedec9](https://github.com/lensapp/lens-sandbox/commit/3dedec90f9ffbef1d3d8c9e86f7d564bd20ca1d9))
+* **connectors:** keep the installed set, the profiles, and each project's answer ([7643601](https://github.com/lensapp/lens-sandbox/commit/764360139488d31d3488d74b9584b0566b0b4947))
+* **connectors:** push counts what a packed directory will send ([f3fdf84](https://github.com/lensapp/lens-sandbox/commit/f3fdf84b7f14581ec00a178126c3f50b7f076141))
+* **connectors:** the card names the deny a grant would overturn ([9489f59](https://github.com/lensapp/lens-sandbox/commit/9489f59dd0325eea85b89c4f60c7cb2671e36b00))
+* **connectors:** the policy frame carries the files a grant writes ([7825060](https://github.com/lensapp/lens-sandbox/commit/7825060a0e727e9d99f84d8179a6198a445146df))
+* **connectors:** the run the user names takes what was reserved for it ([8a85b1b](https://github.com/lensapp/lens-sandbox/commit/8a85b1b20f8600d4853f4bd28e276e160ef31ac6))
+* **connectors:** the variable a connector serves holds its placeholder ([e7c1eed](https://github.com/lensapp/lens-sandbox/commit/e7c1eed363940a3ce639cf08d8e921bf600918ef))
+* **connectors:** what a run granted goes when the run does ([bea1b20](https://github.com/lensapp/lens-sandbox/commit/bea1b2050650d5b3f0a6e1164bb9fbb5c38e6be3))
+* **connectors:** what one method may write has a ceiling ([470990e](https://github.com/lensapp/lens-sandbox/commit/470990e8121af77d0cec20d29d8ac2efe2e92a66))
+* **init:** a bind with a fileset-seeded exclude mounts entry by entry ([8734833](https://github.com/lensapp/lens-sandbox/commit/87348336cc2651ad8871f8347d2a720d762ba440))
+* **ipc:** the service socket lives under run.lns ([2eaf1fd](https://github.com/lensapp/lens-sandbox/commit/2eaf1fd57aae340f635ededefc51823a2b12600d))
+* LNS is the product name ([2c32a79](https://github.com/lensapp/lens-sandbox/commit/2c32a7918c72115135f3357fd63f66dfa69039a9))
+* **lns-cli:** lns connector install, uninstall and list ([dcb7881](https://github.com/lensapp/lens-sandbox/commit/dcb788173c04909078e522b2c093f60201048bff))
+* **service:** a bind carries the excluded paths a fileset writes into ([1264d3d](https://github.com/lensapp/lens-sandbox/commit/1264d3dfc0032eb79e3bdb638190cfac86069fcb))
+* **service:** a run tells the guest what installed connectors would write ([f3edde1](https://github.com/lensapp/lens-sandbox/commit/f3edde1e47612959e0198981326f158413fb1ba0))
+* **service:** the tray shows the LNS mark ([85d1b72](https://github.com/lensapp/lens-sandbox/commit/85d1b72cdc2a5aa4620eae6f40257152f546b14c))
+
+
+### Bug Fixes
+
+* **artifact:** a fileset claim is a path it writes, not its guestPath ([b73b484](https://github.com/lensapp/lens-sandbox/commit/b73b484378bc8bedfdc790d146b50826837b4cf9))
+* **cli:** a push refusal shows the registry's own words ([340887d](https://github.com/lensapp/lens-sandbox/commit/340887d2fe9a50e556f0fd72d0fee93a8ba2e5ee))
+* **cli:** creating the file is what refuses to overwrite it ([5836248](https://github.com/lensapp/lens-sandbox/commit/5836248ce332709643758ab0e6ddd8ac36304c24))
+* **cli:** inspect names the last boot the way ps does ([969fbe8](https://github.com/lensapp/lens-sandbox/commit/969fbe85c7ef2dc87e19513142700e7f4e57f65f))
+* **cli:** the volume help says a sandbox holds a volume, not a run ([d9d6c81](https://github.com/lensapp/lens-sandbox/commit/d9d6c81f310f708dd2b70476251b2e56faa08d93))
+* **connectors:** a destination a grant opens is written to the chain ([71971bb](https://github.com/lensapp/lens-sandbox/commit/71971bb1d0bb1e998692c7cee07ead0ea4c950f6))
+* **connectors:** a granted file never reaches the host ([b9e992e](https://github.com/lensapp/lens-sandbox/commit/b9e992ea99075e81fdb9040be89d9de7d11fdf86))
+* **connectors:** a granted method's own env reaches an exec too ([794c434](https://github.com/lensapp/lens-sandbox/commit/794c43416ce68bcc7144fb099d2c5d3866e52dcc))
+* **connectors:** a row it cannot read is a row uninstall must not delete ([57db2e6](https://github.com/lensapp/lens-sandbox/commit/57db2e63f8b9b536501b234c659b18707fc570a1))
+* **connectors:** a serves entry whose port is not a port is refused ([21f57a2](https://github.com/lensapp/lens-sandbox/commit/21f57a2a49daf6101a2242c2ca74d8846f24b935))
+* **connectors:** a variable a grant fills is not set from anywhere else ([05670db](https://github.com/lensapp/lens-sandbox/commit/05670db5bde51166713c95727332611c5d7aef53))
+* **connectors:** a write in flight holds off the next one ([7748607](https://github.com/lensapp/lens-sandbox/commit/774860793e34356baad6c5a36c90e35a18c016fb))
+* **connectors:** an exec names the run, not an image that set nothing ([de7ce1f](https://github.com/lensapp/lens-sandbox/commit/de7ce1f9f27d4b26e66a16ff261e931978c6d180))
+* **connectors:** boot and an exec agree on what a method's env may set ([1f0b864](https://github.com/lensapp/lens-sandbox/commit/1f0b864d53a8b585a149273aaae25421beebab50))
+* **connectors:** declining a connector lifts the hold it was standing in for ([8ae1659](https://github.com/lensapp/lens-sandbox/commit/8ae1659eb0f0dc6d7d4847bf12f77b69d1eb084b))
+* **connectors:** install a document, address the Lens hub, pick an account ([2a019b5](https://github.com/lensapp/lens-sandbox/commit/2a019b5c9481468570ad384f9f713ae278d2b488))
+* **connectors:** one connector this run cannot supply costs only its own grant ([f3c4eab](https://github.com/lensapp/lens-sandbox/commit/f3c4eab882265b62bc1ed9ba5f20a15061a576aa))
+* **connectors:** one variable carries one placeholder across a connector's methods ([6f5a5ac](https://github.com/lensapp/lens-sandbox/commit/6f5a5acbc5af73badac5cc4d45e24f31b7657698))
+* **connectors:** say it plainly, and make a chip look like a control ([f47dd8e](https://github.com/lensapp/lens-sandbox/commit/f47dd8e2289ddef09011bec345f0135cbb7bd45d))
+* **connectors:** the card names the variables the method sets ([623222a](https://github.com/lensapp/lens-sandbox/commit/623222a5ef2c1d481715b2b488abd13b1649866e))
+* **connectors:** the value a connect asks for is the value the grant arms ([a7a8357](https://github.com/lensapp/lens-sandbox/commit/a7a8357a65a322d35c5a46fcdfeba1914a76e23f))
+* **init:** a preserved writable layer never decides where root writes ([1d7ac7a](https://github.com/lensapp/lens-sandbox/commit/1d7ac7a5674774b0e65abf5369917fa461e30b10))
+* **init:** the private share's own mount point is the boot's to make too ([b68f6af](https://github.com/lensapp/lens-sandbox/commit/b68f6af6605abf619c42172bf637de634a32d2b7))
+* **inspect:** a connector refuses a mixin flag, and a merge test proves the merge ([72e364d](https://github.com/lensapp/lens-sandbox/commit/72e364da1acbcb804d9cd07ad5c8bde8f70da827))
+* **inspect:** a declared credential is disclosed again ([2a49218](https://github.com/lensapp/lens-sandbox/commit/2a492188870690451f5837238bc6bdf38f1faab5))
+* **lns-cli:** connecting twice keeps both accounts ([1b79035](https://github.com/lensapp/lens-sandbox/commit/1b79035487cce48573bfbe584499947403940df0))
+* **lns-cli:** NoTerminal refuses a secret read, and the step audit names an unterminated literal ([a2d8861](https://github.com/lensapp/lens-sandbox/commit/a2d88613a069515a5625b74d2db7860b006f07d1))
+* **lns-init:** a home directory this boot created belongs to the workload ([d7e1d43](https://github.com/lensapp/lens-sandbox/commit/d7e1d430a003fc3d76d39a55d8aa2aba8d5c289f))
+* **lns-service:** publish the policy before the decision it justifies ([dad3711](https://github.com/lensapp/lens-sandbox/commit/dad3711c45256e27af39a5f3919a27e2645afd0b))
+* **service:** a restart keeps the time the run was created ([75afa45](https://github.com/lensapp/lens-sandbox/commit/75afa45dc31f63535d57abb650e6018dc5aa846e))
+* **service:** a sandbox's captured output outlives the boot that wrote it ([4781ef6](https://github.com/lensapp/lens-sandbox/commit/4781ef6abb59cfcbdc518a29c64b521f33e6ecf7))
+* **service:** a volume a stopped sandbox declares is not free to remove ([1fae34b](https://github.com/lensapp/lens-sandbox/commit/1fae34b9522cd4d4b8558f318fb220e0f40d7fc4))
+* **service:** an exec session gets the same loopback exclusions ([c5b2cce](https://github.com/lensapp/lens-sandbox/commit/c5b2cce76bdf44a0dacdbb23d4c6e6b2c09aa97f))
+* **spec:** one source may not set a variable its own credential fills ([7c399e2](https://github.com/lensapp/lens-sandbox/commit/7c399e21137122b60a222dd28825345981ce1a7e))
+* **supervisor:** the workload proxy variables exclude loopback ([9982ed6](https://github.com/lensapp/lens-sandbox/commit/9982ed6db84f8fb2f954ca51fbdfd35dd25b32ce))
+* the volume prune asks about the sweep it will do ([da7dd59](https://github.com/lensapp/lens-sandbox/commit/da7dd59f4dab0332196ea3c4f1a43f07297afd42))
+
+
+### Code Refactoring
+
+* **cli:** drop .lnsignore in favour of a bind's exclude ([d151d98](https://github.com/lensapp/lens-sandbox/commit/d151d98e0cd77376e9dc2a52adfc6170b5794f64))
+* remove connectors and credentials ([d927b59](https://github.com/lensapp/lens-sandbox/commit/d927b5983972a0b3cd401920b49e0d777d0361ed))
+
 ## [0.23.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.22.0...lns-v0.23.0) (2026-09-01)
 
 
