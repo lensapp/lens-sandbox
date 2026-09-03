@@ -43,3 +43,9 @@ Feature: a command runs to completion inside a real microVM
     When the user runs a microVM command "/bin/sh -c 'echo final-$((9*9)); exit 0'"
     Then the exit code is 0
     And the output contains "final-81"
+
+  Scenario: a headless run hands the workload pipes, so no pager can spawn
+    Given the Lens Sandbox service is running
+    When the user runs a microVM command "/bin/sh -c 'if [ -t 1 ]; then echo stdout-is-a-terminal; else echo stdout-is-a-pipe; fi'"
+    Then the exit code is 0
+    And the output contains "stdout-is-a-pipe"
