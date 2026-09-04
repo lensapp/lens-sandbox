@@ -1055,20 +1055,21 @@ its DHCP server exist while at least one run is active. The host starts
 `bootpd` when a guest asks for a lease. `bootpd` can exit after five minutes
 without a DHCP exchange even when another run keeps the `vmnet` session alive.
 
-The guest asks for a lease for at least 20 seconds. If the policy allows
-network egress and the host gives no lease, the workload does not start. LNS
-prints this message and exits non-zero:
+The guest asks for a lease seven times, three seconds apart, so it waits 21
+seconds. If the policy allows network egress and the host gives no lease, the
+workload does not start. LNS prints this message and exits non-zero:
 
 ```text
-lns-session-broker: the guest got no DHCP lease from the host network after 20 s
+✗  the guest got no DHCP lease from the host network after 21 s
   the host DHCP server (bootpd) answers a session's first guest and may stop after five idle minutes
   remedy: stop every run, then start again
 ```
 
-The DHCP keepalive sends an exchange at least every 120 seconds for the guest's
-lifetime. It prevents the five-minute idle exit when the installed LNS version
-includes that update. If a guest still gets no lease, stop every run and start
-again. This ends the old host session and starts a new one.
+`lns audit <run>` records the refusal as `no_dhcp_lease`. A different network
+setup failure refuses the same way and keeps its own error text.
+
+To recover, stop every run and start again. This ends the old host session and
+starts a new one, and the first guest of a new session gets a lease.
 
 Do not delete `/var/db/dhcpd_leases`. The lease file does not cause this idle
 server failure. Stopping every run is the part of that workaround that resets
