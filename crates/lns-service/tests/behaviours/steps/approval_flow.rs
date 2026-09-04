@@ -102,7 +102,7 @@ fn given_no_rule_for(world: &mut BehaviourWorld, host: String) {
     );
 }
 
-#[given(regex = r#"^an approval entry is visible for a request to "([^"]+)"$"#)]
+#[given(regex = r#"^an approval card is visible for a request to "([^"]+)"$"#)]
 fn given_notification_visible_for(world: &mut BehaviourWorld, host: String) {
     let rig = world.approval();
     rig.session
@@ -142,7 +142,7 @@ fn seed_policy(world: &mut BehaviourWorld, add: impl FnOnce(&mut Policy)) {
     let _ = drain_frames(rig);
 }
 
-#[given(regex = r#"^an approval entry is visible for a raw splice to "([^"]+)"$"#)]
+#[given(regex = r#"^an approval card is visible for a raw splice to "([^"]+)"$"#)]
 fn given_raw_entry_visible(world: &mut BehaviourWorld, destination: String) {
     let rig = world.approval();
     rig.session
@@ -157,7 +157,7 @@ fn given_workload_makes_request(world: &mut BehaviourWorld, host: String) {
         .submit_pending(make_pending(&host), Instant::now());
 }
 
-#[given("an approval entry is visible")]
+#[given("an approval card is visible")]
 fn given_notification_visible(world: &mut BehaviourWorld) {
     let rig = world.approval();
     let presented = rig.notifier.presented.lock().unwrap();
@@ -167,7 +167,7 @@ fn given_notification_visible(world: &mut BehaviourWorld) {
     );
 }
 
-#[given("a workload has an open approval entry")]
+#[given("a workload has an open approval card")]
 fn given_open_notification(world: &mut BehaviourWorld) {
     let rig = world.approval();
     rig.session
@@ -288,9 +288,7 @@ fn when_then_decision_resolves_both(world: &mut BehaviourWorld) -> Result<(), St
     Err("no rig touched in scenario".into())
 }
 
-#[then(
-    "an entry appears in the approval window showing the destination and the originating sandbox"
-)]
+#[then("a card appears in the approval window showing the destination and the originating sandbox")]
 fn then_notification_appears(world: &mut BehaviourWorld) -> Result<(), String> {
     let rig = world.approval();
     let presented = rig.notifier.presented.lock().unwrap();

@@ -477,6 +477,16 @@ impl Policy {
             .map(|(index, shadowing)| (index, shadowing.clone()));
         place_approved(&mut self.network.egress.tcp, rule, shadowing)
     }
+
+    /// Takes back the entry an approval wrote for this destination; see [`remove_approved`].
+    pub fn remove_approved_rule(&mut self, pattern: &str) -> bool {
+        remove_approved(&mut self.network.egress.http, pattern)
+    }
+
+    /// Takes back the raw entry an approval wrote for this destination; see [`remove_approved`].
+    pub fn remove_approved_tcp_rule(&mut self, destination: &str) -> bool {
+        remove_approved(&mut self.network.egress.tcp, destination)
+    }
 }
 
 /// What became of a decision meant to outlive the request it was made on.
@@ -494,6 +504,8 @@ pub enum Approval {
 trait Placed: PartialEq {
     fn verdict(&self) -> Verdict;
     fn match_pattern(&self) -> &str;
+    /// Whether an approval wrote this entry, which is the only kind an answer may take back.
+    fn is_approved(&self) -> bool;
     /// Whether the file already holds this entry, disregarding the note beside it: a note says how an entry got there, never what it decides.
     fn already_held_as(&self, other: &Self) -> bool;
 }
@@ -505,6 +517,10 @@ impl Placed for RouteRule {
 
     fn match_pattern(&self) -> &str {
         &self.match_pattern
+    }
+
+    fn is_approved(&self) -> bool {
+        self.description.as_deref() == Some(APPROVED_NOTE)
     }
 
     fn already_held_as(&self, other: &Self) -> bool {
@@ -523,6 +539,10 @@ impl Placed for TcpEgressRule {
 
     fn match_pattern(&self) -> &str {
         &self.match_pattern
+    }
+
+    fn is_approved(&self) -> bool {
+        self.description.as_deref() == Some(APPROVED_NOTE)
     }
 
     fn already_held_as(&self, other: &Self) -> bool {
@@ -561,6 +581,13 @@ fn place_approved<R: Placed>(
         return Approval::Stands;
     }
     Approval::Shadowed(shadowing.match_pattern().to_string())
+}
+
+/// Removes every entry an approval wrote for this destination, and only those: a rule the author typed is theirs to delete, even where it says the same thing.
+fn remove_approved<R: Placed>(table: &mut Vec<R>, pattern: &str) -> bool {
+    let before = table.len();
+    table.retain(|rule| !(rule.is_approved() && rule.match_pattern() == pattern));
+    table.len() != before
 }
 
 pub trait PolicyStore: Send + Sync {
@@ -1606,6 +1633,76 @@ egress:
                 "db.some-vendor.example:5432"
             )],
             "the entry they wrote keeps its own words, and nothing is written beside it"
+        );
+    }
+
+    #[test]
+    fn asking_again_takes_back_the_entry_the_approval_wrote() {
+        let mut p = Policy::default();
+        p.add_approved_rule(RouteRule::allow_host("api.linear.app").approved());
+
+        assert!(p.remove_approved_rule("api.linear.app"));
+        assert!(
+            p.network.egress.http.is_empty(),
+            "the destination is undecided again, so the gate has to ask"
+        );
+    }
+
+    #[test]
+    fn asking_again_leaves_the_entry_the_author_typed() {
+        // A rule somebody wrote by hand says what the project decided; an answer given in a window is not a licence to delete it.
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("api.linear.app"));
+
+        assert!(!p.remove_approved_rule("api.linear.app"));
+        assert_eq!(
+            p.network.egress.http,
+            [RouteRule::allow_host("api.linear.app")]
+        );
+    }
+
+    #[test]
+    fn asking_again_leaves_every_other_destination_where_it_is() {
+        let mut p = Policy::default();
+        p.add_approved_rule(RouteRule::allow_host("api.linear.app").approved());
+        p.add_approved_rule(RouteRule::allow_host("api.github.com").approved());
+
+        assert!(p.remove_approved_rule("api.linear.app"));
+        assert_eq!(
+            p.network.egress.http,
+            [RouteRule::allow_host("api.github.com").approved()]
+        );
+    }
+
+    #[test]
+    fn asking_again_about_a_destination_nothing_decided_changes_nothing() {
+        let mut p = Policy::default();
+
+        assert!(!p.remove_approved_rule("api.linear.app"));
+        assert!(p.network.egress.http.is_empty());
+    }
+
+    #[test]
+    fn asking_again_takes_back_the_raw_entry_the_approval_wrote() {
+        let mut p = Policy::default();
+        p.add_approved_tcp_rule(TcpEgressRule::allow_destination("db.internal:5432").approved());
+
+        assert!(p.remove_approved_tcp_rule("db.internal:5432"));
+        assert!(p.network.egress.tcp.is_empty());
+    }
+
+    #[test]
+    fn asking_again_leaves_the_raw_entry_the_author_typed() {
+        let mut p = Policy::default();
+        p.network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.internal:5432"));
+
+        assert!(!p.remove_approved_tcp_rule("db.internal:5432"));
+        assert_eq!(
+            p.network.egress.tcp,
+            [TcpEgressRule::allow_destination("db.internal:5432")]
         );
     }
 

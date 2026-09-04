@@ -391,6 +391,33 @@ silent fallback or a fake success.
 
 If no one responds, the request times out and is treated as a denial.
 
+### The question outlives the card
+
+Every card becomes an entry the run keeps. A card you close, one that times out,
+and one a workload withdrew by exiting are all still listed as undecided or
+withdrawn — the request failed closed, and the question did not go with it. An
+answer you gave is listed with the verdict it got.
+
+`lns approval ls` reads that list, and `lns approval answer` answers an entry, or
+answers it again:
+
+- **always-allow** and **always-deny** write the rule, or rewrite it, and a
+  running sandbox takes the change at once.
+- **ask-again** takes the entry's rule back, so the destination raises a card the
+  next time a workload reaches it.
+
+A once verdict is not offered there. It applies to a request the guest is holding,
+which is what the window is for. Answering an entry never replays the request that
+raised it: the call failed when nothing decided it, and the answer decides what
+happens next time.
+
+An answer reaches only what that entry wrote. Where another rule already decides
+the destination, nothing is written and the command says so. A rule you typed by
+hand is yours, and `ask-again` leaves it alone.
+
+Entries go when the run goes. A destination an existing rule decides raises no
+card, so it leaves no entry — including everything a closed directory refuses.
+
 ## Sharing policy
 
 Because policy is a plain file, it travels. Save it with `lns sandbox save

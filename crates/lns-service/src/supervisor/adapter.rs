@@ -6,6 +6,7 @@ use std::sync::Weak;
 
 use tokio::sync::mpsc;
 
+use crate::approval_flow::entries::FileEntryStore;
 use crate::approval_flow::notification::WindowNotifier;
 use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::session::ApprovalSession;
@@ -149,6 +150,11 @@ fn sweep_once(weak: &Weak<ApprovalSession>) -> bool {
 
 const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
 
+/// The run's approvals sit beside its decisions, so both go when the run's directory does.
+fn approvals_path_for(policy_path: &Path) -> PathBuf {
+    policy_path.with_file_name(crate::cache::APPROVALS_FILENAME)
+}
+
 /// The effective policy the guest enforces and, second, the developer's own file — the only one an approval writes back.
 fn running_policies(
     policy_path: &Path,
@@ -225,6 +231,12 @@ pub(super) async fn start(
     if let Some(baseline) = sandbox_policy {
         session.set_shipped_policy(baseline.clone());
     }
+
+    // The run keeps what it is asked beside what it decides, so `lns approval` finds it whether this run is up or not.
+    session.set_entry_store(Arc::new(FileEntryStore::new(approvals_path_for(
+        policy_path,
+    ))));
+    crate::run_registry::set_approvals(&run_id, session.clone());
 
     install_connectors(&session, &run_id, &microvm_name).await?;
 

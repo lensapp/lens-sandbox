@@ -1,3 +1,4 @@
+pub mod approval_cli;
 pub mod cli;
 pub mod config_cli;
 pub mod connector_cli;
