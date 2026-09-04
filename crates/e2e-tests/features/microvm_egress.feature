@@ -12,6 +12,10 @@ Feature: the network cage blocks denied egress from a real guest
   reliable assertion needs a deterministic host-side endpoint rather than a
   real-internet host, whose reachability makes the test flaky.
 
+  DHCP keepalive needs a manual macOS vmnet check. Start one sandbox and leave
+  it running. Start a second sandbox seven minutes later. Confirm that the
+  second sandbox gets a network address and can reach an allowed destination.
+
   Scenario: a deny-all policy blocks the workload's outbound connection
     Given the LNS service is running
     And a network policy that denies all egress
