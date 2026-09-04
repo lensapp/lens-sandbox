@@ -1418,6 +1418,12 @@ A grant MAY also be given ahead of any request, with the same disclosure and no
 held request (`lns connector grant`). The trigger decides when the card
 appears, never whether consent must be informed.
 
+**A person consents in one of three ways:** by answering the card, by answering
+the terminal prompt `lns connector grant` asks, or by typing `--yes` on that
+command, which answers the same disclosure on the host. All three disclose the
+whole payload first, and the audit chain records which of the three answered.
+The card itself is answerable by no flag.
+
 **A grant belongs to one run.** Not to a directory: the working directory
 roots the paths a reference resolves against, and nothing about consent
 ([§8.5](#85-what-the-working-directory-decides)). A run keeps what it was granted
