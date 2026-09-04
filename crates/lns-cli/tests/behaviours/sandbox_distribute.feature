@@ -367,3 +367,11 @@ Feature: distributing a sandbox
     Then the exit code is 0
     And the output contains "may differ"
     And nothing is pushed
+
+  @todo
+  Scenario: pushing a connector whose code method runs host programs is refused
+    Given a connector document whose method "sign-in" is a code method declaring host execution
+    When the user runs artifact command "push ghcr.io/team/some-provider:1.0.0 --yes"
+    Then the exit code is 1
+    And the output contains "no machine could install"
+    And nothing is pushed
