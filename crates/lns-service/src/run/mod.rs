@@ -15,7 +15,7 @@ pub fn broker_exit_reason(result: &Result<i32>) -> Option<lns_session::BrokerExi
     result.as_ref().err().and_then(|error| {
         error
             .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
-            .map(|refusal| refusal.reason)
+            .map(|refusal| refusal.reason.clone())
     })
 }
 

@@ -3,6 +3,7 @@ mod events;
 
 pub use base::Context;
 pub use events::{
-    approval, bind_mount, connector, egress, no_dhcp_lease, run_env, run_removed, runs_pruned,
-    sandbox_run, tool_provision, volume_mount, workload_exit, workload_launch, workload_restart,
+    approval, bind_mount, connector, egress, network_setup_failed, no_dhcp_lease, run_env,
+    run_removed, runs_pruned, sandbox_run, tool_provision, volume_mount, workload_exit,
+    workload_launch, workload_restart,
 };

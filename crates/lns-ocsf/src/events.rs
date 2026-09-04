@@ -268,19 +268,34 @@ pub fn workload_exit(ctx: &Context, exit_code: i32, killed: bool) -> Value {
     .build()
 }
 
+pub fn network_setup_failed(ctx: &Context, exit_code: i32, error: &str) -> Value {
+    broker_refusal(
+        ctx,
+        "network_setup_failed",
+        format!("the guest could not set up its network: {error}"),
+        exit_code,
+    )
+}
+
 pub fn no_dhcp_lease(ctx: &Context, exit_code: i32) -> Value {
-    Event::new(
+    broker_refusal(
+        ctx,
         "no_dhcp_lease",
+        "the guest got no DHCP lease from the host network".to_string(),
+        exit_code,
+    )
+}
+
+fn broker_refusal(ctx: &Context, kind: &'static str, message: String, exit_code: i32) -> Value {
+    Event::new(
+        kind,
         class::PROCESS_ACTIVITY,
         category::SYSTEM,
         activity::PROCESS_TERMINATE,
         severity::MEDIUM,
         ctx,
     )
-    .set(
-        "message",
-        "the guest got no DHCP lease from the host network".into(),
-    )
+    .set("message", message.into())
     .set("process", json!({"uid": ctx.run, "name": "session-broker"}))
     .set("device", microvm_device(ctx))
     .set("actor", lns_actor())
@@ -832,6 +847,19 @@ mod tests {
         assert_eq!(ev["status_id"], 2);
         assert_eq!(ev["unmapped"]["lns_kind"], "no_dhcp_lease");
         assert_eq!(ev["unmapped"]["lns_exit_code"], 125);
+    }
+
+    #[test]
+    fn network_setup_failed_keeps_the_underlying_error_in_the_message() {
+        let ev = network_setup_failed(&ctx(), 1, "`ip link set eth0 up` exited with 1");
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["status_id"], 2);
+        assert_eq!(ev["unmapped"]["lns_kind"], "network_setup_failed");
+        assert_eq!(
+            ev["message"],
+            "the guest could not set up its network: `ip link set eth0 up` exited with 1"
+        );
     }
 
     #[test]

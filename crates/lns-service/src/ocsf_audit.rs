@@ -93,11 +93,14 @@ pub fn workload_exit_event(cx: &OcsfCtx, exit_code: i32, killed: bool) -> Map<St
 pub fn broker_exit_event(
     cx: &OcsfCtx,
     exit_code: i32,
-    reason: lns_session::BrokerExitReason,
+    reason: &lns_session::BrokerExitReason,
 ) -> Map<String, Value> {
     match reason {
         lns_session::BrokerExitReason::NoDhcpLease => {
             into_object(lns_ocsf::no_dhcp_lease(&cx.ctx(), exit_code))
+        }
+        lns_session::BrokerExitReason::NetworkSetupFailed(error) => {
+            into_object(lns_ocsf::network_setup_failed(&cx.ctx(), exit_code, error))
         }
     }
 }
@@ -301,10 +304,22 @@ mod tests {
     }
 
     #[test]
-    fn the_broker_dhcp_refusal_selects_its_own_audit_kind() {
+    fn each_broker_refusal_selects_its_own_audit_kind() {
         let cx = OcsfCtx::at_unix("9e8d7c6b0000".into(), "calm-finch".into(), 1_780_000_000);
-        let event = broker_exit_event(&cx, 1, lns_session::BrokerExitReason::NoDhcpLease);
-        assert_eq!(event["unmapped"]["lns_kind"], "no_dhcp_lease");
+        let lease = broker_exit_event(&cx, 1, &lns_session::BrokerExitReason::NoDhcpLease);
+        assert_eq!(lease["unmapped"]["lns_kind"], "no_dhcp_lease");
+        let setup = broker_exit_event(
+            &cx,
+            1,
+            &lns_session::BrokerExitReason::NetworkSetupFailed("busybox is missing".into()),
+        );
+        assert_eq!(setup["unmapped"]["lns_kind"], "network_setup_failed");
+        assert!(
+            setup["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("busybox is missing")),
+            "the real error must reach the audit: {setup:?}"
+        );
     }
 
     #[test]

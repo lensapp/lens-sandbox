@@ -17,21 +17,29 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use lns_session::BROKER_PORT;
 
-const NO_DHCP_LEASE_MESSAGE: &str = "lns-session-broker: the guest got no DHCP lease from the host network after 20 s\n  the host DHCP server (bootpd) answers a session's first guest and may stop after five idle minutes\n  remedy: stop every run, then start again";
-
 fn policy_allows_egress_with(env_get: impl Fn(&str) -> Option<String>) -> bool {
     env_get(lns_session::EGRESS_ALLOWED_ENV).as_deref() != Some("0")
 }
 
+fn refusal_for(error: network::NetworkSetupError) -> lns_session::BrokerExitReason {
+    match error.step {
+        network::NetworkStep::Dhcp => lns_session::BrokerExitReason::NoDhcpLease,
+        _ => lns_session::BrokerExitReason::NetworkSetupFailed(error.message),
+    }
+}
+
 fn bring_up_network_with(
-    bring_up: impl FnOnce() -> Result<(), String>,
+    bring_up: impl FnOnce() -> Result<(), network::NetworkSetupError>,
     egress_allowed: bool,
-) -> Result<(), String> {
+) -> Result<(), lns_session::BrokerExitReason> {
     match bring_up() {
         Ok(()) => Ok(()),
-        Err(_) if egress_allowed => Err(NO_DHCP_LEASE_MESSAGE.to_string()),
-        Err(err) => {
-            eprintln!("lns-session-broker: best-effort network setup failed: {err}");
+        Err(error) if egress_allowed => Err(refusal_for(error)),
+        Err(error) => {
+            eprintln!(
+                "lns-session-broker: best-effort network setup failed: {}",
+                error.message
+            );
             Ok(())
         }
     }
@@ -64,10 +72,13 @@ fn main() -> ExitCode {
 fn run() -> Result<i32, String> {
     let egress_allowed = policy_allows_egress_with(|key| std::env::var(key).ok());
     let network_refusal = bring_up_network_with(network::bring_up_eth0, egress_allowed).err();
-    if network_refusal.is_none() {
+    match &network_refusal {
+        Some(reason) => eprintln!("lns-session-broker: {}", reason.explain()),
         // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
-        if let Err(e) = network::configure_dns() {
-            eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
+        None => {
+            if let Err(e) = network::configure_dns() {
+                eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
+            }
         }
     }
 
@@ -87,13 +98,9 @@ fn run() -> Result<i32, String> {
 
     let primary_conn = vsock::accept(listen_fd).map_err(|e| format!("accept(primary): {e}"))?;
 
-    if let Some(message) = network_refusal {
-        let outcome = session::refuse_session(
-            primary_conn,
-            &message,
-            lns_session::BrokerExitReason::NoDhcpLease,
-        )
-        .map_err(|e| format!("refuse primary session: {e}"))?;
+    if let Some(reason) = network_refusal {
+        let outcome = session::refuse_session(primary_conn, &reason.explain(), reason.clone())
+            .map_err(|e| format!("refuse primary session: {e}"))?;
         return Ok(outcome.exit_code);
     }
 
@@ -243,12 +250,26 @@ mod tests {
     }
 
     #[test]
-    fn a_network_failure_refuses_a_run_whose_policy_allows_egress() {
+    fn a_failed_lease_request_refuses_a_run_whose_policy_allows_egress() {
         let runner = failed_dhcp();
         let fs = FakeFsWriter;
-        let err = bring_up_network_with(|| network::bring_up_eth0_with(&runner, &fs), true)
+        let reason = bring_up_network_with(|| network::bring_up_eth0_with(&runner, &fs), true)
             .expect_err("an egress workload without a lease cannot do its work");
-        assert_eq!(err, NO_DHCP_LEASE_MESSAGE);
+        assert_eq!(reason, lns_session::BrokerExitReason::NoDhcpLease);
+    }
+
+    #[test]
+    fn an_earlier_step_refuses_with_its_own_error_rather_than_the_dhcp_story() {
+        let runner = FakeCommandRunner {
+            outcomes: RefCell::new(vec![ok(3)]),
+        };
+        let fs = FakeFsWriter;
+        let reason = bring_up_network_with(|| network::bring_up_eth0_with(&runner, &fs), true)
+            .expect_err("an egress workload with no interface cannot do its work");
+        let text = reason.summary();
+        assert_eq!(reason.as_str(), "network_setup_failed");
+        assert!(text.contains("ip link set lo up"), "got: {text}");
+        assert!(text.contains("exited with 3"), "got: {text}");
     }
 
     #[test]

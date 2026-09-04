@@ -8,9 +8,14 @@ fn broker_reports_no_lease(world: &mut BehaviourWorld) {
 
 #[when("the service handles the broker outcome")]
 fn service_handles_outcome(world: &mut BehaviourWorld) {
-    let reason = world.broker_refusal.expect("the broker outcome was staged");
+    let reason = world
+        .broker_refusal
+        .clone()
+        .expect("the broker outcome was staged");
     let outcome = Err(anyhow::Error::new(
-        lns_service::vm::session_client::BrokerRefusal { reason },
+        lns_service::vm::session_client::BrokerRefusal {
+            reason: reason.clone(),
+        },
     ));
     world.broker_exit_reason =
         lns_service::run::broker_exit_reason(&outcome).map(|reason| reason.as_str().to_string());
@@ -20,7 +25,7 @@ fn service_handles_outcome(world: &mut BehaviourWorld) {
         1_788_499_200,
     );
     world.broker_exit_audit = Some(lns_service::ocsf_audit::broker_exit_event(
-        &context, 1, reason,
+        &context, 1, &reason,
     ));
 }
 

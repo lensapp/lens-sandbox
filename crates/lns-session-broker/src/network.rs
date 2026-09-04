@@ -54,21 +54,45 @@ pub trait FsWriter {
     fn write(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
 }
 
-pub fn bring_up_eth0_with(runner: &dyn CommandRunner, fs: &dyn FsWriter) -> Result<(), String> {
+/// Which step of the bring-up failed: only a failed lease request means the host gave no address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkStep {
+    LinkLo,
+    LinkEth0,
+    HookScript,
+    Dhcp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkSetupError {
+    pub step: NetworkStep,
+    pub message: String,
+}
+
+pub fn bring_up_eth0_with(
+    runner: &dyn CommandRunner,
+    fs: &dyn FsWriter,
+) -> Result<(), NetworkSetupError> {
     run_check(
         runner,
+        NetworkStep::LinkLo,
         "ip link set lo up",
         &["ip", "link", "set", "lo", "up"],
     )?;
     run_check(
         runner,
+        NetworkStep::LinkEth0,
         "ip link set eth0 up",
         &["ip", "link", "set", "eth0", "up"],
     )?;
     fs.write(UDHCPC_SCRIPT_PATH, UDHCPC_SCRIPT.as_bytes(), 0o755)
-        .map_err(|e| format!("writing {UDHCPC_SCRIPT_PATH}: {e}"))?;
+        .map_err(|e| NetworkSetupError {
+            step: NetworkStep::HookScript,
+            message: format!("writing {UDHCPC_SCRIPT_PATH}: {e}"),
+        })?;
     run_check(
         runner,
+        NetworkStep::Dhcp,
         "udhcpc",
         &[
             "udhcpc",
@@ -87,15 +111,21 @@ pub fn bring_up_eth0_with(runner: &dyn CommandRunner, fs: &dyn FsWriter) -> Resu
     Ok(())
 }
 
-fn run_check(runner: &dyn CommandRunner, label: &str, args: &[&str]) -> Result<(), String> {
-    let outcome = runner
-        .run(BUSYBOX, args)
-        .map_err(|e| format!("spawn `{label}`: {e}"))?;
+fn run_check(
+    runner: &dyn CommandRunner,
+    step: NetworkStep,
+    label: &str,
+    args: &[&str],
+) -> Result<(), NetworkSetupError> {
+    let outcome = runner.run(BUSYBOX, args).map_err(|e| NetworkSetupError {
+        step,
+        message: format!("spawn `{label}`: {e}"),
+    })?;
     if !outcome.success() {
-        return Err(format!(
-            "`{label}` exited with {}",
-            outcome.code.unwrap_or(-1)
-        ));
+        return Err(NetworkSetupError {
+            step,
+            message: format!("`{label}` exited with {}", outcome.code.unwrap_or(-1)),
+        });
     }
     Ok(())
 }
@@ -122,7 +152,16 @@ pub fn resolv_conf_contents(servers: &[String]) -> String {
     out
 }
 
+pub const NO_LEASE_DNS_WARNING: &str = "no DHCP lease: DNS upstream falls back to 1.1.1.1";
+
+pub fn dns_warning(dhcp_dns: &[String]) -> Option<&'static str> {
+    dhcp_dns.is_empty().then_some(NO_LEASE_DNS_WARNING)
+}
+
 pub fn configure_dns_with(dhcp_dns: &[String], fs: &dyn FsWriter) -> Result<(), String> {
+    if let Some(warning) = dns_warning(dhcp_dns) {
+        eprintln!("lns-session-broker: WARN {warning}");
+    }
     let servers = select_dns(dhcp_dns);
     let contents = resolv_conf_contents(&servers);
     fs.write(RESOLV_CONF_PATH, contents.as_bytes(), 0o644)
@@ -217,6 +256,14 @@ mod tests {
             fs.writes()[0].1,
             b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
         );
+    }
+
+    #[test]
+    fn an_empty_dhcp_dns_list_warns_that_the_upstream_is_a_public_resolver() {
+        assert_eq!(dns_warning(&[]), Some(NO_LEASE_DNS_WARNING));
+        assert!(NO_LEASE_DNS_WARNING.contains("no DHCP lease"));
+        assert!(NO_LEASE_DNS_WARNING.contains(FALLBACK_DNS[0]));
+        assert_eq!(dns_warning(&["192.168.64.1".to_string()]), None);
     }
 
     #[test]
@@ -333,8 +380,9 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(1)]);
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("lo failed");
-        assert!(err.contains("ip link set lo up"), "got: {err}");
-        assert!(err.contains("exited with 1"), "got: {err}");
+        assert_eq!(err.step, NetworkStep::LinkLo);
+        assert!(err.message.contains("ip link set lo up"), "got: {err:?}");
+        assert!(err.message.contains("exited with 1"), "got: {err:?}");
         assert_eq!(runner.calls().len(), 1, "no further commands after failure");
         assert!(fs.writes().is_empty(), "script not staged on lo failure");
     }
@@ -344,8 +392,9 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(2), ok(0)]);
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("eth0 failed");
-        assert!(err.contains("ip link set eth0 up"), "got: {err}");
-        assert!(err.contains("exited with 2"), "got: {err}");
+        assert_eq!(err.step, NetworkStep::LinkEth0);
+        assert!(err.message.contains("ip link set eth0 up"), "got: {err:?}");
+        assert!(err.message.contains("exited with 2"), "got: {err:?}");
         assert_eq!(runner.calls().len(), 2);
         assert!(fs.writes().is_empty(), "script not staged on eth0 failure");
     }
@@ -355,9 +404,10 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![Err(io::Error::other("ENOENT"))]);
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("spawn failed");
-        assert!(err.contains("spawn"), "got: {err}");
-        assert!(err.contains("ip link set lo up"), "got: {err}");
-        assert!(err.contains("ENOENT"), "got: {err}");
+        assert_eq!(err.step, NetworkStep::LinkLo);
+        assert!(err.message.contains("spawn"), "got: {err:?}");
+        assert!(err.message.contains("ip link set lo up"), "got: {err:?}");
+        assert!(err.message.contains("ENOENT"), "got: {err:?}");
     }
 
     #[test]
@@ -365,8 +415,9 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(0), ok(0)]);
         let fs = FakeFsWriter::err(io::Error::other("EROFS"));
         let err = bring_up_eth0_with(&runner, &fs).expect_err("fs failed");
-        assert!(err.contains(UDHCPC_SCRIPT_PATH), "got: {err}");
-        assert!(err.contains("EROFS"), "got: {err}");
+        assert_eq!(err.step, NetworkStep::HookScript);
+        assert!(err.message.contains(UDHCPC_SCRIPT_PATH), "got: {err:?}");
+        assert!(err.message.contains("EROFS"), "got: {err:?}");
         assert_eq!(
             runner.calls().len(),
             2,
@@ -379,8 +430,13 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(1), ok(0), ok(0)]);
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("udhcpc failed");
-        assert!(err.contains("udhcpc"), "got: {err}");
-        assert!(err.contains("exited with 1"), "got: {err}");
+        assert_eq!(
+            err.step,
+            NetworkStep::Dhcp,
+            "only this step means the host gave no lease"
+        );
+        assert!(err.message.contains("udhcpc"), "got: {err:?}");
+        assert!(err.message.contains("exited with 1"), "got: {err:?}");
         assert_eq!(runner.calls().len(), 3);
         assert_eq!(fs.writes().len(), 1, "script was staged before udhcpc");
     }
@@ -390,7 +446,7 @@ mod tests {
         let runner = FakeCommandRunner::with_outcomes(vec![Ok(CommandOutcome { code: None })]);
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("signal-killed lo");
-        assert!(err.contains("exited with -1"), "got: {err}");
+        assert!(err.message.contains("exited with -1"), "got: {err:?}");
     }
 
     #[test]

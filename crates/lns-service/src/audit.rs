@@ -269,7 +269,7 @@ pub fn record_run_exited_with_reason_at(
     append_ocsf_at(
         path,
         match reason {
-            Some(reason) => crate::ocsf_audit::broker_exit_event(cx, exit_code, reason),
+            Some(reason) => crate::ocsf_audit::broker_exit_event(cx, exit_code, &reason),
             None => crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
         },
     )
