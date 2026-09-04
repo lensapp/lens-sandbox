@@ -144,12 +144,13 @@ pub enum Request {
         name: String,
         connection: Option<String>,
     },
-    /// `run` is the handle the user typed: only the service holds the registry that resolves it.
+    /// `run` is the handle the user typed: only the service holds the registry that resolves it, and `answered_by` is how the person answered, which nothing on this side could infer.
     GrantConnector {
         name: String,
         run: String,
         method: String,
         connection: Option<String>,
+        answered_by: crate::AnswerSource,
     },
     ForgetConnector {
         name: String,

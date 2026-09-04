@@ -33,6 +33,7 @@ pub enum Call {
         run: String,
         method: String,
         connection: Option<String>,
+        answered_by: lns_ipc::AnswerSource,
     },
     Forget {
         name: String,
@@ -159,7 +160,11 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         })?;
         // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
         if !granted.unchanged {
-            record_decision(&self.holder, &self.microvm, granted_event(name, &granted));
+            record_decision(
+                &self.holder,
+                &self.microvm,
+                granted_event(name, &granted, lns_ipc::AnswerSource::Card),
+            );
         }
         Ok(payload)
     }
@@ -199,13 +204,18 @@ fn microvm_of(holder: &GrantHolder) -> String {
     }
 }
 
-fn granted_event(name: &str, granted: &handler::Granted) -> lns_ipc::LedgerEvent {
+fn granted_event(
+    name: &str,
+    granted: &handler::Granted,
+    answered_by: lns_ipc::AnswerSource,
+) -> lns_ipc::LedgerEvent {
     lns_ipc::LedgerEvent::Connector {
         connector: name.to_string(),
         verb: lns_ipc::ConnectorVerb::Granted,
         method: Some(granted.method.clone()),
         connection: granted.connection.clone(),
         digest: Some(granted.digest.clone()),
+        answered_by: Some(answered_by),
     }
 }
 
@@ -225,6 +235,7 @@ fn connector_event(name: &str, verb: lns_ipc::ConnectorVerb) -> lns_ipc::LedgerE
         method: None,
         connection: None,
         digest: None,
+        answered_by: None,
     }
 }
 
@@ -480,6 +491,7 @@ pub async fn answer(call: Call) -> Result<Response> {
             run,
             method,
             connection,
+            answered_by,
         } => {
             let holder = holder_of(&run)?;
             let counted = paths_counted_at_boot_for(&holder);
@@ -495,7 +507,7 @@ pub async fn answer(call: Call) -> Result<Response> {
                 record_decision(
                     &holder,
                     &microvm_of(&holder),
-                    granted_event(&name, &granted),
+                    granted_event(&name, &granted, answered_by),
                 );
             }
             Ok(Response::ConnectorGranted {
@@ -1250,6 +1262,7 @@ mod tests {
             run: RUN.to_string(),
             method: "token".into(),
             connection: None,
+            answered_by: lns_ipc::AnswerSource::Terminal,
         })
         .await
         .expect_err("a live run with no counted set is one this process cannot vouch for");
@@ -1290,6 +1303,7 @@ mod tests {
             run: RUN.to_string(),
             method: "token".to_string(),
             connection: None,
+            answered_by: lns_ipc::AnswerSource::Terminal,
         })
         .await
         .expect("the boot made room for exactly this path, so the grant stands");
@@ -1311,6 +1325,7 @@ mod tests {
             run: RUN.to_string(),
             method: "token".to_string(),
             connection: None,
+            answered_by: lns_ipc::AnswerSource::Terminal,
         })
         .await;
         crate::run_registry::deregister(RUN);
@@ -1336,6 +1351,22 @@ mod tests {
             run_id: run_id.to_string(),
             _cancel: cancel,
         }
+    }
+
+    /// What each connector line in the ledger says answered it, read from the note the OCSF record carries.
+    fn answer_sources() -> Vec<Option<String>> {
+        let path = lns_ipc::connection_ledger().expect("the ledger path");
+        if !path.exists() {
+            return Vec::new();
+        }
+        lns_audit::stream_ledger(&path)
+            .expect("stream the ledger")
+            .map(|event| {
+                event.expect("a ledger line")["unmapped"]["lns_answer_source"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect()
     }
 
     /// Every ledger line this machine holds, read back the way `lns audit` reads it.
@@ -1365,6 +1396,7 @@ mod tests {
             run: RUN.to_string(),
             method: "token".to_string(),
             connection: None,
+            answered_by: lns_ipc::AnswerSource::Terminal,
         })
         .await
         .expect("grant");
@@ -1395,6 +1427,7 @@ mod tests {
                 run: RUN.to_string(),
                 method: "token".to_string(),
                 connection: None,
+                answered_by: lns_ipc::AnswerSource::Terminal,
             })
         };
 
@@ -1484,6 +1517,7 @@ mod tests {
             run: "audit-reservation".to_string(),
             method: "token".to_string(),
             connection: None,
+            answered_by: lns_ipc::AnswerSource::Flag,
         })
         .await
         .expect("reserve a grant");
@@ -1492,6 +1526,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].detail, "granted some-provider token as work");
         assert_eq!(rows[0].run, "", "no run holds it yet");
+        assert_eq!(
+            answer_sources(),
+            [Some("flag".to_string())],
+            "the wire said the flag answered it, and the chain says so too"
+        );
     }
 
     #[test]
@@ -1530,6 +1569,11 @@ mod tests {
                 ("declined some-provider", OTHER_RUN),
             ],
             "the card's answer is the run's decision, and the account it settled on is part of it"
+        );
+        assert_eq!(
+            answer_sources(),
+            [Some("card".to_string()), None],
+            "the card answered the grant; a decline answers for every version and claims no source"
         );
     }
 

@@ -416,11 +416,13 @@ fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
             run,
             method,
             connection,
+            answered_by,
         } => Call::Grant {
             name: name.clone(),
             run: run.clone(),
             method: method.clone(),
             connection: connection.clone(),
+            answered_by: *answered_by,
         },
         Request::ForgetConnector { name, run } => Call::Forget {
             name: name.clone(),
@@ -1951,6 +1953,7 @@ mod tests {
                     run: "reviewer".into(),
                     method: "token".into(),
                     connection: None,
+                    answered_by: lns_ipc::AnswerSource::Terminal,
                 },
                 now,
             )

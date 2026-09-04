@@ -45,6 +45,25 @@ impl ConnectorVerb {
     }
 }
 
+/// Who answered a connector question: the card the tray holds, a terminal prompt, or `--yes` on the grant command. Only the wire carries it, because the service cannot tell one caller from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerSource {
+    Card,
+    Terminal,
+    Flag,
+}
+
+impl AnswerSource {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Card => "card",
+            Self::Terminal => "terminal",
+            Self::Flag => "flag",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LedgerEvent {
@@ -65,6 +84,9 @@ pub enum LedgerEvent {
         /// The bytes the grant bound to; a decline answers for every version and a forget clears whatever was there, so neither carries one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
+        /// How the grant was answered. A forget answers no question, and a line written before this field read without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answered_by: Option<AnswerSource>,
     },
 }
 
@@ -123,8 +145,42 @@ mod tests {
             method: Some("token".into()),
             connection: Some("work".into()),
             digest: Some("sha256:abc".into()),
+            answered_by: Some(AnswerSource::Flag),
         });
         assert_eq!(back.event.name(), "connector");
+    }
+
+    #[test]
+    fn a_line_written_before_the_answer_source_reads_back_without_one() {
+        let line = r#"{"ts":"2026-06-29T14:02:11Z","run":"5e6f7a8b0000000000000000000000bb","microvm":"calm-finch","event":"connector","connector":"some-provider","verb":"granted","method":"token"}"#;
+        let back: LedgerRecord = serde_json::from_str(line).expect("deserialize");
+        assert_eq!(
+            back.event,
+            LedgerEvent::Connector {
+                connector: "some-provider".into(),
+                verb: ConnectorVerb::Granted,
+                method: Some("token".into()),
+                connection: None,
+                digest: None,
+                answered_by: None,
+            }
+        );
+    }
+
+    #[test]
+    fn every_answer_source_has_a_word_the_timeline_reads() {
+        for (source, word) in [
+            (AnswerSource::Card, "card"),
+            (AnswerSource::Terminal, "terminal"),
+            (AnswerSource::Flag, "flag"),
+        ] {
+            assert_eq!(source.word(), word);
+            assert_eq!(
+                serde_json::to_value(source).expect("serialize"),
+                serde_json::Value::String(word.to_string()),
+                "the wire spells it the way the timeline reads it"
+            );
+        }
     }
 
     #[test]
@@ -139,11 +195,13 @@ mod tests {
                 method: None,
                 connection: None,
                 digest: None,
+                answered_by: None,
             },
         };
         let line = serde_json::to_string(&record).expect("serialize");
         assert!(!line.contains("method"), "{line}");
         assert!(!line.contains("digest"), "{line}");
+        assert!(!line.contains("answered_by"), "{line}");
         assert_eq!(
             serde_json::from_str::<LedgerRecord>(&line).expect("deserialize"),
             record

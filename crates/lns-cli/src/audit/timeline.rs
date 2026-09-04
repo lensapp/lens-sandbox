@@ -174,6 +174,7 @@ mod tests {
             Some("token"),
             Some("work"),
             Some("sha256:abc"),
+            Some("terminal"),
         )
         .to_string()
     }

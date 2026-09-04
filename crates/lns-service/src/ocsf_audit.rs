@@ -64,6 +64,7 @@ pub fn ledger_event(record: &LedgerRecord) -> Map<String, Value> {
             method,
             connection,
             digest,
+            answered_by,
         } => lns_ocsf::connector(
             &cx.ctx(),
             connector,
@@ -71,6 +72,7 @@ pub fn ledger_event(record: &LedgerRecord) -> Map<String, Value> {
             method.as_deref(),
             connection.as_deref(),
             digest.as_deref(),
+            answered_by.as_ref().map(|source| source.word()),
         ),
     };
     into_object(value)
