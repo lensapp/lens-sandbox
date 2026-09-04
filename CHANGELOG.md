@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.25.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.24.0...lns-v0.25.0) (2026-09-04)
+
+
+### Features
+
+* **cli:** --yes answers a connector grant on the host ([df0d806](https://github.com/lensapp/lens-sandbox/commit/df0d806a60c2280f4309b501e02df94cf070d3e8))
+* **connectors:** the chain records who answered a grant ([a9d9676](https://github.com/lensapp/lens-sandbox/commit/a9d9676cce65f4e1aa1ce50707f7d5469f098ab5))
+
+
+### Bug Fixes
+
+* **scripts:** a harness frees the directories it makes ([644558d](https://github.com/lensapp/lens-sandbox/commit/644558dc72cbc7d0c83957e31141117fae895731))
+* **scripts:** a test fixture inherits no git environment ([5422a65](https://github.com/lensapp/lens-sandbox/commit/5422a65430943ca921d80886e24bb43357e4a7bf))
+* **service:** a stopped run reports the size it booted with ([8767515](https://github.com/lensapp/lens-sandbox/commit/8767515a829e7e0ab9511dbfaac1768e9b52370e))
+
 ## [0.24.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.23.0...lns-v0.24.0) (2026-09-03)
 
 
