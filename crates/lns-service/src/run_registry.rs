@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::approval_flow::session::ApprovalSession;
 use crate::vm::GuestTransport;
 use crate::vm::session_client::SessionInput;
 
@@ -77,6 +78,8 @@ pub struct RunHandle {
     pub input_tx: Option<mpsc::Sender<SessionInput>>,
     pub exec_sessions: HashMap<String, mpsc::Sender<SessionInput>>,
     pub connector: Option<std::sync::Arc<dyn GuestTransport>>,
+    /// The approval session this run's cards come from, absent until the supervisor relay is up.
+    pub approvals: Option<std::sync::Arc<ApprovalSession>>,
     pub name: String,
     pub image: String,
     pub command: String,
@@ -505,6 +508,26 @@ pub fn exec_environment(run_id: &str) -> ExecEnvironment {
         .unwrap_or_default()
 }
 
+/// The session that owns this run's cards, so an answer given at the terminal reaches the guest the way one given on the card does.
+pub fn approvals(run_id: &str) -> Option<std::sync::Arc<ApprovalSession>> {
+    let g = ACTIVE.lock().expect("ACTIVE poisoned");
+    g.as_ref()
+        .and_then(|m| m.get(run_id))
+        .and_then(|e| e.as_live())
+        .and_then(|h| h.approvals.clone())
+}
+
+pub fn set_approvals(run_id: &str, session: std::sync::Arc<ApprovalSession>) {
+    let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
+    if let Some(h) = g
+        .as_mut()
+        .and_then(|m| m.get_mut(run_id))
+        .and_then(|e| e.as_live_mut())
+    {
+        h.approvals = Some(session);
+    }
+}
+
 pub fn set_connector(run_id: &str, connector: std::sync::Arc<dyn GuestTransport>) {
     let mut g = ACTIVE.lock().expect("ACTIVE poisoned");
     if let Some(h) = g
@@ -783,6 +806,7 @@ pub(crate) fn test_handle() -> (RunHandle, oneshot::Receiver<i32>) {
     (
         RunHandle {
             connector: None,
+            approvals: None,
             cancel_tx,
             detach_tx: Mutex::new(None),
             task,
@@ -1379,6 +1403,44 @@ mod tests {
         );
 
         deregister(&id);
+    }
+
+    fn a_session() -> std::sync::Arc<ApprovalSession> {
+        let (sink, _nowhere) = tokio::sync::mpsc::unbounded_channel();
+        std::sync::Arc::new(ApprovalSession::new(
+            lns_policy::Policy::default(),
+            lns_policy::Policy::default(),
+            std::sync::Arc::new(crate::approval_flow::notification::NoopNotifier),
+            std::sync::Arc::new(lns_policy::FilePolicyStore::new(std::path::PathBuf::from(
+                "/nowhere/decisions.yaml",
+            ))),
+            sink,
+            std::time::Duration::from_secs(30),
+        ))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn set_approvals_publishes_the_session_an_answer_reaches() {
+        // `lns approval answer` finds a live run's session here; without it the answer would edit the file behind the running guest.
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(id.clone(), handle);
+
+        assert!(approvals(&id).is_none(), "no session until the relay is up");
+        set_approvals(&id, a_session());
+
+        assert!(approvals(&id).is_some());
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn set_approvals_is_noop_when_run_not_registered() {
+        let id = "deadbeef00000000000000000000000d".to_string();
+        set_approvals(&id, a_session());
+
+        assert!(approvals(&id).is_none());
     }
 
     #[tokio::test]

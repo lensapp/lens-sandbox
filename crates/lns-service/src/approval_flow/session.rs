@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::approval_flow::entries::{Entry, EntryKind, EntryState, EntryStore, NoEntryStore};
 use crate::approval_flow::protocol::{
     Decision, GrantedPayload, HostFrame, PolicyMessage, RequestDecision, RequestPending, Treatment,
 };
@@ -68,7 +69,7 @@ impl PendingPrompt {
 
 const RAW_SPLICE_CAPTION: &str = "lns cannot inspect this traffic.";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PendingEntry {
     host: String,
     /// The gate's own name for the destination (`CONNECT db.internal:5432`), the only place the port survives.
@@ -92,6 +93,14 @@ impl PendingEntry {
 
     fn raw_destination(&self) -> Option<&str> {
         raw_destination(&self.action, &self.host)
+    }
+
+    fn entry_kind(&self) -> EntryKind {
+        EntryKind::Destination {
+            destination: self.audit_target().to_string(),
+            action: self.action.clone(),
+            raw: self.treatment == Treatment::Raw,
+        }
     }
 }
 
@@ -147,7 +156,79 @@ pub struct ApprovalSession {
     connectors: OnceLock<Arc<dyn ConnectorPort>>,
     /// The connectors this run has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
     offers: Mutex<Vec<ConnectorView>>,
+    /// What the run keeps of every card raised, so a question outlives the card and stays answerable.
+    entries: OnceLock<Arc<dyn EntryStore>>,
     run: Option<String>,
+}
+
+/// Why `ask again` decided nothing: only the rule this entry wrote is its to take back.
+pub const NO_RULE_OF_ITS_OWN: &str = "this entry holds no rule of its own to take back";
+
+/// What became of an answer given away from the card, at the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerOutcome {
+    Recorded(EntryState),
+    UnknownId,
+    /// A connector or a notice: listed, and decided somewhere else.
+    NotAnswerable,
+    /// Nothing was written, for the reason named.
+    NoRuleWritten(String),
+}
+
+/// The verdicts an entry takes once the request that raised it has gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    AlwaysAllow,
+    AlwaysDeny,
+    AskAgain,
+}
+
+impl Answer {
+    fn always(self) -> Option<AlwaysVerdict> {
+        match self {
+            Self::AlwaysAllow => Some(AlwaysVerdict::Allow),
+            Self::AlwaysDeny => Some(AlwaysVerdict::Deny),
+            Self::AskAgain => None,
+        }
+    }
+}
+
+/// A decision that outlives the request it was made on, and so earns a rule; the once verdicts are absent by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlwaysVerdict {
+    Allow,
+    Deny,
+}
+
+impl AlwaysVerdict {
+    fn of(decision: Decision) -> Option<Self> {
+        match decision {
+            Decision::AllowAlways => Some(Self::Allow),
+            Decision::DenyAlways => Some(Self::Deny),
+            Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
+        }
+    }
+
+    fn state(self) -> EntryState {
+        match self {
+            Self::Allow => EntryState::AlwaysAllowed,
+            Self::Deny => EntryState::AlwaysDenied,
+        }
+    }
+
+    fn route(self, host: &str) -> RouteRule {
+        match self {
+            Self::Allow => RouteRule::allow_host(host).approved(),
+            Self::Deny => RouteRule::deny_host(host).approved(),
+        }
+    }
+
+    fn splice(self, destination: &str) -> TcpEgressRule {
+        match self {
+            Self::Allow => TcpEgressRule::allow_destination(destination).approved(),
+            Self::Deny => TcpEgressRule::deny_destination(destination).approved(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,8 +260,70 @@ impl ApprovalSession {
             said: Mutex::new(std::collections::HashSet::new()),
             connectors: OnceLock::new(),
             offers: Mutex::new(Vec::new()),
+            entries: OnceLock::new(),
             run: None,
         }
+    }
+
+    /// Installs what keeps this run's entries; a session without one raises cards that nothing outlives.
+    pub fn set_entry_store(&self, store: Arc<dyn EntryStore>) {
+        let _ = self.entries.set(store);
+    }
+
+    fn entries(&self) -> &dyn EntryStore {
+        static NOTHING_KEPT: NoEntryStore = NoEntryStore;
+        self.entries
+            .get()
+            .map(|store| store.as_ref())
+            .unwrap_or(&NOTHING_KEPT)
+    }
+
+    fn note(&self, entry: &PendingEntry, state: EntryState) {
+        self.entries()
+            .record(Entry::new(self.run.clone(), entry.entry_kind(), state));
+    }
+
+    /// Records that a card went unanswered, unless this destination is already decided — two requests share one entry, so the second's timeout must not undo the first's answer.
+    fn note_if_open(&self, entry: &PendingEntry, state: EntryState) {
+        let asked = Entry::new(self.run.clone(), entry.entry_kind(), state);
+        let settled = self
+            .entries()
+            .list()
+            .into_iter()
+            .any(|held| held.id == asked.id && held.is_settled());
+        if !settled {
+            self.entries().record(asked);
+        }
+    }
+
+    fn note_connector(&self, name: &str, state: EntryState) {
+        self.entries().record(Entry::new(
+            self.run.clone(),
+            EntryKind::Connector {
+                name: name.to_string(),
+            },
+            state,
+        ));
+    }
+
+    fn pending_entry(&self, id: &str) -> Option<PendingEntry> {
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    /// Every line the window shows that asks nothing is still something the developer may have missed.
+    fn tell(&self, message: &str) {
+        self.entries().record(Entry::new(
+            self.run.clone(),
+            EntryKind::Notice {
+                message: message.to_string(),
+            },
+            EntryState::Noted,
+        ));
+        self.notifier.inform(message);
     }
 
     /// Names the run every card this session raises speaks for; the service attributes it from the channel the request arrived on, never from the workload.
@@ -216,7 +359,7 @@ impl ApprovalSession {
         let label = match self.resolve_connection(port.as_ref(), &offer.name, method, connection) {
             Ok(label) => label,
             Err(why) => {
-                self.notifier.inform(&why);
+                self.tell(&why);
                 return DecisionOutcome::Resolved;
             }
         };
@@ -225,12 +368,13 @@ impl ApprovalSession {
         match port.grant(&offer.name, &offer.digest, method, label.as_deref()) {
             Ok(opened) => {
                 self.forget_offer(&offer.name);
+                self.note_connector(&offer.name, EntryState::Granted);
                 self.apply_granted_egress(&offer.name, opened);
                 self.release(&offer.name, &held);
                 DecisionOutcome::Resolved
             }
             Err(why) => {
-                self.notifier.inform(&why);
+                self.tell(&why);
                 DecisionOutcome::Resolved
             }
         }
@@ -244,11 +388,12 @@ impl ApprovalSession {
         if let Some(port) = self.connectors.get()
             && let Err(why) = port.decline(&offer.name)
         {
-            self.notifier.inform(&why);
+            self.tell(&why);
             return DecisionOutcome::Resolved;
         }
         let held = self.held_for(&offer.name);
         self.forget_offer(&offer.name);
+        self.note_connector(&offer.name, EntryState::Declined);
         // The hold is derived from `offers`, so only a frame lifts it — and §3.2.1 holds a destination only while the run has neither granted nor declined.
         self.send_policy_frame();
         self.represent(&held);
@@ -269,7 +414,7 @@ impl ApprovalSession {
             ConnectionChoice::New { label, values } => {
                 let invalidated = port.connect(name, method, &label, values)?;
                 if !invalidated.is_empty() {
-                    self.notifier.inform(&format!(
+                    self.tell(&format!(
                         "this connection no longer covers what {} granted, so {} must decide again",
                         invalidated.join(", "),
                         if invalidated.len() == 1 { "it" } else { "they" }
@@ -400,6 +545,10 @@ impl ApprovalSession {
             },
         );
         drop(pending);
+        // A fresh card means the gate found no rule, so an answer this entry used to carry is not in force any more — unlike a timeout, this one does overwrite it.
+        if let Some(raised) = self.pending_entry(&req.id) {
+            self.note(&raised, EntryState::Undecided);
+        }
         let offer = self.offer_for(&req);
         if let Some(offer) = &offer
             && let Some(entry) = self
@@ -473,7 +622,7 @@ impl ApprovalSession {
     fn inform_once(&self, message: &str) {
         let mut said = self.said.lock().expect("said mutex poisoned");
         if said.insert(message.to_string()) {
-            self.notifier.inform(message);
+            self.tell(message);
         }
     }
 
@@ -489,6 +638,8 @@ impl ApprovalSession {
         if rule_stands {
             self.save_persisted();
         }
+        // Only a rule that stands changes what the run has decided; every other answer leaves the question open.
+        self.note(&entry, state_after(decision, rule_stands));
         self.record_approval(&entry, decision, None);
         DecisionOutcome::Resolved
     }
@@ -507,32 +658,160 @@ impl ApprovalSession {
         };
         self.notifier.dismiss(id);
         self.answer(id, &entry, Decision::Timeout);
+        self.note_if_open(&entry, EntryState::Undecided);
         DecisionOutcome::Resolved
     }
 
     /// Writes the rule an "always" decision earns into the table its treatment belongs to and answers whether it stands; a once-decision earns none.
     fn apply_always_decision(&self, entry: &PendingEntry, decision: Decision) -> bool {
-        match entry.treatment {
-            Treatment::Inspected => match rule_for_always_decision(&entry.host, decision) {
-                Some(rule) => self.apply_persistent_rule(rule),
-                None => false,
-            },
+        let Some(verdict) = AlwaysVerdict::of(decision) else {
+            return false;
+        };
+        let destination = match entry.treatment {
+            Treatment::Inspected => entry.host.clone(),
             Treatment::Raw => match entry.raw_destination() {
-                Some(destination) => match tcp_rule_for_always_decision(destination, decision) {
-                    Some(rule) => self.apply_persistent_tcp_rule(rule),
-                    None => false,
-                },
+                Some(destination) => destination.to_string(),
                 None => {
-                    if earns_a_rule(decision) {
-                        self.report_no_rule_written(&format!(
-                            "the gate named the destination {:?}, which this lns cannot read as a rule for {:?}",
-                            entry.action, entry.host
-                        ));
-                    }
-                    false
+                    self.report_no_rule_written(&format!(
+                        "the gate named the destination {:?}, which this lns cannot read as a rule for {:?}",
+                        entry.action, entry.host
+                    ));
+                    return false;
                 }
             },
+        };
+        match self.place_always_rule(&destination, entry.treatment == Treatment::Raw, verdict) {
+            RulePlacement::Written => true,
+            RulePlacement::Refused(why) => {
+                self.report_no_rule_written(&why);
+                false
+            }
         }
+    }
+
+    /// The one place an always-decision becomes a rule, whether it was answered on the card or at the terminal long after.
+    fn place_always_rule(
+        &self,
+        destination: &str,
+        raw: bool,
+        verdict: AlwaysVerdict,
+    ) -> RulePlacement {
+        if raw {
+            return self.place_raw_rule(destination, verdict);
+        }
+        self.settle(self.apply_persistent_rule(verdict.route(destination)))
+    }
+
+    fn place_raw_rule(&self, destination: &str, verdict: AlwaysVerdict) -> RulePlacement {
+        let rule = verdict.splice(destination);
+        // One rule lens-sandbox-core cannot parse force-denies the whole policy in the guest, so a destination we cannot express is not written at all.
+        if let Err(e) = rule.validate() {
+            return RulePlacement::Refused(e);
+        }
+        let (approval, pre_empted) = self.apply_persistent_tcp_rule(rule);
+        let placement = self.settle(approval);
+        // The http rules this raw rule displaces would otherwise go quiet without a word.
+        if placement == RulePlacement::Written && !pre_empted.is_empty() {
+            self.tell(&format!(
+                "that traffic is now spliced raw, so these HTTP rules no longer apply to it: {}",
+                pre_empted.join(", ")
+            ));
+        }
+        placement
+    }
+
+    fn settle(&self, approval: Approval) -> RulePlacement {
+        match unwritten_because(approval) {
+            None => {
+                self.send_policy_frame();
+                RulePlacement::Written
+            }
+            Some(why) => RulePlacement::Refused(why),
+        }
+    }
+
+    /// Answers an entry away from the card that raised it, when the request it held is long gone.
+    pub fn answer_entry(&self, id: &str, answer: Answer) -> AnswerOutcome {
+        let Some(entry) = self.entries().list().into_iter().find(|held| held.id == id) else {
+            return AnswerOutcome::UnknownId;
+        };
+        let EntryKind::Destination {
+            destination, raw, ..
+        } = entry.kind.clone()
+        else {
+            return AnswerOutcome::NotAnswerable;
+        };
+        // The entry's own rule comes out first, so a new answer replaces it instead of landing behind it where the gate never reaches.
+        let before = self.rules_as_they_stand();
+        let held_a_rule = self.take_back_rule(&destination, raw);
+        match answer.always() {
+            None => self.settle_ask_again(entry, held_a_rule),
+            Some(verdict) => match self.settle_late_answer(entry, &destination, raw, verdict) {
+                // A refused answer decided nothing, so the rule it lifted out of the way goes back.
+                AnswerOutcome::NoRuleWritten(why) => {
+                    self.put_rules_back(before);
+                    AnswerOutcome::NoRuleWritten(why)
+                }
+                settled => settled,
+            },
+        }
+    }
+
+    fn rules_as_they_stand(&self) -> (Policy, Policy) {
+        (
+            self.policy.lock().expect("policy mutex poisoned").clone(),
+            self.persisted
+                .lock()
+                .expect("persisted mutex poisoned")
+                .clone(),
+        )
+    }
+
+    fn put_rules_back(&self, (running, persisted): (Policy, Policy)) {
+        *self.policy.lock().expect("policy mutex poisoned") = running;
+        *self.persisted.lock().expect("persisted mutex poisoned") = persisted;
+    }
+
+    fn settle_ask_again(&self, entry: Entry, held_a_rule: bool) -> AnswerOutcome {
+        if !held_a_rule {
+            return AnswerOutcome::NoRuleWritten(NO_RULE_OF_ITS_OWN.to_string());
+        }
+        self.send_policy_frame();
+        self.save_persisted();
+        self.keep(entry, EntryState::Undecided)
+    }
+
+    fn settle_late_answer(
+        &self,
+        entry: Entry,
+        destination: &str,
+        raw: bool,
+        verdict: AlwaysVerdict,
+    ) -> AnswerOutcome {
+        match self.place_always_rule(destination, raw, verdict) {
+            RulePlacement::Written => {
+                self.save_persisted();
+                self.keep(entry, verdict.state())
+            }
+            RulePlacement::Refused(why) => AnswerOutcome::NoRuleWritten(why),
+        }
+    }
+
+    fn keep(&self, entry: Entry, state: EntryState) -> AnswerOutcome {
+        self.entries().record(Entry { state, ..entry });
+        AnswerOutcome::Recorded(state)
+    }
+
+    /// Removes the rule this entry wrote from both the running policy and the file, and says whether one was there.
+    fn take_back_rule(&self, destination: &str, raw: bool) -> bool {
+        let mut policy = self.policy.lock().expect("policy mutex poisoned");
+        let mut persisted = self.persisted.lock().expect("persisted mutex poisoned");
+        if raw {
+            let running = policy.remove_approved_tcp_rule(destination);
+            return persisted.remove_approved_tcp_rule(destination) || running;
+        }
+        let running = policy.remove_approved_rule(destination);
+        persisted.remove_approved_rule(destination) || running
     }
 
     /// `why` overrides the request's own reason, for an opening the user did not answer destination by destination.
@@ -584,6 +863,7 @@ impl ApprovalSession {
         let Some(entry) = self.remove_pending(id) else {
             return false;
         };
+        self.note_if_open(&entry, EntryState::Undecided);
         // The request is gone, but the offer it raised is still the user's to answer, and the connection applies to what runs next.
         if entry.offer.is_some() {
             self.keep_offer(id, entry);
@@ -639,11 +919,12 @@ impl ApprovalSession {
     }
 
     pub fn withdraw_run(&self) {
-        let ids: Vec<String> = {
+        let open: Vec<(String, PendingEntry)> = {
             let mut pending = self.pending.lock().expect("pending mutex poisoned");
-            pending.drain().map(|(id, _)| id).collect()
+            pending.drain().collect()
         };
-        for id in &ids {
+        for (id, entry) in &open {
+            self.note_if_open(entry, EntryState::Withdrawn);
             self.notifier.dismiss(id);
         }
         self.notifier.clear_informs();
@@ -660,7 +941,7 @@ impl ApprovalSession {
         let _ = self.sink.send(HostFrame::Policy(self.policy_message()));
     }
 
-    fn apply_persistent_rule(&self, rule: RouteRule) -> bool {
+    fn apply_persistent_rule(&self, rule: RouteRule) -> Approval {
         let approval = self
             .policy
             .lock()
@@ -672,22 +953,18 @@ impl ApprovalSession {
                 .expect("persisted mutex poisoned")
                 .add_approved_rule(rule);
         }
-        self.publish_if_it_stands(approval)
+        approval
     }
 
     /// Says the decision stands for this request but outlived nothing.
     fn report_no_rule_written(&self, why: &str) {
-        self.notifier.inform(&format!(
+        self.tell(&format!(
             "decision applied to this request only; no policy rule could be written: {why}"
         ));
     }
 
-    fn apply_persistent_tcp_rule(&self, rule: TcpEgressRule) -> bool {
-        // One rule lens-sandbox-core cannot parse force-denies the whole policy in the guest, so a destination we cannot express is not written at all.
-        if let Err(e) = rule.validate() {
-            self.report_no_rule_written(&e);
-            return false;
-        }
+    /// Answers with the approval the table gave, and the http rules the raw entry displaces.
+    fn apply_persistent_tcp_rule(&self, rule: TcpEgressRule) -> (Approval, Vec<String>) {
         let (approval, pre_empted) = {
             let mut policy = self.policy.lock().expect("policy mutex poisoned");
             let pre_empted = pre_empted_http_patterns(&policy, &rule);
@@ -699,35 +976,7 @@ impl ApprovalSession {
                 .expect("persisted mutex poisoned")
                 .add_approved_tcp_rule(rule);
         }
-        if !self.publish_if_it_stands(approval) {
-            return false;
-        }
-        // The http rules this raw rule displaces would otherwise go quiet without a word.
-        if !pre_empted.is_empty() {
-            self.notifier.inform(&format!(
-                "that traffic is now spliced raw, so these HTTP rules no longer apply to it: {}",
-                pre_empted.join(", ")
-            ));
-        }
-        true
-    }
-
-    /// Answers whether the decision stands, telling the developer when it applied to one request only — silence there would read as "remembered".
-    fn publish_if_it_stands(&self, approval: Approval) -> bool {
-        let why = match approval {
-            Approval::Stands => {
-                self.send_policy_frame();
-                return true;
-            }
-            Approval::Shadowed(pattern) => format!(
-                "the rule for {pattern:?} already decides this destination and the guest stops at the first matching rule"
-            ),
-            Approval::Unreachable(pattern) => format!(
-                "this exact rule is already in the policy file, but behind the rule for {pattern:?} that the guest reaches first — move it ahead of that rule to stop being asked"
-            ),
-        };
-        self.report_no_rule_written(&why);
-        false
+        (approval, pre_empted)
     }
 
     /// Runs after both frames have left, and a file that cannot be written still leaves the decision live for the rest of the run.
@@ -738,18 +987,38 @@ impl ApprovalSession {
             .expect("persisted mutex poisoned")
             .clone();
         if let Err(e) = self.store.save(&to_persist) {
-            self.notifier.inform(&format!(
+            self.tell(&format!(
                 "policy rule applied in-memory but not persisted: {e}"
             ));
         }
     }
 }
 
-fn rule_for_always_decision(host: &str, decision: Decision) -> Option<RouteRule> {
-    match decision {
-        Decision::AllowAlways => Some(RouteRule::allow_host(host).approved()),
-        Decision::DenyAlways => Some(RouteRule::deny_host(host).approved()),
-        Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
+/// What became of the rule an always-decision earns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RulePlacement {
+    Written,
+    Refused(String),
+}
+
+/// Why a decision that earned a rule wrote none — silence here would read as "remembered".
+fn unwritten_because(approval: Approval) -> Option<String> {
+    match approval {
+        Approval::Stands => None,
+        Approval::Shadowed(pattern) => Some(format!(
+            "the rule for {pattern:?} already decides this destination and the guest stops at the first matching rule"
+        )),
+        Approval::Unreachable(pattern) => Some(format!(
+            "this exact rule is already in the policy file, but behind the rule for {pattern:?} that the guest reaches first — move it ahead of that rule to stop being asked"
+        )),
+    }
+}
+
+/// What the run has decided about a destination after this answer: a once verdict, and one that wrote no rule, leave the question open.
+fn state_after(decision: Decision, rule_stands: bool) -> EntryState {
+    match AlwaysVerdict::of(decision) {
+        Some(verdict) if rule_stands => verdict.state(),
+        _ => EntryState::Undecided,
     }
 }
 
@@ -760,19 +1029,6 @@ fn pre_empted_http_patterns(policy: &Policy, rule: &TcpEgressRule) -> Vec<String
         .iter()
         .map(|route| format!("{:?}", route.match_pattern))
         .collect()
-}
-
-fn tcp_rule_for_always_decision(destination: &str, decision: Decision) -> Option<TcpEgressRule> {
-    match decision {
-        Decision::AllowAlways => Some(TcpEgressRule::allow_destination(destination).approved()),
-        Decision::DenyAlways => Some(TcpEgressRule::deny_destination(destination).approved()),
-        Decision::AllowOnce | Decision::DenyOnce | Decision::Timeout => None,
-    }
-}
-
-/// Whether the developer asked for a decision that outlives this request, and so is owed an explanation when none can be written.
-fn earns_a_rule(decision: Decision) -> bool {
-    matches!(decision, Decision::AllowAlways | Decision::DenyAlways)
 }
 
 /// Whether this directory's own deny answers for every destination `shared` names; one that answers for only some of them leaves the rest overridden.
@@ -801,6 +1057,7 @@ fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::approval_flow::entries::FileEntryStore;
     use crate::approval_flow::protocol::{WireDefaultVerdict, WireTcpEgressRule, WireVerdict};
     use lns_policy::{RouteRule, Transport, Verdict};
     use std::io;
@@ -3102,17 +3359,141 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// The store a run really keeps, over a directory of this test's own: the ids an answer names have to survive a read-back.
+    fn keeping_entries(session: &ApprovalSession) -> (tempfile::TempDir, Arc<FileEntryStore>) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = Arc::new(FileEntryStore::new(dir.path().join("approvals.json")));
+        session.set_entry_store(store.clone());
+        (dir, store)
+    }
+
     #[test]
-    fn rule_for_always_decision_maps_allow_and_deny_only() {
-        assert!(rule_for_always_decision("h", Decision::AllowOnce).is_none());
-        assert!(rule_for_always_decision("h", Decision::DenyOnce).is_none());
-        assert!(rule_for_always_decision("h", Decision::Timeout).is_none());
+    fn a_late_answer_a_wider_rule_already_decides_writes_nothing_and_says_which_rule() {
+        // Answering at the terminal has no window to explain itself, so the refusal has to travel back as the answer.
+        let mut held = Policy::default();
+        held.add_rule(RouteRule::deny_host("*.linear.app"));
+        let (session, _n, _store, _rx) = fixture_holding(held);
+        let (_dir, entries) = keeping_entries(&session);
+        session.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+        session.dismiss_request("r1");
+        let id = entries.list()[0].id.clone();
 
-        let allow = rule_for_always_decision("h", Decision::AllowAlways).unwrap();
-        assert_eq!(allow.verdict, Verdict::Allow);
-        assert_eq!(allow.match_pattern, "h");
+        assert_eq!(
+            session.answer_entry(&id, Answer::AlwaysAllow),
+            AnswerOutcome::NoRuleWritten(
+                "the rule for \"*.linear.app\" already decides this destination and the guest stops at the first matching rule".to_string()
+            )
+        );
+        assert_eq!(entries.list()[0].state, EntryState::Undecided);
+    }
 
-        let deny = rule_for_always_decision("h", Decision::DenyAlways).unwrap();
-        assert_eq!(deny.verdict, Verdict::Deny);
+    #[test]
+    fn a_refused_re_answer_leaves_the_rule_the_entry_already_had() {
+        // The refusal says nothing was written; taking the old rule out anyway would revoke an allow the developer still has on the file.
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, entries) = keeping_entries(&session);
+        session.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        let id = entries.list()[0].id.clone();
+        let mut narrowed = session.current_policy();
+        narrowed
+            .network
+            .egress
+            .http
+            .insert(0, RouteRule::deny_host("*.linear.app"));
+        session.apply_external_policy(narrowed);
+
+        let outcome = session.answer_entry(&id, Answer::AlwaysAllow);
+
+        assert!(
+            matches!(outcome, AnswerOutcome::NoRuleWritten(_)),
+            "a shadowed re-answer is refused, got {outcome:?}"
+        );
+        assert!(
+            session
+                .current_policy()
+                .network
+                .egress
+                .http
+                .iter()
+                .any(|rule| rule.match_pattern == "api.linear.app"),
+            "the answer the entry already carried must still be in force"
+        );
+    }
+
+    #[test]
+    fn a_late_answer_on_a_raw_splice_writes_the_port_scoped_rule_and_takes_it_back() {
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, entries) = keeping_entries(&session);
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "db.internal".into(),
+                action: "CONNECT db.internal:5432".into(),
+                reason: "policy-ambiguous".into(),
+                treatment: Treatment::Raw,
+            },
+            Instant::now(),
+        );
+        session.dismiss_request("r1");
+        let id = entries.list()[0].id.clone();
+
+        assert_eq!(
+            session.answer_entry(&id, Answer::AlwaysAllow),
+            AnswerOutcome::Recorded(EntryState::AlwaysAllowed)
+        );
+        assert_eq!(
+            session.current_policy().network.egress.tcp[0].match_pattern,
+            "db.internal:5432"
+        );
+
+        assert_eq!(
+            session.answer_entry(&id, Answer::AskAgain),
+            AnswerOutcome::Recorded(EntryState::Undecided)
+        );
+        assert!(
+            session.current_policy().network.egress.tcp.is_empty(),
+            "asking again takes the raw rule back too"
+        );
+    }
+
+    #[test]
+    fn a_notice_is_not_an_entry_an_answer_decides() {
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, entries) = keeping_entries(&session);
+        session.tell("something happened");
+        let id = entries.list()[0].id.clone();
+
+        assert_eq!(
+            session.answer_entry(&id, Answer::AlwaysAllow),
+            AnswerOutcome::NotAnswerable
+        );
+    }
+
+    #[test]
+    fn an_id_this_run_never_kept_is_unknown() {
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, _entries) = keeping_entries(&session);
+
+        assert_eq!(
+            session.answer_entry("never-was", Answer::AlwaysAllow),
+            AnswerOutcome::UnknownId
+        );
+    }
+
+    #[test]
+    fn only_an_always_decision_earns_a_rule() {
+        assert!(AlwaysVerdict::of(Decision::AllowOnce).is_none());
+        assert!(AlwaysVerdict::of(Decision::DenyOnce).is_none());
+        assert!(AlwaysVerdict::of(Decision::Timeout).is_none());
+
+        let allow = AlwaysVerdict::of(Decision::AllowAlways).expect("an always verdict");
+        assert_eq!(allow.route("h").verdict, Verdict::Allow);
+        assert_eq!(allow.route("h").match_pattern, "h");
+        assert_eq!(allow.splice("h:5432").verdict, Verdict::Allow);
+
+        let deny = AlwaysVerdict::of(Decision::DenyAlways).expect("an always verdict");
+        assert_eq!(deny.route("h").verdict, Verdict::Deny);
+        assert_eq!(deny.splice("h:5432").verdict, Verdict::Deny);
     }
 }

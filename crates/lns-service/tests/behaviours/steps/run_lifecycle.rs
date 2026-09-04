@@ -20,6 +20,7 @@ pub fn fresh_handle(
         input_tx: None,
         exec_sessions: Default::default(),
         connector: None,
+        approvals: None,
         name: String::new(),
         image: image.into(),
         command: "some-command".into(),

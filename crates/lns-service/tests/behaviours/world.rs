@@ -20,6 +20,7 @@ pub struct BehaviourWorld {
     pub started_at: Option<Instant>,
     pub response: Option<Response>,
     pub approval: Option<ApprovalRig>,
+    pub stopped: Option<StoppedRunRig>,
 
     pub image_env: Option<Vec<String>>,
     pub image_user: Option<String>,
@@ -180,6 +181,10 @@ impl BehaviourWorld {
         self.approval.as_mut().expect("approval rig must exist")
     }
 
+    pub fn stopped_run(&mut self) -> &mut StoppedRunRig {
+        self.stopped.get_or_insert_with(StoppedRunRig::new)
+    }
+
     pub fn forward_fake(&mut self) -> Arc<ForwardFake> {
         self.forward_fake
             .get_or_insert_with(|| Arc::new(ForwardFake::default()))
@@ -213,5 +218,23 @@ impl BehaviourWorld {
 
     pub fn policy(&mut self) -> &mut PolicyRig {
         self.policy.get_or_insert_with(PolicyRig::default)
+    }
+}
+
+/// A run this process is not hosting: an lns home with the run's own directory, and nothing live behind it.
+#[derive(Debug)]
+pub struct StoppedRunRig {
+    pub home: tempfile::TempDir,
+    pub entry_id: Option<String>,
+    pub outcome: Option<lns_service::approval_flow::session::AnswerOutcome>,
+}
+
+impl StoppedRunRig {
+    pub fn new() -> Self {
+        Self {
+            home: tempfile::TempDir::new().expect("create tempdir"),
+            entry_id: None,
+            outcome: None,
+        }
     }
 }

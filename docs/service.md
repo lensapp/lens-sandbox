@@ -36,8 +36,11 @@ Two environment variables override the defaults (mostly useful for development):
 - `LNS_SOCKET_PATH` — use a specific socket path.
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
 - `LNS_HEADLESS=1` — run without the tray or approval window even when a
-  display is present. Interactive prompts can't be shown headless, so
-  approvals need pre-authorized rules in a mixin the run names.
+  display is present. No card can be shown, so the terminal is the only surface:
+  `lns approval ls` shows what a run has been asked, and `lns approval answer`
+  answers it. A held request still fails closed while it waits, so the answer
+  decides the next attempt rather than the one that raised it. Pre-authorized
+  rules in a mixin the run names avoid the question altogether.
 
 ## Updating
 
