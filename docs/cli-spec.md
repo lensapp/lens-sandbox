@@ -540,7 +540,8 @@ carries no verdict and nothing answers it.
 answer. A connector entry is listed, as granted or declined, and is not
 answerable here: connecting is done per machine and granting per run, both
 through [`lns connector`](#33-lns-connector). A notice is listed and answers
-nothing.
+nothing. Answering either is a refusal: it says why that entry is not answered here,
+and exits `1`.
 
 An entry records the question and the answer it got. What the answer *does* lives
 where it always did — an egress rule in the run's `decisions.yaml`
