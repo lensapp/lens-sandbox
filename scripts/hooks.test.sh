@@ -9,20 +9,16 @@ HOOKS="$SCRIPT_DIR/hooks"
 PASS=0
 FAIL=0
 FAILURES=""
-TMPDIRS=""
+ROOT=$(mktemp -d)
 
 cleanup() {
-    for d in $TMPDIRS; do
-        rm -rf "$d"
-    done
+    rm -rf "$ROOT"
     test_lib_cleanup
 }
 trap cleanup EXIT
 
 mktmp() {
-    d=$(mktemp -d)
-    TMPDIRS="$TMPDIRS $d"
-    echo "$d"
+    mktemp -d "$ROOT/tmp.XXXXXX"
 }
 
 check() {

@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT
 
 mktmp() {
-    TMPDIR="$ROOT" mktemp -d
+    mktemp -d "$ROOT/tmp.XXXXXX"
 }
 
 check() {
@@ -45,7 +45,7 @@ write_fixture_script() {
 set -eu
 . "$LIB"
 trap test_lib_cleanup EXIT
-d=\$(TMPDIR="$ROOT" mktemp -d)
+d=\$(mktemp -d "$ROOT/tmp.XXXXXX")
 cd "\$d"
 git init -q
 echo fixture > file.txt

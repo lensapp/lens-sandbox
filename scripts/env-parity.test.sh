@@ -7,19 +7,15 @@ SCRIPT="$SCRIPT_DIR/env-parity.sh"
 PASS=0
 FAIL=0
 FAILURES=""
-TMPDIRS=""
+ROOT=$(mktemp -d)
 
 cleanup() {
-    for d in $TMPDIRS; do
-        rm -rf "$d"
-    done
+    rm -rf "$ROOT"
 }
 trap cleanup EXIT
 
 mktmp() {
-    d=$(mktemp -d)
-    TMPDIRS="$TMPDIRS $d"
-    echo "$d"
+    mktemp -d "$ROOT/tmp.XXXXXX"
 }
 
 check() {
@@ -137,7 +133,7 @@ test_the_shared_lib_needs_no_home() {
     echo "test_the_shared_lib_needs_no_home"
     status=0
     out=$(env -u HOME -u CARGO_HOME -u RUSTUP_HOME \
-        sh -c "set -u; . \"$SCRIPT_DIR/test-lib.sh\"" 2>&1) || status=$?
+        sh -c "set -u; . \"$SCRIPT_DIR/test-lib.sh\"; test_lib_cleanup" 2>&1) || status=$?
     check "sourcing it survives an unset HOME" "0" "$status"
     check "it does not abort on an unbound variable" "0" \
         "$(echo "$out" | grep -c 'parameter not set')"
@@ -151,8 +147,22 @@ test_the_shared_lib_needs_no_home() {
     done
 }
 
+# A harness leaks nothing: `make lint` runs all of them twice, and the dev
+# volume has run out of space before.
+test_a_harness_frees_what_it_makes() {
+    echo "test_a_harness_frees_what_it_makes"
+    for t in hooks gate-timing; do
+        probe=$(mktmp)
+        status=0
+        TMPDIR="$probe" sh "$SCRIPT_DIR/$t.test.sh" >/dev/null 2>&1 || status=$?
+        check "$t passes" "0" "$status"
+        check "$t leaves nothing behind" "" "$(ls -A "$probe")"
+    done
+}
+
 test_a_passing_binary_agrees
 test_the_shared_lib_needs_no_home
+test_a_harness_frees_what_it_makes
 test_a_failing_binary_is_named
 test_an_env_dependent_binary_is_caught
 test_a_pass_that_runs_nothing_is_not_agreement
