@@ -439,6 +439,10 @@ async fn grant(
         run: args.run.clone(),
         method: method.name.clone(),
         connection: args.connection.clone(),
+        answered_by: match args.yes {
+            true => lns_ipc::AnswerSource::Flag,
+            false => lns_ipc::AnswerSource::Terminal,
+        },
     };
     match send(svc, req).await? {
         Response::ConnectorGranted {

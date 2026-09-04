@@ -121,6 +121,7 @@ pub fn connector(
     method: Option<&str>,
     connection: Option<&str>,
     digest: Option<&str>,
+    answered_by: Option<&str>,
 ) -> Value {
     let mut ev = Event::new(
         "connector",
@@ -146,6 +147,9 @@ pub fn connector(
     }
     if let Some(digest) = digest {
         ev = ev.note("lns_connector_digest", digest.into());
+    }
+    if let Some(answered_by) = answered_by {
+        ev = ev.note("lns_answer_source", answered_by.into());
     }
     ev.build()
 }
@@ -517,6 +521,7 @@ mod tests {
             Some("token"),
             Some("work"),
             Some("sha256:abc"),
+            Some("flag"),
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["message"], "granted some-provider token as work");
@@ -529,6 +534,10 @@ mod tests {
             "a grant binds to bytes, and which bytes is the whole of what it consented to"
         );
         assert_eq!(ev["service"]["name"], "some-provider");
+        assert_eq!(
+            ev["unmapped"]["lns_answer_source"], "flag",
+            "who answered is part of what the chain accounts for"
+        );
     }
 
     #[test]
@@ -540,10 +549,12 @@ mod tests {
             Some("open"),
             None,
             Some("sha256:abc"),
+            Some("card"),
         );
         assert_schema_valid(&ev);
         assert_eq!(ev["message"], "granted some-provider open");
         assert!(ev["unmapped"].get("lns_connection").is_none());
+        assert_eq!(ev["unmapped"]["lns_answer_source"], "card");
     }
 
     #[test]
@@ -552,12 +563,16 @@ mod tests {
             ("declined", "declined some-provider"),
             ("forgot", "forgot some-provider"),
         ] {
-            let ev = connector(&ctx(), "some-provider", verb, None, None, None);
+            let ev = connector(&ctx(), "some-provider", verb, None, None, None, None);
             assert_schema_valid(&ev);
             assert_eq!(ev["message"], expected);
             assert!(
                 ev["unmapped"].get("lns_connector_digest").is_none(),
                 "neither answers for one version of the bytes, so neither claims one"
+            );
+            assert!(
+                ev["unmapped"].get("lns_answer_source").is_none(),
+                "a line with no answer source reads as it always did"
             );
         }
     }

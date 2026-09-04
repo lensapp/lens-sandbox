@@ -128,6 +128,7 @@ Feature: lns connector, on this machine
     And the disclosure names the file it writes
     And the disclosure names the variables it sets
     And the output says it was granted
+    And the grant says the terminal answered it
 
   Scenario: a payload the method does not carry is stated, not omitted
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
@@ -174,6 +175,7 @@ Feature: lns connector, on this machine
     And the disclosure names the variables it sets
     And the output says it was granted
     And the connector output does not contain "grant it?"
+    And the grant says the flag answered it
 
   Scenario: --yes with several offerable methods still refuses and names --method
     Given the service holds the connector "some-provider" serving "api.some-provider.example"

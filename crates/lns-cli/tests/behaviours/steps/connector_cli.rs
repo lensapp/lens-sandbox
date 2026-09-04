@@ -648,6 +648,30 @@ fn says_forgot_reservation(world: &mut BehaviourWorld) {
     );
 }
 
+#[then(expr = "the grant says the {word} answered it")]
+fn grant_names_its_answer_source(world: &mut BehaviourWorld, source: String) {
+    let expected = match source.as_str() {
+        "flag" => lns_ipc::AnswerSource::Flag,
+        "terminal" => lns_ipc::AnswerSource::Terminal,
+        other => panic!("no answer source is named {other}"),
+    };
+    let sent = world
+        .connector
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|req| match req {
+            Request::GrantConnector { answered_by, .. } => Some(*answered_by),
+            _ => None,
+        })
+        .expect("a grant request must have been sent");
+    assert_eq!(
+        sent, expected,
+        "the service cannot tell a prompt from a flag, so the wire carries it"
+    );
+}
+
 #[then(expr = "the disclosure names the connection {string}")]
 fn discloses_the_connection(world: &mut BehaviourWorld, label: String) {
     let run = run_of(world);
