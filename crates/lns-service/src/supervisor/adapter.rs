@@ -181,6 +181,11 @@ fn policy_allows_any_egress(policy: &Policy) -> bool {
             .any(|rule| rule.verdict == Verdict::Allow)
 }
 
+/// Read after every grant layer is installed: a connector's granted destinations need a lease as much as the document's own rules do.
+fn session_allows_egress(session: &ApprovalSession) -> bool {
+    policy_allows_any_egress(&session.current_policy())
+}
+
 /// What this run has already decided about the machine's connectors, read off the runtime thread because every read here blocks (§3.2.1, §7.1).
 async fn install_connectors(
     session: &Arc<ApprovalSession>,
@@ -216,7 +221,6 @@ pub(super) async fn start(
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
     let (policy, own_policy) = running_policies(policy_path, sandbox_policy)?;
-    let egress_allowed = policy_allows_any_egress(&policy);
 
     let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
@@ -267,6 +271,8 @@ pub(super) async fn start(
             .with_context(|| format!("reloading policy {}", policy_path.display()))?,
     );
 
+    let egress_allowed = session_allows_egress(&session);
+
     let supervisor_bin = ensure().await?;
     let relay = relay::spawn(&run_id, &microvm_name, session, frame_rx, user_env)?;
     log::debug!(url = %relay.url, "relay listening");
@@ -315,20 +321,54 @@ mod tests {
     }
 
     fn fixture_session() -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
+        session_with_policy(Policy::default())
+    }
+
+    fn session_with_policy(
+        policy: Policy,
+    ) -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};
-        use lns_policy::Policy;
         let notifier = Arc::new(RecordingNotifier::default());
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<HostFrame>();
         let session = Arc::new(ApprovalSession::new(
-            Policy::default(),
-            Policy::default(),
+            policy.clone(),
+            policy,
             notifier,
             store,
             frame_tx,
             std::time::Duration::from_secs(30),
         ));
         (session, frame_rx)
+    }
+
+    #[test]
+    fn a_granted_connector_makes_the_guest_online_over_a_catch_all_deny() {
+        use crate::approval_flow::protocol::GrantedPayload;
+        use lns_policy::RouteRule;
+
+        let mut denied = Policy::default();
+        denied.add_rule(RouteRule::deny_host("*"));
+        let (session, _frames) = session_with_policy(denied);
+        assert!(
+            !session_allows_egress(&session),
+            "a catch-all deny with no grant boots offline"
+        );
+
+        let mut opened = Policy::default();
+        opened.add_rule(RouteRule::allow_host("api.some-provider.example"));
+        session.apply_granted_egress(
+            "some-provider",
+            GrantedPayload {
+                egress: opened,
+                ..GrantedPayload::default()
+            },
+        );
+
+        assert!(
+            session_allows_egress(&session),
+            "the granted connector's destinations need a lease, so this run refuses without one"
+        );
     }
 
     #[tokio::test]
