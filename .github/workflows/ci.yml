@@ -230,7 +230,15 @@ jobs:
 
       - name: Run coverage
         if: github.event_name != 'pull_request' || steps.affected.outputs.skip != 'true'
-        run: make coverage
+        # Reading the job log or the lcov artifact needs egress a sandboxed
+        # checkout may not have, so the verdict travels as annotations, which
+        # the REST API serves.
+        run: |
+          set -euo pipefail
+          if make coverage 2>&1 | tee coverage-gate.log; then
+            exit 0
+          fi
+          scripts/gate-annotate.sh coverage-gate.log
         env:
           # Empty on push: main and on __FULL__ PRs => Makefile runs full
           # workspace. Non-empty on per-crate PRs => Makefile narrows the
@@ -238,9 +246,9 @@ jobs:
           # the Makefile.
           COVERAGE_CRATES: ${{ steps.affected.outputs.crates }}
 
-      # The floor output names the failing file but not the uncovered
-      # lines; when the failure doesn't reproduce on a macOS dev host the
-      # Linux lcov is the only way to see which DA lines went to zero.
+      # The floor names each failing file and its uncovered lines, and the
+      # step above carries both as annotations; this keeps the whole lcov for
+      # a failure those lines do not explain.
       - name: Upload lcov on coverage failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -314,7 +322,14 @@ jobs:
 
       - name: Run coverage as root
         if: github.event_name != 'pull_request' || steps.affected.outputs.skip != 'true'
-        run: make coverage
+        # A root-only failure is the one a contributor can least reproduce, so
+        # this job wants the annotations most.
+        run: |
+          set -euo pipefail
+          if make coverage 2>&1 | tee coverage-gate.log; then
+            exit 0
+          fi
+          scripts/gate-annotate.sh coverage-gate.log
         env:
           COVERAGE_CRATES: ${{ steps.affected.outputs.crates }}
 
