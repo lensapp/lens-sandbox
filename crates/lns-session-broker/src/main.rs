@@ -99,7 +99,7 @@ fn run() -> Result<i32, String> {
     let primary_conn = vsock::accept(listen_fd).map_err(|e| format!("accept(primary): {e}"))?;
 
     if let Some(reason) = network_refusal {
-        let outcome = session::refuse_session(primary_conn, &reason.explain(), reason.clone())
+        let outcome = session::refuse_session(primary_conn, &reason)
             .map_err(|e| format!("refuse primary session: {e}"))?;
         return Ok(outcome.exit_code);
     }

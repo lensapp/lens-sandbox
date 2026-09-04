@@ -189,21 +189,31 @@ pub fn handle_session(
     }
 }
 
+/// The host renders the refusal from this frame, so the guest sends no display text of its own.
 pub fn refuse_session(
     conn: RawFd,
-    message: &str,
-    reason: lns_session::BrokerExitReason,
+    reason: &lns_session::BrokerExitReason,
 ) -> Result<SessionOutcome, SessionError> {
     let opening = read_client_frame(conn).ok_or(SessionError::PeerHangup)?;
     validate_open_session(&opening)?;
     let conn = SharedFd::new(conn);
-    send_frame(
-        &conn,
-        &ServerFrame::StderrBytes(format!("{message}\n").into_bytes()),
-    );
-    send_frame(&conn, &ServerFrame::Refused(reason));
+    send_frame(&conn, &ServerFrame::Refused(reason.clone()));
+    wait_for_host_close(&conn);
     conn.close();
     Ok(SessionOutcome { exit_code: 1 })
+}
+
+/// The reboot in main() drops whatever is still queued on the vsock, so a refusal waits for the host as both exit paths do.
+fn wait_for_host_close(conn: &SharedFd) {
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+    let conn_for_read = conn.clone();
+    let reader = std::thread::spawn(move || {
+        while read_client_frame(conn_for_read.raw()).is_some() {}
+        let _ = closed_tx.send(());
+    });
+    let _ = closed_rx.recv_timeout(HOST_DRAIN_GRACE);
+    shutdown_read(conn.raw());
+    let _ = reader.join();
 }
 
 fn run_tty_session(
@@ -694,25 +704,22 @@ mod tests {
     }
 
     #[test]
-    fn a_boot_refusal_reaches_the_host_stderr_and_reports_its_exit_code() {
+    fn a_boot_refusal_sends_one_typed_frame_and_waits_for_the_host_to_close() {
         let (client, server) = unix_socketpair();
-        send_open_session(client, vec!["/.lens/bin/lns-supervisor".into()]);
-        let outcome = refuse_session(
-            server,
-            "three-line refusal",
-            lns_session::BrokerExitReason::NoDhcpLease,
-        )
-        .expect("a valid opener can receive the refusal");
+        let host = std::thread::spawn(move || {
+            send_open_session(client, vec!["/.lens/bin/lns-supervisor".into()]);
+            let frame = read_server_frame(client);
+            close(client);
+            frame
+        });
+        let outcome = refuse_session(server, &lns_session::BrokerExitReason::NoDhcpLease)
+            .expect("a valid opener can receive the refusal");
         assert_eq!(
-            read_server_frame(client),
-            ServerFrame::StderrBytes(b"three-line refusal\n".to_vec())
-        );
-        assert_eq!(
-            read_server_frame(client),
-            ServerFrame::Refused(lns_session::BrokerExitReason::NoDhcpLease)
+            host.join().expect("host thread"),
+            ServerFrame::Refused(lns_session::BrokerExitReason::NoDhcpLease),
+            "the guest sends the reason only; the host renders the text"
         );
         assert_ne!(outcome.exit_code, 0);
-        close(client);
     }
 
     struct FakeForker {

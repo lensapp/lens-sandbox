@@ -117,6 +117,14 @@ fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     }
 }
 
+/// A broker refusal is rendered from its typed reason, not from the guest's own bytes: this render is CRLF-corrected and reaches a detached run's log.
+fn failure_message(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+        Some(refusal) => refusal.reason.explain(),
+        None => format!("{error:#}"),
+    }
+}
+
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
         Ok(code) => {
@@ -132,17 +140,13 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
             code
         }
         Err(e) => {
-            if e.downcast_ref::<crate::vm::session_client::BrokerRefusal>()
-                .is_none()
-            {
-                let _ = frame_tx
-                    .send(WireFrame::Json(Response::RunLog {
-                        level: lns_ipc::LogLevel::Error,
-                        verb: None,
-                        message: format!("{e:#}"),
-                    }))
-                    .await;
-            }
+            let _ = frame_tx
+                .send(WireFrame::Json(Response::RunLog {
+                    level: lns_ipc::LogLevel::Error,
+                    verb: None,
+                    message: failure_message(&e),
+                }))
+                .await;
             1
         }
     };
@@ -598,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dhcp_refusal_is_not_misreported_as_a_workload_exit() {
+    async fn a_dhcp_refusal_is_rendered_by_the_host_and_not_as_a_workload_exit() {
         let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
         let result = Err(
             anyhow::Error::new(crate::vm::session_client::BrokerRefusal {
@@ -614,15 +618,32 @@ mod tests {
         let code = emit_completion(&tx, result).await;
         assert_eq!(code, 1);
         match rx.recv().await {
+            Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
+                assert!(matches!(level, lns_ipc::LogLevel::Error));
+                assert_eq!(
+                    message,
+                    lns_session::BrokerExitReason::NoDhcpLease.explain()
+                );
+                assert!(
+                    !message.contains("reading broker session frames"),
+                    "the user reads the cause and the remedy, not the host's call stack: {message}"
+                );
+            }
+            other => panic!("expected the host-rendered refusal, got {other:?}"),
+        }
+        match rx.recv().await {
             Some(WireFrame::Json(Response::RunExit { code: reported })) => {
                 assert_eq!(reported, code)
             }
-            other => panic!("expected only the typed RunExit, got {other:?}"),
+            other => panic!("expected the typed RunExit, got {other:?}"),
         }
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+    }
+
+    #[test]
+    fn an_ordinary_run_failure_keeps_its_whole_error_chain() {
+        let error = anyhow::anyhow!("connection refused").context("booting the microVM");
+        let message = failure_message(&error);
+        assert_eq!(message, "booting the microVM: connection refused");
     }
 
     #[test]

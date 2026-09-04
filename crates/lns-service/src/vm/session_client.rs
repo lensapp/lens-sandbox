@@ -31,7 +31,7 @@ pub struct BrokerRefusal {
 
 impl std::fmt::Display for BrokerRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "broker refused the run: {}", self.reason.as_str())
+        write!(f, "the broker refused the run: {}", self.reason.summary())
     }
 }
 
@@ -359,7 +359,11 @@ mod tests {
             .downcast_ref::<BrokerRefusal>()
             .expect("the service preserves the typed broker reason");
         assert_eq!(refusal.reason, BrokerExitReason::NoDhcpLease);
-        assert_eq!(refusal.to_string(), "broker refused the run: no_dhcp_lease");
+        assert_eq!(
+            refusal.to_string(),
+            "the broker refused the run: the guest got no DHCP lease from the host network after 21 s",
+            "a surface that only prints an error chain still names the cause"
+        );
     }
 
     #[tokio::test]
