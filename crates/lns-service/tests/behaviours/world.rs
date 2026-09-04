@@ -90,6 +90,9 @@ pub struct BehaviourWorld {
 
     /// Run id registered by a lifecycle scenario (stop / inspect / logs).
     pub lifecycle_run: Option<String>,
+    pub broker_refusal: Option<lns_session::BrokerExitReason>,
+    pub broker_exit_reason: Option<String>,
+    pub broker_exit_audit: Option<serde_json::Map<String, serde_json::Value>>,
 
     /// Run id registered by a naming scenario, addressable later by name or id.
     pub naming_run: Option<String>,

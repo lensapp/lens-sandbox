@@ -268,6 +268,28 @@ pub fn workload_exit(ctx: &Context, exit_code: i32, killed: bool) -> Value {
     .build()
 }
 
+pub fn no_dhcp_lease(ctx: &Context, exit_code: i32) -> Value {
+    Event::new(
+        "no_dhcp_lease",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_TERMINATE,
+        severity::MEDIUM,
+        ctx,
+    )
+    .set(
+        "message",
+        "the guest got no DHCP lease from the host network".into(),
+    )
+    .set("process", json!({"uid": ctx.run, "name": "session-broker"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .set_status(status::FAILURE)
+    .note("lns_origin", "guest".into())
+    .note("lns_exit_code", exit_code.into())
+    .build()
+}
+
 pub fn workload_restart(ctx: &Context, image: &str) -> Value {
     Event::new(
         "restart",
@@ -799,6 +821,17 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_killed"], true);
         let graceful = workload_exit(&ctx(), 0, false);
         assert_eq!(graceful["message"], "workload exited with code 0");
+    }
+
+    #[test]
+    fn no_dhcp_lease_records_a_failed_boot_instead_of_a_workload_exit() {
+        let ev = no_dhcp_lease(&ctx(), 125);
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["activity_id"], 2);
+        assert_eq!(ev["status_id"], 2);
+        assert_eq!(ev["unmapped"]["lns_kind"], "no_dhcp_lease");
+        assert_eq!(ev["unmapped"]["lns_exit_code"], 125);
     }
 
     #[test]

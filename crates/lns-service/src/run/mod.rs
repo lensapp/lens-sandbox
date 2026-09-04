@@ -11,6 +11,14 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
+pub fn broker_exit_reason(result: &Result<i32>) -> Option<lns_session::BrokerExitReason> {
+    result.as_ref().err().and_then(|error| {
+        error
+            .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
+            .map(|refusal| refusal.reason)
+    })
+}
+
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {
     pub code: i32,
@@ -124,13 +132,17 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
             code
         }
         Err(e) => {
-            let _ = frame_tx
-                .send(WireFrame::Json(Response::RunLog {
-                    level: lns_ipc::LogLevel::Error,
-                    verb: None,
-                    message: format!("{e:#}"),
-                }))
-                .await;
+            if e.downcast_ref::<crate::vm::session_client::BrokerRefusal>()
+                .is_none()
+            {
+                let _ = frame_tx
+                    .send(WireFrame::Json(Response::RunLog {
+                        level: lns_ipc::LogLevel::Error,
+                        verb: None,
+                        message: format!("{e:#}"),
+                    }))
+                    .await;
+            }
             1
         }
     };
@@ -583,6 +595,34 @@ mod tests {
             Some(WireFrame::Json(Response::RunExit { code: 1 })) => {}
             other => panic!("expected RunExit{{1}}, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_dhcp_refusal_is_not_misreported_as_a_workload_exit() {
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        let result = Err(
+            anyhow::Error::new(crate::vm::session_client::BrokerRefusal {
+                reason: lns_session::BrokerExitReason::NoDhcpLease,
+            })
+            .context("reading broker session frames"),
+        );
+        assert_eq!(
+            broker_exit_reason(&result),
+            Some(lns_session::BrokerExitReason::NoDhcpLease),
+            "the service owns the stable reason shown in the audit"
+        );
+        let code = emit_completion(&tx, result).await;
+        assert_eq!(code, 1);
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunExit { code: reported })) => {
+                assert_eq!(reported, code)
+            }
+            other => panic!("expected only the typed RunExit, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

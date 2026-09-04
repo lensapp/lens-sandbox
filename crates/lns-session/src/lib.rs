@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const BROKER_PORT: u32 = 1029;
 
+pub const EGRESS_ALLOWED_ENV: &str = "LENS_SANDBOX_EGRESS_ALLOWED";
+
 pub const FORWARD_PORT: u32 = 1030;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -73,6 +75,21 @@ pub enum ServerFrame {
     StdoutBytes(Vec<u8>),
     StderrBytes(Vec<u8>),
     ExitStatus(i32),
+    Refused(BrokerExitReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerExitReason {
+    NoDhcpLease,
+}
+
+impl BrokerExitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoDhcpLease => "no_dhcp_lease",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +263,7 @@ mod tests {
             ServerFrame::StderrBytes(b"err".to_vec()),
             ServerFrame::ExitStatus(0),
             ServerFrame::ExitStatus(129),
+            ServerFrame::Refused(BrokerExitReason::NoDhcpLease),
         ] {
             let bytes = encode_frame(&frame).unwrap();
             let back: ServerFrame = decode_frame(&bytes[4..]).unwrap();

@@ -189,6 +189,23 @@ pub fn handle_session(
     }
 }
 
+pub fn refuse_session(
+    conn: RawFd,
+    message: &str,
+    reason: lns_session::BrokerExitReason,
+) -> Result<SessionOutcome, SessionError> {
+    let opening = read_client_frame(conn).ok_or(SessionError::PeerHangup)?;
+    validate_open_session(&opening)?;
+    let conn = SharedFd::new(conn);
+    send_frame(
+        &conn,
+        &ServerFrame::StderrBytes(format!("{message}\n").into_bytes()),
+    );
+    send_frame(&conn, &ServerFrame::Refused(reason));
+    conn.close();
+    Ok(SessionOutcome { exit_code: 1 })
+}
+
 fn run_tty_session(
     conn: RawFd,
     spec: WorkloadSpec,
@@ -520,8 +537,11 @@ where
 }
 
 fn send_exit(conn: &SharedFd, code: i32) {
-    let frame = ServerFrame::ExitStatus(code);
-    if let Ok(bytes) = encode_frame(&frame)
+    send_frame(conn, &ServerFrame::ExitStatus(code));
+}
+
+fn send_frame(conn: &SharedFd, frame: &ServerFrame) {
+    if let Ok(bytes) = encode_frame(frame)
         && let Some(guard) = conn.write_lock()
     {
         let _ = vsock::write_all(*guard, &bytes);
@@ -656,6 +676,43 @@ mod tests {
         // SAFETY: bytes is borrowed for the duration of the call.
         let n = unsafe { libc::write(fd, bytes.as_ptr() as *const _, bytes.len()) };
         assert_eq!(n as usize, bytes.len(), "short write on opener");
+    }
+
+    fn read_server_frame(fd: RawFd) -> ServerFrame {
+        let mut length = [0; 4];
+        assert_eq!(
+            crate::vsock::read_exact(fd, &mut length),
+            crate::vsock::ReadOutcome::Full
+        );
+        let length = lns_session::decode_length_prefix(&length).expect("frame length");
+        let mut body = vec![0; length];
+        assert_eq!(
+            crate::vsock::read_exact(fd, &mut body),
+            crate::vsock::ReadOutcome::Full
+        );
+        lns_session::decode_frame(&body).expect("server frame")
+    }
+
+    #[test]
+    fn a_boot_refusal_reaches_the_host_stderr_and_reports_its_exit_code() {
+        let (client, server) = unix_socketpair();
+        send_open_session(client, vec!["/.lens/bin/lns-supervisor".into()]);
+        let outcome = refuse_session(
+            server,
+            "three-line refusal",
+            lns_session::BrokerExitReason::NoDhcpLease,
+        )
+        .expect("a valid opener can receive the refusal");
+        assert_eq!(
+            read_server_frame(client),
+            ServerFrame::StderrBytes(b"three-line refusal\n".to_vec())
+        );
+        assert_eq!(
+            read_server_frame(client),
+            ServerFrame::Refused(lns_session::BrokerExitReason::NoDhcpLease)
+        );
+        assert_ne!(outcome.exit_code, 0);
+        close(client);
     }
 
     struct FakeForker {

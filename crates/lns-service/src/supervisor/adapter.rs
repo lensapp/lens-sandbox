@@ -163,6 +163,24 @@ fn running_policies(
     Ok((effective, own))
 }
 
+fn policy_allows_any_egress(policy: &Policy) -> bool {
+    use lns_policy::Verdict;
+
+    !policy.network.is_closed()
+        || policy
+            .network
+            .egress
+            .http
+            .iter()
+            .any(|rule| rule.verdict == Verdict::Allow)
+        || policy
+            .network
+            .egress
+            .tcp
+            .iter()
+            .any(|rule| rule.verdict == Verdict::Allow)
+}
+
 /// What this run has already decided about the machine's connectors, read off the runtime thread because every read here blocks (§3.2.1, §7.1).
 async fn install_connectors(
     session: &Arc<ApprovalSession>,
@@ -198,6 +216,7 @@ pub(super) async fn start(
     user_env: Vec<String>,
 ) -> Result<SupervisorSession> {
     let (policy, own_policy) = running_policies(policy_path, sandbox_policy)?;
+    let egress_allowed = policy_allows_any_egress(&policy);
 
     let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
@@ -259,6 +278,7 @@ pub(super) async fn start(
         },
         relay,
         watcher: Some(watcher),
+        egress_allowed,
     })
 }
 
@@ -266,6 +286,33 @@ pub(super) async fn start(
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn only_a_deny_all_policy_marks_the_guest_as_offline() {
+        use lns_policy::{RouteRule, TcpEgressRule};
+
+        assert!(policy_allows_any_egress(&Policy::default()));
+
+        let mut denied = Policy::default();
+        denied.add_rule(RouteRule::deny_host("*"));
+        assert!(!policy_allows_any_egress(&denied));
+
+        let mut named_http = denied.clone();
+        named_http
+            .network
+            .egress
+            .http
+            .insert(0, RouteRule::allow_host("api.example.test"));
+        assert!(policy_allows_any_egress(&named_http));
+
+        let mut raw_tcp = denied;
+        raw_tcp
+            .network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.example.test:5432"));
+        assert!(policy_allows_any_egress(&raw_tcp));
+    }
 
     fn fixture_session() -> (Arc<ApprovalSession>, mpsc::UnboundedReceiver<HostFrame>) {
         use crate::approval_flow::session::tests::{CapturingStore, RecordingNotifier};

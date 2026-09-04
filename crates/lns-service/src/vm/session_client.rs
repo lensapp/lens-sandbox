@@ -6,8 +6,8 @@ use std::io;
 use anyhow::{Context, Result};
 use lns_ipc::WireFrame;
 use lns_session::{
-    ClientFrame, ServerFrame, SignalKind, Winsize, decode_frame as protocol_decode_frame,
-    decode_length_prefix,
+    BrokerExitReason, ClientFrame, ServerFrame, SignalKind, Winsize,
+    decode_frame as protocol_decode_frame, decode_length_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -23,6 +23,19 @@ pub struct CapturedStreams {
     pub stdout: String,
     pub stderr: String,
 }
+
+#[derive(Debug)]
+pub struct BrokerRefusal {
+    pub reason: BrokerExitReason,
+}
+
+impl std::fmt::Display for BrokerRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "broker refused the run: {}", self.reason.as_str())
+    }
+}
+
+impl std::error::Error for BrokerRefusal {}
 
 pub(super) struct CaptureBuffers {
     stdout: Vec<u8>,
@@ -143,6 +156,9 @@ pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
             ServerFrame::ExitStatus(code) => {
                 log::debug!(code, "broker reported workload ExitStatus");
                 return Ok(Some(code));
+            }
+            ServerFrame::Refused(reason) => {
+                return Err(BrokerRefusal { reason }.into());
             }
         }
     }
@@ -330,6 +346,19 @@ mod tests {
             Some(42),
             "an explicit ExitStatus is reported as Some(code)"
         );
+    }
+
+    #[tokio::test]
+    async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
+        let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
+        let (tx, _rx) = mpsc::channel(1);
+        let error = read_server_frames(io::Cursor::new(bytes), tx)
+            .await
+            .expect_err("a refusal is not a workload exit");
+        let refusal = error
+            .downcast_ref::<BrokerRefusal>()
+            .expect("the service preserves the typed broker reason");
+        assert_eq!(refusal.reason, BrokerExitReason::NoDhcpLease);
     }
 
     #[tokio::test]

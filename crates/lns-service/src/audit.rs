@@ -256,9 +256,22 @@ pub fn record_run_exited_at(
     exit_code: i32,
     killed: bool,
 ) -> Result<()> {
+    record_run_exited_with_reason_at(path, cx, exit_code, killed, None)
+}
+
+pub fn record_run_exited_with_reason_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    exit_code: i32,
+    killed: bool,
+    reason: Option<lns_session::BrokerExitReason>,
+) -> Result<()> {
     append_ocsf_at(
         path,
-        crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
+        match reason {
+            Some(reason) => crate::ocsf_audit::broker_exit_event(cx, exit_code, reason),
+            None => crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
+        },
     )
 }
 
@@ -268,11 +281,22 @@ pub fn record_run_exited(
     exit_code: i32,
     clock: &dyn Clock,
 ) -> Result<()> {
-    record_run_exited_at(
+    record_run_exited_with_reason(run_id, microvm, exit_code, None, clock)
+}
+
+pub fn record_run_exited_with_reason(
+    run_id: &str,
+    microvm: &str,
+    exit_code: i32,
+    reason: Option<lns_session::BrokerExitReason>,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_run_exited_with_reason_at(
         &audit_path(run_id)?,
         &run_ctx(run_id, microvm, clock),
         exit_code,
-        exit_code == 137,
+        reason.is_none() && exit_code == 137,
+        reason,
     )
 }
 
@@ -632,6 +656,24 @@ mod tests {
         let content = std::fs::read_to_string(audit_path("aa137").unwrap()).unwrap();
         assert!(content.contains("\"lns_killed\":true"), "{content}");
         assert!(content.contains("\"lns_kind\":\"restart\""), "{content}");
+    }
+
+    #[test]
+    fn a_broker_dhcp_refusal_writes_one_named_failure_instead_of_a_workload_exit() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_run_exited_with_reason_at(
+            &path,
+            &cx(),
+            1,
+            false,
+            Some(lns_session::BrokerExitReason::NoDhcpLease),
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"lns_kind\":\"no_dhcp_lease\""));
+        assert!(!content.contains("\"lns_kind\":\"exit\""));
+        assert_eq!(content.lines().count(), 1);
     }
 
     #[test]
