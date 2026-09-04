@@ -55,9 +55,14 @@ pub fn service_binary() -> PathBuf {
     );
 }
 
-/// Every `lns` the harness spawns gets a session of its own, so `/dev/tty` never opens and a scenario that asserts "no terminal" holds even when the suite runs from an interactive shell.
 pub fn lns_command() -> Command {
-    let mut cmd = Command::new(lns_binary());
+    command_for(lns_binary())
+}
+
+/// Every child gets a session of its own, so `/dev/tty` never opens and a scenario that asserts "no terminal" holds even when the suite runs from an interactive shell; it also opts out of the update check, so a test run neither reaches get.lns.run nor mints an install id.
+pub fn command_for(binary: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.env(lns_ipc::NO_UPDATE_CHECK_ENV, "1");
     // SAFETY: setsid() is async-signal-safe and touches only the forked child's session.
     unsafe {
         cmd.pre_exec(|| {

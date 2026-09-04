@@ -154,7 +154,7 @@ fn run_status_from_another_terminal(world: &mut E2eWorld) {
 
 #[when("two `lns service status` commands run concurrently from different terminals")]
 fn run_concurrent_commands(world: &mut E2eWorld) {
-    use crate::specutil::lns_binary;
+    use crate::specutil::lns_command;
     let socket_path = world
         .service_socket
         .as_ref()
@@ -162,7 +162,7 @@ fn run_concurrent_commands(world: &mut E2eWorld) {
 
     let socket_path2 = socket_path.clone();
     let h1 = std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(lns_binary());
+        let mut cmd = lns_command();
         cmd.args(["service", "status"]);
         if let Some(s) = &socket_path {
             cmd.env("LNS_SOCKET_PATH", s);
@@ -175,7 +175,7 @@ fn run_concurrent_commands(world: &mut E2eWorld) {
         }
     });
     let h2 = std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(lns_binary());
+        let mut cmd = lns_command();
         cmd.args(["service", "status"]);
         if let Some(s) = &socket_path2 {
             cmd.env("LNS_SOCKET_PATH", s);
