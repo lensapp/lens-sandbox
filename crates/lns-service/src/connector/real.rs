@@ -1353,16 +1353,23 @@ mod tests {
         }
     }
 
-    /// What each connector line in the ledger says answered it, read from the note the OCSF record carries.
-    fn answer_sources() -> Vec<Option<String>> {
+    fn ledger_events() -> Vec<serde_json::Map<String, serde_json::Value>> {
         let path = lns_ipc::connection_ledger().expect("the ledger path");
         if !path.exists() {
             return Vec::new();
         }
         lns_audit::stream_ledger(&path)
             .expect("stream the ledger")
+            .map(|event| event.expect("a ledger line"))
+            .collect()
+    }
+
+    /// What each connector line in the ledger says answered it, read from the note the OCSF record carries.
+    fn answer_sources() -> Vec<Option<String>> {
+        ledger_events()
+            .iter()
             .map(|event| {
-                event.expect("a ledger line")["unmapped"]["lns_answer_source"]
+                event["unmapped"]["lns_answer_source"]
                     .as_str()
                     .map(str::to_string)
             })
@@ -1371,13 +1378,9 @@ mod tests {
 
     /// Every ledger line this machine holds, read back the way `lns audit` reads it.
     fn recorded() -> Vec<lns_audit::Row> {
-        let path = lns_ipc::connection_ledger().expect("the ledger path");
-        if !path.exists() {
-            return Vec::new();
-        }
-        lns_audit::stream_ledger(&path)
-            .expect("stream the ledger")
-            .map(|event| lns_audit::read(&event.expect("a ledger line")).expect("a readable row"))
+        ledger_events()
+            .iter()
+            .map(|event| lns_audit::read(event).expect("a readable row"))
             .collect()
     }
 
