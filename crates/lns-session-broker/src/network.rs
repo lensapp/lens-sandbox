@@ -2,13 +2,18 @@
 
 mod real;
 #[cfg(target_os = "linux")]
-pub use real::{bring_up_eth0, configure_dns};
+pub use real::{bring_up_eth0, configure_dns, start_dhcp_keepalive};
+
+use std::time::Duration;
 
 pub const BUSYBOX: &str = "/.lens/guest-tools/bin/busybox";
 pub const UDHCPC_SCRIPT_PATH: &str = "/tmp/lns-udhcpc.script";
+pub const UDHCPC_PID_PATH: &str = "/tmp/lns-udhcpc.pid";
+pub const UDHCPC_RENEW_COMMAND: &str = r#"pid=$("$1" cat "$2") && "$1" kill -USR1 "$pid""#;
 
 pub const DHCP_DNS_PATH: &str = "/.lens/dhcp-dns";
 pub const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
+pub const DHCP_RENEW_INTERVAL: Duration = Duration::from_secs(120);
 
 pub const FALLBACK_DNS: &[&str] = &["1.1.1.1", "8.8.8.8"];
 
@@ -19,10 +24,15 @@ deconfig)
     "$BB" ip addr flush dev "$interface" 2>/dev/null
     ;;
 bound|renew)
+    lease="${ip}|${mask:-24}|${router}|${dns}"
+    previous_lease=$("$BB" cat /.lens/dhcp-lease 2>/dev/null || true)
+    if [ "$previous_lease" = "$lease" ]; then
+        exit 0
+    fi
     "$BB" ip addr flush dev "$interface" 2>/dev/null
     "$BB" ip addr add "${ip}/${mask:-24}" dev "$interface"
     if [ -n "$router" ]; then
-        "$BB" ip route add default via "$router" dev "$interface" 2>/dev/null || true
+        "$BB" ip route replace default via "$router" dev "$interface"
     fi
     "$BB" mkdir -p /.lens
     : > /.lens/dhcp-dns
@@ -31,6 +41,7 @@ bound|renew)
             echo "$d" >> /.lens/dhcp-dns
         done
     fi
+    printf '%s\n' "$lease" > /.lens/dhcp-lease
     ;;
 esac
 "#;
@@ -54,6 +65,27 @@ pub trait FsWriter {
     fn write(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()>;
 }
 
+pub trait KeepaliveWaiter {
+    fn wait(&self, duration: Duration) -> bool;
+}
+
+pub fn keep_dhcp_alive_with(runner: &dyn CommandRunner, waiter: &dyn KeepaliveWaiter) {
+    while waiter.wait(DHCP_RENEW_INTERVAL) {
+        let _ = run_check(
+            runner,
+            "udhcpc renew",
+            &[
+                "sh",
+                "-c",
+                UDHCPC_RENEW_COMMAND,
+                "lns-dhcp-renew",
+                BUSYBOX,
+                UDHCPC_PID_PATH,
+            ],
+        );
+    }
+}
+
 pub fn bring_up_eth0_with(runner: &dyn CommandRunner, fs: &dyn FsWriter) -> Result<(), String> {
     run_check(
         runner,
@@ -74,7 +106,6 @@ pub fn bring_up_eth0_with(runner: &dyn CommandRunner, fs: &dyn FsWriter) -> Resu
             "udhcpc",
             "-i",
             "eth0",
-            "-q",
             "-n",
             "-t",
             "2",
@@ -82,6 +113,8 @@ pub fn bring_up_eth0_with(runner: &dyn CommandRunner, fs: &dyn FsWriter) -> Resu
             "3",
             "-s",
             UDHCPC_SCRIPT_PATH,
+            "-p",
+            UDHCPC_PID_PATH,
         ],
     )?;
     Ok(())
@@ -150,7 +183,7 @@ mod tests {
         for needle in [
             "$interface",
             "${ip}",
-            "\"$BB\" ip route add default",
+            "\"$BB\" ip route replace default",
             "/.lens/dhcp-dns",
             "echo \"$d\"",
         ] {
@@ -261,6 +294,27 @@ mod tests {
         next_result: RefCell<io::Result<()>>,
     }
 
+    struct FakeKeepaliveWaiter {
+        waits: RefCell<Vec<Duration>>,
+        results: RefCell<Vec<bool>>,
+    }
+
+    impl FakeKeepaliveWaiter {
+        fn once() -> Self {
+            Self {
+                waits: RefCell::new(Vec::new()),
+                results: RefCell::new(vec![false, true]),
+            }
+        }
+    }
+
+    impl KeepaliveWaiter for FakeKeepaliveWaiter {
+        fn wait(&self, duration: Duration) -> bool {
+            self.waits.borrow_mut().push(duration);
+            self.results.borrow_mut().pop().expect("wait result")
+        }
+    }
+
     impl FakeFsWriter {
         fn ok() -> Self {
             Self {
@@ -293,6 +347,53 @@ mod tests {
     }
 
     #[test]
+    fn keepalive_renews_after_120_seconds() {
+        let runner = FakeCommandRunner::with_outcomes(vec![ok(0)]);
+        let waiter = FakeKeepaliveWaiter::once();
+
+        keep_dhcp_alive_with(&runner, &waiter);
+
+        assert_eq!(
+            *waiter.waits.borrow(),
+            vec![DHCP_RENEW_INTERVAL, DHCP_RENEW_INTERVAL]
+        );
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                BUSYBOX.to_string(),
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    UDHCPC_RENEW_COMMAND.to_string(),
+                    "lns-dhcp-renew".to_string(),
+                    BUSYBOX.to_string(),
+                    UDHCPC_PID_PATH.to_string(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn udhcpc_script_exits_before_applying_an_unchanged_lease() {
+        let comparison = UDHCPC_SCRIPT
+            .find("previous_lease")
+            .expect("lease comparison");
+        let address_apply = comparison
+            + UDHCPC_SCRIPT[comparison..]
+                .find("ip addr flush")
+                .expect("address apply");
+
+        assert!(comparison < address_apply);
+        assert!(UDHCPC_SCRIPT[comparison..address_apply].contains("exit 0"));
+    }
+
+    #[test]
+    fn udhcpc_script_applies_a_changed_address_once() {
+        assert_eq!(UDHCPC_SCRIPT.matches("ip addr add").count(), 1);
+        assert!(UDHCPC_SCRIPT.contains("printf '%s\\n' \"$lease\" > /.lens/dhcp-lease"));
+    }
+
+    #[test]
     fn bring_up_runs_lo_then_eth0_then_script_then_udhcpc() {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(0), ok(0), ok(0)]);
         let fs = FakeFsWriter::ok();
@@ -310,7 +411,6 @@ mod tests {
                 "udhcpc",
                 "-i",
                 "eth0",
-                "-q",
                 "-n",
                 "-t",
                 "2",
@@ -318,6 +418,8 @@ mod tests {
                 "3",
                 "-s",
                 UDHCPC_SCRIPT_PATH,
+                "-p",
+                UDHCPC_PID_PATH,
             ],
         );
 

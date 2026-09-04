@@ -42,9 +42,13 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
-    if let Err(e) = network::bring_up_eth0() {
-        eprintln!("lns-session-broker: best-effort network setup failed: {e}");
-    }
+    let dhcp_keepalive = match network::bring_up_eth0() {
+        Ok(()) => Some(network::start_dhcp_keepalive()),
+        Err(e) => {
+            eprintln!("lns-session-broker: best-effort network setup failed: {e}");
+            None
+        }
+    };
     // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
     if let Err(e) = network::configure_dns() {
         eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
@@ -85,6 +89,7 @@ fn run() -> Result<i32, String> {
     drop(accept_thread);
 
     reap_exec_sessions(&exec_sessions);
+    drop(dhcp_keepalive);
 
     match primary_outcome {
         Ok(out) => Ok(out.exit_code),
