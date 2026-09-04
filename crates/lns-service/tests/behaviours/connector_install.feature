@@ -79,3 +79,39 @@ Feature: installing a connector on this machine
     When the machine lists its connectors
     Then the list names "some-provider" serving "api.some-provider.example"
     And the list marks the method "token" as needing a connect
+
+  @todo
+  Scenario: a pulled connector may not carry host execution
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "sign-in" is a code method declaring host execution
+    When the machine installs the connector from a registry reference
+    Then the install is refused
+    And the refusal says host execution is local-install only
+
+  @todo
+  Scenario: a connector installed from a local path may carry host execution
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "sign-in" is a code method declaring host execution
+    When the machine installs the connector from a local path
+    Then the install succeeds
+
+  @todo
+  Scenario: editing a component after install changes nothing until a reinstall
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "sign-in" is a code method
+    And the machine installs the connector from a local path
+    And the run "1a2b3c4d" grants the method "sign-in"
+    When the component file changes on disk
+    Then the machine still holds the connector at the digest it installed
+    And the run keeps its grant
+
+  @todo
+  Scenario: reinstalling a connector whose component changed asks the run again
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "sign-in" is a code method
+    And the machine installs the connector from a local path
+    And the run "1a2b3c4d" grants the method "sign-in"
+    When the component file changes on disk
+    And the machine installs the connector from a local path
+    Then the machine holds the connector at a different digest
+    And the run is offered the connector again
