@@ -357,7 +357,7 @@ lns connector uninstall <ID>
 lns connector list [--format <table|json>]
 lns connector connect <ID> [--method <NAME>] [--as <CONNECTION>]
 lns connector disconnect <ID> [--connection <CONNECTION>]
-lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>]
+lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>] [--yes]
 lns connector forget <ID> --run <RUN>
 ```
 
@@ -368,7 +368,7 @@ lns connector forget <ID> --run <RUN>
 | `list` | Lists what is installed: what each connector serves, its methods — marking those that need no connect — and the connections this machine holds for it. |
 | `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **connection**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several connections of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a run still decides which connection to use. |
 | `disconnect` | Drops one connection, or every connection of a connector when `--connection` is absent. Exits `1` when the connector holds none — a connector whose methods all lack `auth` never holds one. The connector stays installed, runs that granted a dropped connection keep their grants, and you are asked to connect again the next time a request needs a value. |
-| `grant` | Grants one run a method before it asks for it. `--run` names the run and is required — there is no working directory to fall back on. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the connection's authority where it authenticates — and asks. `--method` names the method; omitted, you choose when more than one is offerable. `--connection` names the connection behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no connection, `grant` says to `connect` first rather than starting an authentication of its own. A run holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. Where `--run` names no run, what it prints says so, and the answer reserves the decision for the run the user next creates with that name. Exits `1` when the run already granted that method and connection, or when a reservation for that name already names them. |
+| `grant` | Grants one run a method before it asks for it. `--run` names the run and is required — there is no working directory to fall back on. Prints what the card would show — the destinations the method opens, the files it writes, the variables it sets, and the authority of each connection of the method it grants — and asks. `--yes` answers that disclosure on the command line instead of at the prompt, so one command per run gives a dispatcher its grant with no terminal and no card; the disclosure is still printed, and `--yes` still chooses nothing. `--method` names the method; omitted, you choose when more than one is offerable. `--connection` names the connection behind it, and a method with no `auth` takes none; where one authenticates and this machine holds no connection, `grant` says to `connect` first rather than starting an authentication of its own. A run holds one grant per connector, so this replaces any prior one, and what it prints names the method it displaces. Where `--run` names no run, what it prints says so, and the answer reserves the decision for the run the user next creates with that name. Exits `1` when the run already granted that method and connection, or when a reservation for that name already names them. |
 | `forget` | Clears one run's decision about one connector, granted or declined, so the next start asks again. It also clears a reservation waiting for a name. The inverse of `grant`, and `--run` is required for the same reason. Exits `1` when there was nothing to forget. |
 
 Four verbs bound the decision, across two scopes. On the machine: `install`
@@ -385,9 +385,18 @@ naming that connection are invalidated and asked again
 **`grant` is the card in a terminal, not a shortcut past it.** It discloses
 exactly what the card discloses and then asks, so consent is never given to a
 payload nobody saw ([§7.2](#72-answering)). What it moves is *when* you decide,
-not *whether* you were told. There is deliberately no flag that answers it: with
-no terminal to ask at, `grant` refuses like any other prompt
-([§7.2](#72-answering)), so a script cannot consent on a person's behalf.
+not *whether* you were told.
+
+**A person consents in one of three ways: at the card, at the terminal prompt,
+or with `--yes` on `grant`.** The flag is not a script consenting on a person's
+behalf: it runs on the host as that person, who already holds the credential and
+can spend it directly, and the boundary's job — keeping the value out of the
+guest — is the same however the grant was answered. The disclosure prints in
+every one of the three, because consent by flag is still consent to something
+the person could read. With neither a terminal nor `--yes`, `grant` refuses like
+any other prompt ([§7.2](#72-answering)) and names both ways out. The card
+itself stays unanswerable by any flag, and the answer's source — `card`,
+`terminal` or `flag` — is recorded in the audit chain.
 
 **The card is the normal path.** It offers every method the connector declares,
 and for one that authenticates, every connection this machine holds plus the option
@@ -660,7 +669,8 @@ you may also answer early, at your terminal, with the same disclosure.
 - A prompt is written to stderr and read from your terminal. It never consumes
   stdin, so piping data into `lns run` can never be mistaken for a "yes".
 - `--yes` accepts what a document declares. `-f`/`--force` accepts a `prune`.
-  `-y` accepts an uninstall.
+  `-y` accepts an uninstall. `--yes` on `lns connector grant` accepts the
+  disclosure that command prints.
 - A verb that names its target does not ask: you already named it. `rm` removes
   what you pointed at, and `-f` on `lns sandbox rm` means "stop it first", not
   "delete without asking".

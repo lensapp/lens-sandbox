@@ -311,7 +311,7 @@ lns connector uninstall <ID>
 lns connector list [--format <table|json>]
 lns connector connect <ID> [--method <NAME>] [--as <CONNECTION>]
 lns connector disconnect <ID> [--connection <CONNECTION>]
-lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>]
+lns connector grant <ID> --run <RUN> [--method <NAME>] [--connection <CONNECTION>] [--yes]
 lns connector forget <ID> --run <RUN>
 ```
 
@@ -322,7 +322,7 @@ lns connector forget <ID> --run <RUN>
 | `list`                | List what is installed: what each connector serves, each method and what it still needs (`ready to grant`, `connect first`, or that this `lns` cannot offer it), and the connections this machine holds. |
 | `connect <ID>`        | Ask for each value the method's authentication produces, at the terminal and without echoing it, and keep the result as a named connection. A `kind: token` authentication produces one value, so one method asks one question however many credentials draw on it. `--as` names it; otherwise `lns` suggests the first free name and you confirm, so a suggested name never replaces a connection you already hold. A name you give yourself — with `--as` or at the prompt — that a connection already uses re-authenticates that connection in place. Grants nothing: a run still decides whether to use it. Refused for a method with no `auth` — grant that instead. |
 | `disconnect <ID>`     | Drop one connection, or every connection of the connector when `--connection` is absent. Exits `1` when it holds none. The connector stays installed, and runs that granted a dropped connection keep their grants. |
-| `grant <ID>`          | Let one run use one method. `--run` names it — its id, its name, or a unique id prefix — and is required. Prints what that method opens, writes and sets, and the authority of each connection held, then asks. Where `--run` names no run, the disclosure says so and your answer reserves the decision for the run you next create with that name. An id or id prefix that resolves to nothing is an error, not a reservation. Exits `1` when you decline, and `1` when that run already granted that method and connection. A method that writes a file is refused for a run that started before the connector was installed: only a boot works out where the file lands, so restart the run and grant it there. |
+| `grant <ID>`          | Let one run use one method. `--run` names it — its id, its name, or a unique id prefix — and is required. Prints what that method opens, writes and sets, and the authority of each connection the method can use, then asks. `--yes` answers the disclosure on the command line, so a dispatcher reserves a grant for the run name it is about to use, with no prompt and no card. It still prints the disclosure, and it still refuses to choose: name the method with `--method` and the connection with `--connection` where more than one is offerable. Where `--run` names no run, the disclosure says so and your answer reserves the decision for the run you next create with that name. An id or id prefix that resolves to nothing is an error, not a reservation. Exits `1` when you decline, and `1` when that run already granted that method and connection. A method that writes a file is refused for a run that started before the connector was installed: only a boot works out where the file lands, so restart the run and grant it there. |
 | `forget <ID>`         | Clear one run's decision about one connector, granted or declined, so its next start asks again. It also clears a reservation waiting for a name. Exits `1` when there was nothing to clear. |
 
 `install` takes either a published reference or a local path — a directory
@@ -334,10 +334,33 @@ against your working directory. The digest a local install records is the one
 publishing that directory would produce, so a grant survives the publish, and
 naming the document records the same digest as naming its directory.
 
-`connect` and `grant` need a terminal by design: no flag answers either, so a
-script cannot consent or paste a secret on your behalf. `--method` is required
-when a connector declares more than one method this version can offer — `lns`
-refuses rather than choosing for you.
+`connect` needs a terminal by design: no flag answers it, so nothing pastes a
+secret on your behalf. `grant` needs a terminal or `--yes`: the flag runs on
+your machine as you, and you already hold the credential it grants, so typing it
+is you consenting to a disclosure you can read. `--method` is required when a
+connector declares more than one method this version can offer — `lns` refuses
+rather than choosing for you.
+
+```console
+$ lns connector grant github --run task-42 --yes
+granting github to task-42 would give it:
+  method   Personal access token
+  opens    github.com, api.github.com, codeload.github.com
+  writes   nothing
+  sets     GH_TOKEN
+  connection gh auth token (no authority reported)
+  no run is named task-42. This reserves the decision for the run you next create with that name.
+reserved github with token as gh auth token for task-42
+```
+
+Without a terminal and without the flag, `grant` refuses and names both ways
+out:
+
+```console
+$ lns connector grant github --run task-45
+error: granting github shows what it opens and asks you to confirm, and there is no terminal to ask at.
+       Run `lns connector grant github --run task-45` from a terminal, or pass --yes to answer here.
+```
 
 You do not have to grant anything ahead of time. When a run reaches a destination
 an installed connector serves, and that run has neither granted nor declined
