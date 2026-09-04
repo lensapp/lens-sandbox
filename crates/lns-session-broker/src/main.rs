@@ -42,12 +42,17 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
-    if let Err(e) = network::bring_up_eth0() {
-        eprintln!("lns-session-broker: best-effort network setup failed: {e}");
-    }
-    // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
-    if let Err(e) = network::configure_dns() {
-        eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
+    let egress_allowed = network::policy_allows_egress_with(|key| std::env::var(key).ok());
+    let network_refusal =
+        network::bring_up_network_with(network::bring_up_eth0, egress_allowed).err();
+    match &network_refusal {
+        Some(reason) => eprintln!("lns-session-broker: {}", reason.explain()),
+        // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
+        None => {
+            if let Err(e) = network::configure_dns() {
+                eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
+            }
+        }
     }
 
     // Must run before any session forks: the workload inherits env naming the canonical bundle, and the supervisor appends the proxy CA to it.
@@ -65,6 +70,12 @@ fn run() -> Result<i32, String> {
     let listen_fd = vsock::listen(BROKER_PORT).map_err(|e| format!("listen: {e}"))?;
 
     let primary_conn = vsock::accept(listen_fd).map_err(|e| format!("accept(primary): {e}"))?;
+
+    if let Some(reason) = network_refusal {
+        let outcome = session::refuse_session(primary_conn, &reason)
+            .map_err(|e| format!("refuse primary session: {e}"))?;
+        return Ok(outcome.exit_code);
+    }
 
     let exec_sessions: Arc<Mutex<Vec<session::ExecSession>>> = Arc::new(Mutex::new(Vec::new()));
 

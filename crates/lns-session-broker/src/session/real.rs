@@ -189,6 +189,33 @@ pub fn handle_session(
     }
 }
 
+/// The host renders the refusal from this frame, so the guest sends no display text of its own.
+pub fn refuse_session(
+    conn: RawFd,
+    reason: &lns_session::BrokerExitReason,
+) -> Result<SessionOutcome, SessionError> {
+    let opening = read_client_frame(conn).ok_or(SessionError::PeerHangup)?;
+    validate_open_session(&opening)?;
+    let conn = SharedFd::new(conn);
+    send_frame(&conn, &ServerFrame::Refused(reason.clone()));
+    wait_for_host_close(&conn);
+    conn.close();
+    Ok(SessionOutcome { exit_code: 1 })
+}
+
+/// The reboot in main() drops whatever is still queued on the vsock, so a refusal waits for the host as both exit paths do.
+fn wait_for_host_close(conn: &SharedFd) {
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+    let conn_for_read = conn.clone();
+    let reader = std::thread::spawn(move || {
+        while read_client_frame(conn_for_read.raw()).is_some() {}
+        let _ = closed_tx.send(());
+    });
+    let _ = closed_rx.recv_timeout(HOST_DRAIN_GRACE);
+    shutdown_read(conn.raw());
+    let _ = reader.join();
+}
+
 fn run_tty_session(
     conn: RawFd,
     spec: WorkloadSpec,
@@ -520,8 +547,11 @@ where
 }
 
 fn send_exit(conn: &SharedFd, code: i32) {
-    let frame = ServerFrame::ExitStatus(code);
-    if let Ok(bytes) = encode_frame(&frame)
+    send_frame(conn, &ServerFrame::ExitStatus(code));
+}
+
+fn send_frame(conn: &SharedFd, frame: &ServerFrame) {
+    if let Ok(bytes) = encode_frame(frame)
         && let Some(guard) = conn.write_lock()
     {
         let _ = vsock::write_all(*guard, &bytes);
@@ -656,6 +686,40 @@ mod tests {
         // SAFETY: bytes is borrowed for the duration of the call.
         let n = unsafe { libc::write(fd, bytes.as_ptr() as *const _, bytes.len()) };
         assert_eq!(n as usize, bytes.len(), "short write on opener");
+    }
+
+    fn read_server_frame(fd: RawFd) -> ServerFrame {
+        let mut length = [0; 4];
+        assert_eq!(
+            crate::vsock::read_exact(fd, &mut length),
+            crate::vsock::ReadOutcome::Full
+        );
+        let length = lns_session::decode_length_prefix(&length).expect("frame length");
+        let mut body = vec![0; length];
+        assert_eq!(
+            crate::vsock::read_exact(fd, &mut body),
+            crate::vsock::ReadOutcome::Full
+        );
+        lns_session::decode_frame(&body).expect("server frame")
+    }
+
+    #[test]
+    fn a_boot_refusal_sends_one_typed_frame_and_waits_for_the_host_to_close() {
+        let (client, server) = unix_socketpair();
+        let host = std::thread::spawn(move || {
+            send_open_session(client, vec!["/.lens/bin/lns-supervisor".into()]);
+            let frame = read_server_frame(client);
+            close(client);
+            frame
+        });
+        let outcome = refuse_session(server, &lns_session::BrokerExitReason::NoDhcpLease)
+            .expect("a valid opener can receive the refusal");
+        assert_eq!(
+            host.join().expect("host thread"),
+            ServerFrame::Refused(lns_session::BrokerExitReason::NoDhcpLease),
+            "the guest sends the reason only; the host renders the text"
+        );
+        assert_ne!(outcome.exit_code, 0);
     }
 
     struct FakeForker {

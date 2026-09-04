@@ -84,11 +84,13 @@ pub async fn handle(
     )
     .instrument(tracing::Span::current())
     .await;
+    let broker_reason = super::broker_exit_reason(&result);
     let code = emit_completion(&frame_tx, result).await;
-    if let Err(e) = crate::audit::record_run_exited(
+    if let Err(e) = crate::audit::record_run_exited_with_reason(
         &finished_run_id,
         &microvm_label,
         code,
+        broker_reason,
         &crate::clock::RealClock,
     ) {
         log::warn!("run exit not audited: {e:#}");

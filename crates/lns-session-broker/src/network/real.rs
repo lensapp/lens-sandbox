@@ -30,7 +30,7 @@ impl FsWriter for RealFsWriter {
 }
 
 #[cfg(target_os = "linux")]
-pub fn bring_up_eth0() -> Result<(), String> {
+pub fn bring_up_eth0() -> Result<(), super::NetworkSetupError> {
     super::bring_up_eth0_with(&RealCommandRunner, &RealFsWriter)
 }
 

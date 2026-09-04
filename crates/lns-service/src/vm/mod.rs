@@ -113,6 +113,12 @@ pub struct ExecSpec {
 }
 
 impl ExecSpec {
+    fn egress_marker(allowed: bool) -> (String, String) {
+        (
+            lns_session::EGRESS_ALLOWED_ENV.into(),
+            u8::from(allowed).to_string(),
+        )
+    }
     pub fn server(
         image_config: Option<&oci_client::config::ConfigFile>,
         run_as: &RunAs,
@@ -120,6 +126,7 @@ impl ExecSpec {
         token: &str,
         entrypoint: Option<&str>,
         cmd: &[String],
+        egress_allowed: bool,
     ) -> Self {
         let agent_command = match image_config {
             Some(cfg) => crate::workload_argv::from_image_config(cfg, entrypoint, cmd),
@@ -142,6 +149,7 @@ impl ExecSpec {
             "AGENT_COMMAND_B64".into(),
             crate::base64::encode(agent_command.as_bytes()),
         ));
+        kernel_env.push(Self::egress_marker(egress_allowed));
         kernel_env.push((
             "PATH".into(),
             crate::workload_env::GUEST_DEFAULT_PATH.into(),
@@ -166,6 +174,8 @@ impl ExecSpec {
                     "AGENT_COMMAND_B64".into(),
                     crate::base64::encode(argv.as_bytes()),
                 ),
+                // The tool provisioner boots without a session and fetches over the network, so it refuses without a lease too.
+                Self::egress_marker(true),
                 (
                     "PATH".into(),
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -189,6 +199,7 @@ impl ExecSpec {
                 &s.relay.token,
                 entrypoint,
                 cmd,
+                s.egress_allowed,
             ),
             None => Self::from_image_config(image_config, entrypoint, cmd),
         }
@@ -370,6 +381,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_kernel_environment_tells_the_broker_if_egress_is_allowed() {
+        assert_eq!(
+            ExecSpec::egress_marker(true),
+            (lns_session::EGRESS_ALLOWED_ENV.into(), "1".into())
+        );
+        assert_eq!(
+            ExecSpec::egress_marker(false),
+            (lns_session::EGRESS_ALLOWED_ENV.into(), "0".into())
+        );
+    }
+
+    #[test]
     fn base64_encode_output_has_no_whitespace() {
         let v = crate::base64::encode(b"echo hello world\tfoo\nbar");
         assert!(
@@ -384,6 +407,23 @@ mod tests {
         let keys: Vec<&str> = spec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
         assert!(!keys.contains(&"AGENT_COMMAND"));
+    }
+
+    #[test]
+    fn a_session_less_boot_declares_that_it_needs_egress() {
+        let spec = ExecSpec::for_run(
+            &resolve_run_as(Some("0"), Some(0), None, None),
+            None,
+            &["/bin/sh".into()],
+            None,
+            None,
+        );
+        let env: std::collections::HashMap<_, _> = spec.kernel_env.iter().cloned().collect();
+        assert_eq!(
+            env.get(lns_session::EGRESS_ALLOWED_ENV).map(String::as_str),
+            Some("1"),
+            "the tool provisioner fetches tools over the network, so a missing lease is fatal for it too"
+        );
     }
 
     #[test]
@@ -723,6 +763,7 @@ mod tests {
             "token",
             None,
             &["echo".into(), "hello".into()],
+            true,
         );
         let keys: Vec<&str> = exec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
@@ -785,6 +826,7 @@ mod tests {
                 fd_tx,
             },
             watcher: None,
+            egress_allowed: true,
         }
     }
 
@@ -945,6 +987,7 @@ mod tests {
             "token-xyz",
             None,
             &[],
+            true,
         );
         let b64 = spec
             .kernel_env
@@ -1206,6 +1249,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = named.kernel_env.iter().cloned().collect();
         assert_eq!(
@@ -1224,6 +1268,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = numeric.kernel_env.iter().cloned().collect();
         assert_eq!(env.get("SANDBOX_UID").map(String::as_str), Some("1000"));
@@ -1243,6 +1288,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = with_group.kernel_env.iter().cloned().collect();
         assert_eq!(
@@ -1258,6 +1304,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = without_group.kernel_env.iter().cloned().collect();
         assert!(

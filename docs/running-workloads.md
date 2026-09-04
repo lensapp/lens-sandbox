@@ -1048,6 +1048,33 @@ every run publishes it — no flag opts in:
 - Explicit `-p` entries combine with the declared set; on a container-port
   conflict the explicit `-p` wins.
 
+### Host DHCP on macOS
+
+Apple's shared `vmnet` network is one host session. The session, its bridge, and
+its DHCP server exist while at least one run is active. The host starts
+`bootpd` when a guest asks for a lease. `bootpd` can exit after five minutes
+without a DHCP exchange even when another run keeps the `vmnet` session alive.
+
+The guest asks for a lease seven times, three seconds apart, so it waits 21
+seconds. If the policy allows network egress and the host gives no lease, the
+workload does not start. LNS prints this message and exits non-zero:
+
+```text
+✗  the guest got no DHCP lease from the host network after 21 s
+  the host DHCP server (bootpd) answers a session's first guest and may stop after five idle minutes
+  remedy: stop every run, then start again
+```
+
+`lns audit <run>` records the refusal as `no_dhcp_lease`. A different network
+setup failure refuses the same way and keeps its own error text.
+
+To recover, stop every run and start again. This ends the old host session and
+starts a new one, and the first guest of a new session gets a lease.
+
+Do not delete `/var/db/dhcpd_leases`. The lease file does not cause this idle
+server failure. Stopping every run is the part of that workaround that resets
+the host session.
+
 ### Interactive, TTY, and detached sessions
 
 | Flag                  | Default | Meaning                                                              |

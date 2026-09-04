@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const BROKER_PORT: u32 = 1029;
 
+pub const EGRESS_ALLOWED_ENV: &str = "LENS_SANDBOX_EGRESS_ALLOWED";
+
 pub const FORWARD_PORT: u32 = 1030;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -73,6 +75,49 @@ pub enum ServerFrame {
     StdoutBytes(Vec<u8>),
     StderrBytes(Vec<u8>),
     ExitStatus(i32),
+    Refused(BrokerExitReason),
+}
+
+/// Why the broker refused to start a workload: the host renders the text, so the wire carries the cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerExitReason {
+    NoDhcpLease,
+    NetworkSetupFailed(String),
+}
+
+impl BrokerExitReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoDhcpLease => "no_dhcp_lease",
+            Self::NetworkSetupFailed(_) => "network_setup_failed",
+        }
+    }
+
+    /// One line, for an error chain that adds its own context.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::NoDhcpLease => {
+                "the guest got no DHCP lease from the host network after 21 s".into()
+            }
+            Self::NetworkSetupFailed(error) => {
+                format!("the guest could not set up its network: {error}")
+            }
+        }
+    }
+
+    /// The summary plus what the user can do about it, for the host's own error render.
+    pub fn explain(&self) -> String {
+        let tail = match self {
+            Self::NoDhcpLease => {
+                "  the host DHCP server (bootpd) answers a session's first guest and may stop after five idle minutes\n  remedy: stop every run, then start again"
+            }
+            Self::NetworkSetupFailed(_) => {
+                "  this run's policy allows network egress, so the workload does not start without a network"
+            }
+        };
+        format!("{}\n{tail}", self.summary())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,11 +291,48 @@ mod tests {
             ServerFrame::StderrBytes(b"err".to_vec()),
             ServerFrame::ExitStatus(0),
             ServerFrame::ExitStatus(129),
+            ServerFrame::Refused(BrokerExitReason::NoDhcpLease),
+            ServerFrame::Refused(BrokerExitReason::NetworkSetupFailed(
+                "`ip link set eth0 up` exited with 1".into(),
+            )),
         ] {
             let bytes = encode_frame(&frame).unwrap();
             let back: ServerFrame = decode_frame(&bytes[4..]).unwrap();
             assert_eq!(back, frame);
         }
+    }
+
+    #[test]
+    fn the_missing_lease_reason_names_the_host_cause_and_the_remedy() {
+        let reason = BrokerExitReason::NoDhcpLease;
+        assert_eq!(reason.as_str(), "no_dhcp_lease");
+        assert_eq!(
+            reason.summary(),
+            "the guest got no DHCP lease from the host network after 21 s"
+        );
+        let explained = reason.explain();
+        assert!(explained.starts_with(&reason.summary()), "{explained}");
+        assert!(explained.contains("bootpd"), "{explained}");
+        assert!(
+            explained.contains("remedy: stop every run, then start again"),
+            "{explained}"
+        );
+    }
+
+    #[test]
+    fn a_setup_failure_reason_carries_the_underlying_error_text() {
+        let reason =
+            BrokerExitReason::NetworkSetupFailed("spawn `ip link set lo up`: ENOENT".into());
+        assert_eq!(reason.as_str(), "network_setup_failed");
+        let summary = reason.summary();
+        assert!(
+            summary.contains("spawn `ip link set lo up`: ENOENT"),
+            "the real error must not be replaced by the DHCP story: {summary}"
+        );
+        assert!(
+            !reason.explain().contains("bootpd"),
+            "only a missing lease blames the host DHCP server"
+        );
     }
 
     #[test]

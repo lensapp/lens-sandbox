@@ -250,29 +250,35 @@ pub fn record_run_launched(
     )
 }
 
-pub fn record_run_exited_at(
+pub fn record_run_exited_with_reason_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
     exit_code: i32,
     killed: bool,
+    reason: Option<lns_session::BrokerExitReason>,
 ) -> Result<()> {
     append_ocsf_at(
         path,
-        crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
+        match reason {
+            Some(reason) => crate::ocsf_audit::broker_exit_event(cx, exit_code, &reason),
+            None => crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
+        },
     )
 }
 
-pub fn record_run_exited(
+pub fn record_run_exited_with_reason(
     run_id: &str,
     microvm: &str,
     exit_code: i32,
+    reason: Option<lns_session::BrokerExitReason>,
     clock: &dyn Clock,
 ) -> Result<()> {
-    record_run_exited_at(
+    record_run_exited_with_reason_at(
         &audit_path(run_id)?,
         &run_ctx(run_id, microvm, clock),
         exit_code,
         exit_code == 137,
+        reason,
     )
 }
 
@@ -627,11 +633,29 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
         let _x = crate::test_env::EnvVarGuard::set("XDG_CACHE_HOME", d.path().join("cache"));
-        record_run_exited("aa137", "calm-finch", 137, &CLOCK).unwrap();
+        record_run_exited_with_reason("aa137", "calm-finch", 137, None, &CLOCK).unwrap();
         record_run_restarted("aa137", "calm-finch", "alpine:latest", &CLOCK).unwrap();
         let content = std::fs::read_to_string(audit_path("aa137").unwrap()).unwrap();
         assert!(content.contains("\"lns_killed\":true"), "{content}");
         assert!(content.contains("\"lns_kind\":\"restart\""), "{content}");
+    }
+
+    #[test]
+    fn a_broker_dhcp_refusal_writes_one_named_failure_instead_of_a_workload_exit() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_run_exited_with_reason_at(
+            &path,
+            &cx(),
+            1,
+            false,
+            Some(lns_session::BrokerExitReason::NoDhcpLease),
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"lns_kind\":\"no_dhcp_lease\""));
+        assert!(!content.contains("\"lns_kind\":\"exit\""));
+        assert_eq!(content.lines().count(), 1);
     }
 
     #[test]
@@ -915,7 +939,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
         record_run_launched_at(&path, &cx(), "alpine:latest").unwrap();
-        record_run_exited_at(&path, &cx(), 0, false).unwrap();
+        record_run_exited_with_reason_at(&path, &cx(), 0, false, None).unwrap();
         record_run_restarted_at(&path, &cx(), "alpine:latest").unwrap();
         record_run_removed_at(&path, &cx(), false, false).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
