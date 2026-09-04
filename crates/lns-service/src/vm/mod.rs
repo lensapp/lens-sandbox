@@ -174,6 +174,8 @@ impl ExecSpec {
                     "AGENT_COMMAND_B64".into(),
                     crate::base64::encode(argv.as_bytes()),
                 ),
+                // The tool provisioner boots without a session and fetches over the network, so it refuses without a lease too.
+                Self::egress_marker(true),
                 (
                     "PATH".into(),
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -405,6 +407,23 @@ mod tests {
         let keys: Vec<&str> = spec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
         assert!(!keys.contains(&"AGENT_COMMAND"));
+    }
+
+    #[test]
+    fn a_session_less_boot_declares_that_it_needs_egress() {
+        let spec = ExecSpec::for_run(
+            &resolve_run_as(Some("0"), Some(0), None, None),
+            None,
+            &["/bin/sh".into()],
+            None,
+            None,
+        );
+        let env: std::collections::HashMap<_, _> = spec.kernel_env.iter().cloned().collect();
+        assert_eq!(
+            env.get(lns_session::EGRESS_ALLOWED_ENV).map(String::as_str),
+            Some("1"),
+            "the tool provisioner fetches tools over the network, so a missing lease is fatal for it too"
+        );
     }
 
     #[test]
