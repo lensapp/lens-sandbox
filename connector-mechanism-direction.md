@@ -10,10 +10,11 @@ methods:
   - name: sign-in
     auth:
       kind: code
-      component: sha256:…     # a component layer in the connector artifact
+      component: ./sign-in.wasm  # a file beside the document, packed at publish
       outputs: [token]        # what connect returns, so credentials[].field validates offline
       hosts: [auth.example.com, api.example.com]
       limits: { callSeconds: 30, sessionSeconds: 900 }
+      # exec: true            # opt-in, and it changes what the card can promise
 ```
 
 The component implements three functions: **`connect`**, **`revoke`**, **`refresh`**. lns
@@ -70,10 +71,13 @@ Decided: a background poll, and lns owns it. Undecided: the policy.
 
 Four facts shape it, each checked:
 
-- **Nothing we inject today expires.** GitHub PATs and OAuth App tokens, Anthropic and
-  OpenAI API keys: no expiry. Expiry exists only for OAuth *access* tokens (1–8 h) and AWS
-  sessions. So the poll matters for the OAuth kinds and for whatever `kind: code`
-  connectors bring — not for the `token` kind.
+- **Nothing we inject *today* expires — but the class this feature exists for is expiring
+  by nature.** GitHub PATs and OAuth App tokens, Anthropic and OpenAI API keys: no expiry.
+  Expiry exists for OAuth *access* tokens (1–8 h), AWS sessions, and every credential a
+  host tool owns and renews. Measured on a real machine, Claude Code's own store carried an
+  access token good for about two hours and a refresh token good for about nine days. So
+  the poll does not matter for the `token` kind and matters for almost everything a
+  `kind: code` connector will bring.
 - **Today, an expired value fails silently.** The proxy holds a request only when a
   placeholder is *unarmed*; an armed-but-expired value is injected and the upstream 401 is
   relayed to the workload unchanged — `proxy.rs:306` is `intercept_for_unarmed`, and
@@ -100,7 +104,15 @@ What has to be answered before this is buildable —
 - **Failure policy.** How many failed refreshes before lns stops calling and marks the
   connection as needing a reconnect. A provider outage must not burn the grant.
 - **What the user can see and stop.** A background call is invisible by definition, so the
-  audit row and some surface in the tray are part of the feature, not polish.
+  ledger entry and some surface in the tray are part of the feature, not polish. The store
+  for it already exists and needs no design: `ledger::append_machine_event` writes the
+  **durable ledger** (`~/.lns/ledger.jsonl`, hash-chained against `ledger.anchor`, serialized
+  by a global lock), which `lns audit` already merges with each run's own chain. Its
+  precedent is exact — `append_tool_provisioned` puts tools fetched during a pull there,
+  "because they belong to no run". A connection belongs to no run either, which is why
+  `ConnectorVerb` deliberately records only what a *run* decided. What is missing is not a
+  facility but the entries: an outbound call, a program started, a scheduled renewal — and
+  a `lns audit` kind that can select them, or they are written where no user looks.
 
 **Failure handling is not part of that question, and should land regardless.** When a
 refresh fails — or for any credential with no `code` behind it — lns should read the
@@ -115,18 +127,53 @@ The rest of this note does not depend on the answer.
 wait. `done` carries the account label with the values, so a `code` connector gets the
 same connection identity a descriptor one does.
 
-Two things stay out of the component. It is never in the request path — injection and
-signing stay in the guest supervisor. And **it never performs a host read itself**: the
-manifest declares each source (a Keychain service, or a home-relative file under the
-refusals `413d37b2` implemented and `d927b598` deleted along with the rest of the connector
-layer — so they are a thing to rebuild, not a thing to reuse), lns reads it, and the
-component receives bytes.
+One thing stays out of the component: it is never in the request path — injection and
+signing stay in the guest supervisor.
 
-That is what lets the Claude Code case become a `code` connector rather than a declarative
-one. The component gets the Keychain blob and does whatever extraction the tool's format
-needs; lns still decides what may be read, and the card still names it. Detection needs no
-separate function: the user presses Connect, the component inspects the blob it was handed,
-and returns `done` immediately instead of prompting.
+## Host execution, and what it costs
+
+An earlier draft of this note also kept host *reads* out of the component: the manifest
+would declare each source, lns would read it, and the component would receive bytes. That
+is not enough, and the case that breaks it is the one that motivates the whole feature.
+
+**A credential is often owned by a tool that already knows how to renew it.** `gh auth
+token`, `gcloud auth print-access-token`, `aws configure export-credentials`, `claude`. The
+ecosystem has converged on this three separate times — Kubernetes `client.authentication.k8s.io`
+exec-credential plugins, `docker-credential-*` helpers, `git credential-*` helpers — each
+one "run a binary, take a credential and an expiry, run it again when that expires".
+
+A declared *source* cannot express that. Reading Claude Code's store means a Keychain on
+macOS and a file on Linux, so a `hostSource` needs two source kinds and a platform branch;
+`claude auth status --json` is one invocation on both. **The command is the stable
+interface; the store is not.**
+
+So the component may run a host program, and it composes the invocation itself. Two
+consequences, both taken deliberately:
+
+- **The sandbox's bounds become advisory for a component that has this capability.**
+  Declared hosts, no filesystem, no environment, no clock, fuel — a component that can run
+  `curl` has all of them back. The bounds still hold for a component without it, and they
+  are what the sandbox endgame below restores. But for one with it, the enforcement layer
+  is the user's own account, and the card must say so rather than claim otherwise.
+- **The later move into a sandbox is a breaking change, not a migration.** A component
+  composing `/usr/local/bin/claude` finds a different filesystem inside a sandbox. Every
+  component that exists by then is rewritten. That is cheap now, while they are all
+  first-party, and it is the window.
+
+**What holds the line instead of the sandbox is provenance.** For this phase, a `code`
+method that declares host execution may be installed only from a local path; a pulled
+artifact carrying one is refused. Later that becomes a trusted-publisher gate — the
+publisher signature stops being informational and becomes the thing carrying the trust the
+sandbox cannot. Either way it is one rule: **something other than the digest vouches for
+the code, because the digest cannot.**
+
+**The endgame is to run the execution inside a sandbox**, which is more on-product than
+this note's original answer. This note rejected a microVM because it "gives the code a
+filesystem and a clock we would then have to take away" — true for an author's logic
+component, and exactly inverted here: a filesystem and a clock are what `claude` needs to
+read a credentials file, refresh, and write it back. A sandboxed refresh also gets lns's
+own egress policy applied to it, which is the product enforcing its own principle on
+itself.
 
 ## The layering: `code` is the primitive
 
@@ -191,10 +238,12 @@ interface types {
   }
 
   // Everything ambient arrives here. No clock, no environment, no filesystem.
+  // A component that needs the host's own credential store runs the tool that
+  // owns it (see `exec`) rather than being handed bytes lns read for it: the
+  // store differs per platform, the command does not.
   record context {
     now-millis: u64,
     inputs: values,                              // descriptor fields: client id, endpoints, scopes
-    host-blobs: list<tuple<string, list<u8>>>,   // declared host sources, read by lns
   }
 }
 
@@ -216,10 +265,19 @@ interface callback {
   bind: func() -> result<binding, string>;
 }
 
+interface exec {
+  record output { status: s32, stdout: list<u8>, stderr: list<u8> }
+  // The component composes the argv. lns bounds nothing about what the program
+  // then does — it runs with the user's own access. Refused unless the manifest
+  // asks for it, refused for a pulled artifact, and every call is a ledger row.
+  run: func(argv: list<string>) -> result<output, string>;
+}
+
 world mechanism {
   import http;
   import entropy;
   import callback;
+  import exec;
 
   export begin:   func(ctx: context) -> progress;
   export resume:  func(state: list<u8>, ev: event, ctx: context) -> progress;
@@ -235,13 +293,15 @@ What each import is bounded by, and by whom:
 | `http.fetch` | the manifest's `hosts`, TLS only | host, per call, audited |
 | `entropy.bytes` | a byte ceiling | host |
 | `callback.bind` | one listener per session, host-owned port, host-checked `state` | host |
+| `exec.run` | **nothing about the program itself.** Local-install only, declared on the method, every call a ledger row | provenance, not the sandbox |
 
 Deliberately absent, each for a reason already argued: no clock (`now-millis` is an input,
 so a mechanism cannot time anything the host did not tell it); no filesystem and no
-environment; **no host-secret read** — lns reads each declared source and passes the bytes
-in `host-blobs`; no `cancel` export — the host stops calling `resume` and drops the state;
-and no way for a component to request a wake-up, which is what keeps the refresh schedule
-lns's to own.
+environment **as imports of their own** — a component that needs either reaches them only
+through `exec`, where the capability is declared, disclosed, and gated on provenance, so
+there is one such door rather than three; no `cancel` export — the host stops calling
+`resume` and drops the state; and no way for a component to request a wake-up, which is
+what keeps the refresh schedule lns's to own.
 
 Two things the sketch makes obvious that prose hid. `refresh` returns a `renewal` exactly
 like `done`, so the host's carry-forward rule — keep the previous scopes and account when a
@@ -304,9 +364,14 @@ and not in a microVM — a VM costs seconds and hundreds of MB per connector, an
 code a filesystem and a clock we would then have to take away.
 
 Bounds, enforced by the host and never trusted from the component: outbound HTTPS only to
-the declared `hosts`, each call written to the audit chain; no filesystem, no environment,
-no clock (`now` is an input); `random` by import; fuel, memory, and component-size
-ceilings; the deadlines above.
+the declared `hosts`, each call written to the durable ledger; no filesystem, no
+environment, no clock (`now` is an input); `random` by import; fuel, memory, and
+component-size ceilings; the deadlines above.
+
+**Every one of those bounds is advisory for a component that declares `exec`**, because a
+program it starts is subject to none of them. That is stated here rather than buried: the
+list above describes a component without the capability, and provenance rather than the
+sandbox is what bounds one with it.
 
 Cost to accept: roughly 20–30 MB of Wasmtime in `lns-service` (unmeasured on our release
 profile), a cross-build it has not seen, and an authoring toolchain — Rust, or
@@ -319,10 +384,23 @@ shows bounds instead of behaviour: the hosts it may contact, the publisher signa
 digest, and one plain sentence — **"lns cannot show what this code does. It can only bound
 where it runs, what it reaches, and how long it has."**
 
-That sentence is the honest price of the feature, and it is the reason `token` and the
-OAuth kinds should stay declarative rather than being reimplemented on top of `code`.
+**A component that declares `exec` gets a different sentence, because that one would be
+false.** The second half is the part that stops being true: lns bounds where it runs and
+how long it has, but not what it reaches. So the card says instead — **"lns cannot show
+what this code does, and it runs programs on your machine with your own access. lns cannot
+bound what those reach."**
 
-## Spec changes, each its own decision commit
+Both sentences are the honest price of the feature, and they are the reason `token` and the
+OAuth kinds should stay declarative rather than being reimplemented on top of `code`. The
+difference between them is also the reason `exec` is a separate declaration rather than
+something every `code` method carries: a component that does not ask for it earns the
+better sentence.
+
+## Spec changes
+
+These land together rather than one per section, because split apart the earlier
+commits would reference a §3.2.6 that does not exist yet. They are one decision — the
+kind exists and may execute — and the sections below are its consequences.
 
 - **§3.2.3** — narrow, do not reverse. "Connecting a connector MUST NOT run code **in the
   guest**. Code a `code` method carries runs on the host, in the functions §3.2.6 names,
@@ -330,15 +408,27 @@ OAuth kinds should stay declarative rather than being reimplemented on top of `c
   narrows.
 - **New §3.2.6** — the `code` kind: the three functions, their inputs and returns,
   deadlines, trap semantics, the capability block, and the timing rule in both its halves —
-  a press for `connect` and `revoke`, an lns-owned schedule for `refresh`.
+  a press for `connect` and `revoke`, an lns-owned schedule for `refresh`. The capability
+  block is where `exec` is defined, along with the two rules that bound it: local-install
+  only, and a card sentence that claims nothing about what it reaches.
+- **§1.3** — a **program** on the running machine joins the three things outside a
+  document's reach. It fits the existing pattern rather than reversing it: a pulled document
+  only names it, and whether it runs is decided per machine, on the same terms as a
+  destination.
 - **§3.2.2** — `code` joins the kind table. A `code` method MUST declare `outputs[]`,
   because a component produces whatever it says it produces; §3.2.2's `Produces` column and
   §4.1's `field` rule then validate a credential's `field` against that list. Without it
   `lns artifact validate` cannot check a `code` connector at all.
 - **§1.5** — the card's code paragraph is part of the one disclosure.
 - **§5** — validation rows: a `code` block on any other kind; unknown function names; ceilings.
-- **§7.1** — a component layer media type beside the fileset layer. Digest binding already
-  covers re-consent.
+- **§7.1** — a component layer media type beside the fileset layer, and §6 a publish-time
+  transform that packs it. `component` keeps its spelling across the push, exactly as a
+  fileset `path` does, so there is no second digest to write down; the artifact digest a
+  grant already binds to covers the component's bytes, and digest binding already covers
+  re-consent. The installed set has to capture those bytes too, and digest over them: a
+  local install has no artifact, and an `exec` component can only ever arrive that way, so
+  without it an author could swap the file under an installed connector and every grant
+  would stand unasked.
 
 ## What to watch
 
@@ -355,26 +445,53 @@ The reason to keep this an escape hatch rather than the main path:
 - **`refresh` is the hole in the press-only property**, taken deliberately. Watch that it
   stays one function on a schedule lns owns, and does not become a general "the component
   may run periodically" facility.
+- **`exec` is the hole in the bounded-component property**, also taken deliberately. Watch
+  two things. That a component asks for it only when driving a host tool is the point —
+  a component reaching a network through `exec` rather than `http.fetch` has escaped the
+  host filter, and the card cannot tell the user which happened. And that "local-install
+  only" does not quietly relax before the trusted-publisher gate that replaces it exists;
+  the day a pulled artifact can carry `exec`, provenance is the only bound left and it must
+  actually be there.
 
 ## First slice
 
-The layering reorders this: **build the port and the native adapters first, and add
-Wasmtime only once three real mechanisms have validated the world.**
+Two reorderings, each for its own reason.
 
-1. Define the world, and the `Mechanism` port from it.
-2. Native adapters for `token`, `oauth_device` and `oauth_pkce`. Three, not two — PKCE is
-   what forces the inbound callback capability, and a world validated without it will be
-   wrong the day the first `code` connector needs a browser redirect.
-3. One conformance suite, run against every adapter: the `oauth_connector.feature` and
+**The spec decisions come first, before any code.** CLAUDE.md's transitional rule is
+explicit that a change may not add a field the specification does not describe, and
+`auth.component`, `auth.outputs`, `auth.hosts` and the `exec` capability are exactly that.
+So §3.2.6, the §3.2.3 narrowing, the §1.3 addition, and the §3.2.2 kind row land as
+decision commits ahead of the grammar that implements them — not, as an earlier draft of
+this note had it, alongside.
+
+**Wasm comes before the native adapters**, which inverts what this section first said. The
+reasoning that put native adapters first — that three real mechanisms would validate the
+world — does not hold: a native adapter allocates freely, blocks, and holds state a
+component cannot, so it would validate nothing about whether the world is implementable by
+a component. Only a component validates a world for components. The guard that keeps the
+inversion honest is that **the world does not freeze until a native adapter fits it
+unchanged**, or it ends up Wasm-shaped and the built-ins cannot implement it.
+
+1. The spec decision commit above.
+2. The `code` kind in the connector grammar: `component`, `outputs`, `hosts` and the `exec`
+   declaration, each refused on any other kind, and a credential's `field` validated against
+   the declared `outputs` rather than against a table this version holds.
+3. Define the world, and the `Mechanism` port from it — including the inbound callback
+   capability PKCE forces, so the world is not wrong on arrival, and `exec`.
+4. The Wasmtime adapter behind that port. Layer 3: the host filter refuses an undeclared
+   host, a call past its deadline traps, state round-trips through `resume`, `now` arrives
+   as an input. Fixture component built for `wasm32-wasip2` in CI.
+5. One real component end to end, not a fixture — the host-tool case, which is what proves
+   `exec` and the whole premise.
+6. Native adapters for `token`, `oauth_device` and `oauth_pkce`. Three, not two — PKCE is
+   what forces the inbound callback capability. **This is the freeze point:** if the world
+   has to change to fit a native adapter, it changes here, before anything external exists.
+7. One conformance suite, run against every adapter: the `oauth_connector.feature` and
    `pkce_connector.feature` deleted in `d927b598`, rewritten against the port, plus a
    `token` feature pinning today's `handler::connect` behaviour.
-4. Only then the Wasmtime adapter, behind the same port. Layer 3: the host filter refuses an
-   undeclared host, a call past its deadline traps, state round-trips through `resume`,
-   `now` arrives as an input. Fixture component built for `wasm32-wasip2` in CI.
-5. Layer 2 through the mocked port: a `code` method's card shows hosts, publisher and
-   digest; a failed `connect` leaves the offer standing; `revoke` drops the connection even
-   when it traps.
-6. Spec §3.2.6 and the §3.2.3 narrowing land as decision commits alongside.
+8. Layer 2 through the mocked port: a `code` method's card shows its hosts and digest and
+   the sentence its capabilities earn; a failed `connect` leaves the offer standing;
+   `revoke` drops the connection even when it traps.
 
 ## Appendix: what the investigation found
 
@@ -393,8 +510,10 @@ Kept because it decides what `code` should *not* be used for.
   no-filesystem component just as thoroughly.
 - **Refresh, parked.** "Refresh differs per provider" is not the problem; ownership of a
   rotating secret across the host/guest boundary is. The shipped Claude seed carried a
-  *placeholder* refresh token with `expiresAt: 4102444800000` (year 2100), so the guest
-  never refreshes and the host copy goes stale in an hour; the Codex recipe (not in the tree —
+  *placeholder* refresh token with `expiresAt: 4102444800000` (year 2100) — that value is
+  the **seed's**, not a real store's, which is why it reads as absurd; a real machine's
+  store carries an ordinary few-hour expiry. So the guest never refreshes and the host copy
+  goes stale in an hour; the Codex recipe (not in the tree —
   `73cb1a7a:docs/examples/codex-chatgpt-subscription/lns.yaml`, on the `codex-example`
   branch) uses no connector and keeps a live refresh token in a named volume. The answer is a
   `kind: token_exchange` injection letting the proxy hand a refresh POST to the host. A
