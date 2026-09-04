@@ -2028,10 +2028,17 @@ mod tests {
     async fn inspect_of_a_stopped_run_reports_its_recorded_launch_config() {
         let id = allocate_run_id();
         let mut record = stopped_record(&id, &format!("rev-{id}"));
-        record.args.cpus = 7;
+        record.args.cpus = 1;
+        record.args.mem = 512;
+        record.resolved_cpus = Some(6);
+        record.resolved_mem_mib = Some(4096);
         register_stopped(StoppedRun { record });
         let details = inspect(&id).expect("a stopped run is inspectable");
-        assert_eq!(details.config.cpus, 7);
+        assert_eq!(
+            (details.config.cpus, details.config.mem_mib),
+            (6, 4096),
+            "the run booted at the size its document resolved to, not at the request"
+        );
         assert_eq!(details.summary.status, RunStatus::Exited { code: 3 });
         set_connector_with_environment(
             &id,
@@ -2042,6 +2049,21 @@ mod tests {
             connector(&id).is_none(),
             "a stopped run has no live handle to hang a connector on"
         );
+        deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn inspect_of_a_run_recorded_before_the_resolved_size_reports_the_request() {
+        let id = allocate_run_id();
+        let mut record = stopped_record(&id, &format!("rev-{id}"));
+        record.args.cpus = 7;
+        record.args.mem = 768;
+        record.resolved_cpus = None;
+        record.resolved_mem_mib = None;
+        register_stopped(StoppedRun { record });
+        let details = inspect(&id).expect("a stopped run is inspectable");
+        assert_eq!((details.config.cpus, details.config.mem_mib), (7, 768));
         deregister(&id);
     }
 

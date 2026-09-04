@@ -28,6 +28,11 @@ Feature: run lifecycle — graceful stop over IPC
     And the inspect details report 2 cpus and 1024 MiB
     And the inspect details report the run as running
 
+  Scenario: Inspecting a stopped run reports the size it booted with
+    Given a stopped run that asked for 1 cpu and 512 MiB and booted with 6 cpus and 4096 MiB
+    When an InspectRun request for that run arrives
+    Then the inspect details report 6 cpus and 4096 MiB
+
   Scenario: Removing an unknown run surfaces an Error
     Given a fresh service handler
     When a RemoveRun request for run 99999 arrives

@@ -666,6 +666,8 @@ async fn orchestrate(
         name: microvm.clone(),
         args: record_args,
         resolved_document,
+        resolved_cpus: None,
+        resolved_mem_mib: None,
         descriptor_sha256: recorded_descriptor_sha,
         layer_digests: recorded_layer_digests,
         image: image_label,
