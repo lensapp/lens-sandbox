@@ -127,6 +127,18 @@ test_a_fixture_ignores_the_config_overrides_of_its_caller() {
     check "the caller's hook stays out" "absent" "$([ -e "$marker" ] && echo present || echo absent)"
 }
 
+# `make shell-tests` fails any harness that prints no `Results:` line, so that
+# a self-skipping harness cannot read as agreement. Every harness must carry it.
+test_every_harness_reports_a_result() {
+    echo "test_every_harness_reports_a_result"
+    for t in "$SCRIPT_DIR"/*.test.sh; do
+        name=$(basename "$t")
+        check "$name prints a result line" "1" \
+            "$(grep -c '^echo "Results: ' "$t" || true)"
+    done
+}
+
+test_every_harness_reports_a_result
 test_a_fixture_ignores_the_git_dir_of_its_caller
 test_a_fixture_ignores_the_work_tree_of_its_caller
 test_a_fixture_ignores_the_index_file_of_its_caller
