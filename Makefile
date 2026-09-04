@@ -280,6 +280,7 @@ coverage-lcov:
 # subprocesses with side effects).
 e2e:
 	$(CARGO) build -p lns-cli -p lns-service
+	$(CARGO) test -p e2e-tests --test specutil_env
 	@LNS_BIN=$(CARGO_TARGET_DIR)/debug/lns \
 		LNS_SERVICE_BIN=$(CARGO_TARGET_DIR)/debug/lns-service \
 		$(CARGO) test -p e2e-tests --test e2e
@@ -296,6 +297,7 @@ e2e:
 # (.github/workflows/e2e-microvm.yml).
 e2e-microvm: preflight-microvm build
 	$(CARGO) test -p e2e-tests --test specutil_timeout
+	$(CARGO) test -p e2e-tests --test specutil_env
 	@LNS_E2E_MICROVM=1 \
 		LNS_BIN=$(CARGO_TARGET_DIR)/release/lns \
 		LNS_SERVICE_BIN=$(CARGO_TARGET_DIR)/release/lns-service \
