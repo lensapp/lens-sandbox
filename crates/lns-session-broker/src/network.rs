@@ -111,6 +111,35 @@ pub fn bring_up_eth0_with(
     Ok(())
 }
 
+pub fn policy_allows_egress_with(env_get: impl Fn(&str) -> Option<String>) -> bool {
+    env_get(lns_session::EGRESS_ALLOWED_ENV).as_deref() != Some("0")
+}
+
+fn refusal_for(error: NetworkSetupError) -> lns_session::BrokerExitReason {
+    match error.step {
+        NetworkStep::Dhcp => lns_session::BrokerExitReason::NoDhcpLease,
+        _ => lns_session::BrokerExitReason::NetworkSetupFailed(error.message),
+    }
+}
+
+/// A run that needs egress refuses without a network; one that allows none keeps the best-effort path.
+pub fn bring_up_network_with(
+    bring_up: impl FnOnce() -> Result<(), NetworkSetupError>,
+    egress_allowed: bool,
+) -> Result<(), lns_session::BrokerExitReason> {
+    match bring_up() {
+        Ok(()) => Ok(()),
+        Err(error) if egress_allowed => Err(refusal_for(error)),
+        Err(error) => {
+            eprintln!(
+                "lns-session-broker: best-effort network setup failed: {}",
+                error.message
+            );
+            Ok(())
+        }
+    }
+}
+
 fn run_check(
     runner: &dyn CommandRunner,
     step: NetworkStep,
@@ -340,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn bring_up_runs_lo_then_eth0_then_script_then_udhcpc() {
+    fn udhcpc_asks_seven_times_at_three_seconds_so_the_guest_waits_21_s_for_a_lease() {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(0), ok(0), ok(0)]);
         let fs = FakeFsWriter::ok();
         let result = bring_up_eth0_with(&runner, &fs);
@@ -447,6 +476,46 @@ mod tests {
         let fs = FakeFsWriter::ok();
         let err = bring_up_eth0_with(&runner, &fs).expect_err("signal-killed lo");
         assert!(err.message.contains("exited with -1"), "got: {err:?}");
+    }
+
+    #[test]
+    fn a_failed_lease_request_refuses_a_run_whose_policy_allows_egress() {
+        let runner = FakeCommandRunner::with_outcomes(vec![ok(1), ok(0), ok(0)]);
+        let fs = FakeFsWriter::ok();
+        let reason = bring_up_network_with(|| bring_up_eth0_with(&runner, &fs), true)
+            .expect_err("an egress workload without a lease cannot do its work");
+        assert_eq!(reason, lns_session::BrokerExitReason::NoDhcpLease);
+    }
+
+    #[test]
+    fn an_earlier_step_refuses_with_its_own_error_rather_than_the_dhcp_story() {
+        let runner = FakeCommandRunner::with_outcomes(vec![ok(3)]);
+        let fs = FakeFsWriter::ok();
+        let reason = bring_up_network_with(|| bring_up_eth0_with(&runner, &fs), true)
+            .expect_err("an egress workload with no interface cannot do its work");
+        assert_eq!(reason.as_str(), "network_setup_failed");
+        let text = reason.summary();
+        assert!(text.contains("ip link set lo up"), "got: {text}");
+        assert!(text.contains("exited with 3"), "got: {text}");
+    }
+
+    #[test]
+    fn a_network_failure_remains_best_effort_when_policy_allows_no_egress() {
+        let runner = FakeCommandRunner::with_outcomes(vec![ok(1), ok(0), ok(0)]);
+        let fs = FakeFsWriter::ok();
+        bring_up_network_with(|| bring_up_eth0_with(&runner, &fs), false)
+            .expect("an offline workload does not need a lease");
+    }
+
+    #[test]
+    fn the_broker_reads_the_host_resolved_egress_allowance() {
+        assert!(policy_allows_egress_with(|_| Some("1".into())));
+        assert!(!policy_allows_egress_with(|_| Some("0".into())));
+    }
+
+    #[test]
+    fn a_missing_egress_marker_fails_closed_on_a_network_error() {
+        assert!(policy_allows_egress_with(|_| None));
     }
 
     #[test]
