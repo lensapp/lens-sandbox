@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::sandbox::FilesetEntry;
 use crate::spec;
 
-/// The value each `auth.kind` this version can offer produces, which a credential's `field` names. Any other kind parses and leaves its method unofferable (§3.2.2).
-const AUTH_OUTPUTS: [(&str, &str); 1] = [("token", "token")];
+/// The values each built-in `auth.kind` produces, which a credential's `field` names. A `code` method declares its own instead, and any other kind parses and leaves its method unofferable (§3.2.2).
+const BUILT_IN_OUTPUTS: [(&str, &[&str]); 1] = [("token", &["token"])];
+
+/// The kind whose mechanism the connector carries itself, so what it produces is the document's to say rather than this version's (§3.2.6).
+const CODE: &str = "code";
 
 /// What one method may write, counted across its filesets (§3.2.3).
 pub const MAX_METHOD_FILESET_BYTES: usize = crate::sandbox::MAX_INLINE_TOTAL_BYTES;
@@ -61,11 +64,9 @@ pub struct Method {
 }
 
 impl Method {
-    /// The card can offer this method only if this version implements its mechanism; an unknown one is not an error (§3.2.2).
+    /// The card can offer this method only if this version implements its mechanism; one it does not is not an error (§3.2.2).
     pub fn is_offerable(&self) -> bool {
-        self.auth
-            .as_ref()
-            .is_none_or(|auth| auth.output().is_some())
+        self.auth.as_ref().is_none_or(Auth::is_implemented)
     }
 
     pub fn label(&self) -> &str {
@@ -73,12 +74,15 @@ impl Method {
     }
 }
 
-/// The auth output one credential draws its value from: the `field` it names, or the one value the method's `auth` produces. `None` under a kind this version does not know, whose method cannot be connected anyway (§4.1).
+/// The auth output one credential draws its value from: the `field` it names, or the one value the method's `auth` produces. `None` under a kind this version does not know, whose method cannot be connected anyway, and `None` where the auth produces several and the credential named none (§4.1).
 pub fn input_of(method: &Method, credential: &lns_spec::Credential) -> Option<String> {
-    credential
-        .field
-        .clone()
-        .or_else(|| Some(method.auth.as_ref()?.output()?.to_string()))
+    if let Some(field) = credential.field.clone() {
+        return Some(field);
+    }
+    match method.auth.as_ref()?.outputs()?.as_slice() {
+        [only] => Some((*only).to_string()),
+        _ => None,
+    }
 }
 
 /// How the user proves they may use a method. `kind` decides what else it accepts.
@@ -90,18 +94,100 @@ pub struct Auth {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
-    /// Tolerated only for a `kind` this version does not know; strict decoding holds for one it does (§1.2).
+    /// Everything the `kind` decides the shape of, left undecoded here so a kind this version does not know decodes nothing of its own (§3.2.2).
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// What a `code` auth carries beyond the fields every kind has (§3.2.6). Decoded only where the kind is `code`, so no other kind's spelling of these names is this version's to read.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodeAuth {
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub exec: bool,
+    #[serde(default)]
+    limits: Option<Limits>,
+}
+
+impl CodeAuth {
+    /// How long this component may take, which is the ceiling wherever the document left it out (§3.2.6).
+    pub fn limits(&self) -> Limits {
+        self.limits.clone().unwrap_or_default()
+    }
+}
+
+/// The longest §3.2.6 lets one call and one session take, and what a method leaving them out gets.
+const MAX_CALL_SECONDS: u32 = 30;
+const MAX_SESSION_SECONDS: u32 = 900;
+
+/// How long a component may take. Absent means the ceiling (§3.2.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Limits {
+    #[serde(default = "max_call_seconds")]
+    pub call_seconds: u32,
+    #[serde(default = "max_session_seconds")]
+    pub session_seconds: u32,
+}
+
+fn max_call_seconds() -> u32 {
+    MAX_CALL_SECONDS
+}
+
+fn max_session_seconds() -> u32 {
+    MAX_SESSION_SECONDS
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            call_seconds: MAX_CALL_SECONDS,
+            session_seconds: MAX_SESSION_SECONDS,
+        }
+    }
+}
+
+/// The names only a `code` auth may carry, so a refusal on another kind can say which one was misplaced (§5).
+const CODE_ONLY_FIELDS: [&str; 5] = ["component", "outputs", "hosts", "exec", "limits"];
+
 impl Auth {
-    /// The value this kind produces, or `None` for a kind this version does not know and so decodes nothing of (§3.2.2).
-    fn output(&self) -> Option<&'static str> {
-        AUTH_OUTPUTS
+    /// The `code` block this auth carries, decoded strictly. `None` for every other kind, and an error where the kind is `code` and the block will not read.
+    pub fn code(&self) -> Option<Result<CodeAuth>> {
+        if self.kind != CODE {
+            return None;
+        }
+        let block = serde_json::Value::Object(self.extra.clone().into_iter().collect());
+        Some(serde_json::from_value(block).context("reading a code auth"))
+    }
+
+    /// The values this kind produces, or `None` for a kind this version does not know and so decodes nothing of (§3.2.2).
+    fn outputs(&self) -> Option<Vec<String>> {
+        if let Some(code) = self.code() {
+            return code.ok().map(|code| code.outputs);
+        }
+        BUILT_IN_OUTPUTS
             .iter()
             .find(|(kind, _)| *kind == self.kind)
-            .map(|(_, output)| *output)
+            .map(|(_, outputs)| outputs.iter().map(|o| (*o).to_string()).collect())
+    }
+
+    /// Whether this build can actually run this mechanism. `code` parses and validates here, but no component runtime exists yet, so offering it would ask the user to hand-type what a component is supposed to produce.
+    fn is_implemented(&self) -> bool {
+        BUILT_IN_OUTPUTS.iter().any(|(kind, _)| *kind == self.kind)
+    }
+
+    /// Which `code`-only name this auth carries, for a kind that may not carry one.
+    fn code_only_field(&self) -> Option<&str> {
+        self.extra
+            .keys()
+            .find(|key| CODE_ONLY_FIELDS.contains(&key.as_str()))
+            .map(String::as_str)
     }
 
     /// What a connect calls the value it asks for: the author's own word for it, else the kind.
@@ -369,18 +455,24 @@ fn refuse_a_field_the_auth_does_not_produce(method: &Method) -> Result<()> {
         return Ok(());
     };
     // A kind this version does not know decodes no `auth`, so what it produces is not this version's to judge (§3.2.2).
-    let Some(output) = auth.output() else {
+    let Some(outputs) = auth.outputs() else {
         return Ok(());
     };
+    let produced = outputs.join(", ");
     for credential in &method.credentials {
-        if let Some(field) = &credential.field
-            && field != output
-        {
-            bail!(
-                "credential {} draws on field {field:?}, but a {:?} auth produces {output}: nothing would supply that value and the credential would reach the guest unarmed",
+        match &credential.field {
+            Some(field) if !outputs.contains(field) => bail!(
+                "credential {} draws on field {field:?}, but a {:?} auth produces {produced}: nothing would supply that value and the credential would reach the guest unarmed",
                 credential.owner(),
                 auth.kind
-            );
+            ),
+            // §4.1 lets a credential name no field only where the auth produces one value.
+            None if outputs.len() > 1 => bail!(
+                "credential {} names no field, but a {:?} auth produces {produced}: nothing says which of them arms it, and the credential would reach the guest unarmed",
+                credential.owner(),
+                auth.kind
+            ),
+            _ => {}
         }
     }
     Ok(())
@@ -390,12 +482,99 @@ fn validate_auth(auth: &Auth) -> Result<()> {
     if auth.kind.trim().is_empty() {
         bail!("a method's auth must name its kind");
     }
-    if auth.output().is_some()
-        && let Some(unknown) = auth.extra.keys().next()
-    {
+    if let Some(code) = auth.code() {
+        return validate_code_auth(&code?);
+    }
+    // A kind this version does not know decodes nothing of its auth, so neither its shape nor its field names are this version's to judge (§3.2.2).
+    if !auth.is_implemented() {
+        return Ok(());
+    }
+    if let Some(field) = auth.code_only_field() {
+        bail!(
+            "a {:?} auth declares {field}, which only a {CODE:?} auth carries: lns implements this mechanism itself, so what it produces and what it may reach are not the document's to say",
+            auth.kind
+        );
+    }
+    if let Some(unknown) = auth.extra.keys().next() {
         bail!(
             "unknown field {unknown:?} in a {:?} auth: strict decoding holds for a kind this version knows",
             auth.kind
+        );
+    }
+    Ok(())
+}
+
+/// §3.2.6: a component produces whatever it says it produces, so the document must say it and lns must be able to hold it to that.
+fn validate_code_auth(code: &CodeAuth) -> Result<()> {
+    match code.component.as_deref() {
+        None | Some("") => bail!(
+            "a {CODE:?} auth must name its component: it is the implementation the method connects with"
+        ),
+        Some(component) => validate_component_path(component)?,
+    }
+    if code.outputs.is_empty() {
+        bail!(
+            "a {CODE:?} auth must declare outputs: a component produces whatever it says it produces, and without that list a credential's field cannot be checked before the connector is installed"
+        );
+    }
+    let mut named = BTreeSet::new();
+    for output in &code.outputs {
+        if !named.insert(output) {
+            bail!("a {CODE:?} auth declares the output {output:?} twice");
+        }
+    }
+    for host in &code.hosts {
+        validate_component_host(host)?;
+    }
+    let limits = code.limits();
+    if limits.call_seconds > MAX_CALL_SECONDS {
+        bail!(
+            "a {CODE:?} auth gives one call {} seconds, more than the {MAX_CALL_SECONDS}-second ceiling: a person is waiting on a connect, and lns stops a component that outstays it",
+            limits.call_seconds
+        );
+    }
+    if limits.session_seconds > MAX_SESSION_SECONDS {
+        bail!(
+            "a {CODE:?} auth gives one session {} seconds, more than the {MAX_SESSION_SECONDS}-second ceiling: state a component holds between calls is secret material lns keeps in memory",
+            limits.session_seconds
+        );
+    }
+    Ok(())
+}
+
+/// §3.2.6: the card names these and lns enforces them per call, so an entry no matcher can read is a bound that silently holds nothing.
+fn validate_component_host(host: &str) -> Result<()> {
+    if host.trim().is_empty() {
+        bail!("a {CODE:?} auth's hosts entry must name a destination");
+    }
+    if host.chars().any(char::is_whitespace) {
+        bail!("hosts entry {host:?} must not contain whitespace");
+    }
+    if let Some(why) = lns_policy::matching::unusable_port(host) {
+        bail!(
+            "hosts entry {host:?}: {why}. lns reads the whole entry as one host name, so the component could never reach it"
+        );
+    }
+    Ok(())
+}
+
+/// §3.2.6: the component is packed at publish, so it names one file beside the document and never one on whichever machine runs it.
+fn validate_component_path(component: &str) -> Result<()> {
+    if component.trim().is_empty() {
+        bail!("a {CODE:?} auth's component must name a file beside this document");
+    }
+    if component.starts_with('~') {
+        bail!(
+            "component {component:?} is packed from a file beside this document, so it cannot be home-anchored"
+        );
+    }
+    let reaches_out = component.starts_with('/')
+        || component
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "..");
+    if reaches_out || component.chars().any(char::is_control) {
+        bail!(
+            "component {component:?} must name one file beside this document, by a relative path with no empty or parent segment"
         );
     }
     Ok(())
@@ -462,6 +641,20 @@ mod tests {
         .into_bytes()
     }
 
+    fn code_of(auth: &Auth) -> CodeAuth {
+        auth.code().expect("a code auth").expect("it reads")
+    }
+
+    fn code_auth_of(block: &str) -> Auth {
+        let extra: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(block).expect("a code block");
+        Auth {
+            kind: CODE.into(),
+            extra,
+            ..Auth::default()
+        }
+    }
+
     const SERVES: &str = r#""serves":["api.some-provider.example"]"#;
 
     fn drawing_on(field: Option<&str>) -> Vec<u8> {
@@ -500,6 +693,444 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("access_token"), "{rendered}");
         assert!(rendered.contains("unarmed"), "{rendered}");
+    }
+
+    fn code_method(auth: &str, credentials: &str) -> Vec<u8> {
+        with_methods(&format!(
+            r#"[{{"name":"sign-in","auth":{auth},"credentials":[{credentials}]}}]"#
+        ))
+    }
+
+    const CODE_AUTH: &str = r#"{"kind":"code","component":"./sign-in.wasm","outputs":["access_token","refresh_token"]}"#;
+
+    fn credential_drawing_on(field: Option<&str>) -> String {
+        let field = field.map_or(String::new(), |field| format!(r#","field":"{field}""#));
+        format!(r#"{{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"{field}}}"#)
+    }
+
+    #[test]
+    fn a_code_method_produces_what_it_says_it_produces() {
+        // §3.2.2: a component produces whatever it declares, so `outputs` is what a credential's `field` is validated against.
+        let parsed = parse(&code_method(
+            CODE_AUTH,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .expect("a code method declaring its outputs parses");
+        let method = &parsed.spec.methods[0];
+        assert_eq!(
+            input_of(method, &method.credentials[0]),
+            Some("access_token".to_string())
+        );
+    }
+
+    #[test]
+    fn a_code_method_whose_credential_draws_on_a_field_it_does_not_produce_is_refused() {
+        let err = parse(&code_method(
+            CODE_AUTH,
+            &credential_drawing_on(Some("id_token")),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("id_token"), "{rendered}");
+        assert!(rendered.contains("unarmed"), "{rendered}");
+    }
+
+    #[test]
+    fn a_code_method_declaring_no_outputs_is_refused() {
+        // Without `outputs`, `lns artifact validate` cannot check a code connector's credentials at all.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm"}"#,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("outputs"), "{err:#}");
+    }
+
+    #[test]
+    fn a_home_anchored_component_is_refused_for_the_reason_it_cannot_work() {
+        // §3.2.6: the file is packed at publish, so it cannot name one on whichever machine runs the document.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"~/sign-in.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("packed"), "{err:#}");
+    }
+
+    #[test]
+    fn a_component_reaching_outside_the_document_s_directory_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"../elsewhere/sign-in.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("beside"), "{err:#}");
+    }
+
+    #[test]
+    fn an_absolute_component_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"/opt/sign-in.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("beside"), "{err:#}");
+    }
+
+    #[test]
+    fn a_component_carrying_a_control_character_is_refused() {
+        // A path a terminal renders as one thing and a filesystem opens as another is never worth resolving.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"sign-in\u0007.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("beside"), "{err:#}");
+    }
+
+    #[test]
+    fn a_component_beside_the_document_may_be_written_with_a_leading_dot() {
+        // §3.2.6's own example is `./sign-in.wasm`, so the ordinary spelling must parse.
+        let parsed = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .expect("the spec's own spelling parses");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        let code = auth.code().expect("a code auth").expect("it reads");
+        assert_eq!(code.component.as_deref(), Some("./sign-in.wasm"));
+    }
+
+    #[test]
+    fn a_component_that_is_only_whitespace_is_refused() {
+        // It is not empty, so the field looks declared; nothing beside the document answers to it.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"   ","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("beside this document"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn an_empty_component_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"","outputs":["token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("component"), "{err:#}");
+    }
+
+    #[test]
+    fn a_code_method_declaring_no_component_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","outputs":["access_token"]}"#,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("component"), "{err:#}");
+    }
+
+    #[test]
+    fn a_credential_naming_no_field_under_a_code_method_producing_several_is_refused() {
+        // §4.1 lets a credential name no field only where the auth produces one value; several leaves nothing to say which.
+        let err = parse(&code_method(CODE_AUTH, &credential_drawing_on(None))).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("access_token"), "{rendered}");
+        assert!(rendered.contains("refresh_token"), "{rendered}");
+    }
+
+    #[test]
+    fn a_code_method_producing_one_value_still_lets_a_credential_name_no_field() {
+        let parsed = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"]}"#,
+            &credential_drawing_on(None),
+        ))
+        .expect("one output leaves nothing ambiguous");
+        let method = &parsed.spec.methods[0];
+        assert_eq!(
+            input_of(method, &method.credentials[0]),
+            Some("token".to_string())
+        );
+    }
+
+    #[test]
+    fn a_code_field_on_a_kind_that_is_not_code_is_refused() {
+        // §5: the fields a component needs mean nothing to a mechanism lns implements itself.
+        let err = parse(&code_method(
+            r#"{"kind":"token","component":"./sign-in.wasm"}"#,
+            &credential_drawing_on(None),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("component"), "{rendered}");
+        assert!(rendered.contains("code"), "{rendered}");
+    }
+
+    #[test]
+    fn outputs_on_a_kind_that_is_not_code_is_refused() {
+        // What a built-in produces is this version's to know, so a document restating it could disagree with the mechanism.
+        let err = parse(&code_method(
+            r#"{"kind":"token","outputs":["token"]}"#,
+            &credential_drawing_on(None),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("outputs"), "{rendered}");
+        assert!(rendered.contains("code"), "{rendered}");
+    }
+
+    #[test]
+    fn hosts_on_a_kind_that_is_not_code_is_refused() {
+        // A built-in reaches what its mechanism reaches; a host list would read as a bound lns does not apply.
+        let err = parse(&code_method(
+            r#"{"kind":"token","hosts":["auth.some-provider.example"]}"#,
+            &credential_drawing_on(None),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("hosts"), "{rendered}");
+        assert!(rendered.contains("code"), "{rendered}");
+    }
+
+    #[test]
+    fn an_auth_producing_several_values_arms_no_credential_that_names_none() {
+        // `input_of` is public and a caller may hold a method from somewhere the document check never ran, so it says "nothing" rather than guessing the first.
+        let method = Method {
+            name: "sign-in".into(),
+            auth: Some(code_auth_of(
+                r#"{"component":"./sign-in.wasm","outputs":["access_token","refresh_token"]}"#,
+            )),
+            ..Method::default()
+        };
+        let credential = lns_spec::Credential {
+            env_var: Some("SOME_TOKEN".into()),
+            placeholder: "some_LNSPLACEHOLDER0000000000".into(),
+            field: None,
+            injections: Vec::new(),
+        };
+        assert_eq!(input_of(&method, &credential), None);
+    }
+
+    #[test]
+    fn a_code_method_declaring_one_output_twice_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token","token"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("twice"), "{rendered}");
+        assert!(rendered.contains("token"), "{rendered}");
+    }
+
+    #[test]
+    fn a_code_method_is_not_offered_until_this_build_can_run_one() {
+        // Offering it would ask the user to hand-type what a component is supposed to produce, and nothing here runs a component.
+        let parsed = parse(&code_method(
+            CODE_AUTH,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .expect("a code method parses");
+        assert!(
+            !parsed.spec.methods[0].is_offerable(),
+            "a code method must read as needing a newer lns while its mechanism is unimplemented"
+        );
+    }
+
+    #[test]
+    fn a_token_method_beside_an_unofferable_code_method_is_still_offered() {
+        let document = with_methods(
+            r#"[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["token"]}},{"name":"paste","auth":{"kind":"token"}}]"#,
+        );
+        let parsed = parse(&document).expect("both methods parse");
+        assert!(!parsed.spec.methods[0].is_offerable());
+        assert!(parsed.spec.methods[1].is_offerable());
+    }
+
+    #[test]
+    fn a_code_auth_is_still_decoded_strictly_though_it_is_not_offered() {
+        // Unofferable is not unknown: this version knows the kind, so a typo in it is still a broken document.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"hostss":[]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("hostss"), "{err:#}");
+    }
+
+    #[test]
+    fn a_kind_this_version_does_not_know_may_carry_a_field_this_version_reserves() {
+        // §3.2.2: an unknown kind decodes nothing, so a future kind that legitimately declares hosts must not make today's lns refuse the whole connector.
+        let document = with_methods(
+            r#"[{"name":"browser","auth":{"kind":"oauth_device","hosts":["auth.some-provider.example"]}},{"name":"token","auth":{"kind":"token"}}]"#,
+        );
+        let parsed =
+            parse(&document).expect("an unknown kind carrying a reserved field still parses");
+        assert!(!parsed.spec.methods[0].is_offerable());
+        assert!(parsed.spec.methods[1].is_offerable());
+    }
+
+    #[test]
+    fn a_kind_this_version_does_not_know_may_carry_a_shape_this_version_cannot_read() {
+        // §3.2.2: an unknown kind decodes nothing, so a future kind's own spelling of a field must not refuse the document.
+        for future in [
+            r#""limits":{"callSeconds":30,"retries":3}"#,
+            r#""exec":"yes""#,
+            r#""outputs":"token""#,
+            r#""component":{"path":"x"}"#,
+        ] {
+            let document = with_methods(&format!(
+                r#"[{{"name":"browser","auth":{{"kind":"oauth_device",{future}}}}},{{"name":"token","auth":{{"kind":"token"}}}}]"#
+            ));
+            let parsed = parse(&document).expect("an unknown kind decodes nothing of its auth");
+            assert!(!parsed.spec.methods[0].is_offerable(), "{future}");
+            assert!(parsed.spec.methods[1].is_offerable(), "{future}");
+        }
+    }
+
+    #[test]
+    fn a_kind_this_version_does_not_know_may_carry_exec() {
+        let document = with_methods(
+            r#"[{"name":"browser","auth":{"kind":"oauth_device","exec":true}},{"name":"token","auth":{"kind":"token"}}]"#,
+        );
+        let parsed = parse(&document).expect("an unknown kind decodes nothing of its auth");
+        assert!(!parsed.spec.methods[0].is_offerable());
+    }
+
+    #[test]
+    fn the_specs_own_code_example_parses() {
+        // §3.2.6's worked example, verbatim: a document the specification calls valid must not be refused.
+        let parsed = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"],"hosts":["auth.some-provider.example"],"limits":{"callSeconds":30,"sessionSeconds":900}}"#,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .expect("the specification's own example");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        assert_eq!(code_of(auth).limits().call_seconds, 30);
+        assert_eq!(code_of(auth).limits().session_seconds, 900);
+    }
+
+    #[test]
+    fn a_call_deadline_past_the_ceiling_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"limits":{"callSeconds":31}}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("30"), "{err:#}");
+    }
+
+    #[test]
+    fn a_session_deadline_past_the_ceiling_is_refused() {
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"limits":{"sessionSeconds":901}}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("900"), "{err:#}");
+    }
+
+    #[test]
+    fn limits_a_code_auth_leaves_out_default_to_the_ceiling() {
+        let parsed = parse(&code_method(
+            CODE_AUTH,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .expect("limits is optional");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        assert_eq!(code_of(auth).limits().call_seconds, 30);
+        assert_eq!(code_of(auth).limits().session_seconds, 900);
+    }
+
+    #[test]
+    fn a_host_the_match_grammar_cannot_read_is_refused() {
+        // The card names these and lns enforces them per call, so an unparseable entry is a bound that silently holds nothing.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"hosts":["not a host"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not a host"), "{err:#}");
+    }
+
+    #[test]
+    fn a_hosts_entry_naming_no_destination_is_refused() {
+        // An empty entry reads as a bound and holds nothing, and the card would print a blank line as a disclosure.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"hosts":[""]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must name a destination"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_hosts_entry_whose_port_position_is_not_a_port_is_refused() {
+        // lns reads the whole entry as one host name, so the component could never reach what the author meant.
+        let err = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"hosts":["auth.some-provider.example:https"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("could never reach"), "{err:#}");
+    }
+
+    #[test]
+    fn a_code_method_declares_whether_it_may_run_host_programs() {
+        // §3.2.6: opt-in, because a method that does not ask earns the stronger card sentence.
+        let parsed = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"exec":true}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .expect("a code method may declare host execution");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        assert!(code_of(auth).exec);
+    }
+
+    #[test]
+    fn a_code_method_runs_no_host_program_unless_it_says_so() {
+        let parsed = parse(&code_method(
+            CODE_AUTH,
+            &credential_drawing_on(Some("access_token")),
+        ))
+        .expect("exec is optional");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        assert!(!code_of(auth).exec, "absent must mean no, never yes");
+    }
+
+    #[test]
+    fn exec_on_a_kind_that_is_not_code_is_refused() {
+        // A built-in mechanism runs no program of the document's choosing, so the field would read as a capability lns does not grant.
+        let err = parse(&code_method(
+            r#"{"kind":"token","exec":true}"#,
+            &credential_drawing_on(None),
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("exec"), "{rendered}");
+        assert!(rendered.contains("code"), "{rendered}");
+    }
+
+    #[test]
+    fn a_code_method_declares_the_hosts_its_component_may_reach() {
+        let parsed = parse(&code_method(
+            r#"{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"hosts":["auth.some-provider.example"]}"#,
+            &credential_drawing_on(Some("token")),
+        ))
+        .expect("a code method may declare hosts");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("auth");
+        assert_eq!(
+            code_of(auth).hosts,
+            vec!["auth.some-provider.example".to_string()]
+        );
     }
 
     #[test]
