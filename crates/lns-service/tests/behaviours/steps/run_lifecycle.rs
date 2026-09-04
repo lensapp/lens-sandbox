@@ -147,6 +147,27 @@ async fn registered_run_with_config(
     world.lifecycle_run = Some(run_id);
 }
 
+#[given(
+    regex = r#"^a stopped run that asked for (\d+) cpu and (\d+) MiB and booted with (\d+) cpus and (\d+) MiB$"#
+)]
+async fn stopped_run_with_a_resolved_size(
+    world: &mut BehaviourWorld,
+    requested_cpus: u8,
+    requested_mem: usize,
+    resolved_cpus: u8,
+    resolved_mem: usize,
+) {
+    crate::steps::run_start_stopped::hold_serial(world).await;
+    let run_id = lns_service::run_registry::allocate_run_id();
+    let mut record = crate::steps::run_start_stopped::stopped_record(&run_id, &run_id);
+    record.args.cpus = requested_cpus;
+    record.args.mem = requested_mem;
+    record.resolved_cpus = Some(resolved_cpus);
+    record.resolved_mem_mib = Some(resolved_mem);
+    lns_service::run_registry::register_stopped(lns_service::run_registry::StoppedRun { record });
+    world.lifecycle_run = Some(run_id);
+}
+
 #[when(regex = r#"^an InspectRun request for run (\d+) arrives$"#)]
 async fn inspect_unknown_run(world: &mut BehaviourWorld, run_id: u32) {
     world.response = Some(

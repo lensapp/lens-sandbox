@@ -402,16 +402,35 @@ mod tests {
     #[test]
     fn a_saved_sandbox_records_the_size_the_run_booted_with() {
         let mut record = record_with(None);
-        record.args.cpus = 4;
-        record.args.mem = 2048;
+        record.args.cpus = 1;
+        record.args.mem = 512;
+        record.resolved_cpus = Some(6);
+        record.resolved_mem_mib = Some(4096);
         let text = render(&record, &Policy::default(), SaveKind::Sandbox, "big")
             .expect("a resized run can be written out");
         let doc = yaml(&text);
-        assert_eq!(doc["spec"]["resources"]["cpu"], 4);
         assert_eq!(
-            doc["spec"]["resources"]["memory"], "2048Mi",
+            doc["spec"]["resources"]["cpu"], 6,
+            "saving the request would write a document that boots smaller than the run it names; got: {text}"
+        );
+        assert_eq!(
+            doc["spec"]["resources"]["memory"], "4096Mi",
             "a size saved without its unit would read as bytes; got: {text}"
         );
+    }
+
+    #[test]
+    fn a_run_recorded_before_the_resolved_size_saves_the_size_it_was_asked_for() {
+        let mut record = record_with(None);
+        record.args.cpus = 4;
+        record.args.mem = 2048;
+        record.resolved_cpus = None;
+        record.resolved_mem_mib = None;
+        let text = render(&record, &Policy::default(), SaveKind::Sandbox, "big")
+            .expect("an older run can be written out");
+        let doc = yaml(&text);
+        assert_eq!(doc["spec"]["resources"]["cpu"], 4);
+        assert_eq!(doc["spec"]["resources"]["memory"], "2048Mi");
     }
 
     #[test]

@@ -14,6 +14,11 @@ pub struct RunRecord {
     /// The merged sandbox document this run booted, so `lns sandbox save` writes what ran rather than what was typed.
     #[serde(default)]
     pub resolved_document: Option<String>,
+    /// The vCPU count and memory this run's boot resolved to, so a report of it after a service restart names the size it booted with rather than the request; absent on a record written before they were kept.
+    #[serde(default)]
+    pub resolved_cpus: Option<u8>,
+    #[serde(default)]
+    pub resolved_mem_mib: Option<usize>,
     pub descriptor_sha256: String,
     pub layer_digests: Vec<String>,
     pub image: String,
@@ -256,6 +261,8 @@ mod tests {
     pub(crate) fn sample_record(run_id: &str) -> RunRecord {
         RunRecord {
             resolved_document: None,
+            resolved_cpus: Some(4),
+            resolved_mem_mib: Some(2048),
             version: CURRENT_VERSION,
             run_id: run_id.to_string(),
             name: format!("name-{run_id}"),
@@ -414,6 +421,17 @@ mod tests {
             .as_ref()
             .expect("a record that parsed still names what it declared");
         assert_eq!(volumes[0].name, "cache");
+    }
+
+    #[test]
+    fn a_record_written_before_the_resolved_size_existed_still_loads() {
+        let mut json = serde_json::to_value(sample_record("aa01")).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("resolved_cpus");
+        object.remove("resolved_mem_mib");
+        let back: RunRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back.resolved_cpus, None);
+        assert_eq!(back.resolved_mem_mib, None);
     }
 
     #[test]

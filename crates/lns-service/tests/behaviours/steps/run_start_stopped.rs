@@ -52,6 +52,8 @@ impl StartHost for ScriptedStartHost {
 pub(crate) fn stopped_record(run_id: &str, name: &str) -> RunRecord {
     RunRecord {
         resolved_document: None,
+        resolved_cpus: None,
+        resolved_mem_mib: None,
         version: lns_service::run_record::CURRENT_VERSION,
         run_id: run_id.to_string(),
         name: name.to_string(),
