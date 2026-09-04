@@ -36,7 +36,7 @@ fn render_sandbox(record: &RunRecord, decisions: &Policy, name: &str) -> Result<
         .context("the document this run booted has no spec")?;
     // Every source is already folded in, so a reference left here would resolve a second time on the next run.
     spec.remove("mixins");
-    overlay_launch(spec, &record.args);
+    overlay_launch(spec, record);
     root_declared_paths(spec, record.args.definition_dir.as_deref());
     spec.insert("egress".to_string(), effective_egress(spec, decisions)?);
     serde_yaml::to_string(&document).context("rendering this run as a document")
@@ -79,7 +79,8 @@ fn base_document(record: &RunRecord) -> Result<Value> {
     }
 }
 
-fn overlay_launch(spec: &mut serde_json::Map<String, Value>, args: &lns_ipc::RunImageArgs) {
+fn overlay_launch(spec: &mut serde_json::Map<String, Value>, record: &RunRecord) {
+    let args = &record.args;
     if !args.cmd.is_empty() {
         spec.insert("command".to_string(), json!(args.cmd.join(" ")));
     }
@@ -91,9 +92,11 @@ fn overlay_launch(spec: &mut serde_json::Map<String, Value>, args: &lns_ipc::Run
     if !args.published_ports.is_empty() {
         spec.insert("ports".to_string(), ports_of(&args.published_ports));
     }
+    let cpus = record.resolved_cpus.unwrap_or(args.cpus);
+    let mem_mib = record.resolved_mem_mib.unwrap_or(args.mem);
     spec.insert(
         "resources".to_string(),
-        json!({ "cpu": args.cpus, "memory": format!("{}Mi", args.mem) }),
+        json!({ "cpu": cpus, "memory": format!("{mem_mib}Mi") }),
     );
 }
 

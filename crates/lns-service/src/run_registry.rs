@@ -643,11 +643,23 @@ pub fn inspect(run_id: &str) -> Option<lns_ipc::RunDetails> {
             config: with_its_decisions_file(
                 match e {
                     RunEntry::Live(h) => h.config.clone(),
-                    RunEntry::Stopped(s) => lns_ipc::RunConfig::from_run_args(&s.record.args),
+                    RunEntry::Stopped(s) => at_the_size_it_booted(&s.record),
                 },
                 run_id,
             ),
         })
+}
+
+/// The size a boot resolved to is a fact the record keeps, and resolving the document again here would answer for the host as it is now.
+fn at_the_size_it_booted(record: &crate::run_record::RunRecord) -> lns_ipc::RunConfig {
+    let mut config = lns_ipc::RunConfig::from_run_args(&record.args);
+    if let Some(cpus) = record.resolved_cpus {
+        config.cpus = cpus;
+    }
+    if let Some(mem_mib) = record.resolved_mem_mib {
+        config.mem_mib = mem_mib;
+    }
+    config
 }
 
 /// A run's decisions file is the service's to name from the run's own directory (`docs/sandbox-spec.md` §8.3), so `inspect` fills it in here rather than reading it off what a caller sent.
