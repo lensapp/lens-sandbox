@@ -324,12 +324,10 @@ mod tests {
         let reason =
             BrokerExitReason::NetworkSetupFailed("spawn `ip link set lo up`: ENOENT".into());
         assert_eq!(reason.as_str(), "network_setup_failed");
+        let summary = reason.summary();
         assert!(
-            reason
-                .summary()
-                .contains("spawn `ip link set lo up`: ENOENT"),
-            "the real error must not be replaced by the DHCP story: {}",
-            reason.summary()
+            summary.contains("spawn `ip link set lo up`: ENOENT"),
+            "the real error must not be replaced by the DHCP story: {summary}"
         );
         assert!(
             !reason.explain().contains("bootpd"),

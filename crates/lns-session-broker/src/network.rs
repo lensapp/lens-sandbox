@@ -479,6 +479,14 @@ mod tests {
     }
 
     #[test]
+    fn a_guest_with_a_lease_starts_its_workload() {
+        let runner = FakeCommandRunner::with_outcomes(vec![ok(0), ok(0), ok(0)]);
+        let fs = FakeFsWriter::ok();
+        bring_up_network_with(|| bring_up_eth0_with(&runner, &fs), true)
+            .expect("a lease refuses nothing");
+    }
+
+    #[test]
     fn a_failed_lease_request_refuses_a_run_whose_policy_allows_egress() {
         let runner = FakeCommandRunner::with_outcomes(vec![ok(1), ok(0), ok(0)]);
         let fs = FakeFsWriter::ok();
