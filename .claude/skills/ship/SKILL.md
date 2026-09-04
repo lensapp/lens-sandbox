@@ -2,7 +2,7 @@
 name: ship
 description: >
   Drive the problem-first pipeline forward — detect the current phase
-  (intake, plan, implement, review, PR) from observable state and invoke the
+  (plan, implement, review, PR) from observable state and invoke the
   right skill, pausing at every human gate. Use only when the user runs
   `/ship`, optionally with an issue number or a one-line idea.
 ---
@@ -22,9 +22,9 @@ state, never from conversation memory.
 ## Arguments
 
 - *(empty)* — detect phase from the current branch and plan file.
-- Issue number / `#124` / issue URL — drive the pipeline from that issue
-  (`/problem-first-impl` Mode B).
-- Free text — a new idea; start at intake with it as the problem seed.
+- Issue number / `#124` / issue URL — read it (`gh issue view <n>`) and use its
+  content as the problem seed for planning.
+- Free text — a new idea; start at planning with it as the problem seed.
 
 ## Isolated worktree
 
@@ -74,13 +74,18 @@ Format:
 
 ```markdown
 # <branch> — plan
-Source: <issue ref or "session intake">
+Source: <issue ref, or a one-line problem statement>
+Direction: <the agreed approach, one paragraph>
+Rejected: <1-3 alternatives, one line each>
 
 - [ ] 1. <slice: scenarios to activate, files to touch>
 - [ ] 2. ...
 - [ ] Self-review (/code-review)
 - [ ] Open PR (/create-pr)        <- include only when gh/GitHub is in play
 ```
+
+`Direction` and `Rejected` carry the "why" from `/problem-first` Phase 3, so a
+`/ship` that resumes after the session is gone does not re-derive it.
 
 Implementation boxes are ticked by `/green` on each successful close; you
 tick the Self-review and Open PR boxes yourself when those phases complete.
@@ -101,8 +106,8 @@ First matching row wins:
 
 | Observable state | Phase | Action |
 |---|---|---|
-| Free-text args, or no plan file + no agreed problem in conversation + no issue arg | Intake | Invoke `/problem-first`. When intake concludes and the user is NOT implementing now, suggest `/problem-first-issue` (GitHub only) and stop. |
-| Issue arg given, or intake agreed and proceeding; no plan file for this branch | Spec + plan | Invoke `/problem-first-impl` (Mode B when driven from an issue). After the plan is approved: create the feature branch **in a `.ship/` worktree** (see Isolated worktree), write the plan file, and run all further phases inside it. |
+| Args given (issue or free text) **and** a plan file with unchecked implementation boxes exists for this branch | Ambiguous | Do not silently resume and do not silently drop the args. Ask the user: is this a direction change on the in-flight plan (see **Don't re-plan half-done work**), or new work that wants its own branch? Act on the answer. |
+| No plan file for this branch | Spec + plan | Invoke `/problem-first`, seeded with the args — an issue's content when an issue was named, the free text otherwise. Re-entry while a `/problem-first` session is already under way continues from conversation context; if the session no longer carries it, restart `/problem-first` and say so. After the plan is approved: create the feature branch **in a `.ship/` worktree** (see Isolated worktree), move what Phase 5 wrote in the current checkout into it, write the plan file, and run all further phases inside it. |
 | Plan file has unchecked implementation boxes | Implement | For the first unchecked step: failing-test-first per the repo Workflow (activate the step's scenarios, watch them fail, implement), then invoke `/green`. On green (box ticked), continue to the next unchecked step without pausing. Stop only when `/green` escalates or reports stuck. |
 | All implementation boxes ticked; Self-review box unchecked | Review | Run `make e2e` once (Layer 1 wiring — CI's test job runs it, `/green` deliberately doesn't); fix failures via `/green`. Then invoke `/code-review` (self-review mode). If it produces fixes, apply them and invoke `/green` after. On "Ship it" / all findings resolved, tick the box. If the branch touches VM/session plumbing, remind the user of the manual checks: `make e2e-microvm` (virt-capable host) and the `lns run -it` smoke test (`expect -f crates/lns-cli/tests/smoke/interactive-shell.exp`). |
 | Self-review ticked; Open PR box present and unchecked; `gh` available | Package | Invoke `/create-pr`. Tick the box. |
@@ -113,10 +118,10 @@ First matching row wins:
 
 - **Never bypass a red gate.** If `/green` stops without green, you stop too
   and surface its report — do not route around it to reach the next phase.
-- **Inherit every human gate.** `/problem-first` convergence, `-impl`'s
-  Phase 4 confirmation and plan-mode approval, `/green` escalations — when a
-  sub-skill needs the user, end the turn there; the next `/ship` resumes.
-- **GitHub is optional.** `gh` unavailable → skip the park/package/respond
+- **Inherit every human gate.** `/problem-first`'s phase exits, plan-mode
+  approval, `/green` escalations — when a sub-skill needs the user, end the
+  turn there; the next `/ship` resumes.
+- **GitHub is optional.** `gh` unavailable → skip the package/respond
   rows entirely; the plan file is the source of truth either way.
 - **Don't re-plan half-done work.** A plan file with ticked boxes means the
   plan was approved; resume at the first unchecked step. Only return to

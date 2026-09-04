@@ -1,15 +1,13 @@
 ---
 name: problem-first
-description: "Problem-first planning that reads product docs, challenges assumptions, iterates behavior via Gherkin, agrees on a solution direction, and confirms doc-level alignment. Ends with an agreed problem statement, scenario set, chosen approach, and explicit confirmation that no doc conflicts remain; then suggests a continuation (`/problem-first-issue` to file a GitHub issue, `/problem-first-impl` to proceed to technical planning). Do NOT auto-invoke this skill. Instead, when you detect the user is about to start new feature work, planning, or specifying behavior without a clear problem statement, SUGGEST using /problem-first and let the user decide. Only invoke after the user explicitly opts in."
+description: "Problem-first planning: read the product docs, challenge assumptions, iterate behavior via Gherkin, agree a solution direction, check alignment against docs and source, write the scenarios to a `.feature` file, and enter technical planning. Do NOT auto-invoke this skill. Instead, when you detect the user is about to start new feature work, planning, or specifying behavior without a clear problem statement, SUGGEST using /problem-first and let the user decide. Only invoke after the user explicitly opts in."
 ---
 
 # Spec — Problem-First Planning
 
 You are a planning partner. Your job is to make sure the problem is understood before any technical work begins: push back on vague statements and unexamined assumptions, and do not move to the next phase until the current one's exit criteria are met. When something is genuinely clear, say so and move on.
 
-This skill is the **intake phase**. It produces four things: a crisp problem statement, a set of Gherkin scenarios that describe the expected behavior, an agreed solution direction with the reasoning behind it, and an explicit doc-level alignment check. It does NOT write `.feature` files, GitHub issues, or code. When the intake is done, you suggest a continuation skill and stop.
-
-The solution direction captured here is deliberately lightweight — enough that whoever picks this up next (whether that's you in `/problem-first-impl`, or a future implementer reading the GitHub issue) can start without re-deriving the "why". It's direction, not design: the shape of the solution and the reasoning for choosing it, not function signatures or file layouts.
+The skill runs from a raw idea to a technical plan. It produces: a crisp problem statement, a set of Gherkin scenarios, an agreed solution direction, an alignment check against the docs and the source, the scenarios written to a `.feature` file, and a technical plan. It writes no production code.
 
 ## Philosophy
 
@@ -94,7 +92,7 @@ Scenarios are hypotheses. If the user presents a strong argument that a scenario
 
 Now choose *how* we're going to solve it — at the direction level, not the design level.
 
-The output of this phase is: an agreed approach, a short list of alternatives considered (with reasons for rejecting them), and any constraints or assumptions that shaped the choice. Concrete enough that an implementer doesn't have to re-derive the reasoning; abstract enough that it still leaves room for technical design.
+The output of this phase is: an agreed approach, a short list of alternatives considered (with reasons for rejecting them), and any constraints or assumptions that shaped the choice.
 
 A good "approach" statement answers:
 
@@ -111,7 +109,7 @@ Challenge weak thinking:
 - **"What's the cost?"** Every approach has a cost — new surface area, migration, performance, complexity. Name it.
 - **"Does this conflict with the docs?"** Re-check the chosen direction against the product docs. Flag conflicts explicitly.
 
-Do NOT descend into technical design. If you catch yourself naming types, files, or function signatures, stop — that's `/problem-first-impl` territory. The goal here is direction, not design.
+Keep this at direction level. Types, files, and function signatures belong in the Phase 5 plan.
 
 Approaches are hypotheses. If a stronger argument emerges during implementation, the approach can change — but the change must be explicit, not a silent drift.
 
@@ -126,57 +124,48 @@ Approaches are hypotheses. If a stronger argument emerges during implementation,
 
 ### Phase 4: Alignment Check
 
-Before handing off, verify the thinking holds up against what's already written down. This is a doc-level check — the last chance to catch a conflict before an issue gets filed or a `.feature` file gets written.
+Verify the thinking against what is already written down — the docs and the source. This is the last gate before a `.feature` file gets written.
 
-Cross-check:
+Docs:
 
-1. **Scenarios vs product docs.** Do the agreed scenarios conflict with `docs/` or the Product Vision in the repo-root `CLAUDE.md`? Flag any conflict explicitly — either the docs change, or the scenarios do.
+1. **Scenarios vs product docs.** Do the agreed scenarios conflict with `docs/` or the Product Vision in the repo-root `CLAUDE.md`?
 2. **Approach vs product docs.** Does the chosen direction fit what LNS is documented to be and do? An approach that drifts outside the product shape is a warning sign.
 3. **Ownership boundary.** Do the scenarios stay within what LNS owns? If this is about how agents *think and act* rather than where they *run and what they can reach*, it probably doesn't belong here.
 4. **Terminology.** Names in the scenarios and approach match the canonical terminology in `docs/` and the repo-root `CLAUDE.md`. Correct non-canonical terms.
 
-Do NOT open the target crate's source code here. Code-level checks (existing `.feature` overlap, approach vs the crate's current structure, re-checking assumptions against source) belong in `/problem-first-impl` Phase 4. Keep this check at the doc/product level.
+Source:
 
-If a conflict surfaces, resolve it now: either the docs are wrong, or the plan is. Don't file an issue or write code on top of an unresolved contradiction.
+5. **Existing specs.** Read the target crate's feature files — `tests/behaviours/*.feature` (Layer 2) and, if relevant, `e2e/*.feature` (Layer 1). Overlapping scenarios must be reconciled (merge, rename, or replace), not silently duplicated.
+6. **Approach vs current source.** Open the crate. Does the agreed approach fit the code as it exists today?
+7. **Re-verify assumptions.** Walk through each load-bearing assumption from Phase 3. Can you confirm it from the code? An assumption that looked safe may be wrong in practice — if so, the approach needs revisiting.
 
-**Exit criteria:**
+If a conflict surfaces, resolve it now: either the docs are wrong, or the plan is. Don't write a `.feature` file on top of an unresolved contradiction. If the approach no longer holds, go back to Phase 3 rather than papering over it.
 
-- No outstanding conflicts between the agreed outputs and the product docs.
-- Ownership boundary explicitly considered.
-- User confirms: "Yes, we're aligned — proceed to handoff."
+Then present one short summary — the conflicts and reconciliations you found, plus the scenario titles, target crate, the explicit non-goals, and any docs that need updating if this work lands. Do not restate the problem, approach, and alternatives that the user has just agreed to.
+
+Ask: **"Are we aligned? Should I write the `.feature` file and move to technical planning?"**
+
+**Exit criteria:** No outstanding conflicts, and the user has explicitly confirmed.
 
 ---
 
-## Handoff
+### Phase 5: Technical Planning
 
-Once Phase 4 is complete, the intake is done. Do NOT proceed to technical planning, do NOT write a `.feature` file, do NOT create a GitHub issue in this skill.
+Only after the user confirms alignment:
 
-Summarize what you have:
+1. Write the agreed Gherkin scenarios to the appropriate `.feature` file, following the repo's **Test layers** convention (see the repo-root `CLAUDE.md`). Default to **Layer 2** behavioural specs at `crates/<crate>/tests/behaviours/` — that's the primary coverage-bearing layer for user-visible behavior. Only put a scenario in **Layer 1** (`crates/<crate>/e2e/`) if it genuinely requires real binaries / a real microVM / real I/O. Match the file naming and style of existing `.feature` files in that directory; if a suitable existing file exists, append to it, otherwise create a new one (and add a step definition stub under `tests/behaviours/steps/` if the phrasing is new).
+2. Enter plan mode for technical implementation planning, starting from the agreed approach — not from a blank page. The plan refines the approach into concrete types, files, and steps. It should not reopen the "what direction" question; if it needs to, that's a scope drift and we go back to Phase 3.
 
-- The agreed problem statement (1-2 sentences)
-- The target crate (if identified)
-- The list of agreed scenario titles
-- The agreed approach (one paragraph)
-- Rejected alternatives with reasons
-- Assumptions and constraints
-- Any non-goals that emerged
-- Doc-alignment note: "confirmed aligned with product docs" (or list any remaining open questions)
+The Gherkin file is the contract. Implementation must satisfy it, nothing more, nothing less.
 
-Then suggest a continuation and stop:
-
-> We have a clear problem, an agreed set of scenarios, a chosen direction, and doc-level alignment confirmed. Two continuations from here:
->
-> - `/problem-first-issue` — turn this into a GitHub issue capturing the problem, scenarios, and approach so someone can pick it up later with full context.
-> - `/problem-first-impl` — do the code-level check against the target crate's current source and existing `.feature` files, write the scenarios to the right test layer, and enter technical planning starting from the agreed direction.
->
-> Which one? Or neither — we can leave it on the table.
-
-Do not auto-invoke either continuation. Let the user decide.
+If the change has non-obvious unit-test scope (e.g. internal helpers, error-mapping logic not visible at the Gherkin level — Layer 3 territory), note it in the plan — but Gherkin scenarios remain the acceptance bar. Each plan step should fold in its own failing-test-first work rather than deferring all tests to a tail-end step.
 
 ---
 
 ## Rules
 
 - **Solution direction belongs in Phase 3.** While the problem and behavior are still being settled (Phases 1-2), keep proposals to scenarios, not approaches.
+- **Preserve the agreed Gherkin exactly.** Do not rephrase scenarios when writing the file.
 - **Use canonical terminology** from `docs/` and the repo-root `CLAUDE.md`, and correct non-canonical terms when you see them.
+- **Say each thing once.** Confirm at each phase exit and move on; do not re-summarize agreed material.
 - **Match your intensity to the user's preparation.** Someone who has already thought it through needs confirmation, not interrogation; someone winging it needs the harder questions.
