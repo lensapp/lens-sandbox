@@ -51,7 +51,7 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
 | `~/.lns/audit/` | Each sandbox's own audit chain, which outlives the sandbox that wrote it. |
-| `~/.lns/runs/` | A live or stopped sandbox's writable layer, scratch, decisions, and captured output, removed with the sandbox. |
+| `~/.lns/runs/` | A live or stopped sandbox's writable layer, scratch, decisions, approvals, and captured output, removed with the sandbox. |
 | `~/.lns/` (the rest) | Cached artifacts and layers, named volumes, the durable ledger, and the kernel. |
 
 One directory, one thing to back up, one thing `lns uninstall --purge` removes.
@@ -451,6 +451,50 @@ Integrity is checked automatically as the log is read: if a hash chain has been 
 truncated, or can't be verified against its anchor, `lns audit` prints an inline
 `audit integrity:` warning and still lists what's there — the warning marks it
 untrustworthy. There is no separate verify step. See [Audit](audit.md).
+
+## `lns approval`
+
+Read what each run has been asked, and answer it at the terminal.
+
+```bash
+lns approval ls                             # every run's entries, with the answer each has
+lns approval ls <sandbox>                   # scope to one sandbox: run id, name, or unique id prefix
+lns approval ls [--format <table|json>]
+lns approval answer <id> <always-allow|always-deny|ask-again>
+```
+
+A card that asks about a destination becomes an **entry** the run keeps, in
+`~/.lns/runs/<RUN>/approvals.json`. One you close, one that times out, and one a
+workload withdrew by exiting are all still listed — the request failed closed at
+the boundary, and the question did not go with it. A connector question you
+answered is listed too, granted or declined. The window also shows lines that ask
+nothing, such as a rule it could not write; each is listed as a notice, with no
+verdict to give.
+
+`answer` decides a destination entry, and only that. A connector entry is listed
+as granted or declined and is answered through [`lns connector`](#lns-connector);
+a notice answers nothing. There is no once verdict here: a once decision applies
+to a request the guest is still holding, which is what the window is for.
+
+- `always-allow` / `always-deny` write the entry's rule into the run's
+  `decisions.yaml`, or rewrite the one it wrote before. A running sandbox takes
+  the change at once.
+- `ask-again` takes that rule back, so the destination raises a card the next time
+  a workload reaches it.
+
+Answering never replays the request that raised the entry. The call failed when
+nothing decided it; the answer decides the next one. An entry of a **stopped**
+sandbox is answerable too, and edits that run's `decisions.yaml` without starting
+it.
+
+An answer reaches only what the entry itself wrote. Where another rule already
+decides the destination, nothing is written: the command names that rule and exits
+`1`. `ask-again` on an entry that holds no rule — one still undecided, or one
+whose rule you edited by hand — leaves the file alone, says so, and exits `1`.
+
+Entries go when the run goes, with `lns rm` and `lns prune`. A request an existing
+rule decides raises no card, so it leaves no entry; `lns audit` is where that one
+is recorded. See [Policy and approvals](policy.md).
 
 ## `lns service`
 

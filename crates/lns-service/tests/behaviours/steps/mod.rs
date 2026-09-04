@@ -1,3 +1,4 @@
+pub mod approval_entries;
 pub mod approval_flow;
 pub mod artifact_dispatch;
 pub mod connector_connect;

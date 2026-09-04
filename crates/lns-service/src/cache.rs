@@ -15,3 +15,10 @@ pub fn decisions_path(root: &Path, run_id: &str) -> PathBuf {
 }
 
 pub const DECISIONS_FILENAME: &str = "decisions.yaml";
+
+/// A run keeps what it was asked beside what it decided, so one sweep takes both.
+pub fn approvals_path(root: &Path, run_id: &str) -> PathBuf {
+    run_dir(root, run_id).join(APPROVALS_FILENAME)
+}
+
+pub const APPROVALS_FILENAME: &str = "approvals.json";

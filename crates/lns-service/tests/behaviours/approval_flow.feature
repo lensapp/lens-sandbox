@@ -8,19 +8,21 @@ Feature: lns-service approval flow
   running policy. An "always" decision is persisted to the policy
   file used by the run and hot-swapped into the running policy so
   future identical requests are not asked about again. Dismissing a
-  card is not a decision: the request fails closed, nothing is
-  recorded, and the next one asks again. Policy edits made by the
-  developer directly on the file are also hot-swapped.
+  card is not a decision: the request fails closed, no rule is written,
+  the audit chain records nothing, and the next one asks again — the
+  question itself survives as an entry the run keeps
+  (approval_entries.feature). Policy edits made by the developer
+  directly on the file are also hot-swapped.
 
   Scenario: A workload action with no matching rule prompts the developer
     Given a workload is running in the sandbox
     And the policy has no rule for "api.linear.app"
     When the workload makes a request to "api.linear.app"
-    Then an entry appears in the approval window showing the destination and the originating sandbox
+    Then a card appears in the approval window showing the destination and the originating sandbox
     And the workload's request is held pending a decision
 
   Scenario: Allow once resolves a single request without changing policy
-    Given an approval entry is visible for a request to "api.linear.app"
+    Given an approval card is visible for a request to "api.linear.app"
     When the developer picks "allow once"
     Then the workload's request proceeds
     And the running policy is unchanged
@@ -30,7 +32,7 @@ Feature: lns-service approval flow
   Scenario: Always allow writes a rule to the policy file and hot-swaps the running policy
     Given the run records what it decides in "decisions.yaml"
     And the policy has no rule for "api.linear.app"
-    And an approval entry is visible for a request to "api.linear.app"
+    And an approval card is visible for a request to "api.linear.app"
     When the developer picks "always allow"
     Then "decisions.yaml" contains a new allow rule for "api.linear.app"
     And the running policy contains the same rule
@@ -38,7 +40,7 @@ Feature: lns-service approval flow
     And a future request to "api.linear.app" is allowed without prompting
 
   Scenario: Deny once fails the request without changing policy
-    Given an approval entry is visible for a request to "api.linear.app"
+    Given an approval card is visible for a request to "api.linear.app"
     When the developer picks "deny once"
     Then the workload's request is denied once
     And the running policy is unchanged
@@ -46,45 +48,48 @@ Feature: lns-service approval flow
     And a future request to "api.linear.app" prompts again
 
   Scenario: Closing a network card fails the request without recording a decision
-    Given an approval entry is visible for a request to "api.linear.app"
+    Given an approval card is visible for a request to "api.linear.app"
     When the developer closes the card without choosing
     Then the workload's request is failed at the boundary as undecided
     And the running policy is unchanged
     And the policy file is unchanged
     And the audit chain records no approval for "api.linear.app"
     And a future request to "api.linear.app" prompts again
+    And the run's approvals still list "api.linear.app" as undecided
 
   Scenario: Always deny writes a deny rule to the policy file and hot-swaps the running policy
     Given the run records what it decides in "decisions.yaml"
     And the policy has no rule for "api.linear.app"
-    And an approval entry is visible for a request to "api.linear.app"
+    And an approval card is visible for a request to "api.linear.app"
     When the developer picks "always deny"
     Then "decisions.yaml" contains a new deny rule for "api.linear.app"
     And the running policy contains the same rule
     And the workload's request is denied always
     And a future request to "api.linear.app" is denied without prompting
 
-  Scenario: Repeated requests to the same destination share one entry
+  Scenario: Repeated requests to the same destination share one card
     Given a workload makes a request to "api.linear.app" with no matching rule
-    And an approval entry is visible
+    And an approval card is visible
     When the workload makes a second request to "api.linear.app" before the developer decides
     Then no second card appears in the approval window
     And when the developer's decision is recorded, both requests resolve under that decision
 
-  Scenario: An approval entry with no decision after the timeout fails closed
-    Given an approval entry is visible for a request to "api.linear.app"
+  Scenario: An approval card with no decision after the timeout fails closed
+    Given an approval card is visible for a request to "api.linear.app"
     When no decision is recorded before the configured approval timeout
     Then the workload's request is failed at the boundary as undecided
     And the approval card is removed from the approval window
     And the running policy is unchanged
     And the policy file is unchanged
+    And the run's approvals still list "api.linear.app" as undecided
 
-  Scenario: A workload exit withdraws its open entries
-    Given a workload has an open approval entry
+  Scenario: A workload exit withdraws its open cards
+    Given a workload has an open approval card
     When the workload exits before a decision is recorded
     Then the approval card is removed from the approval window
     And the running policy is unchanged
     And the policy file is unchanged
+    And the run's approvals still list that destination as withdrawn
 
   Scenario: A decision-driven policy update is applied to the next request
     Given a workload is running with the loaded policy
@@ -104,7 +109,7 @@ Feature: lns-service approval flow
   # and silence would leave the developer believing their deny stuck.
   Scenario: A second, contradicting always-decision is not written behind the rule the first one wrote
     Given the run records what it decides in "decisions.yaml"
-    And an approval entry is visible for a request to "api.example.test"
+    And an approval card is visible for a request to "api.example.test"
     When the developer picks "always allow"
     And the workload makes a request to "api.example.test"
     And the developer picks "always deny"
@@ -116,14 +121,14 @@ Feature: lns-service approval flow
   # developer was shown; the bare host would grant every other port on that host too.
   Scenario: Always allow on a raw splice writes the port-scoped destination to the raw table
     Given the run records what it decides in "decisions.yaml"
-    And an approval entry is visible for a raw splice to "db.internal:5432"
+    And an approval card is visible for a raw splice to "db.internal:5432"
     When the developer picks "always allow"
     Then "decisions.yaml" contains a new raw allow rule for "db.internal:5432"
     And the workload's request proceeds
 
   Scenario: Always deny on a raw splice writes a raw deny rule
     Given the run records what it decides in "decisions.yaml"
-    And an approval entry is visible for a raw splice to "db.internal:5432"
+    And an approval card is visible for a raw splice to "db.internal:5432"
     When the developer picks "always deny"
     Then "decisions.yaml" contains a new raw deny rule for "db.internal:5432"
     And the workload's request is denied always
@@ -135,7 +140,7 @@ Feature: lns-service approval flow
   Scenario: An always-decision the file already holds behind another rule is reported, not silently dropped
     Given the run records what it decides in "decisions.yaml"
     And the policy denies "*.example.test" and holds an allow rule for "api.example.test" behind that
-    And an approval entry is visible for a request to "api.example.test"
+    And an approval card is visible for a request to "api.example.test"
     When the developer picks "always allow"
     Then the approval window informs the developer that the rule it would write is unreachable
     And the workload's request proceeds
@@ -145,7 +150,7 @@ Feature: lns-service approval flow
   Scenario: Approving a raw splice says which HTTP rule stops applying to it
     Given the run records what it decides in "decisions.yaml"
     And the policy allows "db.internal"
-    And an approval entry is visible for a raw splice to "db.internal:5432"
+    And an approval card is visible for a raw splice to "db.internal:5432"
     When the developer picks "always allow"
     Then "decisions.yaml" contains a new raw allow rule for "db.internal:5432"
     And the approval window informs the developer that the HTTP rule for "db.internal" no longer applies
@@ -154,14 +159,14 @@ Feature: lns-service approval flow
   # destination we cannot express has to leave the file alone and say so.
   Scenario: A raw destination that cannot be expressed as a rule is not written to the policy file
     Given the run records what it decides in "decisions.yaml"
-    And an approval entry is visible for a raw splice to "db.internal"
+    And an approval card is visible for a raw splice to "db.internal"
     When the developer picks "always allow"
     Then the workload's request proceeds
     And the raw table in "decisions.yaml" stays empty
     And the approval window informs the developer that the destination could not be turned into a rule
 
   Scenario: A failed policy-file write keeps the rule in memory and notifies the developer
-    Given an approval entry is visible for a request to "api.linear.app"
+    Given an approval card is visible for a request to "api.linear.app"
     And the policy file cannot be written
     When the developer picks "always allow"
     Then the workload's request proceeds
@@ -175,12 +180,12 @@ Feature: lns-service approval flow
   Scenario: An entry an always-decision writes says how it got there
     Given the run records what it decides in "decisions.yaml"
     And the policy has no rule for "docs.some-vendor.example"
-    And an approval entry is visible for a request to "docs.some-vendor.example"
+    And an approval card is visible for a request to "docs.some-vendor.example"
     When the developer picks "always allow"
     Then the rule for "docs.some-vendor.example" in "decisions.yaml" is noted as approved during a run
 
   Scenario: A raw entry an always-decision writes says how it got there
     Given the run records what it decides in "decisions.yaml"
-    And an approval entry is visible for a raw splice to "db.internal:5432"
+    And an approval card is visible for a raw splice to "db.internal:5432"
     When the developer picks "always allow"
     Then the raw rule for "db.internal:5432" in "decisions.yaml" is noted as approved during a run

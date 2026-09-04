@@ -39,6 +39,7 @@ pub struct BehaviourWorld {
     pub resolved_run: Option<ResolvedRunView>,
     pub volume: VolumeCliRig,
     pub connector: ConnectorCliRig,
+    pub approval: ApprovalCliRig,
     pub merged_env: Option<Result<Vec<String>, String>>,
     pub sandbox: SandboxCliRig,
     pub sandbox_run: SandboxRunRig,
@@ -172,6 +173,22 @@ pub struct ResolvedRunView {
     pub workdir: Option<String>,
     pub volumes: Vec<String>,
     pub binds: Vec<String>,
+}
+
+/// Scripted state for the fake approval service: what each run was asked, and which ids answer to nothing.
+#[derive(Debug, Default)]
+pub struct ApprovalCliRig {
+    pub approvals: Vec<lns_ipc::ApprovalInfo>,
+    /// Ids the service has no entry for, so an answer comes back unknown.
+    pub unknown: Vec<String>,
+    /// Why the service wrote no rule, when the scenario says it could not.
+    pub not_written: Option<String>,
+    /// A sandbox handle the service resolves to no run.
+    pub unknown_sandbox: Option<String>,
+    pub refuse_message: Option<String>,
+    /// Answers every approval request with a response no approval verb expects.
+    pub nonsense: bool,
+    pub requests: std::sync::Arc<std::sync::Mutex<Vec<lns_ipc::Request>>>,
 }
 
 /// Scripted state for the fake connector service, plus what the command printed.
