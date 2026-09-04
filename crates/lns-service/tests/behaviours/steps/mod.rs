@@ -17,7 +17,6 @@ pub mod mixin_resolution;
 pub mod policy_guardrail;
 pub mod rootfs_assembly;
 pub mod run_as_env;
-pub mod run_dhcp_refusal;
 pub mod run_lifecycle;
 pub mod run_naming;
 pub mod run_removal;
