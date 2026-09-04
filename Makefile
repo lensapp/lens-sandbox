@@ -148,16 +148,29 @@ fmt:
 # inside `lint`, which is where a contributor already looks for "is it clean".
 # Run under both CI and non-CI, because these scripts branch on it and a
 # harness that only passes in one environment is the defect this gate exists
-# to catch.
+# to catch. A harness that reports no result fails the step in CI: there every
+# tool it needs is present, so silence is not a missing jq but a dead harness.
 shell-tests:
-	@status=0; failed=""; \
+	@status=0; failed=""; silent=""; ci="$${CI:-}"; \
 		for t in scripts/*.test.sh; do \
-			echo "── $$t (no CI) ──"; \
-			env -u CI "./$$t" || { status=$$?; failed="$$failed $$t(no-CI)"; }; \
-			echo "── $$t (CI=1) ──"; \
-			CI=1 "./$$t" || { status=$$?; failed="$$failed $$t(CI)"; }; \
+			for mode in no-CI CI; do \
+				echo "── $$t ($$mode) ──"; \
+				if [ "$$mode" = CI ]; then \
+					out=$$(CI=1 "./$$t" 2>&1) || { status=$$?; failed="$$failed $$t($$mode)"; }; \
+				else \
+					out=$$(env -u CI "./$$t" 2>&1) || { status=$$?; failed="$$failed $$t($$mode)"; }; \
+				fi; \
+				echo "$$out"; \
+				case "$$out" in *Results:*) ;; *) silent="$$silent $$t($$mode)";; esac; \
+			done; \
 		done; \
 		[ -z "$$failed" ] || echo "shell-tests failed:$$failed"; \
+		if [ -n "$$silent" ] && [ -n "$$ci" ]; then \
+			echo "shell-tests reported no result in CI, where every tool is present:$$silent"; \
+			status=1; \
+		elif [ -n "$$silent" ]; then \
+			echo "shell-tests note: reported no result (a tool is missing here):$$silent"; \
+		fi; \
 		exit $$status
 
 # ── Coverage ──────────────────────────────────────────────────────────
