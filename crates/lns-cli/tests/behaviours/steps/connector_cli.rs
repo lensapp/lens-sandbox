@@ -69,6 +69,7 @@ struct FakeConnectorService {
     held: Vec<ConnectorView>,
     dropped_connections: Option<usize>,
     refuse_message: Option<String>,
+    refuse_grant_message: Option<String>,
     unreachable: bool,
     requests: Arc<Mutex<Vec<Request>>>,
 }
@@ -88,6 +89,7 @@ impl FakeConnectorService {
             held: rig.held.clone(),
             dropped_connections: rig.dropped_connections,
             refuse_message: rig.refuse_message.clone(),
+            refuse_grant_message: rig.refuse_grant_message.clone(),
             unreachable: rig.unreachable,
             requests: rig.requests.clone(),
         }
@@ -98,6 +100,11 @@ impl FakeConnectorService {
             return None;
         }
         if let Some(message) = &self.refuse_message {
+            return Some(Response::Error {
+                message: message.clone(),
+            });
+        }
+        if let (Request::GrantConnector { .. }, Some(message)) = (req, &self.refuse_grant_message) {
             return Some(Response::Error {
                 message: message.clone(),
             });
@@ -225,6 +232,11 @@ fn service_uninstalls(world: &mut BehaviourWorld, name: String, dropped: usize) 
 #[given(expr = "the connector service refuses with {string}")]
 fn connector_service_refuses(world: &mut BehaviourWorld, message: String) {
     world.connector.refuse_message = Some(message);
+}
+
+#[given(expr = "the service refuses the grant with {string}")]
+fn connector_service_refuses_the_grant(world: &mut BehaviourWorld, message: String) {
+    world.connector.refuse_grant_message = Some(message);
 }
 
 #[given(expr = "the connector service is unreachable")]
@@ -632,6 +644,16 @@ fn says_forgot_reservation(world: &mut BehaviourWorld) {
     assert!(
         run.output.contains("reservation about some-provider"),
         "got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the disclosure names the connection {string}")]
+fn discloses_the_connection(world: &mut BehaviourWorld, label: String) {
+    let run = run_of(world);
+    assert!(
+        run.output.contains(&format!("connection {label}")),
+        "what is printed is what is granted, so the connection behind the method is named: {}",
         run.output
     );
 }

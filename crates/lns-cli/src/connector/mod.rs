@@ -83,6 +83,13 @@ pub struct GrantArgs {
         help = "Which run this grants. Its id, its name, or a unique id prefix."
     )]
     pub run: String,
+    #[arg(
+        short = 'y',
+        long = "yes",
+        default_value_t = false,
+        help = "Answer the disclosure here, instead of at a terminal prompt. It still prints what the grant applies."
+    )]
+    pub yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -382,12 +389,12 @@ async fn grant(
     writer: &mut impl Write,
     prompt: &mut impl Write,
 ) -> Result<i32> {
-    // cli-spec §3.3: `grant` is the card in a terminal, and no flag answers it, so a script cannot consent on a person's behalf.
-    if !terminal.is_available() {
+    // cli-spec §3.3: a person consents at the card, at a terminal prompt, or with `--yes` on the host, and never a script on their behalf.
+    if !args.yes && !terminal.is_available() {
         bail!(
-            "granting {} shows what it opens and asks you to confirm, and there is no terminal to ask at. No flag answers it: run `lns connector grant {}` from a terminal.",
-            args.name,
-            args.name
+            "granting {name} shows what it opens and asks you to confirm, and there is no terminal to ask at.\n       Run `lns connector grant {name} --run {run}` from a terminal, or pass --yes to answer here.",
+            name = args.name,
+            run = args.run
         );
     }
     let connector = installed_view(svc, &args.name).await?;
@@ -417,13 +424,15 @@ async fn grant(
             run = args.run
         )?;
     }
-    write!(prompt, "grant it? [y/N] ")?;
-    prompt.flush()?;
-    let answer = terminal.read_answer()?;
-    writeln!(prompt)?;
-    if !crate::terminal::is_affirmative(&answer) {
-        writeln!(writer, "nothing was granted")?;
-        return Ok(1);
+    if !args.yes {
+        write!(prompt, "grant it? [y/N] ")?;
+        prompt.flush()?;
+        let answer = terminal.read_answer()?;
+        writeln!(prompt)?;
+        if !crate::terminal::is_affirmative(&answer) {
+            writeln!(writer, "nothing was granted")?;
+            return Ok(1);
+        }
     }
     let req = Request::GrantConnector {
         name: args.name.clone(),
@@ -491,7 +500,12 @@ fn disclose(
     disclose_list(prompt, "opens", &method.opens)?;
     disclose_list(prompt, "writes", &method.writes)?;
     disclose_list(prompt, "sets", &method.sets())?;
-    for connection in &connector.connections {
+    // What is printed is what is granted, so a connection made for another method is not part of this disclosure.
+    for connection in connector
+        .connections
+        .iter()
+        .filter(|held| held.method == method.name)
+    {
         let authority = if connection.authority.is_empty() {
             "no authority reported".to_string()
         } else {
@@ -1190,6 +1204,7 @@ mod tests {
                     method: Some("token".into()),
                     connection: None,
                     run: "reviewer".into(),
+                    yes: false,
                 }),
                 &svc,
                 &["y"],
@@ -1217,6 +1232,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "1a2b".into(),
+                yes: false,
             }),
             &svc,
             &["n"],
@@ -1244,6 +1260,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &mut asking(&["y"]),
@@ -1280,6 +1297,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "revieweer".into(),
+                yes: false,
             }),
             &svc,
             &["y"],
@@ -1323,6 +1341,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &["y"],
@@ -1388,6 +1407,7 @@ mod tests {
                     method: Some("token".into()),
                     connection: None,
                     run: "reviewer".into(),
+                    yes: false,
                 }),
                 &svc,
                 &mut asking(&["y"]),
@@ -1443,6 +1463,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &mut asking(&["y"]),
@@ -1492,6 +1513,7 @@ mod tests {
                 method: Some("token".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &["y"],
@@ -1519,6 +1541,7 @@ mod tests {
                 method: Some("future".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
         ] {
             // No fileset on this one, so the only thing this version cannot honour is its auth kind.
@@ -1546,6 +1569,7 @@ mod tests {
                 method: Some("seeded".into()),
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &["y"],
@@ -1581,6 +1605,7 @@ mod tests {
                 method: None,
                 connection: None,
                 run: "reviewer".into(),
+                yes: false,
             }),
             &svc,
             &["y"],

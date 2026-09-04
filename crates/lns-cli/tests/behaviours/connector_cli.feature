@@ -153,13 +153,64 @@ Feature: lns connector, on this machine
     Then the connector command exits 1
     And the output says nothing was granted
 
-  Scenario: granting with no terminal refuses, and no flag answers it
+  Scenario: granting with no terminal and without --yes refuses and names --yes
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And there is no terminal
     When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command fails
     And the connector error says "granting"
-    And the connector error says "No flag answers it"
+    And the connector error says "there is no terminal to ask at"
+    And the connector error says "pass --yes to answer here"
+    And the connector error says "--run reviewer"
+
+  Scenario: with --yes it discloses, grants and exits 0 with no terminal
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --run reviewer --method token --yes"
+    Then the connector command succeeds
+    And the disclosure names what the method opens
+    And the disclosure names the file it writes
+    And the disclosure names the variables it sets
+    And the output says it was granted
+    And the connector output does not contain "grant it?"
+
+  Scenario: --yes with several offerable methods still refuses and names --method
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --run reviewer --yes"
+    Then the connector command fails
+    And the connector error says "--method"
+
+  Scenario: --yes with several connections for the method still refuses and names --connection
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the machine holds the connection "work" of "some-provider" for method "token"
+    And the machine holds the connection "home" of "some-provider" for method "token"
+    And the service refuses the grant with "some-provider holds 2 connections for method token, so name one with --connection"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --run reviewer --method token --yes"
+    Then the connector command fails
+    And the connector error says "name one with --connection"
+
+  Scenario: --yes where the machine holds no connection says to connect first
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service refuses the grant with "some-provider authenticates and this machine holds no connection for method token; run `lns connector connect some-provider --method token` first"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --run reviewer --method token --yes"
+    Then the connector command fails
+    And the connector error says "holds no connection for method token"
+    And the connector error says "lns connector connect some-provider --method token"
+
+  Scenario: the disclosure lists the connections of the granted method only
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the machine holds the connection "work" of "some-provider" for method "token"
+    And the machine holds the connection "other-account" of "some-provider" for method "session"
+    And the service grants "some-provider" the method "token"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
+    Then the connector command succeeds
+    And the disclosure names the connection "work"
+    And the connector output does not contain "other-account"
 
   Scenario: granting with no --run is a usage error, because there is no directory to fall back on
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
@@ -182,6 +233,16 @@ Feature: lns connector, on this machine
     And the service grants "some-provider" the method "token"
     And the user types "y"
     When the user runs connector command "grant some-provider --run revieweer --method token"
+    Then the connector command succeeds
+    And the disclosure says no run is named "revieweer"
+    And the output says it reserved the decision
+
+  Scenario: --yes on a name no run holds reserves the decision for that name
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And no run answers to that name
+    And the service grants "some-provider" the method "token"
+    And there is no terminal
+    When the user runs connector command "grant some-provider --run revieweer --method token --yes"
     Then the connector command succeeds
     And the disclosure says no run is named "revieweer"
     And the output says it reserved the decision

@@ -186,6 +186,8 @@ pub struct ConnectorCliRig {
     /// `Some` means the connector was installed; `None` makes uninstall answer that nothing is.
     pub dropped_connections: Option<usize>,
     pub refuse_message: Option<String>,
+    /// A refusal the service answers the grant with, so the probes the command makes first still answer.
+    pub refuse_grant_message: Option<String>,
     pub unreachable: bool,
     pub connected: Option<String>,
     pub granted: Option<(String, Option<String>)>,
