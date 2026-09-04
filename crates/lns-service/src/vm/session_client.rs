@@ -359,6 +359,7 @@ mod tests {
             .downcast_ref::<BrokerRefusal>()
             .expect("the service preserves the typed broker reason");
         assert_eq!(refusal.reason, BrokerExitReason::NoDhcpLease);
+        assert_eq!(refusal.to_string(), "broker refused the run: no_dhcp_lease");
     }
 
     #[tokio::test]
