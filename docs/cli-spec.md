@@ -198,7 +198,7 @@ lns artifact prune [-f]
 |---|---|---|
 | `init` | `lns init` | Scaffolds a document in this directory. `--kind` chooses which — `sandbox` (the default), `mixin`, or `connector`; the file is `./lns.yaml` unless `-f` names another. Refuses to overwrite. |
 | `validate` | | Checks the document named by `-f`, or `./lns.yaml`, offline — schema, cross-field, and secret checks — and lists every problem it found, not just the first. That list is the answer, so it goes to stdout ([§4.1](#41-streams)), and the exit code is non-zero when the document is broken. `--kind <KIND>` also requires the document to be that kind. |
-| `push` | `lns push` | Publishes the document as one OCI artifact at `<REF>`. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, so the files and the declaration that mounts them share one digest; a `README.md` beside the document is packed into a `text/markdown` layer (`sandbox-spec.md` §7.2); each fuzzy `spec.tools` version is resolved and published as an exact pin. For a `spec.mixins` entry that names a local path, the document it names publishes first as its own artifact, beside `<REF>` and under the mixin's own `name`, tagged with its own digest, and the entry is pinned to that digest — the command lists those mixins and asks before it uploads anything, which `--yes` accepts without prompting. `--dry-run` does everything except the upload, stays offline, prints the digests that would publish for every artifact, and says when a declared tool means a real digest may differ. |
+| `push` | `lns push` | Publishes the document as one OCI artifact at `<REF>`. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, so the files and the declaration that mounts them share one digest; each `code` method's `auth.component` file is packed the same way (`sandbox-spec.md` §6); a `README.md` beside the document is packed into a `text/markdown` layer (`sandbox-spec.md` §7.2); each fuzzy `spec.tools` version is resolved and published as an exact pin. Refuses a connector whose `code` method declares `exec`, because no machine could install what the push would produce (`sandbox-spec.md` §6). For a `spec.mixins` entry that names a local path, the document it names publishes first as its own artifact, beside `<REF>` and under the mixin's own `name`, tagged with its own digest, and the entry is pinned to that digest — the command lists those mixins and asks before it uploads anything, which `--yes` accepts without prompting. `--dry-run` does everything except the upload, stays offline, prints the digests that would publish for every artifact, and says when a declared tool means a real digest may differ. |
 | `pull` | `lns pull` | Shows you what the reference resolves to, then fetches it and its base image into the local store. A sandbox that declares tools asks before running their installers in a disposable provisioning guest; `--yes` accepts that without prompting. The fetch is bound to the digest you were shown, so a tag that moves in between is refused. |
 | `tag` | `lns tag` | Re-references a cached artifact under a new tag, in its own registry and repository. |
 | `ls` | | Lists cached artifacts: reference, kind, digest, size, and what holds each. `--kind` filters. |
@@ -363,7 +363,7 @@ lns connector forget <ID> --run <RUN>
 
 | Verb | What it does |
 |---|---|
-| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no file is written, and no real value is supplied. It does make the connector's destinations ask, in every run that has neither granted nor declined it, and lend its `placeholder` to a variable a sandbox itself declared and left to it. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, or when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key. |
+| `install` | Makes a pulled or local connector available on this machine. Installing grants nothing: no destination opens, no file is written, and no real value is supplied. It does make the connector's destinations ask, in every run that has neither granted nor declined it, and lend its `placeholder` to a variable a sandbox itself declared and left to it. Refused when a method declares a block a connector may not carry, when the document's `serves` overlaps an installed connector's, when it claims a variable an installed connector already claims — an `envVar` or a plain `env` key — or when a **pulled** connector declares `exec` on a `code` method, which only a local install may carry (`sandbox-spec.md` §3.2.6). |
 | `uninstall` | Removes it from this machine, with every connection it held. A run that already granted a method keeps that decision — uninstalling stops the offer, it does not retract a grant — and the command says so. |
 | `list` | Lists what is installed: what each connector serves, its methods — marking those that need no connect — and the connections this machine holds for it. |
 | `connect` | Connects this machine, without waiting for a run to ask. Picks a method — `--method` names one, otherwise you choose — runs whatever authentication that method declares, and stores the result as a **connection**. A method with no `auth` has nothing to connect and is refused here — grant it instead. `--as` names it; otherwise the mechanism suggests one and you confirm. A machine may hold several connections of one connector, including several of one method: two accounts, or two sign-ins at different scopes. Connecting is not granting: a run still decides which connection to use. |
@@ -381,6 +381,28 @@ and nothing about consent.
 place.** Where the authentication comes back with different authority, the grants
 naming that connection are invalidated and asked again
 ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
+
+**A method carrying code discloses bounds, because it has no behaviour to show.**
+A `code` method ([sandbox-spec §3.2.6](sandbox-spec.md#326-kind-code)) is a
+component lns runs and nobody can read, so the card names the hosts it may contact
+and **the digest the connector is installed at** — the `component` is a relative
+spelling like `./sign-in.wasm` and identifies nothing, while the digest covers the
+component's bytes and is what a grant binds to. It then carries one of two
+disclosures **verbatim** — a paraphrase would let what the user reads drift from
+what lns enforces. Where the method declares no `hosts`, the card prints
+`it may contact no hosts.` where the host list would go, because reaching nothing
+is a disclosure and not an absence.
+
+| The method | The card says |
+|---|---|
+| declares no `exec` | `lns cannot show what this code does. It can only bound where it runs, what it reaches, and how long it has.` |
+| declares `exec` | `lns cannot show what this code does, and it runs programs on your machine with your own access. lns cannot bound what those reach.` |
+
+The second is not the first with a warning added. It **withdraws** the guarantee
+the first makes: where `exec` is declared lns does not bound what the code reaches,
+so the first would be a false statement about what lns enforces. A card MUST NOT
+carry the first for a method declaring `exec`, and both `grant` and the card itself
+print the same one.
 
 **`grant` is the card in a terminal, not a shortcut past it.** It discloses
 exactly what the card discloses and then asks, so consent is never given to a
@@ -467,9 +489,26 @@ lns audit [SANDBOX] [--connector <ID>] [--kind <KIND>] [--format <table|jsonl>]
 
 `SANDBOX` is a `RUN`. `--kind` takes one of `launch`, `exit`, `restart`,
 `sandbox_run`, `run_removed`, `runs_pruned`, `egress`, `env`, `volume`, `bind`,
-`approval`, `connector`, or `tool`. Filters compose.
+`approval`, `connector`, `mechanism`, or `tool`. Filters compose.
 `connector` covers granting, declining, and forgetting one. `--connector <ID>`
-keeps only what was decided about that one.
+keeps only the lines about that connector, whichever kind they are.
+
+**`mechanism` covers what a connector's own code did**: a call it made, a program
+it started, and a renewal lns ran on its schedule
+([sandbox-spec §3.2.6](sandbox-spec.md#326-kind-code)). These are not decisions, so
+they sit beside `tool` rather than beside `connector`.
+
+**The timeline carries two kinds of line**, and it always has: each run's own
+chain, and the machine-scoped entries of the durable ledger — `tool` is one today,
+`mechanism` is another. So scope is not what decides whether something belongs.
+
+**A decision is recorded whatever else shows it**, because the record is what makes
+consent auditable afterwards: an `approval` and a `connector` grant are both
+readable in the run's decisions ([sandbox-spec §8.6](sandbox-spec.md#86-where-a-connector-grant-goes))
+and both are still lines here. **For anything that records no decision, the test is
+whether anything else would ever show it.** A renewal lns ran at four in the
+morning is recorded nowhere else and nobody watched it happen, so the entry is the
+only way it is ever seen.
 
 **Arming a credential is not an event of its own.** A grant records that the
 credential will be armed and the connector digest it bound to, and every
@@ -478,11 +517,15 @@ would add is a fingerprint of the value behind it — a live secret's hash in a
 ledger that holds none. The timeline records the decision, not each application
 of it.
 
-**Connecting is not a connector decision the timeline holds.** Every line the
-timeline carries answers for one run — but a connection is
-the machine's, held by no run and offered to every one of them
-([sandbox-spec §7.1](sandbox-spec.md#71-connectors)), so no run's
-timeline could account for it. `disconnect` is the same.
+**Connecting is not a connector decision the timeline holds.** A connection is the
+machine's, held by no run and offered to every one of them
+([sandbox-spec §7.1](sandbox-spec.md#71-connectors)), so it answers for no run —
+but by the rule just stated that alone would not exclude it. What excludes it is
+that a connection is standing state rather than a moment: `lns connector list`
+names every connection this machine holds, at any time, so nothing about it is
+visible only in a timeline. `disconnect` is the same, and its result is the same
+listing with one entry gone. That is the difference from a `mechanism` line, which
+records something that happened once and left no state behind.
 
 A sandbox's own life is in the timeline as much as what it reached for: `launch`
 is the workload starting, `exit` is it ending, `restart` is a stopped sandbox
@@ -732,7 +775,7 @@ Everything `lns` keeps for you lives in one directory, `~/.lns/`:
 | Path | Holds |
 |---|---|
 | `~/.lns/config.yaml` | Your `lns config` defaults. |
-| `~/.lns/connectors/` | The connectors installed on this machine, each stored verbatim at the digest it came from. |
+| `~/.lns/connectors/` | The connectors installed on this machine — each one's document and every file captured with it, a `code` method's `auth.component` and each `filesets` `path` directory, stored verbatim at the digest computed over all of them (`sandbox-spec.md` §7.1). |
 | `~/.lns/connector-grants.json` | Which connector method a run granted, the connection behind it where it authenticates, the authority it consented to, which connectors it declined, and the grants reserved for a name no run holds yet. |
 | `~/.lns/connector-values.json` | The connections this machine holds — each one's authority and the values its `auth` returned, mode `0600`. |
 | `~/.lns/registry-auth.json` | Registry logins, mode `0600`. |
