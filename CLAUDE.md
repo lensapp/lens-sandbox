@@ -83,7 +83,41 @@ The **local pre-push gate** is `make lint && make complexity && make coverage-af
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity` (per-crate because workspace feature unification disagrees with per-crate runs). For genuinely-branchy functions, use `#[allow(clippy::cognitive_complexity)]` with a one-line reason.
 - `make coverage` — compiles and runs all tests **instrumented** in `target/llvm-cov-target/`, then enforces every file at 100% line coverage unless listed in `scripts/coverage-floor.sh`'s IGNORES table. Test failures surface here. See [Per-file coverage gate](#per-file-coverage-gate) below.
 
-`make install-hooks` wires the gate into pre-push. Bypass: `git push --no-verify`.
+`make install-hooks` points `core.hooksPath` at `scripts/hooks/`, the repo's only hook directory. Run it once per clone, not per worktree — the setting lives in the shared `.git/config`, and the relative path resolves inside whichever worktree git runs the hook from. The hooks are: `commit-msg` (commitlint), `pre-commit` (`cargo fmt --check` and markdownlint), and `pre-push` (the gate). The two node-based steps look for their tool in the current worktree and then in the main one, so a fresh worktree needs no `npm install` of its own. They skip themselves with a printed notice unless both the tool and a reachable `node` are present, so a Rust-only checkout — or an nvm shell where `node` is off `PATH` — is never blocked from committing. Bypass: `git push --no-verify`.
+
+Until that command runs, no hook exists and nothing says so — git has no dead-hook signal — so every timed gate step prints a one-line reminder while `core.hooksPath` is unset.
+
+### Build-cache rules the gate depends on
+
+Three separate cargo target dirs, because cargo fingerprints the flags each step uses. Mixing them makes every step recompile what the previous one just built.
+
+- `target/` — `make dev`, `make lint`, `make test`, raw cargo, rust-analyzer. These agree on flags, so switching between them is free. Do not add `CARGO_INCREMENTAL` or extra `RUSTFLAGS` to `lint` or `test`.
+- `target/complexity/` — `make complexity` only. It passes different clippy args than `lint`, so it gets its own dir.
+- `target/llvm-cov-target/` — `make coverage` only. It is instrumented.
+
+`crates/lns-service/build.rs` embeds the guest binaries (lns-init, session-broker, supervisor, static-nft) in **release** builds and skips them in **debug** builds. That keeps one fingerprint across every debug caller, so no gate step needs to export `LNS_*_BIN=skip`. Set `LNS_<NAME>_BIN=<path>` to point a build at a pre-built guest binary; a shipping artifact must be a release build.
+
+`make coverage` clears only the profraw counters between runs. It falls back to a full artifact clean when the toolchain or any manifest changes, because those shift the artifact hashes and leave superseded binaries behind for `llvm-cov report` to find. The stamp that decides this is `.gate/coverage-toolchain-stamp`, which also hashes every workspace `Cargo.toml`. It stays per worktree, unlike the timing log: it describes that worktree's own instrumented artifacts, so sharing it would let one worktree call another's tree warm.
+
+### Environment parity
+
+**A test result must never depend on the host.** Not on uid, umask, TZ, locale, `HOME`, `TMPDIR`, or proxy variables. A test that inverts on a root box is a test nobody can read, and one that silently stops covering its branch is worse — it stays green while pinning nothing.
+
+`make coverage` enforces this. After the test run it invokes `make parity`, which re-runs the test binaries it has just built — no recompilation, about 15 seconds — under a deliberately different environment: an unprivileged uid where the first pass was root, plus a fresh `HOME` and `TMPDIR`, `TZ=LNS-14`, `LC_ALL=C`, `umask 077`, and a dead HTTP proxy with loopback exempted. The first pass is the ordinary test run, which aborts the recipe on failure; parity judges the second. A binary that fails only there fails the gate, named. A pass that runs nothing fails too — silence must never read as agreement.
+
+Three things to know before you run it: it needs `jq` and, to drop privileges, `setpriv`; when it runs as root it adds `o+x` (never `o+r`) to any ancestor of the workspace that lacks it, so the unprivileged pass can reach the binaries, and it hands every bit back on exit; and `LNS_ENV_PARITY=0` skips it. `scripts/env-parity.test.sh` covers the harness.
+
+CI covers the other direction: the `coverage-as-root` job runs the same gate in a root container, because the runner is never root. Between the two, every PR exercises both uids.
+
+Never inject a failure by removing a permission bit — root ignores it. Take the failure through a seam instead: a parameter for the writer, the remover, or the tmp path; a port method; or an error the kernel enforces for everyone, such as `EEXIST` from `O_EXCL` or `ENOTDIR` from a path component that is a regular file.
+
+### Gate telemetry
+
+Every gate step records itself — `make lint`, `test`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `<git-common-dir>/lns-gate/timings.tsv` — `.git/lns-gate/` in a plain checkout. That is the shared git directory, so every worktree of the repo appends to one history instead of restarting it per branch, and the log itself lands outside every working tree, where `cargo clean` and a branch switch cannot disturb it.
+
+`make gate-report` reads the last 30 days: runs, failures, and min/median/max seconds per step, a count per coverage verdict, and `coverage-data` split by cold and warm cache — a full artifact clean and a counter-only clean are different runs and averaging them hides both. `scripts/gate-timing.sh report --since <days>` or `--all` widens it.
+
+The rows nest: `coverage-affected` covers `coverage`, which covers `coverage-data` and `parity`. Each records its own row, so the durations must not be summed. Only one layer wraps — the pre-push hook calls the targets plainly, because they time themselves. Set `LNS_GATE_TIMING=0` to stop recording. `scripts/gate-timing.test.sh` covers the script.
 
 Outside the gate: `make build` (shipping artifacts), `make test` (uninstrumented — coverage already runs the same tests instrumented), `make e2e` (real binaries — runs in CI's test job, manual locally). The live-microVM interactive-shell smoke test (`crates/lns-cli/tests/smoke/interactive-shell.exp`) is run manually via `expect -f` when touching `lns run -it` plumbing — no Makefile wrapper.
 
@@ -145,7 +179,13 @@ make coverage          full workspace coverage gate (all crates, 100% floor)
 make coverage-affected coverage gate narrowed to crates touched since origin/main
 make coverage-lcov     re-emit the last coverage run as target/llvm-cov-target/llvm-cov/lcov.info (no rerun)
 make e2e             Layer 1 cucumber harness against real lns + lns-service binaries
+make parity          re-run the built test binaries under a perturbed environment
+make gate-report     per-step gate timings recorded by scripts/gate-timing.sh
 make clean           rm -rf bin/ + cargo clean (coverage artifacts live inside target/)
+
+# `make coverage` writes only the lcov the gate reads. Add the text summary
+# and the browsable HTML report when you need them:
+COVERAGE_HTML=1 make coverage
 
 # CI invokes the same gate targets with strictness toggled on:
 CARGO_LOCKED=--locked make lint

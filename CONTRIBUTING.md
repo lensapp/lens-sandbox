@@ -12,11 +12,19 @@ The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml); `r
 cargo install cargo-llvm-cov   # make coverage
 ```
 
-Wire the repository hooks into your checkout (one-time):
+Wire the repository hooks into your clone (one-time — worktrees inherit it):
 
 ```bash
 make install-hooks   # points core.hooksPath at scripts/hooks
 ```
+
+That installs `commit-msg` (commitlint), `pre-commit` (`cargo fmt --check` and
+markdownlint), and `pre-push` (the gate). `core.hooksPath` lives in the shared
+`.git/config`, so every worktree of the clone gets the hooks — including ones
+you create later. The node-based steps look for their tool in the current
+worktree and then in the main one, and print a notice and skip themselves if
+neither has it, so `npm install` is optional and never per worktree. Until you
+run `make install-hooks`, every gate step reminds you that no hook is active.
 
 Fast inner loop:
 
@@ -37,7 +45,7 @@ make lint && make complexity && make coverage
 - `make complexity` — per-crate `cargo clippy -- -D clippy::cognitive_complexity`.
 - `make coverage` — runs the test suite instrumented and enforces a 100% per-file line-coverage floor (exemptions live in `scripts/coverage-floor.sh`).
 
-The `make install-hooks` pre-push hook runs this gate (narrowed to affected crates) on every push. CI runs the same targets plus `make test` and `make e2e`.
+The `make install-hooks` pre-push hook runs this gate (narrowed to affected crates) on every push. CI runs the same targets plus `make test` and `make e2e`. Every gate step records its own duration in `.git/lns-gate/timings.tsv`, which all worktrees of the repo share; `make gate-report` summarises the last 30 days.
 
 ## Test Layers
 

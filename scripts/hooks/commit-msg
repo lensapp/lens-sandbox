@@ -1,0 +1,24 @@
+#!/bin/sh
+# Conventional-commit check. Skipped, not failed, when the tool is absent — a
+# Rust-only contributor must not be blocked from committing.
+set -eu
+
+# Resolved before the cd, so a hook invoked from a subdirectory still finds it.
+hooks_dir=$(cd "$(dirname "$0")" && pwd)
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+. "$hooks_dir/lib.sh"
+
+commitlint=$(node_bin commitlint)
+# The launcher is `#!/usr/bin/env node`, so the runtime has to be reachable too.
+if [ -z "$commitlint" ] || ! command -v node >/dev/null 2>&1; then
+    printf 'commit-msg: commitlint not installed, check skipped (npm install to enable).\n'
+    exit 0
+fi
+
+# commitlint resolves `extends` from the cwd, so it runs beside the
+# node_modules it found. The message is passed by absolute path.
+message=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+cd "$(dirname "$commitlint")/../.."
+"$commitlint" --edit "$message"

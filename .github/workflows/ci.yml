@@ -73,13 +73,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      # Skip the aarch64-musl cross-build of the embedded guest binaries
-      # (build.rs treats non-empty as skip). Saves ~10 min of apt install
-      # for the cross toolchain; release-please builds the real binary.
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
-
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -92,7 +85,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           # Per-job cache-shared-key so lint/test/coverage don't fight
-          # for the same target/ slot.
+          # for the same target/ slot. `make complexity` nests its own dir
+          # inside target/, which rust-cache stores with the rest.
           cache-workspaces: .
           cache-on-failure: true
           cache-shared-key: lns-ci-lint
@@ -104,9 +98,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -151,9 +142,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    env:
-      LNS_INIT_BIN: skip
-      LNS_SESSION_BROKER_BIN: skip
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -175,6 +163,9 @@ jobs:
           # path (COVERAGE_TARGET_DIR). Cache key matches its layout.
           cache-workspaces: |
             . -> target/llvm-cov-target
+          # The stamp that decides profraw-only vs full clean. rust-cache
+          # strips loose files from a cached target root, so it lives here.
+          cache-directories: .gate
           cache-on-failure: true
           cache-shared-key: lns-ci-coverage
 
@@ -235,6 +226,76 @@ jobs:
           name: coverage-lcov
           path: target/llvm-cov-target/llvm-cov/lcov.info
 
+  # The runner is non-root, so nothing here would notice a test that only
+  # passes as uid 0 — the class that cost seven tests. A container job runs
+  # as root, and `make coverage` ends in the parity pass that re-runs every
+  # test binary as an unprivileged user. Between the two, both uids are
+  # exercised on every PR.
+  coverage-as-root:
+    runs-on: ubuntu-latest
+    container: rust:1.97.1
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Same reason as the coverage job: affected-crates.sh needs the
+          # merge-base with the PR's base.
+          fetch-depth: 0
+
+      - name: Install system dependencies (tray-icon / GTK, jq, setpriv)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev jq util-linux
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: |
+            . -> target/llvm-cov-target
+          cache-directories: .gate
+          cache-on-failure: true
+          cache-shared-key: lns-ci-coverage-root
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@28ba36d36bfc4814f98a469ff9f76b2a41e9aa8a # cargo-llvm-cov tool tag @ 2026-06-03
+
+      - run: rustup component add llvm-tools-preview
+
+      # Narrowed exactly like the non-root coverage job, so a PR is never
+      # blocked by the floor on a crate its diff does not touch.
+      - name: Compute affected crates
+        if: github.event_name == 'pull_request'
+        id: affected
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          out=$(scripts/affected-crates.sh "${{ github.event.pull_request.base.sha }}")
+          if [ "$out" = "__NONE__" ]; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "crates="    >> "$GITHUB_OUTPUT"
+          elif [ "$out" = "__FULL__" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "crates="    >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            {
+              echo 'crates<<EOF'
+              echo "$out"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Coverage as root (skipped — no crates affected)
+        if: github.event_name == 'pull_request' && steps.affected.outputs.skip == 'true'
+        run: echo "No crates affected by this PR's diff — coverage skipped."
+
+      - name: Run coverage as root
+        if: github.event_name != 'pull_request' || steps.affected.outputs.skip != 'true'
+        run: make coverage
+        env:
+          COVERAGE_CRATES: ${{ steps.affected.outputs.crates }}
+
   # Fails the build on any RUSTSEC advisory against the locked graph so
   # future transitive vulns surface in CI rather than at release time.
   audit:
@@ -258,7 +319,7 @@ jobs:
       - run: make audit
 
   # `make build` with real cross-builds + codesign — what the gate's
-  # LNS_*_BIN=skip flow doesn't validate. Env pins mirror release-please.yml.
+  # debug-profile embed skip doesn't validate. Env pins mirror release-please.yml.
   check-release-build:
     needs: changes
     if: needs.changes.outputs['check-release-build'] == 'true'
@@ -274,6 +335,8 @@ jobs:
     env:
       LNS_INIT_BIN: ""
       LNS_SESSION_BROKER_BIN: ""
+      LNS_NFT_BIN: ""
+      LNS_SUPERVISOR_BIN: ""
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
       CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
       AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
@@ -337,7 +400,7 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, lint, test, coverage, audit, check-release-build, verify-static-nft]
+    needs: [changes, lint, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft]
     if: always()
     steps:
       - name: Verify all gates passed
@@ -350,10 +413,11 @@ jobs:
           if ! ok "${{ needs.lint.result }}" \
             || ! ok "${{ needs.test.result }}" \
             || ! ok "${{ needs.coverage.result }}" \
+            || ! ok "${{ needs['coverage-as-root'].result }}" \
             || ! ok "${{ needs.audit.result }}" \
             || ! ok "${{ needs.check-release-build.result }}" \
             || ! ok "${{ needs.verify-static-nft.result }}"; then
-            echo "One or more gates failed: lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }}"
+            echo "One or more gates failed: lint=${{ needs.lint.result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.

@@ -75,7 +75,6 @@ while IFS= read -r path; do
         .gitattributes)        continue ;;
         package.json)          continue ;;
         package-lock.json)     continue ;;
-        .husky/*)              continue ;;
         .vscode/*)             continue ;;
         .editorconfig)         continue ;;
         *)                     all_skippable=""; break ;;

@@ -564,6 +564,13 @@ mod tests {
         ContentStore::new(tmp.path().join("content"))
     }
 
+    // A regular file where the store needs a directory: ENOTDIR binds root too.
+    fn block_the_sha_dir(tmp: &tempfile::TempDir) {
+        let content = tmp.path().join("content");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join("sha256"), b"").unwrap();
+    }
+
     #[test]
     fn build_from_single_layer_with_one_file() {
         let d = tempdir();
@@ -980,17 +987,13 @@ mod tests {
 
     #[test]
     fn a_content_store_install_failure_aborts_the_layer_with_context() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempdir();
         let s = store(&d);
-        let sha_dir = d.path().join("content").join("sha256");
-        std::fs::create_dir_all(&sha_dir).unwrap();
-        std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        block_the_sha_dir(&d);
 
         let tar = build_tar(|b| write_file_entry(b, "etc/hostname", 0o644, b"sandbox\n"));
         let err = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap_err();
 
-        std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             format!("{err:#}").contains("installing regular file"),
             "expected install context, got: {err:#}"
@@ -1024,18 +1027,14 @@ mod tests {
 
     #[test]
     fn a_large_file_install_failure_aborts_the_layer_with_path_context() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempdir();
         let s = store(&d);
-        let sha_dir = d.path().join("content").join("sha256");
-        std::fs::create_dir_all(&sha_dir).unwrap();
-        std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        block_the_sha_dir(&d);
 
         let big = vec![0x7eu8; (MAX_BUFFERED_FILE_BYTES + 1) as usize];
         let tar = build_tar(|b| write_file_entry(b, "opt/model.bin", 0o644, &big));
         let err = build_filesystem_from_layer_bytes(&s, &[tar], &|_, _| {}).unwrap_err();
 
-        std::fs::set_permissions(&sha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             format!("{err:#}").contains("installing opt/model.bin"),
             "expected the streamed-file path in the context, got: {err:#}"

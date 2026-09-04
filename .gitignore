@@ -5,6 +5,10 @@ dist
 coverage
 *.log
 
+# Gate bookkeeping: the per-worktree coverage stamp and detail handoff.
+# The timing log lives in the shared git dir, which is never tracked.
+.gate/
+
 # Per-package build artifacts
 bin/
 

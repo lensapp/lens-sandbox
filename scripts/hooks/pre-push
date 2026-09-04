@@ -1,16 +1,10 @@
 #!/bin/sh
 # Pre-push hook: run the gate steps in order, refuse the push on the
-# first failure. The three steps are:
-#
-#   1. `make verify` — build + lint + test + complexity (the
-#      pre-merge gate documented in CLAUDE.md).
-#   2. `make coverage-affected` — narrows AST-aware strip + the
-#      inverted per-file floor to crates whose code (or rev-deps)
-#      changed since `origin/main`. Falls back to `make coverage`
-#      (full workspace) when the affected-crates script signals
-#      `__FULL__` (e.g. Cargo.lock / Makefile / coverage tooling
-#      changes), and skips coverage entirely on `__NONE__` (docs,
-#      `.github/**`, etc).
+# first failure. The steps are `make lint`, `make complexity`, and
+# `make coverage-affected` — which narrows the AST-aware strip and the
+# per-file floor to crates whose code (or rev-deps) changed since
+# `origin/main`, falls back to the full workspace on `__FULL__`, and
+# skips coverage on `__NONE__` (docs, `.github/**`, etc).
 #
 # Installation:
 #   git config core.hooksPath scripts/hooks    # one-time, per checkout
@@ -83,3 +77,4 @@ if ! make "$coverage_target"; then
 fi
 
 printf '\033[1;32m✓\033[0m  pre-push: gate green. Pushing.\n'
+printf '   Step timings: make gate-report\n'

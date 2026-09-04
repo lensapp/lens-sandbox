@@ -1,0 +1,21 @@
+#!/bin/sh
+# Commit time stays cheap: formatting only. The gate — lint, complexity,
+# coverage — runs at push time, where it belongs.
+set -eu
+
+# Resolved before the cd, so a hook invoked from a subdirectory still finds it.
+hooks_dir=$(cd "$(dirname "$0")" && pwd)
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+cargo fmt --all -- --check
+
+. "$hooks_dir/lib.sh"
+
+markdownlint=$(node_bin markdownlint-cli2)
+# The launcher is `#!/usr/bin/env node`, so the runtime has to be reachable too.
+if [ -n "$markdownlint" ] && command -v node >/dev/null 2>&1; then
+    "$markdownlint" '**/*.md' '#node_modules' '#crates/*/CHANGELOG.md'
+else
+    printf 'pre-commit: markdownlint not installed, check skipped (npm install to enable).\n'
+fi

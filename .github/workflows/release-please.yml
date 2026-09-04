@@ -155,6 +155,8 @@ jobs:
       # dev-override branch that would ship a 0-byte placeholder.
       LNS_INIT_BIN: ""
       LNS_SESSION_BROKER_BIN: ""
+      LNS_NFT_BIN: ""
+      LNS_SUPERVISOR_BIN: ""
       # The GitHub OAuth app id (a public device-flow identifier, not a
       # true secret) is baked into the official binary; fork builds ship
       # without it and fall back to a pasted PAT.
