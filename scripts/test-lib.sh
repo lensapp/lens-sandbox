@@ -15,6 +15,15 @@ if [ -n "${HOME:-}" ]; then
     export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 fi
 
+# A fixture owns the repositories it makes and inherits no git environment: a
+# linked worktree hands its hooks an absolute GIT_DIR, so under pre-push an
+# inherited one puts every fixture commit on the branch being pushed.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+    GIT_QUARANTINE_PATH GIT_PUSH_CERT_NONCE GIT_REFLOG_ACTION \
+    GIT_CONFIG GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+    GIT_TEMPLATE_DIR GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+
 export HOME="$GIT_HOME"
 export XDG_CONFIG_HOME="$GIT_HOME/.config"
 export GIT_CONFIG_GLOBAL="$GIT_HOME/.gitconfig"
