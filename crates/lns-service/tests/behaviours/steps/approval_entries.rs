@@ -136,6 +136,18 @@ fn given_stopped_sandbox_with_entry(world: &mut BehaviourWorld, host: String) {
     rig.entry_id = Some(entry.id);
 }
 
+#[given(regex = r#"^a connector "([^"]+)" serves "([^"]+)"$"#)]
+fn given_connector_serves(world: &mut BehaviourWorld, name: String, host: String) {
+    world.approval().offer_connector(&name, &host);
+}
+
+#[given(regex = r#"^a workload reaches "([^"]+)"$"#)]
+#[when(regex = r#"^a workload reaches "([^"]+)"$"#)]
+fn workload_reaches(world: &mut BehaviourWorld, host: String) {
+    world.approval().reach(&host);
+}
+
+#[when(regex = r#"^the developer grants the connector "([^"]+)" to the run$"#)]
 #[given(regex = r#"^the developer grants the connector "([^"]+)" to the run$"#)]
 fn given_connector_granted(world: &mut BehaviourWorld, name: String) {
     let rig = world.approval();
@@ -430,6 +442,11 @@ fn then_sandbox_stays_stopped(world: &mut BehaviourWorld) {
         "answering an entry must not boot the sandbox"
     );
     assert!(rig.outcome.is_some(), "the answer was recorded");
+}
+
+#[then(regex = r#"^the run's approvals list the connector "([^"]+)" as undecided$"#)]
+fn then_connector_undecided(world: &mut BehaviourWorld, name: String) {
+    assert_state(world, &name, EntryState::Undecided);
 }
 
 #[then(regex = r#"^the run's approvals list the connector "([^"]+)" as granted$"#)]

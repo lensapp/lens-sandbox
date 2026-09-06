@@ -64,6 +64,8 @@ pub struct DashboardState {
     pub approvals: Vec<Entry>,
     pub approval_notice: Option<String>,
     pub approval_answers: std::collections::BTreeSet<String>,
+    /// The connector row the developer opened, and the grant they are composing on it.
+    pub granting: Option<OpenGrant>,
     pub answer_open: bool,
     pub sandbox_open: bool,
     pub rows: Vec<TimelineRow>,
@@ -554,7 +556,12 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                         let entry = &state.approvals[i];
                         let asked_by =
                             approvals::asked_by(entry, state.selected_sandbox.as_deref());
-                        if let Some(act) = approval_row(ui, entry, asked_by) {
+                        let open = state
+                            .granting
+                            .as_mut()
+                            .filter(|open| open.id == entry.id)
+                            .map(|open| (&mut open.draft, open.offer.as_ref()));
+                        if let Some(act) = approval_row(ui, entry, asked_by, open) {
                             chosen = Some((entry.id.clone(), act));
                         }
                     }
@@ -563,18 +570,42 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
     match chosen {
         Some((id, RowAction::Answer(answer))) => answer_entry(state, &id, answer),
         Some((id, RowAction::Remove)) => remove_entry(state, &id),
+        Some((id, RowAction::Unfold)) => unfold(state, &id),
+        Some((id, RowAction::Grant(method, connection))) => {
+            grant_connector(state, &id, &method, connection);
+        }
         None => {}
     }
 }
 
+/// The row the developer opened, the grant they are composing, and the offer it discloses — read once when the row opens, because it is the run's own held offer and the frame must not re-read every file to draw it.
+#[derive(Debug)]
+pub struct OpenGrant {
+    id: String,
+    draft: crate::tray::OfferDraft,
+    offer: Option<lns_ipc::ConnectorView>,
+}
+
 /// What a click on a row asked for. A notice is the one row that can be cleared, so it is the one that offers this alongside no answers at all.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum RowAction {
     Answer(lns_ipc::ApprovalAnswer),
     Remove,
+    /// Show, or stop showing, what granting this connector would apply.
+    Unfold,
+    /// Grant it, with the method and connection the row composed.
+    Grant(String, crate::approval_flow::session::ConnectionChoice),
 }
 
-fn approval_row(ui: &mut egui::Ui, entry: &Entry, asked_by: Option<&str>) -> Option<RowAction> {
+fn approval_row(
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    asked_by: Option<&str>,
+    open: Option<(
+        &mut crate::tray::OfferDraft,
+        Option<&lns_ipc::ConnectorView>,
+    )>,
+) -> Option<RowAction> {
     let mut chosen = None;
     Frame::new()
         .fill(SELECT_FILL)
@@ -585,6 +616,11 @@ fn approval_row(ui: &mut egui::Ui, entry: &Entry, asked_by: Option<&str>) -> Opt
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(approvals::question(entry))
+                                .size(FS_LABEL)
+                                .color(CATEGORY),
+                        );
                         ui.label(
                             RichText::new(entry.subject())
                                 .monospace()
@@ -620,13 +656,107 @@ fn approval_row(ui: &mut egui::Ui, entry: &Entry, asked_by: Option<&str>) -> Opt
                             chosen = Some(RowAction::Answer(answer));
                         }
                     }
+                    if approvals::is_grantable(entry)
+                        && ui
+                            .button(if open.is_some() { "Cancel" } else { "Connect" })
+                            .clicked()
+                    {
+                        chosen = Some(RowAction::Unfold);
+                    }
                     ui.add_space(4.0);
                     decision_badge(ui, entry);
                 });
             });
+            if let Some((draft, offer)) = open
+                && let Some(grant) = grant_form(ui, offer, draft)
+            {
+                chosen = Some(grant);
+            }
         });
     ui.add_space(6.0);
     chosen
+}
+
+/// The card's own grant, unfolded under the row: the method, the connection it authenticates with, and the whole payload before the button (cli-spec §7.1).
+fn grant_form(
+    ui: &mut egui::Ui,
+    offer: Option<&lns_ipc::ConnectorView>,
+    draft: &mut crate::tray::OfferDraft,
+) -> Option<RowAction> {
+    let Some(offer) = offer else {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(crate::approval_flow::answering::NOT_OFFERED)
+                .size(FS_LABEL)
+                .color(STATUS_WARNING),
+        );
+        return None;
+    };
+    let Some(method) = crate::tray::chosen_method(offer, draft) else {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("this connector's methods need a newer lns")
+                .size(FS_LABEL)
+                .color(STATUS_WARNING),
+        );
+        return None;
+    };
+    let method = method.clone();
+    ui.add_space(8.0);
+    crate::tray::render_connection_choice(ui, offer, &method, draft);
+    crate::tray::render_disclosure(ui, &method);
+    ui.add_space(10.0);
+    let ready = crate::tray::ready_to_grant(&method, draft);
+    ui.add_enabled(ready, egui::Button::new("Grant to this sandbox"))
+        .clicked()
+        .then(|| RowAction::Grant(method.name.clone(), crate::tray::connection_choice(draft)))
+}
+
+fn unfold(state: &mut DashboardState, id: &str) {
+    state.approval_notice = None;
+    if state.granting.as_ref().is_some_and(|open| open.id == id) {
+        state.granting = None;
+        return;
+    }
+    state.granting = Some(OpenGrant {
+        id: id.to_string(),
+        draft: crate::tray::OfferDraft::default(),
+        offer: offer_behind(id),
+    });
+}
+
+/// The offer the run still holds for this row, which is what the form discloses.
+fn offer_behind(id: &str) -> Option<lns_ipc::ConnectorView> {
+    let root = crate::cache::root().ok()?;
+    crate::approval_flow::answering::offered(
+        &root,
+        &crate::run_registry::known_ids(),
+        crate::run_registry::approvals,
+        id,
+    )
+}
+
+fn grant_connector(
+    state: &mut DashboardState,
+    id: &str,
+    method: &str,
+    connection: crate::approval_flow::session::ConnectionChoice,
+) {
+    let root = match crate::cache::root() {
+        Ok(root) => root,
+        Err(e) => return set_error(state, e),
+    };
+    let granted = crate::approval_flow::answering::grant(
+        &root,
+        &crate::run_registry::known_ids(),
+        crate::run_registry::approvals,
+        id,
+        method,
+        connection,
+    );
+    state.approval_notice = approvals::granting_reported(&granted);
+    state.granting = None;
+    load_approvals(state);
 }
 
 /// The answer, painted as loudly as what it permits: this is the thing the developer opened the view to see.

@@ -464,16 +464,24 @@ lns approval answer <id> <always-allow|always-deny|ask-again>
 lns approval rm <id>                        # clear one notice
 ```
 
+The list has a row for every question the run was asked: a **destination**, a
+**connector**, and a **notice** for a line that asked nothing.
+
 A card that asks about a destination becomes an **entry** the run keeps, in
 `~/.lns/runs/<RUN>/approvals.json`. One you close, one that times out, and one a
 workload withdrew by exiting are all still listed — the request failed closed at
-the boundary, and the question did not go with it. A connector question you
-answered is listed too, granted or declined. The list also shows lines that ask
+the boundary, and the question did not go with it. A connector card is listed
+from the moment it is raised: undecided until you answer, granted or declined
+after. The list also shows lines that ask
 nothing, such as a rule the run could not write; each is listed as a notice, with
 no verdict to give.
 
 The service shows the same entries: its tray menu opens an **Approvals** view,
-which answers an entry the way this command does.
+which answers an entry the way this command does. An undecided connector row
+there offers the grant its card offered — a method, a connection, and the same
+disclosure — so a connector card you closed is answered where you found it. This
+command lists a connector entry without deciding it; `lns connector grant` is its
+verb at a terminal.
 
 `answer` decides a destination entry, and only that. A connector entry is listed
 as granted or declined and is answered through [`lns connector`](#lns-connector);

@@ -89,7 +89,10 @@ impl Entry {
     pub fn is_settled(&self) -> bool {
         matches!(
             self.state,
-            EntryState::AlwaysAllowed | EntryState::AlwaysDenied
+            EntryState::AlwaysAllowed
+                | EntryState::AlwaysDenied
+                | EntryState::Granted
+                | EntryState::Declined
         )
     }
 

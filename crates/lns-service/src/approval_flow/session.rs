@@ -297,13 +297,30 @@ impl ApprovalSession {
     }
 
     fn note_connector(&self, name: &str, state: EntryState) {
-        self.entries().record(Entry::new(
+        self.entries().record(self.connector_entry(name, state));
+    }
+
+    /// Records that a connector was offered, unless this run already answered it — a second destination the same connector serves must not report the grant as undecided.
+    fn note_connector_if_open(&self, name: &str) {
+        let offered = self.connector_entry(name, EntryState::Undecided);
+        let answered = self
+            .entries()
+            .list()
+            .into_iter()
+            .any(|held| held.id == offered.id && held.is_settled());
+        if !answered {
+            self.entries().record(offered);
+        }
+    }
+
+    fn connector_entry(&self, name: &str, state: EntryState) -> Entry {
+        Entry::new(
             self.run.clone(),
             EntryKind::Connector {
                 name: name.to_string(),
             },
             state,
-        ));
+        )
     }
 
     fn pending_entry(&self, id: &str) -> Option<PendingEntry> {
@@ -348,9 +365,31 @@ impl ApprovalSession {
         method: &str,
         connection: ConnectionChoice,
     ) -> DecisionOutcome {
-        let Some(offer) = self.offer_of(id) else {
-            return DecisionOutcome::UnknownId;
-        };
+        match self.offer_of(id) {
+            Some(offer) => self.grant_the(&offer, method, connection),
+            None => DecisionOutcome::UnknownId,
+        }
+    }
+
+    /// The same grant, for the connector an entry names rather than a request the guest holds: the Approvals view answers a card it closed here (cli-spec §7.1).
+    pub fn grant_offered(
+        &self,
+        name: &str,
+        method: &str,
+        connection: ConnectionChoice,
+    ) -> DecisionOutcome {
+        match self.offer_named(name) {
+            Some(offer) => self.grant_the(&offer, method, connection),
+            None => DecisionOutcome::UnknownId,
+        }
+    }
+
+    fn grant_the(
+        &self,
+        offer: &ConnectorView,
+        method: &str,
+        connection: ConnectionChoice,
+    ) -> DecisionOutcome {
         let Some(port) = self.connectors.get() else {
             self.notifier
                 .inform("no connector store is wired to this run, so nothing was granted");
@@ -423,6 +462,18 @@ impl ApprovalSession {
                 Ok(Some(label))
             }
         }
+    }
+
+    /// The offer this run still holds under that name, which is what a row can still grant. It carries what the grant would override, as the card's own copy does: §3.2.4 makes that part of the consent, and the stored offer cannot know it.
+    pub fn offer_named(&self, name: &str) -> Option<ConnectorView> {
+        let held = self
+            .offers
+            .lock()
+            .expect("offers mutex poisoned")
+            .iter()
+            .find(|offer| offer.name == name)
+            .cloned()?;
+        Some(self.with_overrides(held))
     }
 
     fn offer_of(&self, id: &str) -> Option<ConnectorView> {
@@ -550,14 +601,17 @@ impl ApprovalSession {
             self.note(&raised, EntryState::Undecided);
         }
         let offer = self.offer_for(&req);
-        if let Some(offer) = &offer
-            && let Some(entry) = self
+        if let Some(offer) = &offer {
+            // The question outlives its card here too: a connector card closed in haste must leave the offer listed, not nothing.
+            self.note_connector_if_open(&offer.name);
+            if let Some(entry) = self
                 .pending
                 .lock()
                 .expect("pending mutex poisoned")
                 .get_mut(&req.id)
-        {
-            entry.offer = Some(offer.clone());
+            {
+                entry.offer = Some(offer.clone());
+            }
         }
         self.notifier.present(&PendingPrompt {
             id: req.id,
@@ -1782,6 +1836,29 @@ pub(crate) mod tests {
             card_offer(&n).methods[0].overrides.as_deref(),
             Some(["api.some-provider.example".to_string()].as_slice()),
             "an allow that answers for one port leaves the rest to the rules behind it"
+        );
+    }
+
+    #[test]
+    fn the_row_reads_the_override_the_card_reads() {
+        // §3.2.4 makes the override part of the consent, and the Approvals row asks for that consent too; the stored offer cannot know it, so reading one straight out would take consent for what it did not disclose.
+        let (s, n, _store, _rx) = raising_a_card(
+            Some(denying("api.some-provider.example")),
+            Policy::default(),
+        );
+
+        let row = s
+            .offer_named("some-provider")
+            .expect("the run still holds the offer");
+
+        assert_eq!(
+            row.methods[0].overrides,
+            card_offer(&n).methods[0].overrides,
+            "the row and the card disclose the same override"
+        );
+        assert_eq!(
+            row.methods[0].overrides.as_deref(),
+            Some(["api.some-provider.example".to_string()].as_slice())
         );
     }
 

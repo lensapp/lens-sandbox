@@ -504,6 +504,17 @@ pub enum ApprovalEntryKind {
     Notice,
 }
 
+impl ApprovalEntryKind {
+    /// What the entry asks about, as `lns approval ls` prints it. A notice asks nothing, so it names no question.
+    pub fn question(&self) -> &'static str {
+        match self {
+            Self::Destination => "destination",
+            Self::Connector => "connector",
+            Self::Notice => "",
+        }
+    }
+}
+
 /// The verdicts an entry takes once the request that raised it has gone; a once verdict answers a request the guest still holds, which only the window can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -157,9 +157,8 @@ impl ApprovalRig {
         self.frames = rx;
     }
 
-    /// Grants a connector the way a card does: the run holds an offer, and the developer takes it.
-    pub fn grant_connector(&self, name: &str) {
-        let host = "api.linear.app";
+    /// A run that holds an offer for `host`, which is what raises the connector card.
+    pub fn offer_connector(&self, name: &str, host: &str) {
         self.session.set_connector_port(Arc::new(GrantingPort));
         self.session.hold_for_offers(vec![ConnectorView {
             name: name.to_string(),
@@ -168,6 +167,10 @@ impl ApprovalRig {
             methods: Vec::new(),
             connections: Vec::new(),
         }]);
+    }
+
+    /// The card the offer raises when the workload reaches the served destination.
+    pub fn reach(&self, host: &str) {
         self.session.submit_pending(
             RequestPending {
                 id: format!("req-{host}"),
@@ -178,8 +181,24 @@ impl ApprovalRig {
             },
             std::time::Instant::now(),
         );
-        self.session
-            .grant_offer(&format!("req-{host}"), "token", ConnectionChoice::None);
+    }
+
+    /// Grants a connector the way a card does: the run holds an offer for `host`, and the developer takes it.
+    pub fn grant_connector_for(&self, name: &str, host: &str) {
+        if self.entry_for(name).is_none() {
+            self.offer_connector(name, host);
+            self.reach(host);
+        }
+        assert_eq!(
+            self.session
+                .grant_offer(&format!("req-{host}"), "token", ConnectionChoice::None),
+            lns_service::approval_flow::session::DecisionOutcome::Resolved,
+            "the card the rig raised must be the card it grants"
+        );
+    }
+
+    pub fn grant_connector(&self, name: &str) {
+        self.grant_connector_for(name, "api.linear.app");
     }
 
     pub fn for_run(run: Option<String>) -> Self {

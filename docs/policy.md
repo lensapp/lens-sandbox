@@ -398,6 +398,9 @@ and one a workload withdrew by exiting are all still listed as undecided or
 withdrawn — the request failed closed, and the question did not go with it. An
 answer you gave is listed with the verdict it got.
 
+A connector card is listed from the moment it is raised too: undecided until you
+answer it, granted or declined after.
+
 Two surfaces read that list. The service's tray menu has an **Approvals** item
 that lists the entries and answers them. At your terminal, `lns approval ls`
 reads the list and `lns approval answer` answers an entry, or answers it again:

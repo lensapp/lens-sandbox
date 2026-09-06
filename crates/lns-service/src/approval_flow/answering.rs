@@ -5,7 +5,9 @@ use lns_ipc::{ApprovalAnswer, ApprovalEntryKind, ApprovalInfo, Response};
 
 use crate::approval_flow::entries::{Entry, EntryKind, RemoveOutcome, Unremovable};
 use crate::approval_flow::offline;
-use crate::approval_flow::session::{Answer, AnswerOutcome, ApprovalSession};
+use crate::approval_flow::session::{
+    Answer, AnswerOutcome, ApprovalSession, ConnectionChoice, DecisionOutcome,
+};
 
 /// Why this entry stays, in the words that fit the kind the user named.
 pub fn not_removable(kind: Unremovable) -> String {
@@ -23,13 +25,20 @@ pub fn not_removable(kind: Unremovable) -> String {
 pub const DECIDED_ELSEWHERE: &str =
     "this entry is decided elsewhere: a connector through `lns connector`, and a notice not at all";
 
+/// What this entry asks about, in the one mapping both surfaces read.
+pub fn kind_of(entry: &Entry) -> ApprovalEntryKind {
+    match entry.kind {
+        EntryKind::Destination { .. } => ApprovalEntryKind::Destination,
+        EntryKind::Connector { .. } => ApprovalEntryKind::Connector,
+        EntryKind::Notice { .. } => ApprovalEntryKind::Notice,
+    }
+}
+
 pub fn view(entry: &Entry) -> ApprovalInfo {
-    let (kind, action) = match &entry.kind {
-        EntryKind::Destination { action, .. } => {
-            (ApprovalEntryKind::Destination, Some(action.clone()))
-        }
-        EntryKind::Connector { .. } => (ApprovalEntryKind::Connector, None),
-        EntryKind::Notice { .. } => (ApprovalEntryKind::Notice, None),
+    let kind = kind_of(entry);
+    let action = match &entry.kind {
+        EntryKind::Destination { action, .. } => Some(action.clone()),
+        EntryKind::Connector { .. } | EntryKind::Notice { .. } => None,
     };
     ApprovalInfo {
         id: entry.id.clone(),
@@ -128,6 +137,55 @@ pub fn removal(root: &Path, runs: &[String], live: LiveSession, id: &str) -> Res
         RemoveOutcome::NotCleared(reason) => kept(reason),
     }
 }
+
+/// What the Approvals view can still grant on a connector row: the offer the run holds. A run that is not up, or that no longer holds the offer, has nothing for the row to answer.
+pub fn offered(
+    root: &Path,
+    runs: &[String],
+    live: LiveSession,
+    id: &str,
+) -> Option<lns_ipc::ConnectorView> {
+    let (run, asked) = holder_of(root, runs, id)?;
+    let EntryKind::Connector { name } = &asked.kind else {
+        return None;
+    };
+    live(&run)?.offer_named(name)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Granting {
+    Granted,
+    UnknownId,
+    /// The run is not up, or no longer holds the offer, so this surface cannot grant it.
+    NotOffered,
+}
+
+/// Grants the connector an entry names, with the card's own effect: the run's own session records it, publishes it, and releases every request the offer was holding.
+pub fn grant(
+    root: &Path,
+    runs: &[String],
+    live: LiveSession,
+    id: &str,
+    method: &str,
+    connection: ConnectionChoice,
+) -> Granting {
+    let Some((run, asked)) = holder_of(root, runs, id) else {
+        return Granting::UnknownId;
+    };
+    let EntryKind::Connector { name } = &asked.kind else {
+        return Granting::NotOffered;
+    };
+    let Some(session) = live(&run) else {
+        return Granting::NotOffered;
+    };
+    match session.grant_offered(name, method, connection) {
+        DecisionOutcome::Resolved => Granting::Granted,
+        DecisionOutcome::UnknownId => Granting::NotOffered,
+    }
+}
+
+pub const NOT_OFFERED: &str =
+    "this sandbox is not holding that offer; grant it with `lns connector grant`";
 
 fn apply(
     root: &Path,
@@ -454,6 +512,286 @@ mod tests {
                 ApprovalAnswer::AlwaysAllow
             ),
             AnswerOutcome::UnknownId
+        );
+    }
+
+    /// Grants whatever it is asked to, so the tests here pin the routing rather than the connector store.
+    #[derive(Default)]
+    struct WillingPort {
+        granted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::approval_flow::session::ConnectorPort for WillingPort {
+        fn connect(
+            &self,
+            _: &str,
+            _: &str,
+            label: &str,
+            _: lns_ipc::SecretValues,
+        ) -> Result<Vec<String>, String> {
+            self.granted
+                .lock()
+                .expect("granted")
+                .push(format!("connect {label}"));
+            Ok(Vec::new())
+        }
+
+        fn grant(
+            &self,
+            name: &str,
+            _: &str,
+            method: &str,
+            connection: Option<&str>,
+        ) -> Result<crate::approval_flow::protocol::GrantedPayload, String> {
+            self.granted
+                .lock()
+                .expect("granted")
+                .push(format!("grant {name} {method} {connection:?}"));
+            Ok(crate::approval_flow::protocol::GrantedPayload::default())
+        }
+
+        fn decline(&self, name: &str) -> Result<(), String> {
+            self.granted
+                .lock()
+                .expect("granted")
+                .push(format!("decline {name}"));
+            Ok(())
+        }
+    }
+
+    fn offering(home: &Path, name: &str) -> (Arc<ApprovalSession>, Arc<WillingPort>) {
+        let (sink, _nowhere) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(
+            ApprovalSession::new(
+                Policy::default(),
+                Policy::default(),
+                Arc::new(NoopNotifier),
+                Arc::new(FilePolicyStore::new(crate::cache::decisions_path(
+                    home, RUN,
+                ))),
+                sink,
+                Duration::from_secs(30),
+            )
+            .for_run(RUN.to_string()),
+        );
+        session.set_entry_store(Arc::new(FileEntryStore::new(crate::cache::approvals_path(
+            home, RUN,
+        ))));
+        let port = Arc::new(WillingPort::default());
+        session.set_connector_port(port.clone());
+        session.hold_for_offers(vec![lns_ipc::ConnectorView {
+            name: name.to_string(),
+            digest: "sha256:test".into(),
+            serves: vec!["api.linear.app".into()],
+            methods: Vec::new(),
+            connections: Vec::new(),
+        }]);
+        (session, port)
+    }
+
+    #[test]
+    fn a_connector_row_reads_the_offer_the_run_still_holds() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Undecided);
+        let (session, _port) = offering(home.path(), "linear");
+        LIVE.with(|live| *live.borrow_mut() = Some(session));
+
+        let offer = offered(home.path(), &runs(), live_from_thread, &entry.id);
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert_eq!(
+            offer.map(|offer| offer.digest),
+            Some("sha256:test".to_string()),
+            "the row renders the disclosure from the offer, so it must be the offer the run holds"
+        );
+    }
+
+    #[test]
+    fn granting_on_the_row_reaches_the_run_the_way_the_card_does() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Undecided);
+        let (session, port) = offering(home.path(), "linear");
+        LIVE.with(|live| *live.borrow_mut() = Some(session));
+
+        let granted = grant(
+            home.path(),
+            &runs(),
+            live_from_thread,
+            &entry.id,
+            "token",
+            ConnectionChoice::Held("work".into()),
+        );
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert_eq!(granted, Granting::Granted);
+        assert_eq!(
+            port.granted.lock().expect("granted").as_slice(),
+            [r#"grant linear token Some("work")"#],
+            "the row grants through the run's own session, so the guest is told at once"
+        );
+        assert_eq!(
+            entries(home.path(), &runs())[0].state,
+            EntryState::Granted,
+            "and the row reads granted afterwards"
+        );
+    }
+
+    #[test]
+    fn granting_with_a_new_connection_authenticates_it_first() {
+        // The row offers the card's "+ new", so the value the developer typed has to reach the store before the grant that names it.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Undecided);
+        let (session, port) = offering(home.path(), "linear");
+        LIVE.with(|live| *live.borrow_mut() = Some(session));
+
+        let granted = grant(
+            home.path(),
+            &runs(),
+            live_from_thread,
+            &entry.id,
+            "token",
+            ConnectionChoice::New {
+                label: "work".into(),
+                values: lns_ipc::SecretValues(std::collections::BTreeMap::from([(
+                    "token".to_string(),
+                    "sk-live-real".to_string(),
+                )])),
+            },
+        );
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert_eq!(granted, Granting::Granted);
+        assert_eq!(
+            port.granted.lock().expect("granted").as_slice(),
+            ["connect work", r#"grant linear token Some("work")"#],
+            "the connection is made first, then granted by the label it was made under"
+        );
+    }
+
+    #[test]
+    fn a_connector_the_run_answered_is_no_longer_the_rows_to_grant() {
+        // Granting forgets the offer, so a second click on a row the list had not refreshed must not grant twice.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Undecided);
+        let (session, port) = offering(home.path(), "linear");
+        LIVE.with(|live| *live.borrow_mut() = Some(session));
+
+        let first = grant(
+            home.path(),
+            &runs(),
+            live_from_thread,
+            &entry.id,
+            "token",
+            ConnectionChoice::None,
+        );
+        let again = grant(
+            home.path(),
+            &runs(),
+            live_from_thread,
+            &entry.id,
+            "token",
+            ConnectionChoice::None,
+        );
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert_eq!((first, again), (Granting::Granted, Granting::NotOffered));
+        assert_eq!(
+            port.granted.lock().expect("granted").len(),
+            1,
+            "the second click reached the store exactly not at all"
+        );
+    }
+
+    #[test]
+    fn a_declined_connector_leaves_a_row_the_view_cannot_grant() {
+        // Declining is the card's own answer; the row must read it and offer nothing, not offer a grant the run said no to.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        seed(home.path(), connector(), EntryState::Undecided);
+        let (session, port) = offering(home.path(), "linear");
+        session.submit_pending(
+            crate::approval_flow::protocol::RequestPending {
+                id: "r1".into(),
+                host: "api.linear.app".into(),
+                action: "CONNECT api.linear.app:443".into(),
+                reason: "policy-ambiguous".into(),
+                treatment: crate::approval_flow::protocol::Treatment::Inspected,
+            },
+            std::time::Instant::now(),
+        );
+
+        session.decline_offer("r1");
+
+        assert_eq!(
+            port.granted.lock().expect("granted").as_slice(),
+            ["decline linear"]
+        );
+        let listed = entries(home.path(), &runs());
+        let row = listed
+            .iter()
+            .find(|held| held.subject() == "linear")
+            .expect("the connector row");
+        assert_eq!(row.state, EntryState::Declined);
+        assert!(
+            session.offer_named("linear").is_none(),
+            "a declined offer is not one the row can still grant"
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_sandbox_that_is_not_up_offers_nothing_and_grants_nothing() {
+        // Granting needs the session: it is what publishes the credentials to the guest and releases the requests the offer was holding.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Undecided);
+
+        assert!(offered(home.path(), &runs(), no_live_session, &entry.id).is_none());
+        assert_eq!(
+            grant(
+                home.path(),
+                &runs(),
+                no_live_session,
+                &entry.id,
+                "token",
+                ConnectionChoice::None
+            ),
+            Granting::NotOffered
+        );
+    }
+
+    #[test]
+    fn a_destination_row_is_not_a_connector_to_grant() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), destination(), EntryState::Undecided);
+        let (session, _port) = offering(home.path(), "linear");
+        LIVE.with(|live| *live.borrow_mut() = Some(session));
+
+        let offer = offered(home.path(), &runs(), live_from_thread, &entry.id);
+        let granted = grant(
+            home.path(),
+            &runs(),
+            live_from_thread,
+            &entry.id,
+            "token",
+            ConnectionChoice::None,
+        );
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert!(offer.is_none());
+        assert_eq!(granted, Granting::NotOffered);
+    }
+
+    #[test]
+    fn granting_an_id_no_run_holds_says_so() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        assert_eq!(
+            grant(
+                home.path(),
+                &runs(),
+                no_live_session,
+                "never-was",
+                "token",
+                ConnectionChoice::None
+            ),
+            Granting::UnknownId
         );
     }
 

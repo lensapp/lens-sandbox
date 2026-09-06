@@ -131,3 +131,16 @@ Feature: the approvals a run keeps
     When the developer tries to remove the connector entry
     Then the refusal says "decided through `lns connector`"
     And the run's approvals list the connector "linear" as granted
+
+  # A connector card is a question like any other: closing it must leave the
+  # offer listed, or the one card the developer cannot get back is this one.
+  Scenario: A connector card is listed from the moment it is raised
+    Given a connector "linear" serves "api.linear.app"
+    When a workload reaches "api.linear.app"
+    Then the run's approvals list the connector "linear" as undecided
+
+  Scenario: Answering the connector card later replaces the offer it left
+    Given a connector "linear" serves "api.linear.app"
+    And a workload reaches "api.linear.app"
+    When the developer grants the connector "linear" to the run
+    Then the run's approvals list the connector "linear" as granted

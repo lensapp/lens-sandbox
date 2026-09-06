@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use lns_ipc::ApprovalAnswer;
 
+use crate::approval_flow::answering::Granting;
 use crate::approval_flow::entries::{Entry, EntryKind, EntryState, RemoveOutcome};
 use crate::approval_flow::session::AnswerOutcome;
 use crate::dashboard::Sandbox;
@@ -65,6 +66,30 @@ pub fn tone(entry: &Entry) -> Tone {
         EntryState::AlwaysAllowed | EntryState::Granted => Tone::Allowed,
         EntryState::AlwaysDenied | EntryState::Declined => Tone::Denied,
         EntryState::Withdrawn | EntryState::Noted => Tone::Quiet,
+    }
+}
+
+/// What the row asks about, in the words `lns approval ls` prints and the case a row's eyebrow reads in.
+pub fn question(entry: &Entry) -> String {
+    let asked = crate::approval_flow::answering::kind_of(entry);
+    match asked {
+        lns_ipc::ApprovalEntryKind::Notice => "NOTICE".to_string(),
+        named => named.question().to_uppercase(),
+    }
+}
+
+/// Whether this row offers the grant the card offered. An answered connector is granted again through `lns connector`, which is where a grant is replaced.
+pub fn is_grantable(entry: &Entry) -> bool {
+    matches!(entry.kind, EntryKind::Connector { .. })
+        && matches!(entry.state, EntryState::Undecided)
+}
+
+/// What the view says after a grant. One that landed says nothing — the row reads granted.
+pub fn granting_reported(granted: &Granting) -> Option<String> {
+    match granted {
+        Granting::Granted => None,
+        Granting::UnknownId => Some(ENTRY_IS_GONE.to_string()),
+        Granting::NotOffered => Some(crate::approval_flow::answering::NOT_OFFERED.to_string()),
     }
 }
 
@@ -169,6 +194,16 @@ mod tests {
                 raw,
             },
             state,
+        )
+    }
+
+    fn connector(run: &str) -> Entry {
+        Entry::new(
+            Some(run.to_string()),
+            EntryKind::Connector {
+                name: "linear".into(),
+            },
+            EntryState::Undecided,
         )
     }
 
@@ -399,6 +434,66 @@ mod tests {
                 EntryState::Declined,
             )),
             Tone::Denied
+        );
+    }
+
+    #[test]
+    fn every_row_says_what_it_asks_about() {
+        // A connector shown by name alone reads as a destination nobody can answer, which is what the developer reported.
+        assert_eq!(
+            question(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided
+            )),
+            "DESTINATION"
+        );
+        assert_eq!(question(&connector("dapper_thistle")), "CONNECTOR");
+        assert_eq!(
+            question(&notice("dapper_thistle")),
+            "NOTICE",
+            "a notice names no question at a terminal, and the row still has to say what it is"
+        );
+    }
+
+    #[test]
+    fn only_an_unanswered_connector_row_offers_the_grant() {
+        // A grant already given is replaced through `lns connector`, which is where a grant's own verbs live.
+        assert!(is_grantable(&connector("dapper_thistle")));
+        for state in [EntryState::Granted, EntryState::Declined] {
+            assert!(
+                !is_grantable(&Entry::new(
+                    Some("dapper_thistle".to_string()),
+                    EntryKind::Connector {
+                        name: "linear".into()
+                    },
+                    state,
+                )),
+                "{state:?}"
+            );
+        }
+        assert!(
+            !is_grantable(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided
+            )),
+            "a destination is answered, not granted"
+        );
+    }
+
+    #[test]
+    fn a_grant_that_landed_reports_nothing_and_every_refusal_says_why() {
+        assert_eq!(granting_reported(&Granting::Granted), None);
+        assert!(
+            granting_reported(&Granting::UnknownId).is_some_and(|said| said.contains("no longer"))
+        );
+        assert_eq!(
+            granting_reported(&Granting::NotOffered).as_deref(),
+            Some(crate::approval_flow::answering::NOT_OFFERED),
+            "a sandbox that is no longer holding the offer must say where the grant goes instead"
         );
     }
 

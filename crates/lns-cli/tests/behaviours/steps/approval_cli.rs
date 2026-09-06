@@ -161,6 +161,26 @@ fn reports_always_allowed(
         .push(fixture(&id, &subject, &sandbox, "always allow"));
 }
 
+#[given(
+    expr = "the service reports an undecided connector {string} for {string} raised by {string}"
+)]
+fn reports_undecided_connector(
+    world: &mut BehaviourWorld,
+    id: String,
+    name: String,
+    sandbox: String,
+) {
+    world.approval.approvals.push(ApprovalInfo {
+        id,
+        sandbox: Some(sandbox),
+        subject: name,
+        action: None,
+        kind: ApprovalEntryKind::Connector,
+        answer: "undecided".to_string(),
+        answerable: false,
+    });
+}
+
 #[given(expr = "the service reports a notice {string} saying {string} raised by {string}")]
 fn reports_notice(world: &mut BehaviourWorld, id: String, message: String, sandbox: String) {
     world.approval.approvals.push(ApprovalInfo {

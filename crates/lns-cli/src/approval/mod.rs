@@ -200,12 +200,14 @@ impl ApprovalRow {
 }
 
 impl crate::output::TableRow for ApprovalRow {
-    const HEADERS: &'static [&'static str] = &["ID", "SANDBOX", "ASKED ABOUT", "ANSWER"];
+    const HEADERS: &'static [&'static str] =
+        &["ID", "SANDBOX", "QUESTION", "ASKED ABOUT", "ANSWER"];
 
     fn cells(&self) -> Vec<String> {
         vec![
             self.id.clone(),
             self.sandbox.clone().unwrap_or_else(|| "-".to_string()),
+            self.kind.question().to_string(),
             self.subject.clone(),
             self.answer.clone(),
         ]

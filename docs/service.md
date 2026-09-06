@@ -24,7 +24,8 @@ Its tray menu opens two views and quits the service. The **Audit** view shows th
 timeline of what the runs did. The **Approvals** view shows what they were asked. It
 answers an entry, and clears a notice, the way
 [`lns approval`](cli-reference.md#lns-approval) does. Choose a sandbox or an
-answer to narrow the list. **Quit** stops the service.
+answer to narrow the list. An undecided connector row offers the grant its card
+offered, so a connector card you closed is answered there too. **Quit** stops the service.
 
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.

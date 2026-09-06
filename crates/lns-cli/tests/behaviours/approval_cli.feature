@@ -135,3 +135,13 @@ Feature: reading and answering approvals from the CLI
     When the user runs approval command "rm n1"
     Then the exit code is 1
     And the output contains "could not be written"
+
+  Scenario: the list says what each entry asks about
+    Given the service reports an undecided approval "a1" for "api.linear.app" raised by "reviewer"
+    And the service reports an undecided connector "c1" for "linear" raised by "reviewer"
+    And the service reports a notice "n1" saying "the rule could not be written" raised by "reviewer"
+    When the user runs approval command "ls"
+    Then the exit code is 0
+    And the output contains "QUESTION"
+    And the output contains "connector"
+    And the output contains "destination"

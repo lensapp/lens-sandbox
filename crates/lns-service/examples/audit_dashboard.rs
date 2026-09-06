@@ -181,9 +181,16 @@ fn seed_approvals() -> Vec<Entry> {
             EntryState::AlwaysDenied,
         ),
         asked(
-            RUN_A,
+            RUN_B,
             EntryKind::Connector {
                 name: "linear".into(),
+            },
+            EntryState::Undecided,
+        ),
+        asked(
+            RUN_A,
+            EntryKind::Connector {
+                name: "some-provider".into(),
             },
             EntryState::Granted,
         ),

@@ -1325,7 +1325,7 @@ enum ConnectorChoice {
 }
 
 /// The method this card is offering: the one the draft names, else the first this version can offer.
-fn chosen_method<'a>(
+pub(crate) fn chosen_method<'a>(
     offer: &'a lns_ipc::ConnectorView,
     draft: &OfferDraft,
 ) -> Option<&'a lns_ipc::ConnectorMethodView> {
@@ -1337,7 +1337,7 @@ fn chosen_method<'a>(
 }
 
 /// Which connection the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
-fn render_connection_choice(
+pub(crate) fn render_connection_choice(
     ui: &mut egui::Ui,
     offer: &lns_ipc::ConnectorView,
     method: &lns_ipc::ConnectorMethodView,
@@ -1510,7 +1510,7 @@ fn override_line(method: &lns_ipc::ConnectorMethodView) -> Option<String> {
     ))
 }
 
-fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
+pub(crate) fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
     for line in disclosure_lines(method) {
         ui.add_space(6.0);
         ui.label(
@@ -1555,7 +1555,7 @@ fn render_needs_a_newer_lns(ui: &mut egui::Ui, offer: &lns_ipc::ConnectorView) {
 }
 
 /// A method that authenticates cannot be granted until there is a connection behind it.
-fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
+pub(crate) fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> bool {
     if method.auth_label.is_none() {
         return true;
     }
@@ -1569,7 +1569,7 @@ fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &OfferDraft) -> 
             .all(|ask| draft.values.get(ask).is_some_and(|v| !v.trim().is_empty()))
 }
 
-fn connection_choice(draft: &OfferDraft) -> ConnectionChoice {
+pub(crate) fn connection_choice(draft: &OfferDraft) -> ConnectionChoice {
     if draft.connecting {
         return ConnectionChoice::New {
             label: draft.label.trim().to_string(),
@@ -1684,6 +1684,18 @@ pub struct OfferDraft {
     connecting: bool,
     label: String,
     values: std::collections::BTreeMap<String, String>,
+}
+
+/// Hand-written for the reason `WireInjection`'s is: the draft holds what the user just typed, and no debug of a UI state may put a live credential on the trace stream.
+impl std::fmt::Debug for OfferDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfferDraft")
+            .field("method", &self.method)
+            .field("connection", &self.connection)
+            .field("connecting", &self.connecting)
+            .field("asked_for", &self.values.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 pub fn position_top_right(monitor: egui::Vec2) -> egui::Pos2 {
