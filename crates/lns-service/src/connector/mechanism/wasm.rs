@@ -1,6 +1,6 @@
 //! A `code` method's mechanism, run as a WebAssembly component: lns cannot read what it does, so what stands in for reading it is what [`lend_the_standard_library`] hands over and what [`Host`] bounds (§3.2.6).
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Result, anyhow};
 use wasmtime::component::{Component as WasmComponent, Linker, ResourceTable};
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::cli::{WasiCli, WasiCliView};
@@ -51,12 +51,11 @@ impl WasiView for Data {
 /// Only what a `wasm32-wasip2` standard library needs to start; a filesystem, sockets, randomness and a wall clock are never linked, so they cannot be imported at all.
 fn lend_the_standard_library<T: WasiView + WasiCliView + WasiClocksView>(
     linker: &mut Linker<T>,
-) -> Result<()> {
+) -> wasmtime::Result<()> {
     use wasmtime_wasi::p2::bindings::sync::{cli, clocks, io};
 
-    let exiting = cli::exit::LinkOptions::default();
     clocks::monotonic_clock::add_to_linker::<T, WasiClocks>(linker, T::clocks)?;
-    cli::exit::add_to_linker::<T, WasiCli>(linker, &exiting, T::cli)?;
+    cli::exit::add_to_linker::<T, WasiCli>(linker, T::cli)?;
     cli::environment::add_to_linker::<T, WasiCli>(linker, T::cli)?;
     cli::stdin::add_to_linker::<T, WasiCli>(linker, T::cli)?;
     cli::stdout::add_to_linker::<T, WasiCli>(linker, T::cli)?;
@@ -90,15 +89,18 @@ impl Runtime {
         config.epoch_interruption(true);
         config.consume_fuel(true);
         config.wasm_component_model(true);
-        let engine = Engine::new(&config).context("starting the component runtime")?;
+        // A backtrace through a component names that component's own functions, and lns cannot read them anyway.
+        config.wasm_backtrace_max_frames(None);
+        let engine = Engine::new(&config)
+            .map_err(|e| raised(&e).context("starting the component runtime"))?;
         let mut linker = Linker::new(&engine);
-        lend_the_standard_library(&mut linker)
-            .context("linking the standard library a component was built against")?;
+        // Linking a fixed set into a fresh linker fails only on a name collision, which would be lns's own bug; the runtime's text names it.
+        lend_the_standard_library(&mut linker).map_err(|e| raised(&e))?;
         bindings::Mechanism::add_to_linker::<Data, wasmtime::component::HasSelf<Data>>(
             &mut linker,
             |data| data,
         )
-        .context("linking what lns lends a component")?;
+        .map_err(|e| raised(&e).context("linking what lns lends a component"))?;
         Ok(Self { engine, linker })
     }
 
@@ -115,8 +117,9 @@ impl Runtime {
             );
         }
         Ok(Component {
-            component: WasmComponent::new(&self.engine, bytes)
-                .context("reading the component this method connects with")?,
+            component: WasmComponent::new(&self.engine, bytes).map_err(|e| {
+                raised(&e).context("reading the component this method connects with")
+            })?,
             engine: self.engine.clone(),
             linker: self.linker.clone(),
         })
@@ -146,15 +149,31 @@ impl Component {
         );
         store.limiter(|data| &mut data.limits);
         store.set_epoch_deadline(u64::from(seconds));
-        store.set_fuel(FUEL_PER_SECOND * u64::from(seconds))?;
+        store
+            .set_fuel(FUEL_PER_SECOND * u64::from(seconds))
+            .map_err(|e| raised(&e))?;
         let instance = bindings::Mechanism::instantiate(&mut store, &self.component, &self.linker)
             .map_err(|e| stopped(e, seconds))?;
         Ok((store, instance))
     }
 }
 
+/// The runtime keeps its own error type, and lns reports one. Its text can still name what a component called itself, so it is scrubbed and cut to the same ceiling — cut rather than refused, because there is no connect left to fail.
+fn raised(error: &wasmtime::Error) -> anyhow::Error {
+    let mut said = scrubbed(&format!("{error:?}"));
+    if said.len() > MAX_CONNECTOR_TEXT_BYTES {
+        said.truncate(
+            (0..=MAX_CONNECTOR_TEXT_BYTES)
+                .rev()
+                .find(|at| said.is_char_boundary(*at))
+                .unwrap_or(0),
+        );
+    }
+    anyhow!("{said}")
+}
+
 /// A component stopped at its deadline, or one that trapped, is a failed connect and never a stored connection.
-fn stopped(error: anyhow::Error, seconds: u32) -> anyhow::Error {
+fn stopped(error: wasmtime::Error, seconds: u32) -> anyhow::Error {
     match error.downcast_ref::<wasmtime::Trap>() {
         Some(wasmtime::Trap::Interrupt) => {
             anyhow!("this connector's component did not finish within {seconds} seconds")
@@ -162,7 +181,7 @@ fn stopped(error: anyhow::Error, seconds: u32) -> anyhow::Error {
         Some(wasmtime::Trap::OutOfFuel) => {
             anyhow!("this connector's component did more work than one call may do")
         }
-        _ => error.context("this connector's component stopped before it answered"),
+        _ => raised(&error).context("this connector's component stopped before it answered"),
     }
 }
 
@@ -267,10 +286,15 @@ fn connector_text(words: &str, spoken: usize) -> Result<String> {
             "this connector's component spoke more than {MAX_CONNECTOR_TEXT_BYTES} bytes at once"
         );
     }
-    Ok(words
+    Ok(scrubbed(words))
+}
+
+/// Nothing that could move a cursor, clear a screen, or start a line of its own survives (§3.2.6).
+fn scrubbed(words: &str) -> String {
+    words
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .collect())
+        .collect()
 }
 
 fn outcome_of(outcome: wit::Outcome) -> Outcome {

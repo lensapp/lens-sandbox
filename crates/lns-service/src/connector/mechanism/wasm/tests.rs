@@ -263,6 +263,33 @@ fn a_refusal_to_refresh_or_revoke_is_the_connectors_text_too() {
 }
 
 #[test]
+fn what_the_runtime_says_about_a_component_is_scrubbed_and_cut_like_anything_else() {
+    // A trap's backtrace names the component's own functions, so the runtime's account is a second way in.
+    let forged = wasmtime::Error::msg("harmless\u{1b}[2Jlns: granted")
+        .context("error while executing at wasm backtrace:");
+
+    // The whole chain, because the runtime's account is a source of lns's own message.
+    let reported = format!("{:#}", super::stopped(forged, 5));
+
+    assert!(
+        reported.contains("harmless"),
+        "the runtime's account does travel, so this test is not vacuous: {reported:?}"
+    );
+    assert!(
+        !reported.chars().any(char::is_control),
+        "nothing that could redraw a terminal survives: {reported:?}"
+    );
+
+    let shouted = wasmtime::Error::msg("é".repeat(super::MAX_CONNECTOR_TEXT_BYTES));
+    let cut = super::raised(&shouted).to_string();
+    assert!(
+        cut.len() <= super::MAX_CONNECTOR_TEXT_BYTES,
+        "a failure lns is already reporting is cut rather than refused: {} bytes",
+        cut.len()
+    );
+}
+
+#[test]
 fn a_field_label_is_the_connectors_text_too_and_cannot_redraw_the_card_either() {
     let (_runtime, component) = compiled("labelling");
     let parts = Parts::new();
