@@ -207,6 +207,7 @@ struct TrayApp {
     cards: CardState,
     audit: Arc<Mutex<AuditWindow>>,
     audit_open: Arc<AtomicBool>,
+    dock_shown: bool,
 }
 
 #[derive(Default)]
@@ -245,6 +246,7 @@ impl TrayApp {
             cards: CardState::default(),
             audit: Arc::new(Mutex::new(AuditWindow::default())),
             audit_open: Arc::new(AtomicBool::new(false)),
+            dock_shown: false,
         })
     }
 
@@ -262,7 +264,19 @@ impl TrayApp {
                 egui::ViewportCommand::Focus,
             );
         }
-        if !self.audit_open.load(Ordering::Relaxed) {
+        let open = self.audit_open.load(Ordering::Relaxed);
+        match visibility_transition(open, self.dock_shown) {
+            VisibilityTransition::Show => {
+                set_dock_presence(true);
+                self.dock_shown = true;
+            }
+            VisibilityTransition::Hide => {
+                set_dock_presence(false);
+                self.dock_shown = false;
+            }
+            VisibilityTransition::Unchanged => {}
+        }
+        if !open {
             return;
         }
         let audit = self.audit.clone();
@@ -1713,6 +1727,36 @@ pub fn install_activation_policy(opts: &mut eframe::NativeOptions) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
+
+/// Puts the app in the Dock and the cmd-tab list while the Audit window is open, and takes it back out when the window closes — a tray-resident service with no window belongs in neither.
+#[cfg(target_os = "macos")]
+fn set_dock_presence(shown: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        crate::log::warn!("skipped Dock-presence change: not on the main thread");
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let policy = if shown {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if !app.setActivationPolicy(policy) {
+        crate::log::warn!("macOS refused the activation-policy change");
+        return;
+    }
+    if shown {
+        // `activate` is macOS 14+; the deprecated selector is the one every supported version answers.
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_presence(_shown: bool) {}
 
 /// Lets the always-on-top approval window appear on whichever macOS Space is active — including a full-screen app's Space — instead of staying pinned to the desktop it was created on.
 #[cfg(target_os = "macos")]

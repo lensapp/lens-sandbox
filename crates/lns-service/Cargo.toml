@@ -91,7 +91,7 @@ egui_material_icons = { version = "0.6", default-features = false, features = ["
 objc2                 = "0.6"
 objc2-foundation      = { version = "0.3", features = ["NSError", "NSString", "NSURL", "NSFileHandle", "NSObject"] }
 # Tray window joins every macOS Space so a notification shows on the active desktop, not the one it was created on.
-objc2-app-kit         = { version = "0.3", features = ["NSApplication", "NSResponder", "NSWindow"] }
+objc2-app-kit         = { version = "0.3", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSWindow"] }
 objc2-virtualization  = { version = "0.3", features = [
     "VZVirtualMachine",
     "VZVirtualMachineConfiguration",
