@@ -312,9 +312,10 @@ connected can overrule it.
 
 - **The run writes it.** A destination no rule decides is asked about at first
   use, and your answer is appended as an `egress` entry. There is no command to
-  run: answering the prompt is what records the decision. `lns approval`
-  ([§3.7](#37-lns-approval)) answers a card you closed, and changes an answer you
-  gave.
+  run: answering the prompt is what records the decision. The card leaves an entry
+  behind, and you answer that entry later ([§3.7](#37-lns-approval)): it is how you
+  answer a card you closed, and how you change an answer you gave. You answer it at
+  either surface ([§7.1](#71-the-four-questions)).
 - **It belongs to that run.** A second `lns run` is a second run and starts with
   an empty file, so it asks for itself. `lns start` and `lns exec` rejoin the
   same run and keep what it decided.
@@ -527,7 +528,7 @@ read.
 A connector question you **answered** becomes an entry too, granted or declined.
 One you never answered leaves only the destination entry it rode on.
 
-The window also shows lines that ask nothing — a rule it could not write, a
+The list also shows lines that ask nothing — a rule the run could not write, a
 destination it could not express. Each is listed as a **notice**. A notice
 carries no verdict and nothing answers it.
 
@@ -550,7 +551,7 @@ where it always did — an egress rule in the run's `decisions.yaml`
 at the decision. It does not hold it.
 
 No once verdict is offered. A once decision answers a request the guest is
-holding, which is what the window is for.
+holding, so only the card that holds it offers one.
 
 - `always-allow` and `always-deny` write the entry's rule, or rewrite the one it
   wrote before. A running sandbox takes the change at once.
@@ -742,12 +743,18 @@ you may also answer early, at your terminal, with the same disclosure.
 **A question outlives the card that asked it.** A card that asks about a
 destination becomes an entry in the run's own directory
 ([§3.7](#37-lns-approval)); a connector card does so when you answer it, and the
-credential card never does. The window is where a
-held request is answered in the moment. The terminal is where a question is read
-back, and where an **egress** answer is given late or changed. A connector
-question stays `lns connector`'s: the terminal lists the connector questions the
-window answered, and does not change them. A grant you gave early at your terminal
-raised no card, so it is not listed there either — `lns audit` records it.
+credential card never does. Only a card answers a held request. Only a card has a
+call waiting on the answer.
+
+Two surfaces read the entries back. The service's tray menu opens an
+**Approvals** view that lists them. `lns approval`
+([§3.7](#37-lns-approval)) lists the same entries at your terminal, and is the
+only surface left when the service runs headless ([service.md](service.md)). Both give an
+**egress** answer late, or change one. Both offer the same three answers, and
+neither offers a once verdict. A connector question stays `lns connector`'s: both
+surfaces list the connector questions you answered on a card, and neither changes
+them. A grant you gave early at your terminal raised no card, so neither surface
+lists it — `lns audit` records it.
 
 ### 7.2 Answering
 
