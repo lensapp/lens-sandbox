@@ -1,5 +1,12 @@
 # Connectors: a `code` auth kind that brings its own implementation
 
+> **Superseded in part.** `docs/sandbox-spec.md` §3.2.6 is the decision; this note
+> is the reasoning that led to it. Where they differ, the spec wins: the entry
+> point is `connect`, not `begin`; there is no `wait` variant, because a component
+> may not ask to be woken; and an `ask` carries one plain-text `message` rather
+> than a structured `text`/`url`/`code`. What a connect is bounded by, and how a
+> message is rendered, are decided there and not here.
+
 ## The decision
 
 `auth.kind` keeps its declarative kinds — `token` today, `oauth_device` and `oauth_pkce`

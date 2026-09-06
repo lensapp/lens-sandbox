@@ -1800,7 +1800,7 @@ not home-anchored, and with no empty or `..` segment. A home-anchored `component
 is refused for the reason a home-anchored fileset `path` is — the file is packed at
 publish, so it cannot name something on whichever machine runs the document.
 
-**The three functions.** `connect` and `revoke` run **only when a person presses a
+**The three moments.** `connect` and `revoke` run **only when a person presses a
 button** — Connect, or Disconnect. Never on a schedule, and never as a direct
 consequence of workload behaviour. A guest's request can raise the card
 ([§3.2.4](#324-installing-connecting-and-applying)), so a guest can prompt a person
@@ -1811,12 +1811,69 @@ interval, or shorten the interval lns chose; a reported expiry MAY inform the
 schedule but a floor lns sets bounds it, so a component reporting a one-second
 lifetime cannot produce a hot loop.
 
+**A connect is an exchange, not a call.** A mechanism that lns implements knows
+what to ask for before it runs, so the values can be collected first and handed
+over at once. A component does not: which fields it needs, and how many rounds it
+takes, is the implementation's own decision — a device code shows a URL and then
+waits, a password grant asks twice, a token exchange asks once. So `connect`
+returns one of three answers — **ask**; **done**, with the values, scopes, and
+account it produced; or **failed**, with a reason — and where it asked, lns
+collects what it asked for and calls **`resume`** with the state verbatim and the
+answers. `resume` answers the same three, so a connect runs for as many rounds as
+the implementation needs.
+
+An **ask** carries the opaque state, a **message** in the component's own words,
+and the fields it wants — each named, labelled, and marked secret or not, so lns
+knows which never to echo. A message is what makes a device code expressible: an
+ask MAY name **no** fields, which is a round that shows the user something and
+waits for them to press on.
+
+The message and every field `label` are the **ask's connector text**: words a
+connector supplies **at connect time, from code nobody can read**. The `label` and
+`help` of [§3.2.2](#322-methods) are connector-authored too, but they sit in the
+document the card already discloses, and a document is checked before it is
+installed ([§5](#5-validation-summary)). An ask's text arrives after every such check, so
+it needs a rule of its own, and one rule covers all of it.
+
+lns MUST present an ask's connector text as the connector's, attributed by that
+connector's `name`; MUST refuse an ask whose connector text exceeds a size
+ceiling, failing the connect rather than truncating, so the refusal is visible
+instead of the user reading half a sentence and trusting it; and MUST render it by
+replacing every control character — line breaks included, so a message is one
+paragraph lns wraps — leaving no escape sequence as a sequence and every line lns
+draws lns's. The reason a `failed` carries is connector text under the same rule,
+wherever lns shows it.
+
+Everything [§1.5](#15-one-disclosure) fixes verbatim — the disclosures, the bounds,
+the digest — is lns's own text, and an ask's connector text MUST be surrounded by
+it and MUST NOT be able to occupy, redraw, or imitate it. Text that could forge a
+disclosure would forge consent, which is the one thing this section exists to
+protect.
+
+Only `connect` and `resume` may ask. `refresh` runs on a schedule with nobody there
+to answer at all. `revoke` has a person at the press, but it undoes a decision
+rather than making one, so there is nothing left to ask them.
+
+A person may also **abandon** an ask rather than answer it. lns then stops calling
+the component and drops the state, and the connect ends the way §3.2.4 already says
+an abandoned one does: nothing is stored and the offer stands
+([§3.2.4](#324-installing-connecting-and-applying)).
+
+`resume` is not a fourth moment. It is the rest of one `connect`, so the press that
+authorised the connect authorises it, a session lns did not open cannot be resumed,
+and `sessionSeconds` bounds how long the whole exchange may take. Between calls
+lns holds the state and nothing else: it is opaque to lns, is never persisted, is
+only ever handed back to the component that produced it, and — like every other
+resource this section bounds — has a size ceiling, past which the connect fails.
+
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
 clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
-and component-size ceilings. Step state between calls is secret material — a
-device code, a PKCE verifier — so lns holds it in memory only, for a bounded
-lifetime, and never persists it.
+step-state, connector-text, and component-size ceilings. Step state between calls, and any
+answer to a field marked secret, are secret material — a device code, a PKCE
+verifier, a password — so lns holds each in memory only, for a bounded lifetime,
+never logs it, never persists it, and drops an answer once the `resume` that
+consumed it returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
