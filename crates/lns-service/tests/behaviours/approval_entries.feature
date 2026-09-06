@@ -111,3 +111,23 @@ Feature: the approvals a run keeps
     Given the developer grants the connector "linear" to the run
     Then the run's approvals list the connector "linear" as granted
     And that entry offers no verdict
+
+  Scenario: A notice is cleared from the list
+    Given an approval card is visible for a request to "api.linear.app"
+    And the policy file cannot be written
+    When the developer picks "always allow"
+    And the developer removes that notice
+    Then the run's approvals hold no notice
+    And the entry stays listed
+
+  Scenario: A question is kept, and the refusal names the answer to use
+    Given the run's approvals list "api.linear.app" as always allowed
+    When the developer tries to remove that entry
+    Then the entry stays listed
+    And the refusal says "a destination entry is answered instead"
+
+  Scenario: A granted connector is kept, and the refusal names where it is decided
+    Given the developer grants the connector "linear" to the run
+    When the developer tries to remove the connector entry
+    Then the refusal says "decided through `lns connector`"
+    And the run's approvals list the connector "linear" as granted

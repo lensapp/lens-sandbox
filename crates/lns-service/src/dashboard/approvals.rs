@@ -1,19 +1,41 @@
+use std::collections::BTreeSet;
+
 use lns_ipc::ApprovalAnswer;
 
-use crate::approval_flow::entries::{Entry, EntryKind, EntryState};
+use crate::approval_flow::entries::{Entry, EntryKind, EntryState, RemoveOutcome};
 use crate::approval_flow::session::AnswerOutcome;
 use crate::dashboard::Sandbox;
 
-/// What the view lists, and how many of those rows still wait for an answer.
-pub struct Listing {
-    pub rows: Vec<usize>,
-    pub unanswered: usize,
+/// Every answer a row can carry, in the order the chooser offers them. Read off the states themselves, so the chooser cannot offer one no row has. An empty choice is every answer, as the audit view's kinds are.
+pub fn answers() -> Vec<&'static str> {
+    EntryState::ALL.iter().map(EntryState::label).collect()
 }
 
-/// The rows the view shows: every entry, or only what one sandbox was asked.
+/// How many questions in this sandbox's list still wait for an answer — the count beside the view, and the reason a closed card is recoverable at all.
+///
+/// The chosen answers are deliberately not applied: the chooser lives inside the view, and a count that read `0` because of a filter nobody can see from the sidebar would say the opposite of the truth.
+pub fn waiting(entries: &[Entry], selected: Option<&str>, sandboxes: &[Sandbox]) -> usize {
+    listing(entries, selected, sandboxes, &BTreeSet::new())
+        .rows
+        .iter()
+        .filter(|i| waits(&entries[**i]))
+        .count()
+}
+
+/// What the view lists.
+pub struct Listing {
+    pub rows: Vec<usize>,
+}
+
+/// The rows the view shows: what one sandbox was asked, carrying one of the chosen answers, or everything when neither is chosen.
 ///
 /// An entry is stamped with the run's name, and the sidebar selects a run by id, so the selection is resolved through the sandbox list before it can match.
-pub fn listing(entries: &[Entry], selected: Option<&str>, sandboxes: &[Sandbox]) -> Listing {
+pub fn listing(
+    entries: &[Entry],
+    selected: Option<&str>,
+    sandboxes: &[Sandbox],
+    answers: &BTreeSet<String>,
+) -> Listing {
     let asked = selected.map(|id| named(id, sandboxes));
     let rows: Vec<usize> = entries
         .iter()
@@ -22,10 +44,33 @@ pub fn listing(entries: &[Entry], selected: Option<&str>, sandboxes: &[Sandbox])
             Some(run) => entry.sandbox.as_deref() == Some(run),
             None => true,
         })
+        .filter(|(_, entry)| answers.is_empty() || answers.contains(entry.state.label()))
         .map(|(i, _)| i)
         .collect();
-    let unanswered = rows.iter().filter(|i| waits(&entries[**i])).count();
-    Listing { rows, unanswered }
+    Listing { rows }
+}
+
+/// How loudly a row's answer reads. The answer is the thing the developer came back for, so it is not a muted footnote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Waiting,
+    Allowed,
+    Denied,
+    Quiet,
+}
+
+pub fn tone(entry: &Entry) -> Tone {
+    match entry.state {
+        EntryState::Undecided => Tone::Waiting,
+        EntryState::AlwaysAllowed | EntryState::Granted => Tone::Allowed,
+        EntryState::AlwaysDenied | EntryState::Declined => Tone::Denied,
+        EntryState::Withdrawn | EntryState::Noted => Tone::Quiet,
+    }
+}
+
+/// Whether this row shows the control that clears it.
+pub fn is_removable(entry: &Entry) -> bool {
+    entry.is_removable()
 }
 
 /// The name the run is known by, or the handle itself when this machine knows no run by it — a sandbox removed since the entry was written still names itself.
@@ -36,7 +81,7 @@ fn named<'a>(id: &'a str, sandboxes: &'a [Sandbox]) -> &'a str {
         .map_or(id, |sandbox| sandbox.name.as_str())
 }
 
-/// Whether this question still has no answer — what the count beside the view reports, and the reason a closed card is recoverable at all.
+/// Whether this question still has no answer.
 fn waits(entry: &Entry) -> bool {
     entry.is_answerable() && matches!(entry.state, EntryState::Undecided | EntryState::Withdrawn)
 }
@@ -98,9 +143,22 @@ pub fn reported(outcome: &AnswerOutcome) -> Option<String> {
     }
 }
 
+/// What the view says after a removal. A row that went says nothing — it is not there to say it.
+pub fn removal_reported(outcome: &RemoveOutcome) -> Option<String> {
+    match outcome {
+        RemoveOutcome::Removed => None,
+        RemoveOutcome::UnknownId => Some(ENTRY_IS_GONE.to_string()),
+        RemoveOutcome::NotRemovable(kind) => {
+            Some(crate::approval_flow::answering::not_removable(*kind))
+        }
+        RemoveOutcome::NotCleared(reason) => Some(reason.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::entries::Unremovable;
 
     fn destination(run: &str, host: &str, raw: bool, state: EntryState) -> Entry {
         Entry::new(
@@ -122,6 +180,15 @@ mod tests {
             },
             EntryState::Noted,
         )
+    }
+
+    /// No answer chosen, which is every answer.
+    fn everything() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    fn only(answers: [&str; 1]) -> BTreeSet<String> {
+        answers.iter().map(|a| (*a).to_string()).collect()
     }
 
     const ID_A: &str = "deadbeef00000000000000000000aa01";
@@ -157,9 +224,12 @@ mod tests {
             destination("bold_otter", "api.github.com", false, EntryState::Undecided),
         ];
 
-        assert_eq!(listing(&held, Some(ID_A), &sandboxes()).rows, vec![0]);
         assert_eq!(
-            listing(&held, None, &sandboxes()).rows,
+            listing(&held, Some(ID_A), &sandboxes(), &everything()).rows,
+            vec![0]
+        );
+        assert_eq!(
+            listing(&held, None, &sandboxes(), &everything()).rows,
             vec![0, 1],
             "with no sandbox chosen the view spans every run"
         );
@@ -176,7 +246,7 @@ mod tests {
         )];
 
         assert_eq!(
-            listing(&held, Some("dapper_thistle"), &[]).rows,
+            listing(&held, Some("dapper_thistle"), &[], &everything()).rows,
             vec![0],
             "the handle itself is the last thing left to match on"
         );
@@ -214,11 +284,153 @@ mod tests {
             destination("bold_otter", "api.stripe.com", false, EntryState::Undecided),
         ];
 
-        assert_eq!(listing(&held, None, &sandboxes()).unanswered, 3);
+        assert_eq!(waiting(&held, None, &sandboxes()), 3);
         assert_eq!(
-            listing(&held, Some(ID_A), &sandboxes()).unanswered,
+            waiting(&held, Some(ID_A), &sandboxes()),
             2,
-            "the count must describe the list under it, not a list nobody is looking at"
+            "the count must describe the sandbox the sidebar named"
+        );
+    }
+
+    #[test]
+    fn choosing_an_answer_narrows_the_list_to_the_rows_that_carry_it() {
+        // Coming back to a card you closed means finding the one row that still waits, in a list of every question the run ever asked.
+        let held = vec![
+            destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided,
+            ),
+            destination(
+                "dapper_thistle",
+                "api.github.com",
+                false,
+                EntryState::AlwaysAllowed,
+            ),
+            notice("dapper_thistle"),
+        ];
+
+        assert_eq!(
+            listing(&held, None, &sandboxes(), &only(["undecided"])).rows,
+            vec![0]
+        );
+        assert_eq!(
+            listing(&held, None, &sandboxes(), &only(["notice"])).rows,
+            vec![2]
+        );
+        assert_eq!(
+            listing(&held, None, &sandboxes(), &everything()).rows,
+            vec![0, 1, 2],
+            "choosing nothing is choosing every answer, as the audit view's kinds are"
+        );
+    }
+
+    #[test]
+    fn the_chooser_offers_every_answer_a_row_can_carry_and_nothing_else() {
+        // An answer the chooser offers that no row carries is a filter that can only empty the list.
+        assert_eq!(answers().len(), EntryState::ALL.len());
+        for state in EntryState::ALL {
+            let label = state.label();
+            assert!(
+                answers().contains(&label),
+                "{state:?} reads as {label:?}, which the chooser does not offer"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_reads_as_loudly_as_what_it_permits() {
+        // The answer is what the developer came back for; allow and deny must not look alike at a glance.
+        assert_eq!(
+            tone(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided
+            )),
+            Tone::Waiting
+        );
+        assert_eq!(
+            tone(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::AlwaysAllowed
+            )),
+            Tone::Allowed
+        );
+        assert_eq!(
+            tone(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::AlwaysDenied
+            )),
+            Tone::Denied
+        );
+        assert_eq!(
+            tone(&destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Withdrawn
+            )),
+            Tone::Quiet,
+            "a workload that exited decided nothing, so its row must not read as an answer"
+        );
+        assert_eq!(tone(&notice("dapper_thistle")), Tone::Quiet);
+        assert_eq!(
+            tone(&Entry::new(
+                Some("dapper_thistle".to_string()),
+                EntryKind::Connector {
+                    name: "linear".into()
+                },
+                EntryState::Granted,
+            )),
+            Tone::Allowed
+        );
+        assert_eq!(
+            tone(&Entry::new(
+                Some("dapper_thistle".to_string()),
+                EntryKind::Connector {
+                    name: "linear".into()
+                },
+                EntryState::Declined,
+            )),
+            Tone::Denied
+        );
+    }
+
+    #[test]
+    fn only_a_notice_can_be_cleared_from_the_list() {
+        // Removing an answered question would strand the rule it wrote, and removing an unanswered one would hide a question the run still fails closed on.
+        assert!(is_removable(&notice("dapper_thistle")));
+        for state in [
+            EntryState::Undecided,
+            EntryState::Withdrawn,
+            EntryState::AlwaysAllowed,
+            EntryState::AlwaysDenied,
+        ] {
+            assert!(
+                !is_removable(&destination(
+                    "dapper_thistle",
+                    "api.linear.app",
+                    false,
+                    state
+                )),
+                "{state:?}"
+            );
+        }
+        assert!(
+            !is_removable(&Entry::new(
+                Some("dapper_thistle".to_string()),
+                EntryKind::Connector {
+                    name: "linear".into()
+                },
+                EntryState::Granted,
+            )),
+            "a connector is forgotten through `lns connector`, not here"
         );
     }
 
@@ -325,6 +537,28 @@ mod tests {
         assert_eq!(label(ApprovalAnswer::AlwaysAllow), "Always allow");
         assert_eq!(label(ApprovalAnswer::AlwaysDeny), "Always deny");
         assert_eq!(label(ApprovalAnswer::AskAgain), "Ask again");
+    }
+
+    #[test]
+    fn a_removal_reports_nothing_and_every_refusal_says_why() {
+        assert_eq!(removal_reported(&RemoveOutcome::Removed), None);
+        assert!(
+            removal_reported(&RemoveOutcome::UnknownId)
+                .is_some_and(|said| said.contains("no longer")),
+        );
+        assert_eq!(
+            removal_reported(&RemoveOutcome::NotRemovable(Unremovable::Destination)).as_deref(),
+            Some("only a notice is removed; a destination entry is answered instead"),
+            "the view says what the terminal says, and names the way out that fits the row"
+        );
+        assert_eq!(
+            removal_reported(&RemoveOutcome::NotCleared(
+                "this run's approvals could not be read".to_string()
+            ))
+            .as_deref(),
+            Some("this run's approvals could not be read"),
+            "a removal that did not land must not read as one that did"
+        );
     }
 
     #[test]

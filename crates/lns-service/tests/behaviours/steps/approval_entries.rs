@@ -3,7 +3,7 @@ use std::time::Instant;
 use cucumber::{given, then, when};
 use lns_policy::{Policy, Verdict};
 use lns_service::approval_flow::entries::{
-    Entry, EntryKind, EntryState, EntryStore, FileEntryStore,
+    Entry, EntryKind, EntryState, EntryStore, FileEntryStore, RemoveOutcome,
 };
 use lns_service::approval_flow::offline;
 use lns_service::approval_flow::protocol::{Decision, RequestPending, Treatment};
@@ -222,6 +222,68 @@ fn when_sandbox_removed(world: &mut BehaviourWorld) {
         ),
         "the run directory must be reclaimed"
     );
+}
+
+#[when("the developer removes that notice")]
+fn when_notice_removed(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    let notice = notice_of(rig).expect("a notice");
+    assert_eq!(
+        rig.session.remove_entry(&notice.id),
+        RemoveOutcome::Removed,
+        "a notice asked nothing, so clearing it loses nothing"
+    );
+}
+
+#[when("the developer tries to remove that entry")]
+fn when_question_removal_tried(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    let id = rig
+        .entry_for("api.linear.app")
+        .expect("the destination entry")
+        .id;
+    let outcome = rig.session.remove_entry(&id);
+    world.approval().removal = Some(outcome);
+}
+
+#[when("the developer tries to remove the connector entry")]
+fn when_connector_removal_tried(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    let id = rig.entry_for("linear").expect("the connector entry").id;
+    let outcome = rig.session.remove_entry(&id);
+    world.approval().removal = Some(outcome);
+}
+
+#[then("the run's approvals hold no notice")]
+fn then_no_notice(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    assert!(
+        notice_of(rig).is_none(),
+        "the notice must be gone from the list"
+    );
+}
+
+#[then("the entry stays listed")]
+fn then_entry_stays(world: &mut BehaviourWorld) {
+    let rig = world.approval();
+    assert!(
+        rig.entry_for("api.linear.app").is_some(),
+        "the record of what the run was asked must survive the refusal"
+    );
+}
+
+#[then(regex = r#"^the refusal says "([^"]+)"$"#)]
+fn then_refusal_says(world: &mut BehaviourWorld, needle: String) {
+    let outcome = world
+        .approval()
+        .removal
+        .clone()
+        .expect("a removal was tried");
+    let RemoveOutcome::NotRemovable(kind) = outcome else {
+        panic!("the entry must be kept, got {outcome:?}");
+    };
+    let said = lns_service::approval_flow::answering::not_removable(kind);
+    assert!(said.contains(&needle), "the refusal said {said:?}");
 }
 
 #[then(regex = r#"^the run's approvals list "([^"]+)" as (.+)$"#)]

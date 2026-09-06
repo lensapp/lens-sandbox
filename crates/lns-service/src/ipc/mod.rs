@@ -343,6 +343,7 @@ enum VolumeVerb<'a> {
 enum ApprovalVerb<'a> {
     List(Option<&'a str>),
     Answer(&'a str, lns_ipc::ApprovalAnswer),
+    Remove(&'a str),
 }
 
 impl<'a> ApprovalVerb<'a> {
@@ -350,6 +351,7 @@ impl<'a> ApprovalVerb<'a> {
         match request {
             Request::ListApprovals { sandbox } => Some(ApprovalVerb::List(sandbox.as_deref())),
             Request::AnswerApproval { id, answer } => Some(ApprovalVerb::Answer(id, *answer)),
+            Request::RemoveApproval { id } => Some(ApprovalVerb::Remove(id)),
             _ => None,
         }
     }
@@ -485,6 +487,12 @@ fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
             id,
             answer,
         ),
+        ApprovalVerb::Remove(id) => crate::approval_flow::answering::removal(
+            &root,
+            &crate::run_registry::known_ids(),
+            crate::run_registry::approvals,
+            id,
+        ),
     }
 }
 
@@ -507,6 +515,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::PruneVolumes { .. }
         | Request::ListApprovals { .. }
         | Request::AnswerApproval { .. }
+        | Request::RemoveApproval { .. }
         | Request::InstallConnector { .. }
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
@@ -2036,6 +2045,44 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
+    async fn handle_request_removes_one_notice_and_keeps_a_question() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let asked = seed_approval(home.path(), &id);
+        let notice = seed_notice(home.path(), &id);
+
+        let removed = handle_request(
+            &Request::RemoveApproval {
+                id: notice.id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+        let kept = handle_request(
+            &Request::RemoveApproval {
+                id: asked.id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(&id);
+        let removed = as_json(removed);
+        assert_eq!(removed["type"], "ApprovalRemoved", "got {removed}");
+        assert_eq!(removed["id"], notice.id);
+        let kept = as_json(kept);
+        assert_eq!(kept["type"], "ApprovalKept", "got {kept}");
+        assert_eq!(
+            kept["reason"],
+            "only a notice is removed; a destination entry is answered instead"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
     async fn handle_request_surfaces_a_home_it_cannot_resolve() {
         // With no home there is no run directory to read, and the caller has to hear that rather than an empty list.
         let _lns = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/not/absolute");
@@ -2046,6 +2093,20 @@ mod tests {
         let listed = as_json(listed);
         assert_eq!(listed["type"], "Error", "got {listed}");
         assert!(listed["message"].is_string());
+    }
+
+    fn seed_notice(home: &std::path::Path, run: &str) -> crate::approval_flow::entries::Entry {
+        use crate::approval_flow::entries::{Entry, EntryKind, EntryState, EntryStore};
+        let entry = Entry::new(
+            Some(run.to_string()),
+            EntryKind::Notice {
+                message: "the rule could not be persisted".into(),
+            },
+            EntryState::Noted,
+        );
+        let path = crate::cache::approvals_path(home, run);
+        crate::approval_flow::entries::FileEntryStore::new(path).record(entry.clone());
+        entry
     }
 
     fn seed_approval(home: &std::path::Path, run: &str) -> crate::approval_flow::entries::Entry {

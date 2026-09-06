@@ -5,12 +5,20 @@ use std::time::Duration;
 use lns_policy::{FilePolicyStore, Policy};
 use tokio::sync::mpsc;
 
-use crate::approval_flow::entries::{Entry, EntryStore, FileEntryStore};
+use crate::approval_flow::entries::{Entry, EntryStore, FileEntryStore, RemoveOutcome};
 use crate::approval_flow::notification::NoopNotifier;
 use crate::approval_flow::session::{Answer, AnswerOutcome, ApprovalSession};
 
 pub fn list(root: &Path, run_id: &str) -> Vec<Entry> {
     FileEntryStore::new(crate::cache::approvals_path(root, run_id)).list()
+}
+
+/// Removes an entry of a run this process is not hosting. Nothing is published: a notice held no rule, so no guest has anything to be told.
+pub fn remove(root: &Path, run_id: &str, id: &str) -> RemoveOutcome {
+    crate::approval_flow::entries::remove_from(
+        &FileEntryStore::new(crate::cache::approvals_path(root, run_id)),
+        id,
+    )
 }
 
 /// Answers an entry of a run this process is not hosting: the same session logic over the run's own files, publishing to nobody because no guest is listening.

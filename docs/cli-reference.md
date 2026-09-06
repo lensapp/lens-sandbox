@@ -461,6 +461,7 @@ lns approval ls                             # every run's entries, with the answ
 lns approval ls <sandbox>                   # scope to one sandbox: run id, name, or unique id prefix
 lns approval ls [--format <table|json>]
 lns approval answer <id> <always-allow|always-deny|ask-again>
+lns approval rm <id>                        # clear one notice
 ```
 
 A card that asks about a destination becomes an **entry** the run keeps, in
@@ -485,6 +486,11 @@ one.
   the change at once.
 - `ask-again` takes that rule back, so the destination raises a card the next time
   a workload reaches it.
+
+`rm` clears one notice. A notice asked nothing, so nothing is lost. A destination
+or a connector entry is kept: it is the record of what the run was asked, and an
+answered one is the only handle `ask-again` has. `rm` on either says so and exits
+`1`.
 
 Answering never replays the request that raised the entry. The call failed when
 nothing decided it; the answer decides the next one. An entry of a **stopped**

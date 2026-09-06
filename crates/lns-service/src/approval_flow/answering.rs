@@ -3,9 +3,22 @@ use std::sync::Arc;
 
 use lns_ipc::{ApprovalAnswer, ApprovalEntryKind, ApprovalInfo, Response};
 
-use crate::approval_flow::entries::{Entry, EntryKind};
+use crate::approval_flow::entries::{Entry, EntryKind, RemoveOutcome, Unremovable};
 use crate::approval_flow::offline;
 use crate::approval_flow::session::{Answer, AnswerOutcome, ApprovalSession};
+
+/// Why this entry stays, in the words that fit the kind the user named.
+pub fn not_removable(kind: Unremovable) -> String {
+    match kind {
+        Unremovable::Destination => {
+            "only a notice is removed; a destination entry is answered instead".to_string()
+        }
+        Unremovable::Connector => {
+            "only a notice is removed; a connector entry is decided through `lns connector`"
+                .to_string()
+        }
+    }
+}
 
 pub const DECIDED_ELSEWHERE: &str =
     "this entry is decided elsewhere: a connector through `lns connector`, and a notice not at all";
@@ -84,6 +97,36 @@ pub fn answer(
         return Response::ApprovalUnknown { id: id.to_string() };
     };
     render(asked, id, apply(root, &run, live, id, answer))
+}
+
+/// Removes one entry, at whichever surface asked. A notice holds no rule, so removal reaches only the list.
+pub fn remove(root: &Path, runs: &[String], live: LiveSession, id: &str) -> RemoveOutcome {
+    match holder_of(root, runs, id) {
+        Some((run, _)) => clear(root, &run, live, id),
+        None => RemoveOutcome::UnknownId,
+    }
+}
+
+fn clear(root: &Path, run: &str, live: LiveSession, id: &str) -> RemoveOutcome {
+    match live(run) {
+        // A run this process hosts is removed through its session, which holds the store the run itself records into.
+        Some(session) => session.remove_entry(id),
+        None => offline::remove(root, run, id),
+    }
+}
+
+/// [`remove`], rendered for the terminal.
+pub fn removal(root: &Path, runs: &[String], live: LiveSession, id: &str) -> Response {
+    let kept = |reason| Response::ApprovalKept {
+        id: id.to_string(),
+        reason,
+    };
+    match remove(root, runs, live, id) {
+        RemoveOutcome::Removed => Response::ApprovalRemoved { id: id.to_string() },
+        RemoveOutcome::UnknownId => Response::ApprovalUnknown { id: id.to_string() },
+        RemoveOutcome::NotRemovable(kind) => kept(not_removable(kind)),
+        RemoveOutcome::NotCleared(reason) => kept(reason),
+    }
 }
 
 fn apply(
@@ -412,6 +455,138 @@ mod tests {
             ),
             AnswerOutcome::UnknownId
         );
+    }
+
+    #[test]
+    fn a_notice_is_removed_and_the_row_goes_with_it() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), notice(), EntryState::Noted);
+
+        assert_eq!(
+            removal(home.path(), &runs(), no_live_session, &entry.id),
+            Response::ApprovalRemoved {
+                id: entry.id.clone()
+            }
+        );
+        assert!(entries(home.path(), &runs()).is_empty());
+    }
+
+    #[test]
+    fn a_removal_that_could_not_be_written_reaches_the_terminal_as_a_refusal() {
+        // The write is a removal's only effect, so answering `ApprovalRemoved` after it failed would tell the developer the notice is gone while `ls` still lists it.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), notice(), EntryState::Noted);
+        // The atomic install removes this path first and fails on anything but a missing file, so the write is refused for every uid.
+        std::fs::create_dir(
+            crate::cache::approvals_path(home.path(), RUN).with_extension("json.tmp"),
+        )
+        .expect("block the install");
+
+        let refused = removal(home.path(), &runs(), no_live_session, &entry.id);
+
+        let refused = serde_json::to_value(&refused).expect("responses serialize");
+        assert_eq!(
+            refused["type"], "ApprovalKept",
+            "a failed write must not read as a removal, got {refused}"
+        );
+        assert_eq!(refused["id"], entry.id);
+        assert!(
+            refused["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("could not be written")),
+            "the refusal must say what stopped it, got {refused}"
+        );
+        assert_eq!(
+            entries(home.path(), &runs()).len(),
+            1,
+            "the notice is still listed, so the answer must say so"
+        );
+    }
+
+    #[test]
+    fn a_destination_entry_is_kept_and_told_to_answer_instead() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), destination(), EntryState::AlwaysAllowed);
+
+        let kept = removal(home.path(), &runs(), no_live_session, &entry.id);
+
+        assert_eq!(
+            kept,
+            Response::ApprovalKept {
+                id: entry.id.clone(),
+                reason: "only a notice is removed; a destination entry is answered instead"
+                    .to_string(),
+            }
+        );
+        assert_eq!(
+            entries(home.path(), &runs()).len(),
+            1,
+            "the record of what the run was asked must survive the refusal"
+        );
+    }
+
+    #[test]
+    fn a_connector_entry_is_kept_and_told_where_it_is_decided() {
+        // The refusal names the way out that fits the entry the user pointed at; a connector has no answer here to be told to use.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), connector(), EntryState::Granted);
+
+        assert_eq!(
+            removal(home.path(), &runs(), no_live_session, &entry.id),
+            Response::ApprovalKept {
+                id: entry.id,
+                reason:
+                    "only a notice is removed; a connector entry is decided through `lns connector`"
+                        .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn removing_an_id_no_run_holds_says_so_rather_than_touching_a_file() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        seed(home.path(), notice(), EntryState::Noted);
+
+        assert_eq!(
+            removal(home.path(), &runs(), no_live_session, "never-was"),
+            Response::ApprovalUnknown {
+                id: "never-was".to_string()
+            }
+        );
+        assert_eq!(entries(home.path(), &runs()).len(), 1);
+    }
+
+    #[test]
+    fn a_live_run_is_cleared_through_its_own_session() {
+        // The session holds the store's write lock, so removing behind it could write over an entry the run is recording.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), notice(), EntryState::Noted);
+        let (sink, _nowhere) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(
+            ApprovalSession::new(
+                Policy::default(),
+                Policy::default(),
+                Arc::new(NoopNotifier),
+                Arc::new(FilePolicyStore::new(crate::cache::decisions_path(
+                    home.path(),
+                    RUN,
+                ))),
+                sink,
+                Duration::from_secs(30),
+            )
+            .for_run(RUN.to_string()),
+        );
+        session.set_entry_store(Arc::new(FileEntryStore::new(crate::cache::approvals_path(
+            home.path(),
+            RUN,
+        ))));
+        LIVE.with(|live| *live.borrow_mut() = Some(session.clone()));
+
+        let outcome = remove(home.path(), &runs(), live_from_thread, &entry.id);
+
+        LIVE.with(|live| *live.borrow_mut() = None);
+        assert_eq!(outcome, RemoveOutcome::Removed);
+        assert!(session.remove_entry(&entry.id) == RemoveOutcome::UnknownId);
     }
 
     #[test]

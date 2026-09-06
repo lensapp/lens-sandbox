@@ -63,6 +63,9 @@ pub struct DashboardState {
     pub view: View,
     pub approvals: Vec<Entry>,
     pub approval_notice: Option<String>,
+    pub approval_answers: std::collections::BTreeSet<String>,
+    pub answer_open: bool,
+    pub sandbox_open: bool,
     pub rows: Vec<TimelineRow>,
     pub warnings: Vec<String>,
     pub sandboxes: Vec<Sandbox>,
@@ -339,14 +342,11 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
                 icons::ICON_GAVEL,
                 "Approvals",
                 state.view == View::Approvals,
-                Some(
-                    approvals::listing(
-                        &state.approvals,
-                        state.selected_sandbox.as_deref(),
-                        &sandboxes,
-                    )
-                    .unanswered,
-                ),
+                Some(approvals::waiting(
+                    &state.approvals,
+                    state.selected_sandbox.as_deref(),
+                    &sandboxes,
+                )),
             )
             .clicked()
             {
@@ -516,7 +516,7 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
 }
 
 fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
-    let mut chosen: Option<(String, lns_ipc::ApprovalAnswer)> = None;
+    let mut chosen: Option<(String, RowAction)> = None;
     let notice = state.approval_notice.clone();
     egui::CentralPanel::default()
         .frame(
@@ -526,6 +526,8 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
         )
         .show_inside(ui, |ui| {
             ui.add_space(16.0);
+            approval_choosers(ui, state);
+            ui.add_space(12.0);
             if let Some(said) = notice {
                 ui.label(
                     RichText::new(said)
@@ -538,6 +540,7 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                 &state.approvals,
                 state.selected_sandbox.as_deref(),
                 &state.sandboxes,
+                &state.approval_answers,
             )
             .rows;
             egui::ScrollArea::vertical()
@@ -551,22 +554,27 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                         let entry = &state.approvals[i];
                         let asked_by =
                             approvals::asked_by(entry, state.selected_sandbox.as_deref());
-                        if let Some(answer) = approval_row(ui, entry, asked_by) {
-                            chosen = Some((entry.id.clone(), answer));
+                        if let Some(act) = approval_row(ui, entry, asked_by) {
+                            chosen = Some((entry.id.clone(), act));
                         }
                     }
                 });
         });
-    if let Some((id, answer)) = chosen {
-        answer_entry(state, &id, answer);
+    match chosen {
+        Some((id, RowAction::Answer(answer))) => answer_entry(state, &id, answer),
+        Some((id, RowAction::Remove)) => remove_entry(state, &id),
+        None => {}
     }
 }
 
-fn approval_row(
-    ui: &mut egui::Ui,
-    entry: &Entry,
-    asked_by: Option<&str>,
-) -> Option<lns_ipc::ApprovalAnswer> {
+/// What a click on a row asked for. A notice is the one row that can be cleared, so it is the one that offers this alongside no answers at all.
+#[derive(Debug, Clone, Copy)]
+enum RowAction {
+    Answer(lns_ipc::ApprovalAnswer),
+    Remove,
+}
+
+fn approval_row(ui: &mut egui::Ui, entry: &Entry, asked_by: Option<&str>) -> Option<RowAction> {
     let mut chosen = None;
     Frame::new()
         .fill(SELECT_FILL)
@@ -590,33 +598,193 @@ fn approval_row(
                     if let Some(action) = approvals::action(entry) {
                         ui.label(RichText::new(action).size(FS_LABEL).color(TEXT_MUTED));
                     }
-                    ui.horizontal(|ui| {
+                    if let Some(run) = asked_by {
                         ui.label(
-                            RichText::new(entry.state.label())
+                            RichText::new(run)
+                                .monospace()
                                 .size(FS_LABEL)
                                 .color(TEXT_MUTED),
                         );
-                        if let Some(run) = asked_by {
-                            ui.label(
-                                RichText::new(run)
-                                    .monospace()
-                                    .size(FS_LABEL)
-                                    .color(TEXT_MUTED),
-                            );
-                        }
-                    });
+                    }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if approvals::is_removable(entry)
+                        && icon_button(ui, icons::ICON_CLOSE)
+                            .on_hover_text("Remove")
+                            .clicked()
+                    {
+                        chosen = Some(RowAction::Remove);
+                    }
                     for answer in approvals::offers(entry).into_iter().rev() {
                         if ui.button(approvals::label(answer)).clicked() {
-                            chosen = Some(answer);
+                            chosen = Some(RowAction::Answer(answer));
                         }
                     }
+                    ui.add_space(4.0);
+                    decision_badge(ui, entry);
                 });
             });
         });
     ui.add_space(6.0);
     chosen
+}
+
+/// The answer, painted as loudly as what it permits: this is the thing the developer opened the view to see.
+fn decision_badge(ui: &mut egui::Ui, entry: &Entry) {
+    let ink = match approvals::tone(entry) {
+        approvals::Tone::Waiting => STATUS_WARNING,
+        approvals::Tone::Allowed => ACCENT_GREEN,
+        approvals::Tone::Denied => STATUS_CRITICAL,
+        approvals::Tone::Quiet => TEXT_MUTED,
+    };
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            ink.r(),
+            ink.g(),
+            ink.b(),
+            28,
+        ))
+        .stroke(Stroke::new(
+            1.0_f32,
+            Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 90),
+        ))
+        .corner_radius(CornerRadius::same(theme::BADGE_CORNER_RADIUS))
+        .inner_margin(Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(entry.state.label().to_uppercase())
+                    .size(FS_LABEL)
+                    .color(ink),
+            );
+        });
+}
+
+/// The two filters over the list: which sandbox asked, and which answer a row carries.
+fn approval_choosers(ui: &mut egui::Ui, state: &mut DashboardState) {
+    ui.horizontal(|ui| {
+        sandbox_chooser(ui, state);
+        answer_chooser(ui, state);
+    });
+}
+
+fn sandbox_chooser(ui: &mut egui::Ui, state: &mut DashboardState) {
+    let label = match &state.selected_sandbox {
+        None => "all sandboxes".to_string(),
+        Some(id) => state
+            .sandboxes
+            .iter()
+            .find(|sandbox| &sandbox.id == id)
+            .map_or_else(|| id.clone(), |sandbox| sandbox.name.clone()),
+    };
+    let control = control_button(ui, &label, state.sandbox_open);
+    if control.clicked() {
+        state.sandbox_open = !state.sandbox_open;
+    }
+    if !state.sandbox_open {
+        return;
+    }
+    let sandboxes = state.sandboxes.clone();
+    let popup = egui::Area::new(egui::Id::new("approvals-sandbox-popup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(control.rect.left_bottom() + vec2(0.0, 4.0))
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            popup_body(ui, |ui| {
+                if dropdown_pick(ui, "all sandboxes", state.selected_sandbox.is_none()) {
+                    choose_sandbox(state, None);
+                }
+                for sandbox in &sandboxes {
+                    let picked = state.selected_sandbox.as_deref() == Some(sandbox.id.as_str());
+                    if dropdown_pick(ui, &sandbox.name, picked) {
+                        choose_sandbox(state, Some(sandbox.id.clone()));
+                    }
+                }
+            });
+        });
+    if dismissed(ui, &popup.response, &control) {
+        state.sandbox_open = false;
+    }
+}
+
+fn answer_chooser(ui: &mut egui::Ui, state: &mut DashboardState) {
+    let label = match state.approval_answers.len() {
+        0 => "any answer".to_string(),
+        1 => state
+            .approval_answers
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_default(),
+        n => format!("{n} answers"),
+    };
+    let control = control_button(ui, &label, state.answer_open);
+    if control.clicked() {
+        state.answer_open = !state.answer_open;
+    }
+    if !state.answer_open {
+        return;
+    }
+    let popup = egui::Area::new(egui::Id::new("approvals-answer-popup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(control.rect.left_bottom() + vec2(0.0, 4.0))
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            popup_body(ui, |ui| {
+                if dropdown_item(ui, "any answer", state.approval_answers.is_empty()) {
+                    state.approval_answers.clear();
+                }
+                for answer in approvals::answers() {
+                    let picked = state.approval_answers.contains(answer);
+                    if dropdown_item(ui, answer, picked) && !state.approval_answers.remove(answer) {
+                        state.approval_answers.insert(answer.to_string());
+                    }
+                }
+            });
+        });
+    if dismissed(ui, &popup.response, &control) {
+        state.answer_open = false;
+    }
+}
+
+/// Narrows every list to one sandbox, dropping the open audit detail with it — the detail panel is not view-gated, so a row of the sandbox you just left would stay on screen.
+fn choose_sandbox(state: &mut DashboardState, id: Option<String>) {
+    state.selected_sandbox = id;
+    state.selected = None;
+    state.sandbox_open = false;
+}
+
+fn popup_body(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    Frame::new()
+        .fill(MODAL_FILL)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(6))
+        .show(ui, |ui| {
+            ui.set_width(SELECT_WIDTH + 8.0);
+            body(ui);
+        });
+}
+
+fn dismissed(ui: &egui::Ui, popup: &egui::Response, control: &egui::Response) -> bool {
+    let clicked_out = ui.input(|i| i.pointer.any_pressed())
+        && !popup.contains_pointer()
+        && !control.contains_pointer();
+    clicked_out || ui.input(|i| i.key_pressed(egui::Key::Escape))
+}
+
+fn remove_entry(state: &mut DashboardState, id: &str) {
+    let root = match crate::cache::root() {
+        Ok(root) => root,
+        Err(e) => return set_error(state, e),
+    };
+    let outcome = crate::approval_flow::answering::remove(
+        &root,
+        &crate::run_registry::known_ids(),
+        crate::run_registry::approvals,
+        id,
+    );
+    state.approval_notice = approvals::removal_reported(&outcome);
+    load_approvals(state);
 }
 
 fn answer_entry(state: &mut DashboardState, id: &str, answer: lns_ipc::ApprovalAnswer) {
@@ -659,10 +827,7 @@ fn kind_chooser(ui: &mut egui::Ui, state: &mut DashboardState) {
         .show(ui.ctx(), |ui| {
             kind_popup_body(ui, state);
         });
-    let clicked_out = ui.input(|i| i.pointer.any_pressed())
-        && !popup.response.contains_pointer()
-        && !control.contains_pointer();
-    if clicked_out || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if dismissed(ui, &popup.response, &control) {
         state.kind_open = false;
     }
 }
@@ -689,55 +854,70 @@ fn control_button(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response 
 }
 
 fn kind_popup_body(ui: &mut egui::Ui, state: &mut DashboardState) {
-    Frame::new()
-        .fill(MODAL_FILL)
-        .stroke(Stroke::new(1.0_f32, BORDER))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(6))
-        .show(ui, |ui| {
-            ui.set_width(SELECT_WIDTH + 8.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut state.kind_query)
-                    .hint_text("Filter…")
-                    .margin(Margin::symmetric(8, 6))
-                    .desired_width(f32::INFINITY),
-            )
-            .request_focus();
-            ui.add_space(4.0);
-            let q = state.kind_query.trim().to_lowercase();
-            egui::ScrollArea::vertical()
-                .max_height(300.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if (q.is_empty() || "all kinds".contains(&q))
-                        && dropdown_item(ui, "all kinds", state.kinds.is_empty())
-                    {
-                        state.kinds.clear();
+    popup_body(ui, |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.kind_query)
+                .hint_text("Filter…")
+                .margin(Margin::symmetric(8, 6))
+                .desired_width(f32::INFINITY),
+        )
+        .request_focus();
+        ui.add_space(4.0);
+        let q = state.kind_query.trim().to_lowercase();
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if (q.is_empty() || "all kinds".contains(&q))
+                    && dropdown_item(ui, "all kinds", state.kinds.is_empty())
+                {
+                    state.kinds.clear();
+                }
+                for k in KINDS {
+                    if !q.is_empty() && !k.contains(q.as_str()) {
+                        continue;
                     }
-                    for k in KINDS {
-                        if !q.is_empty() && !k.contains(q.as_str()) {
-                            continue;
-                        }
-                        if dropdown_item(ui, k, state.kinds.contains(k)) && !state.kinds.remove(k) {
-                            state.kinds.insert(k.to_string());
-                        }
+                    if dropdown_item(ui, k, state.kinds.contains(k)) && !state.kinds.remove(k) {
+                        state.kinds.insert(k.to_string());
                     }
-                });
-        });
+                }
+            });
+    });
+}
+
+/// One choice of a single-select chooser: a tick where a multi-select paints a box, so the two do not read alike.
+fn dropdown_pick(ui: &mut egui::Ui, label: &str, picked: bool) -> bool {
+    dropdown_row(
+        ui,
+        label,
+        if picked {
+            (icons::ICON_CHECK, CATEGORY)
+        } else {
+            (icons::ICON_CHECK, Color32::TRANSPARENT)
+        },
+    )
 }
 
 fn dropdown_item(ui: &mut egui::Ui, label: &str, checked: bool) -> bool {
+    dropdown_row(
+        ui,
+        label,
+        if checked {
+            (icons::ICON_CHECK_BOX, CATEGORY)
+        } else {
+            (icons::ICON_CHECK_BOX_OUTLINE_BLANK, TEXT_MUTED)
+        },
+    )
+}
+
+fn dropdown_row(ui: &mut egui::Ui, label: &str, mark: (MaterialIcon, Color32)) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(5), HOVER_FILL);
         }
-        let (icon, color) = if checked {
-            (icons::ICON_CHECK_BOX, CATEGORY)
-        } else {
-            (icons::ICON_CHECK_BOX_OUTLINE_BLANK, TEXT_MUTED)
-        };
+        let (icon, color) = mark;
         let cy = rect.center().y;
         ui.painter().text(
             egui::pos2(rect.left() + 10.0, cy),

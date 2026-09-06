@@ -22,6 +22,8 @@ pub enum ApprovalCommand {
     Ls(ApprovalLsArgs),
     #[command(about = "Answer one destination entry, or answer it again.")]
     Answer(ApprovalAnswerArgs),
+    #[command(about = "Remove one notice.")]
+    Rm(ApprovalRmArgs),
 }
 
 #[derive(clap::Args)]
@@ -40,9 +42,15 @@ pub struct ApprovalAnswerArgs {
 
     #[arg(
         value_enum,
-        help = "The verdict. A once verdict answers a request the guest still holds, which the approval window is for."
+        help = "The verdict. A once verdict answers a request the guest still holds, so only the card holding it offers one."
     )]
     pub answer: AnswerArg,
+}
+
+#[derive(clap::Args)]
+pub struct ApprovalRmArgs {
+    #[arg(help = "Entry id of a notice, as `lns approval ls` prints it.")]
+    pub id: String,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -91,6 +99,7 @@ pub async fn run(
     match cmd {
         ApprovalCommand::Ls(args) => ls(svc, args, writer).await,
         ApprovalCommand::Answer(args) => answer(svc, args, writer).await,
+        ApprovalCommand::Rm(args) => rm(svc, args, writer).await,
     }
 }
 
@@ -140,6 +149,25 @@ async fn answer(
         }
         Response::ApprovalUnknown { id } => bail!("no approval entry with id {id}"),
         Response::ApprovalNotWritten { id, reason } => bail!("{id} was not answered: {reason}"),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+async fn rm(
+    svc: &dyn ApprovalService,
+    args: &ApprovalRmArgs,
+    writer: &mut impl Write,
+) -> Result<i32> {
+    let req = Request::RemoveApproval {
+        id: args.id.clone(),
+    };
+    match send(svc, req).await? {
+        Response::ApprovalRemoved { id } => {
+            writeln!(writer, "Removed {id}")?;
+            Ok(0)
+        }
+        Response::ApprovalUnknown { id } => bail!("no approval entry with id {id}"),
+        Response::ApprovalKept { id, reason } => bail!("{id} was not removed: {reason}"),
         other => bail!("unexpected response from daemon: {other:?}"),
     }
 }

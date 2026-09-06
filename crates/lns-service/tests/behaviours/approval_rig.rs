@@ -118,6 +118,8 @@ pub struct ApprovalRig {
     pub entries_path: PathBuf,
     pub timeout: Duration,
     pub ledger: Arc<RigRecorder>,
+    /// What a removal the developer tried came back with.
+    pub removal: Option<lns_service::approval_flow::entries::RemoveOutcome>,
     _tempdir: TempDir,
 }
 
@@ -212,6 +214,7 @@ impl ApprovalRig {
             entries_path,
             timeout,
             ledger,
+            removal: None,
             _tempdir: dir,
         }
     }

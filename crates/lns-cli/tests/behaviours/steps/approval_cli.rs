@@ -23,6 +23,7 @@ struct FakeApprovalService {
     approvals: Vec<ApprovalInfo>,
     unknown: Vec<String>,
     not_written: Option<String>,
+    kept: Option<String>,
     unknown_sandbox: Option<String>,
     refuse_message: Option<String>,
     nonsense: bool,
@@ -35,6 +36,7 @@ impl FakeApprovalService {
             approvals: world.approval.approvals.clone(),
             unknown: world.approval.unknown.clone(),
             not_written: world.approval.not_written.clone(),
+            kept: world.approval.kept.clone(),
             unknown_sandbox: world.approval.unknown_sandbox.clone(),
             refuse_message: world.approval.refuse_message.clone(),
             nonsense: world.approval.nonsense,
@@ -58,6 +60,29 @@ impl FakeApprovalService {
                     answer: words_for(answer).to_string(),
                     ..held.clone()
                 },
+            },
+            None => Response::ApprovalUnknown { id: id.to_string() },
+        }
+    }
+
+    fn removed(&self, id: &str) -> Response {
+        if self.unknown.iter().any(|missing| missing == id) {
+            return Response::ApprovalUnknown { id: id.to_string() };
+        }
+        if let Some(reason) = &self.kept {
+            return Response::ApprovalKept {
+                id: id.to_string(),
+                reason: reason.clone(),
+            };
+        }
+        match self.approvals.iter().find(|held| held.id == id) {
+            Some(held) if held.kind == ApprovalEntryKind::Notice => {
+                Response::ApprovalRemoved { id: id.to_string() }
+            }
+            Some(_) => Response::ApprovalKept {
+                id: id.to_string(),
+                reason: "only a notice is removed; a destination entry is answered instead"
+                    .to_string(),
             },
             None => Response::ApprovalUnknown { id: id.to_string() },
         }
@@ -104,6 +129,7 @@ impl ApprovalService for FakeApprovalService {
         let resp = match &req {
             Request::ListApprovals { sandbox } => self.listed(sandbox.as_deref()),
             Request::AnswerApproval { id, answer } => self.answered(id, *answer),
+            Request::RemoveApproval { id } => self.removed(id),
             other => panic!("unexpected approval request {other:?}"),
         };
         Box::pin(async move { Some(resp) })
@@ -135,6 +161,30 @@ fn reports_always_allowed(
         .push(fixture(&id, &subject, &sandbox, "always allow"));
 }
 
+#[given(expr = "the service reports a notice {string} saying {string} raised by {string}")]
+fn reports_notice(world: &mut BehaviourWorld, id: String, message: String, sandbox: String) {
+    world.approval.approvals.push(ApprovalInfo {
+        id,
+        sandbox: Some(sandbox),
+        subject: message,
+        action: None,
+        kind: ApprovalEntryKind::Notice,
+        answer: "notice".to_string(),
+        answerable: false,
+    });
+}
+
+#[then(expr = "the service is asked to remove {string}")]
+fn asked_to_remove(world: &mut BehaviourWorld, id: String) {
+    let asked = world.approval.requests.lock().unwrap().clone();
+    assert!(
+        asked
+            .iter()
+            .any(|req| matches!(req, Request::RemoveApproval { id: got } if got == &id)),
+        "the service was asked {asked:?}"
+    );
+}
+
 #[given(expr = "the service reports no approval {string}")]
 fn reports_no_approval(world: &mut BehaviourWorld, id: String) {
     world.approval.unknown.push(id);
@@ -143,6 +193,11 @@ fn reports_no_approval(world: &mut BehaviourWorld, id: String) {
 #[given(expr = "the service will not write the rule, saying {string}")]
 fn service_will_not_write(world: &mut BehaviourWorld, reason: String) {
     world.approval.not_written = Some(reason);
+}
+
+#[given(expr = "the service keeps the notice, saying {string}")]
+fn service_keeps_the_notice(world: &mut BehaviourWorld, reason: String) {
+    world.approval.kept = Some(reason);
 }
 
 #[given(expr = "the service knows no sandbox {string}")]

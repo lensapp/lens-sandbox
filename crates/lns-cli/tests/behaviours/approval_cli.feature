@@ -101,3 +101,37 @@ Feature: reading and answering approvals from the CLI
     Then the exit code is 0
     And the output contains "api.linear.app"
     And the output does not contain "api.stripe.com"
+
+  Scenario: a notice is removed from the list
+    Given the service reports a notice "n1" saying "the rule could not be written" raised by "reviewer"
+    When the user runs approval command "rm n1"
+    Then the exit code is 0
+    And the service is asked to remove "n1"
+    And the output contains "Removed n1"
+
+  Scenario: a question is kept, and the refusal names the answer to use
+    Given the service reports an approval "a2" for "api.github.com" raised by "reviewer" answered always allow
+    When the user runs approval command "rm a2"
+    Then the exit code is 1
+    And the output contains "was not removed"
+    And the output contains "answered instead"
+
+  Scenario: removing an entry no run holds says so
+    Given the service reports no approval "gone"
+    When the user runs approval command "rm gone"
+    Then the exit code is 1
+    And the output contains "no approval entry with id gone"
+
+  Scenario: an unrecognised answer to a removal is reported too
+    Given the service reports a notice "n1" saying "the rule could not be written" raised by "reviewer"
+    And the service answers approvals with something else
+    When the user runs approval command "rm n1"
+    Then the exit code is 1
+    And the output contains "unexpected response"
+
+  Scenario: a removal that did not land is reported, not called a success
+    Given the service reports a notice "n1" saying "the rule could not be written" raised by "reviewer"
+    And the service keeps the notice, saying "this run's approvals could not be written"
+    When the user runs approval command "rm n1"
+    Then the exit code is 1
+    And the output contains "could not be written"

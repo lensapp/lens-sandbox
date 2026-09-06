@@ -183,6 +183,8 @@ pub struct ApprovalCliRig {
     pub unknown: Vec<String>,
     /// Why the service wrote no rule, when the scenario says it could not.
     pub not_written: Option<String>,
+    /// Why the service kept a notice it was asked to remove.
+    pub kept: Option<String>,
     /// A sandbox handle the service resolves to no run.
     pub unknown_sandbox: Option<String>,
     pub refuse_message: Option<String>,

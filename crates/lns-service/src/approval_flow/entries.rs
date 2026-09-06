@@ -33,7 +33,18 @@ pub enum EntryState {
 }
 
 impl EntryState {
-    pub fn label(&self) -> &'static str {
+    /// Every answer a row can carry, so a caller offering them cannot miss one or invent one.
+    pub const ALL: [Self; 7] = [
+        Self::Undecided,
+        Self::Withdrawn,
+        Self::AlwaysAllowed,
+        Self::AlwaysDenied,
+        Self::Granted,
+        Self::Declined,
+        Self::Noted,
+    ];
+
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Undecided => "undecided",
             Self::Withdrawn => "withdrawn",
@@ -86,6 +97,19 @@ impl Entry {
     pub fn is_answerable(&self) -> bool {
         matches!(self.kind, EntryKind::Destination { .. })
     }
+
+    /// Whether this entry can be cleared from the list. A notice asked nothing, so nothing is lost; a question is answered, never removed (cli-spec §3.7).
+    pub fn removal(&self) -> Result<(), Unremovable> {
+        match self.kind {
+            EntryKind::Notice { .. } => Ok(()),
+            EntryKind::Destination { .. } => Err(Unremovable::Destination),
+            EntryKind::Connector { .. } => Err(Unremovable::Connector),
+        }
+    }
+
+    pub fn is_removable(&self) -> bool {
+        self.removal().is_ok()
+    }
 }
 
 /// The same question asked twice is one entry, so identity is a collision-resistant digest of what was asked — never the guest's request id, which no restart preserves and which a workload could aim at an answer already given.
@@ -108,6 +132,39 @@ fn identity(sandbox: Option<&str>, kind: &EntryKind) -> String {
 pub trait EntryStore: Send + Sync {
     fn record(&self, entry: Entry);
     fn list(&self) -> Vec<Entry>;
+    /// Drops one entry. `Err` carries why the list on disk is unchanged, because a removal's only effect is that write.
+    fn forget(&self, id: &str) -> Result<(), String>;
+}
+
+/// A kind of entry a removal cannot take, so the refusal it gets is chosen from the two that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unremovable {
+    Destination,
+    Connector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    Removed,
+    UnknownId,
+    /// A question: answered, never removed.
+    NotRemovable(Unremovable),
+    /// The list is unchanged, for the reason named.
+    NotCleared(String),
+}
+
+/// The one place the removal rule lives, so a live run and a stopped one cannot disagree about it.
+pub fn remove_from(store: &dyn EntryStore, id: &str) -> RemoveOutcome {
+    let Some(entry) = store.list().into_iter().find(|held| held.id == id) else {
+        return RemoveOutcome::UnknownId;
+    };
+    if let Err(why) = entry.removal() {
+        return RemoveOutcome::NotRemovable(why);
+    }
+    match store.forget(id) {
+        Ok(()) => RemoveOutcome::Removed,
+        Err(why) => RemoveOutcome::NotCleared(why),
+    }
 }
 
 /// The store a session runs with when nothing keeps its entries — a host with no run directory, and every test that does not ask about them.
@@ -117,6 +174,9 @@ impl EntryStore for NoEntryStore {
     fn record(&self, _: Entry) {}
     fn list(&self) -> Vec<Entry> {
         Vec::new()
+    }
+    fn forget(&self, _: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -187,10 +247,16 @@ impl FileEntryStore {
     }
 
     /// The open window reads this file, so a card recorded here must reach its list without a refresh.
-    fn write_all(&self, entries: &[Entry]) {
+    fn write_all(&self, entries: &[Entry]) -> io::Result<()> {
         match self.render_and_write(entries) {
-            Ok(()) => (self.wake)(),
-            Err(e) => crate::log::warn!("could not record the approval at {:?}: {e}", self.path),
+            Ok(()) => {
+                (self.wake)();
+                Ok(())
+            }
+            Err(e) => {
+                crate::log::warn!("could not record the approval at {:?}: {e}", self.path);
+                Err(e)
+            }
         }
     }
 
@@ -210,7 +276,7 @@ impl EntryStore for FileEntryStore {
             Some(held) => *held = entry,
             None => entries.push(entry),
         }
-        self.write_all(&entries);
+        let _ = self.write_all(&entries);
     }
 
     fn list(&self) -> Vec<Entry> {
@@ -218,6 +284,18 @@ impl EntryStore for FileEntryStore {
             Held::Read(entries) => entries,
             Held::Unreadable => Vec::new(),
         }
+    }
+
+    fn forget(&self, id: &str) -> Result<(), String> {
+        let _guard = self.write_lock.lock().expect("approvals mutex poisoned");
+        let Held::Read(mut entries) = self.read_all() else {
+            return Err(
+                "this run's approvals could not be read, so nothing was removed".to_string(),
+            );
+        };
+        entries.retain(|held| held.id != id);
+        self.write_all(&entries)
+            .map_err(|e| format!("this run's approvals could not be written: {e}"))
     }
 }
 
@@ -329,6 +407,145 @@ pub(crate) mod tests {
             1,
             "a write that failed put nothing in the file, so there is nothing new to show"
         );
+    }
+
+    fn notice(message: &str) -> EntryKind {
+        EntryKind::Notice {
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_notice_is_cleared_from_the_list_and_the_rest_stays() {
+        let (store, _fs) = fixture();
+        store.record(Entry::new(
+            Some("reviewer".into()),
+            notice("the rule could not be written"),
+            EntryState::Noted,
+        ));
+        let kept = Entry::new(
+            Some("reviewer".into()),
+            destination("api.linear.app"),
+            EntryState::Undecided,
+        );
+        store.record(kept.clone());
+        let clearing = Entry::new(
+            Some("reviewer".into()),
+            notice("the rule could not be written"),
+            EntryState::Noted,
+        );
+
+        assert_eq!(
+            remove_from(&store, &clearing.id),
+            RemoveOutcome::Removed,
+            "a notice asked nothing, so clearing it loses nothing"
+        );
+        assert_eq!(
+            store
+                .list()
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec![kept.id],
+        );
+    }
+
+    #[test]
+    fn a_question_is_kept_and_the_list_is_untouched() {
+        // Removing an answered question would leave the file as the only way to take its rule back (cli-spec §3.7).
+        let (store, _fs) = fixture();
+        let asked = Entry::new(
+            Some("reviewer".into()),
+            destination("api.linear.app"),
+            EntryState::AlwaysAllowed,
+        );
+        store.record(asked.clone());
+
+        assert_eq!(
+            remove_from(&store, &asked.id),
+            RemoveOutcome::NotRemovable(Unremovable::Destination)
+        );
+        assert_eq!(store.list(), vec![asked]);
+    }
+
+    #[test]
+    fn clearing_an_id_the_list_does_not_hold_says_so() {
+        let (store, _fs) = fixture();
+        assert_eq!(remove_from(&store, "never-was"), RemoveOutcome::UnknownId);
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_read_is_not_written_over_by_a_removal() {
+        // The same rule the recording path follows: a file we cannot see holds entries we must not discard.
+        let (store, fs) = fixture();
+        let cleared = Entry::new(
+            Some("reviewer".into()),
+            notice("the rule could not be written"),
+            EntryState::Noted,
+        );
+        store.record(cleared.clone());
+        let written = fs.contents(&store.path);
+        fs.break_reads();
+
+        let refused = store.forget(&cleared.id);
+
+        fs.allow_reads();
+        assert!(
+            refused.is_err_and(|why| why.contains("could not be read")),
+            "a removal that did not land must not read as one that did"
+        );
+        assert_eq!(
+            fs.contents(&store.path),
+            written,
+            "the file must be exactly as it was"
+        );
+    }
+
+    #[test]
+    fn a_removal_that_cannot_be_written_is_not_reported_as_removed() {
+        // The write is a removal's only effect, so answering `Removed` after it failed tells the developer the notice is gone while `ls` still lists it.
+        let (store, fs) = fixture();
+        let cleared = Entry::new(
+            Some("reviewer".into()),
+            notice("the rule could not be written"),
+            EntryState::Noted,
+        );
+        store.record(cleared.clone());
+        fs.break_writes();
+
+        let outcome = remove_from(&store, &cleared.id);
+
+        assert!(
+            matches!(outcome, RemoveOutcome::NotCleared(ref why) if why.contains("could not be written")),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            store.list(),
+            vec![cleared],
+            "the notice is still there, so the answer must say so"
+        );
+    }
+
+    #[test]
+    fn a_removal_wakes_a_window_that_is_showing_the_list() {
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = woken.clone();
+        let fs = Arc::new(FakeFs::default());
+        let store = FileEntryStore::with_fs(PathBuf::from("/run/approvals.json"), fs.clone())
+            .waking(Arc::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }));
+        let cleared = Entry::new(
+            Some("reviewer".into()),
+            notice("the rule could not be written"),
+            EntryState::Noted,
+        );
+        store.record(cleared.clone());
+        let after_recording = woken.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(store.forget(&cleared.id).is_ok());
+
+        assert!(woken.load(std::sync::atomic::Ordering::Relaxed) > after_recording);
     }
 
     #[test]
@@ -444,6 +661,10 @@ pub(crate) mod tests {
     fn a_run_with_no_approvals_file_yet_lists_nothing() {
         let (store, _fs) = fixture();
         assert!(store.list().is_empty());
+        assert!(
+            store.forget("whatever").is_ok(),
+            "keeping nothing is not a failure to remove"
+        );
     }
 
     #[test]
@@ -541,6 +762,10 @@ pub(crate) mod tests {
             destination("api.linear.app"),
             EntryState::Undecided,
         ));
+        assert!(
+            store.forget("whatever").is_ok(),
+            "keeping nothing is not a failure to remove"
+        );
         assert!(store.list().is_empty());
     }
 

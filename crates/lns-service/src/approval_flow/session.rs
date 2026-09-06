@@ -730,6 +730,10 @@ impl ApprovalSession {
         }
     }
 
+    pub fn remove_entry(&self, id: &str) -> crate::approval_flow::entries::RemoveOutcome {
+        crate::approval_flow::entries::remove_from(self.entries(), id)
+    }
+
     /// Answers an entry away from the card that raised it, when the request it held is long gone.
     pub fn answer_entry(&self, id: &str, answer: Answer) -> AnswerOutcome {
         let Some(entry) = self.entries().list().into_iter().find(|held| held.id == id) else {

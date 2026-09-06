@@ -21,9 +21,10 @@ lns service stop     # ask it to shut down
 ```
 
 Its tray menu opens two views and quits the service. The **Audit** view shows the
-timeline of what the runs did. The **Approvals** view shows what they were asked,
-and answers an entry the way [`lns approval`](cli-reference.md#lns-approval)
-does. **Quit** stops the service.
+timeline of what the runs did. The **Approvals** view shows what they were asked. It
+answers an entry, and clears a notice, the way
+[`lns approval`](cli-reference.md#lns-approval) does. Choose a sandbox or an
+answer to narrow the list. **Quit** stops the service.
 
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.

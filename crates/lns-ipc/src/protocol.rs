@@ -96,6 +96,10 @@ pub enum Request {
         id: String,
         answer: ApprovalAnswer,
     },
+    /// Clears one notice from a run's list. Only a notice: a question is answered instead.
+    RemoveApproval {
+        id: String,
+    },
     PullImage {
         image: String,
         expected_digest: String,
@@ -275,6 +279,14 @@ pub enum Response {
     },
     /// The answer decided nothing, for the reason named: a rule the gate reaches first, or an entry with no rule of its own.
     ApprovalNotWritten {
+        id: String,
+        reason: String,
+    },
+    ApprovalRemoved {
+        id: String,
+    },
+    /// The entry stays, for the reason named: a question is answered, never removed.
+    ApprovalKept {
         id: String,
         reason: String,
     },
