@@ -513,6 +513,7 @@ What every run has been asked, and how you answered it — or scoped to one run.
 ```bash
 lns approval ls [SANDBOX] [--format <table|json>]
 lns approval answer <ID> <always-allow|always-deny|ask-again>
+lns approval rm <ID>
 ```
 
 `SANDBOX` is a `RUN`, and scopes the list to it. `ID` names one entry, as `ls`
@@ -536,6 +537,7 @@ carries no verdict and nothing answers it.
 |---|---|
 | `ls` | Lists the run's entries: the sandbox, what was asked, and the answer it has — `undecided`, `withdrawn`, `always allow`, or `always deny` for a destination; `granted` or `declined` for a connector; `notice` for a line that asked nothing. A run nothing has asked about prints that, and exits `0`. |
 | `answer` | Answers one destination entry, or answers it again. The newest answer replaces the one before it. |
+| `rm` | Removes one notice. A destination or a connector entry is not removable. |
 
 **`answer` decides egress, and nothing else.** Only a destination entry takes an
 answer. A connector entry is listed, as granted or declined, and is not
@@ -571,7 +573,21 @@ nothing decided it. The answer decides what happens next time.
 
 An entry of a **stopped** sandbox is answerable, and edits that run's
 `decisions.yaml` without starting it. Entries go when the run goes, with `lns rm`
-and `lns prune`.
+and `lns sandbox prune`.
+
+**`rm` removes a notice, and only a notice.** A notice asked nothing. Clearing it
+loses nothing, and a run that could not write a rule says so once per reason
+rather than once per attempt.
+
+A destination or a connector entry is kept. The entry is the record of what the
+run was asked, and on a headless service this list is the only place that record
+is read. An answered destination entry is also the only handle `ask-again` has:
+the rule itself says `approved during a run`, so removing the entry would not
+make the rule unattributable, but it would leave the file as the only way to take
+that rule back. So `rm` on either is a refusal: it says why that entry is not
+removed, and exits `1`.
+
+A removed notice comes back if the run meets the same thing again.
 
 A request an existing rule decides raises no card, so it leaves no entry. That
 includes everything a closed directory refuses ([policy.md](policy.md)). You
@@ -751,7 +767,8 @@ Two surfaces read the entries back. The service's tray menu opens an
 ([§3.7](#37-lns-approval)) lists the same entries at your terminal, and is the
 only surface left when the service runs headless ([service.md](service.md)). Both give an
 **egress** answer late, or change one. Both offer the same three answers, and
-neither offers a once verdict. A connector question stays `lns connector`'s: both
+neither offers a once verdict. Both remove a notice, and neither removes a
+destination or a connector entry. A connector question stays `lns connector`'s: both
 surfaces list the connector questions you answered on a card, and neither changes
 them. A grant you gave early at your terminal raised no card, so neither surface
 lists it — `lns audit` records it.
