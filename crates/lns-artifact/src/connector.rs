@@ -190,6 +190,14 @@ impl Auth {
             .map(String::as_str)
     }
 
+    /// The file a `code` auth connects with, as the document spells it. Read without decoding the block, because a caller that only needs the path should not need the rest to read.
+    pub fn component(&self) -> Option<&str> {
+        if self.kind != CODE {
+            return None;
+        }
+        self.extra.get("component")?.as_str()
+    }
+
     /// What a connect calls the value it asks for: the author's own word for it, else the kind.
     pub fn label(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.kind)
@@ -527,6 +535,11 @@ fn validate_code_auth(code: &CodeAuth) -> Result<()> {
         validate_component_host(host)?;
     }
     let limits = code.limits();
+    if limits.call_seconds == 0 || limits.session_seconds == 0 {
+        bail!(
+            "a {CODE:?} auth gives its component no time at all: a limit of zero is a method that can never connect, which the document should say by not declaring the method"
+        );
+    }
     if limits.call_seconds > MAX_CALL_SECONDS {
         bail!(
             "a {CODE:?} auth gives one call {} seconds, more than the {MAX_CALL_SECONDS}-second ceiling: a person is waiting on a connect, and lns stops a component that outstays it",
@@ -627,6 +640,15 @@ pub fn path_filesets(connector: &ConnectorSpec) -> Vec<(&str, &str)> {
                 .iter()
                 .filter_map(move |fileset| Some((method.name.as_str(), fileset.path.as_deref()?)))
         })
+        .collect()
+}
+
+/// The component each `code` method connects with, in declaration order — the order an artifact packs them and an install unpacks them (§7).
+pub fn components(connector: &ConnectorSpec) -> Vec<(&str, &str)> {
+    connector
+        .methods
+        .iter()
+        .filter_map(|method| Some((method.name.as_str(), method.auth.as_ref()?.component()?)))
         .collect()
 }
 
@@ -1033,6 +1055,20 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("900"), "{err:#}");
+    }
+
+    #[test]
+    fn a_deadline_of_zero_is_refused_rather_than_left_for_the_runtime_to_round_up() {
+        for limits in [r#"{"callSeconds":0}"#, r#"{"sessionSeconds":0}"#] {
+            let err = parse(&code_method(
+                &format!(
+                    r#"{{"kind":"code","component":"./sign-in.wasm","outputs":["token"],"limits":{limits}}}"#
+                ),
+                &credential_drawing_on(Some("token")),
+            ))
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("no time at all"), "{err:#}");
+        }
     }
 
     #[test]

@@ -13,13 +13,45 @@ pub async fn install<S: ConnectorSource + ?Sized>(
     source: &S,
     operand: &str,
 ) -> Result<ConnectorView> {
-    let fetched = source.fetch(&Source::of(operand)?).await?;
-    let definition = store.install(&fetched.digest, &fetched.document, &fetched.filesets)?;
+    let named = Source::of(operand)?;
+    let fetched = source.fetch(&named).await?;
+    refuse_host_execution_from_a_registry(&named, &fetched.document)?;
+    let definition = store.install(
+        &fetched.digest,
+        &fetched.document,
+        &fetched.filesets,
+        &fetched.components,
+    )?;
     Ok(view_of(
         &definition,
         &fetched.digest,
         &store.connections_of(&definition.name)?,
     ))
+}
+
+/// A `code` method may run programs on this machine, and lns can bound none of it, so provenance is the bound: a pulled document declaring it is refused and a local path may (§3.2.6).
+fn refuse_host_execution_from_a_registry(named: &Source, document: &[u8]) -> Result<()> {
+    let Source::Reference(reference) = named else {
+        return Ok(());
+    };
+    let Ok(definition) = lns_artifact::connector::parse(document) else {
+        return Ok(());
+    };
+    for method in &definition.spec.methods {
+        let declares_exec = method
+            .auth
+            .as_ref()
+            .and_then(lns_artifact::connector::Auth::code)
+            .and_then(Result::ok)
+            .is_some_and(|code| code.exec);
+        if declares_exec {
+            anyhow::bail!(
+                "method {} of {reference} runs programs on this machine with your own access, and lns can bound none of what those reach. A digest cannot stand in for that, so it may only be installed from a local path you can read first.",
+                method.name
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn uninstall(store: &ConnectorStore<'_>, name: &str) -> Result<Option<usize>> {
@@ -610,6 +642,7 @@ mod tests {
     struct FakeSet {
         entries: Mutex<Vec<Installed>>,
         layers: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
+        components: Mutex<Vec<Vec<u8>>>,
     }
 
     impl InstalledSet for FakeSet {
@@ -622,7 +655,9 @@ mod tests {
             digest: &str,
             document: &[u8],
             filesets: &[Vec<u8>],
+            components: &[Vec<u8>],
         ) -> std::io::Result<()> {
+            *self.components.lock().unwrap() = components.to_vec();
             let mut held = self.entries.lock().unwrap();
             held.retain(|e| e.name != name);
             held.push(Installed {
@@ -647,6 +682,15 @@ mod tests {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "no such fileset layer")
                 })
         }
+        fn component(&self, _name: &str, index: usize) -> std::io::Result<Vec<u8>> {
+            self.components
+                .lock()
+                .unwrap()
+                .get(index)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("no such component"))
+        }
+
         fn remove(&self, name: &str) -> std::io::Result<bool> {
             let mut held = self.entries.lock().unwrap();
             let before = held.len();
@@ -660,6 +704,7 @@ mod tests {
         digest: String,
         document: Vec<u8>,
         filesets: Vec<Vec<u8>>,
+        components: Vec<Vec<u8>>,
         asked: Mutex<Vec<Source>>,
     }
 
@@ -670,6 +715,7 @@ mod tests {
                 digest: self.digest.clone(),
                 document: self.document.clone(),
                 filesets: self.filesets.clone(),
+                components: self.components.clone(),
             })
         }
     }
@@ -715,6 +761,7 @@ mod tests {
             digest: "sha256:abc".to_string(),
             document: document(name, host),
             filesets: Vec::new(),
+            components: Vec::new(),
             asked: Mutex::new(Vec::new()),
         }
     }
@@ -742,6 +789,7 @@ mod tests {
             digest: "sha256:abc".to_string(),
             document: doc,
             filesets: vec![layer.clone()],
+            components: Vec::new(),
             asked: Mutex::new(Vec::new()),
         };
 
@@ -758,6 +806,131 @@ mod tests {
             rig.store().fileset_layer("some-provider", 1).is_err(),
             "an index nothing packed is not a layer"
         );
+    }
+
+    #[tokio::test]
+    async fn installing_keeps_the_component_the_source_brought() {
+        // A grant binds to a digest over these bytes, so the bytes have to be here when the method is connected (§3.2.6).
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "sign-in",
+                    "auth": {
+                        "kind": "code",
+                        "component": "./sign-in.wasm",
+                        "outputs": ["access_token"],
+                    },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                        "field": "access_token",
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let src = FakeSource {
+            digest: "sha256:abc".to_string(),
+            document: doc,
+            filesets: Vec::new(),
+            components: vec![b"the mechanism".to_vec()],
+            asked: Mutex::new(Vec::new()),
+        };
+
+        install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .expect("install accepts a connector carrying a component");
+
+        assert_eq!(
+            rig.set.component("some-provider", 0).unwrap(),
+            b"the mechanism",
+            "install passes the source's components to the store, or the method has nothing to connect with"
+        );
+    }
+
+    fn declaring_host_execution() -> Vec<u8> {
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "sign-in",
+                    "auth": {
+                        "kind": "code",
+                        "component": "./sign-in.wasm",
+                        "outputs": ["access_token"],
+                        "exec": true,
+                    },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                        "field": "access_token",
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn bringing(document: Vec<u8>) -> FakeSource {
+        FakeSource {
+            digest: "sha256:abc".to_string(),
+            document,
+            filesets: Vec::new(),
+            components: vec![b"the mechanism".to_vec()],
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pulled_connector_that_runs_programs_on_this_machine_is_refused() {
+        // lns bounds nothing a host program reaches, so provenance is the bound a digest cannot be (§3.2.6).
+        let rig = Rig::new();
+        let src = bringing(declaring_host_execution());
+
+        let err = install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .unwrap_err();
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("sign-in"), "{rendered}");
+        assert!(rendered.contains("local path"), "{rendered}");
+        assert!(
+            rig.store().installed().unwrap().is_empty(),
+            "nothing is kept from a refused install"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pulled_document_that_will_not_parse_is_refused_where_it_is_read_rather_than_here() {
+        // The exec check reads a parsed document; one that will not parse has no declaration to read, and install refuses it for that instead.
+        let rig = Rig::new();
+        let src = bringing(b"not a document".to_vec());
+
+        install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .expect_err("bytes that are not a connector are not installed");
+
+        assert!(rig.store().installed().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_same_connector_installs_from_a_local_path() {
+        let rig = Rig::new();
+        let src = bringing(declaring_host_execution());
+
+        install(&rig.store(), &src, "/work/some-provider")
+            .await
+            .expect("a path is one the user can read before they install it");
     }
 
     #[tokio::test]
@@ -927,7 +1100,7 @@ mod tests {
         // `install` refuses while one of these is present, so `list` is how the user finds out which to uninstall.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document", &[])
+            .put("mystery", "sha256:xyz", b"not a document", &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed.len(), 1);
@@ -1152,7 +1325,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let err = grant(
             &rig.store(),
@@ -1206,6 +1379,7 @@ mod tests {
                 "sha256:abc",
                 &two_token_methods("some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
@@ -1236,6 +1410,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &two_token_methods("some-provider"),
+                &[],
                 &[],
             )
             .unwrap();
@@ -1299,7 +1474,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let listed = list(&rig.store()).unwrap();
@@ -1336,7 +1511,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(
@@ -1370,7 +1545,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
@@ -1382,7 +1557,7 @@ mod tests {
 
     fn installed_as(rig: &Rig, name: &str, host: &str, digest: &str) {
         rig.set
-            .put(name, digest, &document(name, host), &[])
+            .put(name, digest, &document(name, host), &[], &[])
             .unwrap();
     }
 
@@ -1491,7 +1666,13 @@ mod tests {
         // A run must launch beside a connector this build cannot read; holding nothing is the safe direction, since a destination is asked about only when an offer could follow.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
+            .put(
+                "broken",
+                "sha256:abc",
+                b"{\"kind\":\"connector\"}",
+                &[],
+                &[],
+            )
             .unwrap();
         installed_as(
             &rig,
@@ -1541,7 +1722,13 @@ mod tests {
         // Deciding before parsing keeps the warning true: a declined connector is not one this run failed to read.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
+            .put(
+                "broken",
+                "sha256:abc",
+                b"{\"kind\":\"connector\"}",
+                &[],
+                &[],
+            )
             .unwrap();
         rig.store()
             .decide(&a_run(), "broken", RunDecision::Declined)
@@ -1575,7 +1762,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let (_, payload) = grant_disclosed(
@@ -1634,6 +1821,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1671,6 +1859,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1694,6 +1883,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1709,6 +1899,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
+                &[],
                 &[],
             )
             .unwrap();
@@ -1744,10 +1935,16 @@ mod tests {
         // Two entries claiming one path reach the guest as two creates. The second fails, the batch rolls back, and every granted file for the run goes with it.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/.shared"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[], &[])
             .unwrap();
         grant_disclosed(
             &rig.store(),
@@ -1786,10 +1983,16 @@ mod tests {
         // `lns connector grant` reaches `grant` without passing the card, so a check only the card ran would let the CLI record what the card refuses.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/.shared"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[], &[])
             .unwrap();
         grant(&rig.store(), "alpha", &a_run(), "open", None, None).expect("first");
 
@@ -1811,10 +2014,10 @@ mod tests {
         // A grant is per connector, so one unreadable connector must not take the rest of the run's grants with it — the run would start with no egress it was promised and no card to ask again.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", b"not a document", &[])
+            .put("alpha", "sha256:a", b"not a document", &[], &[])
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.beta"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.beta"), &[], &[])
             .unwrap();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.store()
@@ -1853,10 +2056,22 @@ mod tests {
         // `.` is a legal guestPath segment, so a second connector could name a file the first already writes and be refused by neither guard.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/shared/x"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/shared/x"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/shared/./x"), &[])
+            .put(
+                "beta",
+                "sha256:b",
+                &writing("beta", "~/shared/./x"),
+                &[],
+                &[],
+            )
             .unwrap();
         grant(&rig.store(), "alpha", &a_run(), "open", None, None).expect("first");
 
@@ -1879,7 +2094,7 @@ mod tests {
             ("gamma", "sha256:g", vec!["~/.own"]),
         ] {
             rig.set
-                .put(name, digest, &writing_all(name, &paths), &[])
+                .put(name, digest, &writing_all(name, &paths), &[], &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1917,7 +2132,7 @@ mod tests {
         let rig = Rig::new();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.set
-                .put(name, digest, &writing(name, "~/.shared"), &[])
+                .put(name, digest, &writing(name, "~/.shared"), &[], &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1971,7 +2186,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let offered = offerable(&rig.store(), &a_run()).expect("offerable");
@@ -2048,7 +2263,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         // Keyed by what the method's own view asks for, because a test that guessed the key would pass while the CLI and the card asked under another one.
         let asked = list(&rig.store()).expect("list")[0].methods[0].asks.clone();

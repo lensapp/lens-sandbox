@@ -1,0 +1,122 @@
+package lns:connector@0.1.0;
+
+interface types {
+    /// One value a component asks the user for, in the order it asked.
+    record field {
+        name: string,
+        label: string,
+        secret: bool,
+    }
+
+    record answer {
+        name: string,
+        value: string,
+    }
+
+    /// What a finished connect produced. `expires-at-millis` is what the
+    /// component believes; lns owns the schedule and may not shorten it.
+    record outcome {
+        values: list<answer>,
+        authority: list<string>,
+        expires-at-millis: option<u64>,
+    }
+
+    record ask {
+        /// The connector author's own words, which lns presents as theirs. May
+        /// be the whole of a round: an ask naming no fields shows this and waits.
+        message: string,
+        fields: list<field>,
+        /// Opaque to lns, handed back verbatim to `resume`. Held in memory only.
+        state: list<u8>,
+    }
+
+    variant step {
+        ask(ask),
+        done(outcome),
+        failed(string),
+    }
+
+    /// A call the host refused is a `refused`, so a component can tell a bound
+    /// it crossed from a network that was down.
+    variant call-error {
+        refused(string),
+        failed(string),
+    }
+}
+
+interface http {
+    use types.{call-error};
+
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    fetch: func(req: request) -> result<response, call-error>;
+}
+
+interface exec {
+    use types.{call-error};
+
+    record output {
+        code: s32,
+        stdout: list<u8>,
+        stderr: list<u8>,
+    }
+
+    /// Runs a program on the machine with the user's own access. Available only
+    /// to a method that declared `exec: true`, and only to a locally installed
+    /// connector.
+    run: func(argv: list<string>) -> result<output, call-error>;
+}
+
+interface entropy {
+    bytes: func(count: u32) -> list<u8>;
+}
+
+interface callback {
+    use types.{call-error};
+
+    record binding {
+        url: string,
+        handle: u32,
+    }
+
+    /// A loopback listener for a redirect leg. The host owns the port.
+    bind: func() -> result<binding, call-error>;
+
+    /// The query string of the first request the binding received.
+    wait: func(handle: u32) -> result<string, call-error>;
+}
+
+/// What a mechanism implements. An interface rather than four bare functions, so
+/// a component's export symbols cannot collide with the names its own libc uses.
+interface adapter {
+    use types.{step, answer, outcome};
+
+    connect: func(now-millis: u64) -> step;
+
+    /// The rest of one `connect`, once the user has answered what it asked for.
+    /// Not a fourth moment: a connect the user is still answering.
+    resume: func(state: list<u8>, answers: list<answer>, now-millis: u64) -> step;
+
+    refresh: func(values: list<answer>, now-millis: u64) -> result<outcome, string>;
+    revoke: func(values: list<answer>, now-millis: u64) -> result<_, string>;
+}
+
+world mechanism {
+    import http;
+    import exec;
+    import entropy;
+    import callback;
+
+    export adapter;
+}

@@ -152,7 +152,7 @@ mod tests {
             })
             .collect();
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"seed","spec":{"filesets":[{"path":"./seed","guestPath":"/seed"}]}}"#;
-        lns_artifact::build::build_artifact(doc, &[files], None)
+        lns_artifact::build::build_artifact(doc, &[files], None, &[])
             .expect("a packable directory")
             .fileset_layers()
             .next()

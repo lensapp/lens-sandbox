@@ -401,10 +401,17 @@ pub(crate) fn fileset_runtime_specs_with_budget<R: Read>(
 
 /// The packed fileset layers a pulled manifest carries, in manifest order — the only layer media type an artifact's fileset travels in, so anything else is not one and is left out rather than guessed at.
 pub(crate) fn packed_layers(manifest: &OciImageManifest) -> Vec<crate::artifact::PackedLayer> {
+    layers_of(manifest, lns_artifact::build::FILESET_LAYER_MEDIA_TYPE)
+}
+
+pub(crate) fn layers_of(
+    manifest: &OciImageManifest,
+    media_type: &str,
+) -> Vec<crate::artifact::PackedLayer> {
     manifest
         .layers
         .iter()
-        .filter(|layer| layer.media_type == lns_artifact::build::FILESET_LAYER_MEDIA_TYPE)
+        .filter(|layer| layer.media_type == media_type)
         .filter_map(|layer| {
             Some(crate::artifact::PackedLayer {
                 digest: layer.digest.clone(),
