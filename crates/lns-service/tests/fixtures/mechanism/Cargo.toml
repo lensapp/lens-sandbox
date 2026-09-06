@@ -1,0 +1,38 @@
+# Not a workspace member: it builds for wasm32-wasip2, and the built components
+# are committed beside it so the test suite needs no wasm toolchain.
+# Rebuild with ./build.sh after changing this crate or crates/lns-service/wit.
+[package]
+name = "mechanism-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[features]
+fetching = []
+running = []
+asking = []
+hanging = []
+expiring = []
+trapping = []
+binding = []
+prying = []
+hoarding = []
+showing = []
+shouting = []
+forging = []
+labelling = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

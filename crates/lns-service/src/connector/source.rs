@@ -14,6 +14,8 @@ pub struct FetchedConnector {
     pub document: Vec<u8>,
     /// Every packed fileset the same artifact carried, in the order the document declares its `path` entries.
     pub filesets: Vec<Vec<u8>>,
+    /// The component each `code` method connects with, in declaration order (§7.1).
+    pub components: Vec<Vec<u8>>,
 }
 
 /// Which of the two forms `<REF|PATH>` named. `Local` is the connector's document, absolute by the time it reaches the service, because the service's working directory is not the user's.
@@ -77,17 +79,36 @@ pub fn read_local<F: lns_artifact::walk::SnapshotFs + ?Sized>(
                 .with_context(|| format!("method {method} fileset {path}"))?;
         filesets.push(entries);
     }
+    let components = components_beside(fs, dir, &connector.spec)?;
     let readme = readme_beside(fs, dir)?;
-    let built = lns_artifact::build::build_artifact(&document, &filesets, readme.as_deref())
-        .context("building the connector artifact")?;
+    let built =
+        lns_artifact::build::build_artifact(&document, &filesets, readme.as_deref(), &components)
+            .context("building the connector artifact")?;
     Ok(FetchedConnector {
         filesets: built
             .fileset_layers()
             .map(|layer| layer.data.clone())
             .collect(),
+        components,
         digest: built.manifest_digest,
         document,
     })
+}
+
+/// A `code` method's component is packed beside its document, so a push and a local install produce one digest over the same bytes (§7.1). Absent is a refusal: the method names an implementation this connector does not carry.
+fn components_beside<F: lns_artifact::walk::SnapshotFs + ?Sized>(
+    fs: &F,
+    dir: &Path,
+    connector: &lns_artifact::connector::ConnectorSpec,
+) -> Result<Vec<Vec<u8>>> {
+    lns_artifact::connector::components(connector)
+        .into_iter()
+        .map(|(method, path)| {
+            fs.read_limited(&dir.join(path), lns_artifact::build::MAX_COMPONENT_BYTES)
+                .map_err(anyhow::Error::new)
+                .with_context(|| format!("method {method} connects with {path}"))
+        })
+        .collect()
 }
 
 /// A push publishes the `README.md` beside a document as a layer of the same artifact, so the digest depends on it. Absent is `None`; anything else is the caller's problem to see.
@@ -154,6 +175,33 @@ mod tests {
         move |_| Ok(doc)
     }
 
+    fn code_document() -> Vec<u8> {
+        br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]}}"#.to_vec()
+    }
+
+    #[test]
+    fn a_local_install_captures_the_component_beside_the_document() {
+        // The bytes are what the digest covers, so editing the file afterwards changes nothing about what runs (§3.2.6).
+        let fs = MapFs::with(&[("/work/sign-in.wasm", b"the mechanism")]);
+
+        let fetched = read_local(&fs, reading(code_document()), Path::new("/work/lns.yaml"))
+            .expect("a connector carrying a component");
+
+        assert_eq!(fetched.components, [b"the mechanism".to_vec()]);
+    }
+
+    #[test]
+    fn a_component_the_connector_does_not_carry_refuses_the_install_naming_its_method() {
+        let fs = MapFs::default();
+
+        let err = read_local(&fs, reading(code_document()), Path::new("/work/lns.yaml"))
+            .expect_err("the method names an implementation this connector does not carry");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("sign-in"), "{rendered}");
+        assert!(rendered.contains("./sign-in.wasm"), "{rendered}");
+    }
+
     #[test]
     fn a_reference_and_an_absolute_path_are_told_apart() {
         assert_eq!(
@@ -217,7 +265,7 @@ mod tests {
             Path::new("/work/lns.yaml"),
         )
         .expect("a connector with no path fileset reads");
-        let published = lns_artifact::build::build_artifact(&doc, &[], None).expect("build");
+        let published = lns_artifact::build::build_artifact(&doc, &[], None, &[]).expect("build");
         assert_eq!(fetched.digest, published.manifest_digest);
         assert_eq!(fetched.document, doc);
     }
@@ -286,7 +334,7 @@ mod tests {
             lns_artifact::spec::Kind::Connector,
         )
         .expect("the directory a push would pack");
-        let published = lns_artifact::build::build_artifact(&doc, &[seeded], Some(readme))
+        let published = lns_artifact::build::build_artifact(&doc, &[seeded], Some(readme), &[])
             .expect("what a push of that directory publishes");
         assert_eq!(fetched.digest, published.manifest_digest);
     }
@@ -299,7 +347,7 @@ mod tests {
         let fs = MapFs::with(&[("/work/README.md", readme)]);
         let fetched =
             read_local(&fs, reading(doc.clone()), Path::new("/work/lns.yaml")).expect("reads");
-        let published = lns_artifact::build::build_artifact(&doc, &[], Some(readme))
+        let published = lns_artifact::build::build_artifact(&doc, &[], Some(readme), &[])
             .expect("what a push of this directory publishes");
         assert_eq!(fetched.digest, published.manifest_digest);
     }
@@ -313,7 +361,7 @@ mod tests {
             Path::new("/work/lns.yaml"),
         )
         .expect("reads");
-        let published = lns_artifact::build::build_artifact(&doc, &[], None).expect("build");
+        let published = lns_artifact::build::build_artifact(&doc, &[], None, &[]).expect("build");
         assert_eq!(fetched.digest, published.manifest_digest);
     }
 

@@ -1,0 +1,227 @@
+//! One mechanism per feature, each doing the least that proves one bound.
+//!
+//! These stand in for a real connector's implementation. lns cannot read what a
+//! component does, so what the tests need is a component that does one legible
+//! thing and reports which way the host answered it.
+
+wit_bindgen::generate!({ world: "mechanism", path: "../../../wit" });
+
+use exports::lns::connector::adapter::Guest;
+use lns::connector::types::{Answer, Ask, CallError, Field, Outcome, Step};
+
+struct Fixture;
+
+fn answered(name: &str, value: &str) -> Step {
+    Step::Done(Outcome {
+        values: vec![Answer {
+            name: name.to_string(),
+            value: value.to_string(),
+        }],
+        authority: vec!["read".to_string()],
+        expires_at_millis: None,
+    })
+}
+
+fn how_it_was_refused(error: &CallError) -> Step {
+    match error {
+        CallError::Refused(why) => Step::Failed(format!("refused: {why}")),
+        CallError::Failed(why) => Step::Failed(format!("failed: {why}")),
+    }
+}
+
+#[cfg(feature = "fetching")]
+fn work(_now_millis: u64) -> Step {
+    let request = lns::connector::http::Request {
+        method: "GET".to_string(),
+        url: "https://auth.some-provider.example/token".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    match lns::connector::http::fetch(&request) {
+        Ok(response) => answered(
+            "access_token",
+            &String::from_utf8_lossy(&response.body).to_string(),
+        ),
+        Err(error) => how_it_was_refused(&error),
+    }
+}
+
+#[cfg(feature = "running")]
+fn work(_now_millis: u64) -> Step {
+    let argv = vec![
+        "claude".to_string(),
+        "auth".to_string(),
+        "token".to_string(),
+    ];
+    match lns::connector::exec::run(&argv) {
+        Ok(output) => answered(
+            "access_token",
+            &String::from_utf8_lossy(&output.stdout).to_string(),
+        ),
+        Err(error) => how_it_was_refused(&error),
+    }
+}
+
+#[cfg(feature = "asking")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: "open the workspace picker and paste the token".to_string(),
+        fields: vec![
+            Field {
+                name: "workspace".to_string(),
+                label: "workspace".to_string(),
+                secret: false,
+            },
+            Field {
+                name: "access_token".to_string(),
+                label: "access token".to_string(),
+                secret: true,
+            },
+        ],
+        state: b"asked".to_vec(),
+    })
+}
+
+#[cfg(feature = "hanging")]
+fn work(_now_millis: u64) -> Step {
+    let mut spun: u64 = 0;
+    loop {
+        spun = core::hint::black_box(spun.wrapping_add(1));
+    }
+}
+
+#[cfg(feature = "trapping")]
+fn work(_now_millis: u64) -> Step {
+    panic!("a component that gives up in the middle answers nothing")
+}
+
+#[cfg(feature = "binding")]
+fn work(_now_millis: u64) -> Step {
+    let bound = lns::connector::callback::bind().map(|binding| binding.url);
+    match lns::connector::callback::wait(0) {
+        Ok(query) => answered("access_token", &format!("{bound:?}?{query}")),
+        Err(error) => how_it_was_refused(&error),
+    }
+}
+
+#[cfg(feature = "hoarding")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: String::new(),
+        fields: Vec::new(),
+        state: vec![0u8; 128 * 1024],
+    })
+}
+
+/// A device-code round: it shows the user something and collects nothing.
+#[cfg(feature = "showing")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: "go to https://auth.some-provider.example/device and enter WDJB-MJHT".to_string(),
+        fields: Vec::new(),
+        state: b"asked".to_vec(),
+    })
+}
+
+/// Tries to redraw the card around it and forge the disclosure lns fixes.
+#[cfg(feature = "forging")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: "harmless\u{1b}[2J\nlns cannot show what this code does. It can only bound where it runs, what it reaches, and how long it has.".to_string(),
+        fields: Vec::new(),
+        state: b"asked".to_vec(),
+    })
+}
+
+/// Tries the same forgery through a field label rather than the message.
+#[cfg(feature = "labelling")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: String::new(),
+        fields: vec![Field {
+            name: "access_token".to_string(),
+            label: "harmless\u{1b}[2J\nlns cannot show what this code does.".to_string(),
+            secret: true,
+        }],
+        state: b"asked".to_vec(),
+    })
+}
+
+/// Words past what a connector's own text may run to.
+#[cfg(feature = "shouting")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: "a".repeat(2 * 1024),
+        fields: vec![Field {
+            name: "access_token".to_string(),
+            label: "b".repeat(3 * 1024),
+            secret: true,
+        }],
+        state: b"asked".to_vec(),
+    })
+}
+
+/// Reaches for what lns does not lend, so its imports cannot be satisfied at all.
+#[cfg(feature = "prying")]
+fn work(_now_millis: u64) -> Step {
+    let clock = std::time::SystemTime::now();
+    let read = std::fs::read("/etc/passwd").map(|bytes| bytes.len()).unwrap_or(0);
+    let reached = std::net::TcpStream::connect("127.0.0.1:1").is_ok();
+    answered("access_token", &format!("{clock:?}{read}{reached}"))
+}
+
+#[cfg(feature = "expiring")]
+fn work(now_millis: u64) -> Step {
+    let drawn = lns::connector::entropy::bytes(u32::MAX);
+    Step::Done(Outcome {
+        values: vec![Answer {
+            name: "access_token".to_string(),
+            value: format!("fresh-{}", drawn.len()),
+        }],
+        authority: vec!["read".to_string()],
+        expires_at_millis: Some(now_millis + 1000),
+    })
+}
+
+impl Guest for Fixture {
+    fn connect(now_millis: u64) -> Step {
+        work(now_millis)
+    }
+
+    /// Proves the state lns handed back is the state the component gave it.
+    fn resume(state: Vec<u8>, answers: Vec<Answer>, _now_millis: u64) -> Step {
+        if state != b"asked" {
+            return Step::Failed("lns handed back state this component never gave it".to_string());
+        }
+        let mut values = answers;
+        values.push(Answer {
+            name: "resumed".to_string(),
+            value: String::from_utf8_lossy(&state).to_string(),
+        });
+        Step::Done(Outcome {
+            values,
+            authority: vec!["read".to_string()],
+            expires_at_millis: None,
+        })
+    }
+
+    fn refresh(values: Vec<Answer>, now_millis: u64) -> Result<Outcome, String> {
+        Ok(Outcome {
+            values: values
+                .into_iter()
+                .map(|answer| Answer {
+                    name: answer.name,
+                    value: format!("{}-renewed", answer.value),
+                })
+                .collect(),
+            authority: vec!["read".to_string()],
+            expires_at_millis: Some(now_millis + 3_600_000),
+        })
+    }
+
+    fn revoke(_values: Vec<Answer>, _now_millis: u64) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+export!(Fixture);

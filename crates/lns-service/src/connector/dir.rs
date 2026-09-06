@@ -17,6 +17,7 @@ use super::store::{Installed, InstalledSet};
 const DOCUMENT: &str = "document.json";
 const DIGEST: &str = "digest";
 const FILESETS: &str = "filesets";
+const COMPONENTS: &str = "components";
 
 pub struct ConnectorDir {
     root: PathBuf,
@@ -71,16 +72,22 @@ impl InstalledSet for ConnectorDir {
         digest: &str,
         document: &[u8],
         filesets: &[Vec<u8>],
+        components: &[Vec<u8>],
     ) -> io::Result<()> {
         let dir = self.of(name)?;
         // The old layers go first: a reinstall that dropped a fileset would otherwise keep sending the files it no longer declares.
-        match fs::remove_dir_all(dir.join(FILESETS)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        for stale in [FILESETS, COMPONENTS] {
+            match fs::remove_dir_all(dir.join(stale)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
         for (index, layer) in filesets.iter().enumerate() {
             write_json_secret_atomic(&layer_path(&dir, index), layer)?;
+        }
+        for (index, component) in components.iter().enumerate() {
+            write_json_secret_atomic(&component_path(&dir, index), component)?;
         }
         write_json_secret_atomic(&dir.join(DOCUMENT), document)?;
         write_json_secret_atomic(&dir.join(DIGEST), digest.as_bytes())
@@ -89,6 +96,11 @@ impl InstalledSet for ConnectorDir {
     /// One packed fileset by its index in the document's `path` entries, which is the order it was kept in.
     fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
         fs::read(layer_path(&self.of(name)?, index))
+    }
+
+    /// One component by its index among the document's `code` methods, which is the order it was kept in.
+    fn component(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+        fs::read(component_path(&self.of(name)?, index))
     }
 
     fn remove(&self, name: &str) -> io::Result<bool> {
@@ -102,6 +114,10 @@ impl InstalledSet for ConnectorDir {
 
 fn layer_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(FILESETS).join(format!("{index}.tar.gz"))
+}
+
+fn component_path(dir: &Path, index: usize) -> PathBuf {
+    dir.join(COMPONENTS).join(format!("{index}.wasm"))
 }
 
 fn read_one(dir: &Path, name: &str) -> Option<Installed> {
@@ -134,6 +150,7 @@ mod tests {
             "sha256:abc",
             b"{}",
             &[b"first".to_vec(), b"second".to_vec()],
+            &[],
         )
         .unwrap();
 
@@ -146,16 +163,60 @@ mod tests {
     }
 
     #[test]
+    fn a_components_bytes_are_captured_so_the_installed_connector_runs_what_was_consented_to() {
+        // Editing the file afterwards changes nothing: a grant binds to a digest over these bytes (§3.2.6).
+        let (_tmp, set) = dir();
+        set.put(
+            "some-provider",
+            "sha256:abc",
+            b"{}",
+            &[],
+            &[b"first component".to_vec(), b"second component".to_vec()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            set.component("some-provider", 0).unwrap(),
+            b"first component"
+        );
+        assert_eq!(
+            set.component("some-provider", 1).unwrap(),
+            b"second component",
+            "components are kept in the order the document declares the methods that connect with them"
+        );
+    }
+
+    #[test]
+    fn reinstalling_drops_a_component_the_new_document_no_longer_connects_with() {
+        let (_tmp, set) = dir();
+        set.put(
+            "some-provider",
+            "sha256:abc",
+            b"{}",
+            &[],
+            &[b"old".to_vec()],
+        )
+        .unwrap();
+
+        set.put("some-provider", "sha256:def", b"{}", &[], &[])
+            .unwrap();
+
+        set.component("some-provider", 0)
+            .expect_err("what the new bytes do not declare is not kept beside them");
+    }
+
+    #[test]
     fn a_filesets_path_that_is_not_a_directory_fails_the_install() {
         // A store too confused to clear must not be written over: the digest would then promise bytes the layers do not match.
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[], &[])
+            .unwrap();
         let dir_path = set.of("some-provider").unwrap();
         std::fs::write(dir_path.join("filesets"), b"not a directory").unwrap();
 
         // No layers, so nothing after the clear can fail: the refusal is the clear's alone.
         let err = set
-            .put("some-provider", "sha256:def", b"{}", &[])
+            .put("some-provider", "sha256:def", b"{}", &[], &[])
             .unwrap_err();
 
         assert_ne!(
@@ -173,8 +234,14 @@ mod tests {
     #[test]
     fn uninstalling_takes_the_packed_filesets_with_it() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}", &[b"first".to_vec()])
-            .unwrap();
+        set.put(
+            "some-provider",
+            "sha256:abc",
+            b"{}",
+            &[b"first".to_vec()],
+            &[],
+        )
+        .unwrap();
 
         assert!(set.remove("some-provider").unwrap());
 
@@ -193,11 +260,18 @@ mod tests {
             "sha256:abc",
             b"{}",
             &[b"first".to_vec(), b"second".to_vec()],
+            &[],
         )
         .unwrap();
 
-        set.put("some-provider", "sha256:def", b"{}", &[b"only".to_vec()])
-            .unwrap();
+        set.put(
+            "some-provider",
+            "sha256:def",
+            b"{}",
+            &[b"only".to_vec()],
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(set.fileset_layer("some-provider", 0).unwrap(), b"only");
         assert!(set.fileset_layer("some-provider", 1).is_err());
@@ -215,7 +289,7 @@ mod tests {
         // A grant binds to these bytes, so anything that reformats them would invalidate every grant.
         let (_tmp, set) = dir();
         let document = b"{\"apiVersion\":\"lns.run/v1\",  \"kind\":\"connector\"}";
-        set.put("some-provider", "sha256:abc", document, &[])
+        set.put("some-provider", "sha256:abc", document, &[], &[])
             .unwrap();
         assert_eq!(
             set.list().unwrap(),
@@ -230,9 +304,9 @@ mod tests {
     #[test]
     fn installing_the_same_name_replaces_the_document_and_its_digest() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:old", b"{\"v\":1}", &[])
+        set.put("some-provider", "sha256:old", b"{\"v\":1}", &[], &[])
             .unwrap();
-        set.put("some-provider", "sha256:new", b"{\"v\":2}", &[])
+        set.put("some-provider", "sha256:new", b"{\"v\":2}", &[], &[])
             .unwrap();
         let installed = set.list().unwrap();
         assert_eq!(installed.len(), 1);
@@ -244,7 +318,7 @@ mod tests {
     fn the_list_is_ordered_by_name_so_output_does_not_shuffle() {
         let (_tmp, set) = dir();
         for name in ["other-provider", "some-provider", "a-provider"] {
-            set.put(name, "sha256:abc", b"{}", &[]).unwrap();
+            set.put(name, "sha256:abc", b"{}", &[], &[]).unwrap();
         }
         let names: Vec<String> = set.list().unwrap().into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["a-provider", "other-provider", "some-provider"]);
@@ -253,7 +327,8 @@ mod tests {
     #[test]
     fn a_directory_with_no_document_is_a_half_finished_install_and_is_skipped() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[], &[])
+            .unwrap();
         fs::create_dir_all(set.root.join("interrupted")).unwrap();
         let names: Vec<String> = set.list().unwrap().into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["some-provider"]);
@@ -272,7 +347,8 @@ mod tests {
     #[test]
     fn uninstalling_reports_whether_anything_was_there() {
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[], &[])
+            .unwrap();
         assert!(set.remove("some-provider").unwrap());
         assert!(!set.remove("some-provider").unwrap());
         assert_eq!(set.list().unwrap(), Vec::new());
@@ -284,7 +360,7 @@ mod tests {
         let (_tmp, set) = dir();
         for bad in ["../escaped", "a/b", "..", ".", "", ".hidden", "/absolute"] {
             let err = set
-                .put(bad, "sha256:abc", b"{}", &[])
+                .put(bad, "sha256:abc", b"{}", &[], &[])
                 .expect_err("a traversing name must be refused");
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
@@ -325,7 +401,10 @@ mod tests {
     fn an_install_that_cannot_land_surfaces_its_error() {
         let (_tmp, set) = dir();
         fs::create_dir_all(set.root.join("some-provider").join(DOCUMENT)).unwrap();
-        assert!(set.put("some-provider", "sha256:abc", b"{}", &[]).is_err());
+        assert!(
+            set.put("some-provider", "sha256:abc", b"{}", &[], &[])
+                .is_err()
+        );
     }
 
     #[test]
@@ -333,7 +412,8 @@ mod tests {
         // A connector document is not itself a secret, but it sits in the same 0700 tree and the one write helper keeps one rule.
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, set) = dir();
-        set.put("some-provider", "sha256:abc", b"{}", &[]).unwrap();
+        set.put("some-provider", "sha256:abc", b"{}", &[], &[])
+            .unwrap();
         let mode = fs::metadata(set.root.join("some-provider").join(DOCUMENT))
             .unwrap()
             .permissions()
