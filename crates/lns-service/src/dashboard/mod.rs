@@ -1,3 +1,4 @@
+pub mod approvals;
 mod filter;
 mod format;
 pub mod live;
@@ -12,9 +13,10 @@ use eframe::egui::{
 use egui_material_icons::{MaterialIcon, icons};
 use lns_audit::TimelineRow;
 
+use crate::approval_flow::entries::Entry;
 use crate::approval_flow::window::{
-    ACCENT_GREEN, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER, CATEGORY, STATUS_WARNING,
-    TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_GREEN, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER, CATEGORY, STATUS_CRITICAL,
+    STATUS_WARNING, TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::ui::theme;
 
@@ -48,8 +50,19 @@ pub struct Sandbox {
     pub status: String,
 }
 
+/// Which of the window's two lists is on screen: what a run did, or what it was asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum View {
+    #[default]
+    Timeline,
+    Approvals,
+}
+
 #[derive(Debug, Default)]
 pub struct DashboardState {
+    pub view: View,
+    pub approvals: Vec<Entry>,
+    pub approval_notice: Option<String>,
     pub rows: Vec<TimelineRow>,
     pub warnings: Vec<String>,
     pub sandboxes: Vec<Sandbox>,
@@ -147,6 +160,21 @@ fn dashboard_visuals() -> egui::Visuals {
 }
 
 pub fn load(state: &mut DashboardState) {
+    load_timeline(state);
+    load_approvals(state);
+}
+
+fn load_approvals(state: &mut DashboardState) {
+    match crate::cache::root() {
+        Ok(root) => {
+            state.approvals =
+                crate::approval_flow::answering::entries(&root, &crate::run_registry::known_ids());
+        }
+        Err(e) => set_error(state, e),
+    }
+}
+
+fn load_timeline(state: &mut DashboardState) {
     let runs = match lns_ipc::audit_runs_root() {
         Ok(path) => path,
         Err(e) => return set_error(state, e),
@@ -195,7 +223,7 @@ pub fn apply_theme(ctx: &egui::Context) {
 
 pub fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
-        .with_title("LNS — Audit")
+        .with_title("LNS")
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)
@@ -229,7 +257,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut DashboardState) -> DashboardAction 
     if detail_open {
         detail_panel(ui, state, detail_reveal);
     }
-    central(ui, state);
+    match state.view {
+        View::Timeline => central(ui, state),
+        View::Approvals => approvals_panel(ui, state),
+    }
     let reveal = ui.ctx().animate_bool_with_time(
         egui::Id::new("dashboard-search-anim"),
         state.search_open,
@@ -289,14 +320,45 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
         .frame(Frame::new().fill(CHROME_FILL).inner_margin(Margin::same(8)))
         .show_inside(ui, |ui| {
             ui.add_space(26.0);
-            if menu_item(ui, icons::ICON_SEARCH, "Search", state.search_open).clicked() {
+            if menu_item(ui, icons::ICON_SEARCH, "Search", state.search_open, None).clicked() {
                 state.search_open = true;
+            }
+            if menu_item(
+                ui,
+                icons::ICON_RECEIPT_LONG,
+                "Audit",
+                state.view == View::Timeline,
+                None,
+            )
+            .clicked()
+            {
+                state.view = View::Timeline;
+            }
+            if menu_item(
+                ui,
+                icons::ICON_GAVEL,
+                "Approvals",
+                state.view == View::Approvals,
+                Some(
+                    approvals::listing(
+                        &state.approvals,
+                        state.selected_sandbox.as_deref(),
+                        &sandboxes,
+                    )
+                    .unanswered,
+                ),
+            )
+            .clicked()
+            {
+                state.view = View::Approvals;
+                state.approval_notice = None;
             }
             if menu_item(
                 ui,
                 icons::ICON_DNS,
                 "All sandboxes",
                 state.selected_sandbox.is_none(),
+                None,
             )
             .clicked()
             {
@@ -325,7 +387,13 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
         });
 }
 
-fn menu_item(ui: &mut egui::Ui, icon: MaterialIcon, label: &str, selected: bool) -> egui::Response {
+fn menu_item(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    label: &str,
+    selected: bool,
+    count: Option<usize>,
+) -> egui::Response {
     let fill = if selected {
         SELECT_FILL
     } else {
@@ -342,6 +410,15 @@ fn menu_item(ui: &mut egui::Ui, icon: MaterialIcon, label: &str, selected: bool)
                 glyph(ui, icon, TEXT_MUTED, 18.0);
                 ui.add_space(8.0);
                 ui.label(RichText::new(label).size(FS_BODY).color(TEXT_PRIMARY));
+                if let Some(waiting) = count.filter(|n| *n > 0) {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(waiting.to_string())
+                                .size(FS_LABEL)
+                                .color(STATUS_WARNING),
+                        );
+                    });
+                }
             });
         })
         .response
@@ -436,6 +513,126 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
                     }
                 });
         });
+}
+
+fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
+    let mut chosen: Option<(String, lns_ipc::ApprovalAnswer)> = None;
+    let notice = state.approval_notice.clone();
+    egui::CentralPanel::default()
+        .frame(
+            Frame::new()
+                .fill(CONTENT_FILL)
+                .inner_margin(Margin::same(theme::STACK_MARGIN)),
+        )
+        .show_inside(ui, |ui| {
+            ui.add_space(16.0);
+            if let Some(said) = notice {
+                ui.label(
+                    RichText::new(said)
+                        .size(FS_SECONDARY)
+                        .color(STATUS_CRITICAL),
+                );
+                ui.add_space(10.0);
+            }
+            let rows = approvals::listing(
+                &state.approvals,
+                state.selected_sandbox.as_deref(),
+                &state.sandboxes,
+            )
+            .rows;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if rows.is_empty() {
+                        ui.colored_label(TEXT_MUTED, "Nothing has been asked.");
+                        return;
+                    }
+                    for i in rows {
+                        let entry = &state.approvals[i];
+                        let asked_by =
+                            approvals::asked_by(entry, state.selected_sandbox.as_deref());
+                        if let Some(answer) = approval_row(ui, entry, asked_by) {
+                            chosen = Some((entry.id.clone(), answer));
+                        }
+                    }
+                });
+        });
+    if let Some((id, answer)) = chosen {
+        answer_entry(state, &id, answer);
+    }
+}
+
+fn approval_row(
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    asked_by: Option<&str>,
+) -> Option<lns_ipc::ApprovalAnswer> {
+    let mut chosen = None;
+    Frame::new()
+        .fill(SELECT_FILL)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(entry.subject())
+                                .monospace()
+                                .size(FS_BODY)
+                                .color(TEXT_PRIMARY),
+                        );
+                        if approvals::is_raw(entry) {
+                            ui.label(RichText::new("RAW").size(FS_LABEL).color(STATUS_WARNING));
+                        }
+                    });
+                    if let Some(action) = approvals::action(entry) {
+                        ui.label(RichText::new(action).size(FS_LABEL).color(TEXT_MUTED));
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(entry.state.label())
+                                .size(FS_LABEL)
+                                .color(TEXT_MUTED),
+                        );
+                        if let Some(run) = asked_by {
+                            ui.label(
+                                RichText::new(run)
+                                    .monospace()
+                                    .size(FS_LABEL)
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+                    });
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    for answer in approvals::offers(entry).into_iter().rev() {
+                        if ui.button(approvals::label(answer)).clicked() {
+                            chosen = Some(answer);
+                        }
+                    }
+                });
+            });
+        });
+    ui.add_space(6.0);
+    chosen
+}
+
+fn answer_entry(state: &mut DashboardState, id: &str, answer: lns_ipc::ApprovalAnswer) {
+    let root = match crate::cache::root() {
+        Ok(root) => root,
+        Err(e) => return set_error(state, e),
+    };
+    let outcome = crate::approval_flow::answering::decide(
+        &root,
+        &crate::run_registry::known_ids(),
+        crate::run_registry::approvals,
+        id,
+        answer,
+    );
+    state.approval_notice = approvals::reported(&outcome);
+    load_approvals(state);
 }
 
 const SELECT_FONT: f32 = 15.0;

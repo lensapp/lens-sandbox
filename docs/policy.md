@@ -398,18 +398,19 @@ and one a workload withdrew by exiting are all still listed as undecided or
 withdrawn — the request failed closed, and the question did not go with it. An
 answer you gave is listed with the verdict it got.
 
-`lns approval ls` reads that list, and `lns approval answer` answers an entry, or
-answers it again:
+Two surfaces read that list. The service's tray menu has an **Approvals** item
+that lists the entries and answers them. At your terminal, `lns approval ls`
+reads the list and `lns approval answer` answers an entry, or answers it again:
 
 - **always-allow** and **always-deny** write the rule, or rewrite it, and a
   running sandbox takes the change at once.
 - **ask-again** takes the entry's rule back, so the destination raises a card the
   next time a workload reaches it.
 
-A once verdict is not offered there. It applies to a request the guest is holding,
-which is what the window is for. Answering an entry never replays the request that
-raised it: the call failed when nothing decided it, and the answer decides what
-happens next time.
+A once verdict is not offered at either surface. It applies to a request the guest
+is holding, so only the card that holds it offers one. Answering an entry never
+replays the request that raised it: the call failed when nothing decided it, and
+the answer decides what happens next time.
 
 An answer reaches only what that entry wrote. Where another rule already decides
 the destination, nothing is written and the command says so. A rule you typed by

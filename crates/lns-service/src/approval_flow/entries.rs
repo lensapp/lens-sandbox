@@ -141,6 +141,7 @@ pub struct FileEntryStore {
     path: PathBuf,
     fs: Arc<dyn Fs>,
     write_lock: Mutex<()>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl FileEntryStore {
@@ -153,7 +154,13 @@ impl FileEntryStore {
             path,
             fs,
             write_lock: Mutex::new(()),
+            wake: Arc::new(crate::dashboard::live::note_write),
         }
+    }
+
+    #[cfg(test)]
+    fn waking(self, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self { wake, ..self }
     }
 
     /// A file that is missing, or not the JSON we wrote, reads as no entries: a run whose list we cannot parse must still raise cards.
@@ -179,9 +186,11 @@ impl FileEntryStore {
         }
     }
 
+    /// The open window reads this file, so a card recorded here must reach its list without a refresh.
     fn write_all(&self, entries: &[Entry]) {
-        if let Err(e) = self.render_and_write(entries) {
-            crate::log::warn!("could not record the approval at {:?}: {e}", self.path);
+        match self.render_and_write(entries) {
+            Ok(()) => (self.wake)(),
+            Err(e) => crate::log::warn!("could not record the approval at {:?}: {e}", self.path),
         }
     }
 
@@ -289,6 +298,37 @@ pub(crate) mod tests {
         let fs = Arc::new(FakeFs::default());
         let store = FileEntryStore::with_fs(PathBuf::from("/run/approvals.json"), fs.clone());
         (store, fs)
+    }
+
+    #[test]
+    fn recording_an_entry_wakes_a_window_that_is_showing_the_list() {
+        // A card the developer closed is exactly the entry they come back for; making them refresh to see it is making them miss it twice.
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = woken.clone();
+        let fs = Arc::new(FakeFs::default());
+        let store = FileEntryStore::with_fs(PathBuf::from("/run/approvals.json"), fs.clone())
+            .waking(Arc::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }));
+
+        store.record(Entry::new(
+            Some("reviewer".into()),
+            destination("api.linear.app"),
+            EntryState::Undecided,
+        ));
+        assert_eq!(woken.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        *fs.write_fails.lock().unwrap() = true;
+        store.record(Entry::new(
+            Some("reviewer".into()),
+            destination("api.github.com"),
+            EntryState::Undecided,
+        ));
+        assert_eq!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a write that failed put nothing in the file, so there is nothing new to show"
+        );
     }
 
     #[test]

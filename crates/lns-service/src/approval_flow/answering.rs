@@ -7,7 +7,7 @@ use crate::approval_flow::entries::{Entry, EntryKind};
 use crate::approval_flow::offline;
 use crate::approval_flow::session::{Answer, AnswerOutcome, ApprovalSession};
 
-const DECIDED_ELSEWHERE: &str =
+pub const DECIDED_ELSEWHERE: &str =
     "this entry is decided elsewhere: a connector through `lns connector`, and a notice not at all";
 
 pub fn view(entry: &Entry) -> ApprovalInfo {
@@ -40,15 +40,37 @@ fn answer_of(answer: ApprovalAnswer) -> Answer {
 /// Where a live run's session is found; a run this process is not hosting has none, and is answered through its own files.
 pub type LiveSession = fn(&str) -> Option<Arc<ApprovalSession>>;
 
-pub fn list(root: &Path, runs: &[String]) -> Response {
-    let mut approvals: Vec<ApprovalInfo> = runs
+/// Every entry these runs hold, in one order. The runs arrive in whatever order the registry holds them, and a list that reorders itself between reads cannot be followed by either surface.
+pub fn entries(root: &Path, runs: &[String]) -> Vec<Entry> {
+    let mut held: Vec<Entry> = runs
         .iter()
         .flat_map(|run| offline::list(root, run))
-        .map(|entry| view(&entry))
         .collect();
-    // The runs arrive in whatever order the registry holds them, and a list that reorders itself between invocations cannot be read or diffed.
-    approvals.sort_by(|a, b| (&a.sandbox, &a.subject, &a.id).cmp(&(&b.sandbox, &b.subject, &b.id)));
-    Response::ApprovalList { approvals }
+    held.sort_by(|a, b| (&a.sandbox, a.subject(), &a.id).cmp(&(&b.sandbox, b.subject(), &b.id)));
+    held
+}
+
+pub fn list(root: &Path, runs: &[String]) -> Response {
+    Response::ApprovalList {
+        approvals: entries(root, runs)
+            .iter()
+            .map(view)
+            .collect::<Vec<ApprovalInfo>>(),
+    }
+}
+
+/// The answer itself, for a caller that renders the outcome its own way — the service's own window does.
+pub fn decide(
+    root: &Path,
+    runs: &[String],
+    live: LiveSession,
+    id: &str,
+    answer: ApprovalAnswer,
+) -> AnswerOutcome {
+    match holder_of(root, runs, id) {
+        Some((run, _)) => apply(root, &run, live, id, answer),
+        None => AnswerOutcome::UnknownId,
+    }
 }
 
 pub fn answer(
@@ -61,12 +83,21 @@ pub fn answer(
     let Some((run, asked)) = holder_of(root, runs, id) else {
         return Response::ApprovalUnknown { id: id.to_string() };
     };
-    let outcome = match live(&run) {
+    render(asked, id, apply(root, &run, live, id, answer))
+}
+
+fn apply(
+    root: &Path,
+    run: &str,
+    live: LiveSession,
+    id: &str,
+    answer: ApprovalAnswer,
+) -> AnswerOutcome {
+    match live(run) {
         // A live run answers through its own session, so the guest is told at once.
         Some(session) => session.answer_entry(id, answer_of(answer)),
-        None => offline::answer(root, &run, id, answer_of(answer)),
-    };
-    render(asked, id, outcome)
+        None => offline::answer(root, run, id, answer_of(answer)),
+    }
 }
 
 fn holder_of(root: &Path, runs: &[String], id: &str) -> Option<(String, Entry)> {
@@ -347,6 +378,40 @@ mod tests {
 
         LIVE.with(|live| *live.borrow_mut() = None);
         assert_eq!(answered, Response::ApprovalUnknown { id: entry.id });
+    }
+
+    #[test]
+    fn the_window_is_handed_the_outcome_itself_and_renders_it_its_own_way() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), destination(), EntryState::Undecided);
+
+        assert_eq!(
+            decide(
+                home.path(),
+                &runs(),
+                no_live_session,
+                &entry.id,
+                ApprovalAnswer::AlwaysAllow
+            ),
+            AnswerOutcome::Recorded(EntryState::AlwaysAllowed)
+        );
+    }
+
+    #[test]
+    fn deciding_an_id_no_run_holds_reports_that_rather_than_writing() {
+        // The window lists what it read a moment ago, so an entry removed since is the ordinary case here, not a bug.
+        let home = tempfile::TempDir::new().expect("tempdir");
+
+        assert_eq!(
+            decide(
+                home.path(),
+                &runs(),
+                no_live_session,
+                "never-was",
+                ApprovalAnswer::AlwaysAllow
+            ),
+            AnswerOutcome::UnknownId
+        );
     }
 
     #[test]

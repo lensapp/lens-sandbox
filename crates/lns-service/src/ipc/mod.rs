@@ -456,14 +456,6 @@ async fn handle_connector_request(call: crate::connector::real::Call) -> Respons
     }
 }
 
-/// Every run this machine knows of, live or stopped: a question outlives the boot that raised it.
-fn known_runs() -> Vec<String> {
-    crate::run_registry::snapshot()
-        .into_iter()
-        .map(|run| run.id)
-        .collect()
-}
-
 fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
     let root = match crate::cache::root() {
         Ok(root) => root,
@@ -474,7 +466,9 @@ fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
         }
     };
     match verb {
-        ApprovalVerb::List(None) => crate::approval_flow::answering::list(&root, &known_runs()),
+        ApprovalVerb::List(None) => {
+            crate::approval_flow::answering::list(&root, &crate::run_registry::known_ids())
+        }
         ApprovalVerb::List(Some(handle)) => match crate::run_registry::resolve(handle) {
             Ok(id) => crate::approval_flow::answering::list(&root, &[id]),
             Err(crate::run_registry::ResolveError::Unknown { handle }) => {
@@ -486,7 +480,7 @@ fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
         },
         ApprovalVerb::Answer(id, answer) => crate::approval_flow::answering::answer(
             &root,
-            &known_runs(),
+            &crate::run_registry::known_ids(),
             crate::run_registry::approvals,
             id,
             answer,

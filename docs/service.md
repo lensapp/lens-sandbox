@@ -20,7 +20,10 @@ lns service status   # report whether it's running (PID, uptime, version)
 lns service stop     # ask it to shut down
 ```
 
-You can also quit it from the **Quit** item in its tray menu.
+Its tray menu opens two views and quits the service. The **Audit** view shows the
+timeline of what the runs did. The **Approvals** view shows what they were asked,
+and answers an entry the way [`lns approval`](cli-reference.md#lns-approval)
+does. **Quit** stops the service.
 
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.

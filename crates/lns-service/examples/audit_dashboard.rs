@@ -1,5 +1,6 @@
 use eframe::egui;
 use lns_audit::TimelineRow;
+use lns_service::approval_flow::entries::{Entry, EntryKind, EntryState};
 use lns_service::approval_flow::window::{
     install_icon_font, install_system_fonts, quiet_debug_overlays,
 };
@@ -26,7 +27,7 @@ impl eframe::App for Preview {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if dashboard::render(ui, &mut self.state) == DashboardAction::Refresh {
-            self.state = DashboardState::seeded(seed_rows(), seed_warnings(), seed_sandboxes());
+            self.state = preview_state();
         }
     }
 }
@@ -146,6 +147,63 @@ fn seed_warnings() -> Vec<String> {
     vec![]
 }
 
+fn asked(run: &str, kind: EntryKind, state: EntryState) -> Entry {
+    Entry::new(Some(run.to_string()), kind, state)
+}
+
+fn seed_approvals() -> Vec<Entry> {
+    vec![
+        asked(
+            RUN_B,
+            EntryKind::Destination {
+                destination: "api.linear.app".into(),
+                action: "CONNECT api.linear.app:443".into(),
+                raw: false,
+            },
+            EntryState::Undecided,
+        ),
+        asked(
+            RUN_B,
+            EntryKind::Destination {
+                destination: "db.internal:5432".into(),
+                action: "CONNECT db.internal:5432".into(),
+                raw: true,
+            },
+            EntryState::AlwaysAllowed,
+        ),
+        asked(
+            RUN_A,
+            EntryKind::Destination {
+                destination: "telemetry.example.test".into(),
+                action: "CONNECT telemetry.example.test:443".into(),
+                raw: false,
+            },
+            EntryState::AlwaysDenied,
+        ),
+        asked(
+            RUN_A,
+            EntryKind::Connector {
+                name: "linear".into(),
+            },
+            EntryState::Granted,
+        ),
+        asked(
+            RUN_A,
+            EntryKind::Notice {
+                message: "api.example.test is already decided by a rule ahead of this one".into(),
+            },
+            EntryState::Noted,
+        ),
+    ]
+}
+
+fn preview_state() -> DashboardState {
+    DashboardState {
+        approvals: seed_approvals(),
+        ..DashboardState::seeded(seed_rows(), seed_warnings(), seed_sandboxes())
+    }
+}
+
 fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: dashboard::viewport_builder(),
@@ -162,7 +220,7 @@ fn main() -> eframe::Result {
             install_icon_font(&cc.egui_ctx);
             dashboard::style(&cc.egui_ctx);
             Ok(Box::new(Preview {
-                state: DashboardState::seeded(seed_rows(), seed_warnings(), seed_sandboxes()),
+                state: preview_state(),
             }))
         }),
     )

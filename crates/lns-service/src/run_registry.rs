@@ -611,6 +611,11 @@ pub fn status(run_id: &str) -> Option<RunStatus> {
     g.as_ref().and_then(|m| m.get(run_id)).map(|e| e.status())
 }
 
+/// Every run this machine knows of, live or stopped: a question outlives the boot that raised it.
+pub fn known_ids() -> Vec<String> {
+    snapshot().into_iter().map(|run| run.id).collect()
+}
+
 pub fn snapshot() -> Vec<lns_ipc::RunSummary> {
     let g = ACTIVE.lock().expect("ACTIVE poisoned");
     snapshot_from(g.as_ref())
@@ -1677,6 +1682,22 @@ mod tests {
         assert_eq!(row.status, RunStatus::Running);
 
         deregister(&id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn known_ids_names_every_run_an_approval_could_belong_to() {
+        let id = allocate_run_id();
+        let (handle, _rx) = make_handle();
+        register(id.clone(), handle);
+
+        assert!(known_ids().contains(&id));
+
+        deregister(&id);
+        assert!(
+            !known_ids().contains(&id),
+            "a run that is gone holds no entries to answer"
+        );
     }
 
     fn set_status(map: &HashMap<String, RunEntry>, id: &str, status: RunStatus) {

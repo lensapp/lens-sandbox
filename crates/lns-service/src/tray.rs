@@ -43,6 +43,10 @@ fn build_tray_icon(
     menu.append(&audit_item)
         .context("failed to append audit menu item")?;
     let audit_id = audit_item.id().clone();
+    let approvals_item = MenuItem::new("Approvals", true, None);
+    menu.append(&approvals_item)
+        .context("failed to append approvals menu item")?;
+    let approvals_id = approvals_item.id().clone();
     let quit_item = MenuItem::new(
         "Quit LNS",
         true,
@@ -63,8 +67,13 @@ fn build_tray_icon(
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == audit_id {
-            crate::dashboard::live::request_open();
+        let opens = match &event.id {
+            id if *id == audit_id => Some(crate::dashboard::View::Timeline),
+            id if *id == approvals_id => Some(crate::dashboard::View::Approvals),
+            _ => None,
+        };
+        if let Some(view) = opens {
+            crate::dashboard::live::request_open(view);
             if let Some(ctx) = window::ctx() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
@@ -249,10 +258,11 @@ impl TrayApp {
     }
 
     fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
-        if crate::dashboard::live::take_open_request() {
+        if let Some(view) = crate::dashboard::live::take_open_request() {
             self.audit_open.store(true, Ordering::Relaxed);
             if let Ok(mut w) = self.audit.lock() {
                 w.state = crate::dashboard::DashboardState::new();
+                w.state.view = view;
                 crate::dashboard::load(&mut w.state);
                 w.last_gen = crate::dashboard::live::generation();
                 w.focused = false;

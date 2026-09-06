@@ -467,14 +467,18 @@ A card that asks about a destination becomes an **entry** the run keeps, in
 `~/.lns/runs/<RUN>/approvals.json`. One you close, one that times out, and one a
 workload withdrew by exiting are all still listed — the request failed closed at
 the boundary, and the question did not go with it. A connector question you
-answered is listed too, granted or declined. The window also shows lines that ask
-nothing, such as a rule it could not write; each is listed as a notice, with no
-verdict to give.
+answered is listed too, granted or declined. The list also shows lines that ask
+nothing, such as a rule the run could not write; each is listed as a notice, with
+no verdict to give.
+
+The service shows the same entries: its tray menu opens an **Approvals** view,
+which answers an entry the way this command does.
 
 `answer` decides a destination entry, and only that. A connector entry is listed
 as granted or declined and is answered through [`lns connector`](#lns-connector);
 a notice answers nothing. There is no once verdict here: a once decision applies
-to a request the guest is still holding, which is what the window is for.
+to a request the guest is still holding, so only the card that holds it offers
+one.
 
 - `always-allow` / `always-deny` write the entry's rule into the run's
   `decisions.yaml`, or rewrite the one it wrote before. A running sandbox takes
