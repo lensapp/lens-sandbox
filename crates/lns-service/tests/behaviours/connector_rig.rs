@@ -103,7 +103,7 @@ impl ConnectorRig {
         let document = self.document();
         self.error = self
             .store()
-            .install(&digest, &document, &[])
+            .install(&digest, &document, &[], &[])
             .err()
             .map(|e| format!("{e:#}"));
     }

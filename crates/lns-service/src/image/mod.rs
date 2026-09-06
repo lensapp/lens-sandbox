@@ -366,40 +366,71 @@ pub(crate) async fn pull_connector_with<R: Registry>(
     ) {
         anyhow::bail!("{reference} is not a connector artifact");
     }
+    // One budget over everything the artifact would transfer, declared sizes first: two budgets would let a hostile artifact bring twice what one connector may.
+    refuse_beyond_the_transfer_budget(declared_by(&manifest))?;
+    let mut budget = 0u64;
+    let filesets = pull_connector_layers(
+        client,
+        &parsed,
+        &manifest,
+        lns_artifact::build::FILESET_LAYER_MEDIA_TYPE,
+        &mut budget,
+    )
+    .await?;
+    let components = pull_connector_layers(
+        client,
+        &parsed,
+        &manifest,
+        lns_artifact::build::COMPONENT_LAYER_MEDIA_TYPE,
+        &mut budget,
+    )
+    .await?;
+    refuse_a_component_larger_than_one_may_be(&components)?;
     Ok(crate::connector::source::FetchedConnector {
-        filesets: pull_connector_filesets(client, &parsed, &manifest).await?,
+        filesets,
+        components,
         digest: manifest_digest,
         document: config_json.into_bytes(),
     })
 }
 
-/// Every packed fileset the artifact carries, in manifest order, bounded before anything is fetched.
+/// What the whole artifact claims it would transfer, over every layer kind a connector brings.
+fn declared_by(manifest: &OciImageManifest) -> u64 {
+    [
+        lns_artifact::build::FILESET_LAYER_MEDIA_TYPE,
+        lns_artifact::build::COMPONENT_LAYER_MEDIA_TYPE,
+    ]
+    .iter()
+    .flat_map(|media_type| crate::artifact::fileset::layers_of(manifest, media_type))
+    .fold(0u64, |total, layer| total.saturating_add(layer.size))
+}
+
+/// Every packed layer of one kind, in manifest order, charged against a budget shared with the other kinds.
 ///
-/// A declared size is the registry's claim; the budget is checked against it first so a hostile artifact cannot make this machine download what it may not keep, and against the bytes that arrive so it cannot lie its way past.
-async fn pull_connector_filesets<R: Registry>(
+/// A declared size is the registry's claim, so the arriving bytes are charged too: an artifact cannot lie its way past.
+async fn pull_connector_layers<R: Registry>(
     client: &R,
     parsed: &Reference,
     manifest: &OciImageManifest,
+    media_type: &str,
+    spent: &mut u64,
 ) -> Result<Vec<Vec<u8>>> {
-    let layers = crate::artifact::fileset::packed_layers(manifest);
-    let declared: u64 = layers.iter().map(|layer| layer.size).sum();
-    refuse_beyond_the_transfer_budget(declared)?;
+    let layers = crate::artifact::fileset::layers_of(manifest, media_type);
     let mut fetched = Vec::new();
-    let mut spent = 0u64;
     for layer in &layers {
         let descriptor = OciDescriptor {
-            media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+            media_type: media_type.to_string(),
             digest: layer.digest.clone(),
             size: i64::try_from(layer.size).unwrap_or(i64::MAX),
             ..Default::default()
         };
         let bytes = client.pull_blob(parsed, &descriptor, &|_| {}).await?;
-        spent = spent.saturating_add(bytes.len() as u64);
-        refuse_beyond_the_transfer_budget(spent)?;
+        *spent = spent.saturating_add(bytes.len() as u64);
+        refuse_beyond_the_transfer_budget(*spent)?;
         let arrived = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         if arrived != layer.digest {
             anyhow::bail!(
-                "fileset layer {} does not hash to the digest its manifest declared",
+                "{media_type} layer {} does not hash to the digest its manifest declared",
                 layer.digest
             );
         }
@@ -410,11 +441,22 @@ async fn pull_connector_filesets<R: Registry>(
 
 /// A cheap early gate over what an artifact would transfer, so a hostile one cannot make this machine download what install would refuse to keep. Install decides the real question, over what a layer expands to.
 fn refuse_beyond_the_transfer_budget(bytes: u64) -> Result<()> {
-    let limit = crate::connector::store::MAX_CONNECTOR_FILESET_BYTES;
+    let limit = crate::connector::store::MAX_CONNECTOR_TRANSFER_BYTES;
     if bytes > limit {
         anyhow::bail!(
-            "this connector's fileset layers transfer more than the {limit}-byte limit one connector may bring"
+            "this connector's layers transfer more than the {limit}-byte limit one connector may bring"
         );
+    }
+    Ok(())
+}
+
+/// The ceiling a push and the runtime both hold, held here too, so an oversized component is refused rather than kept and refused later (§3.2.6).
+fn refuse_a_component_larger_than_one_may_be(components: &[Vec<u8>]) -> Result<()> {
+    let limit = lns_artifact::build::MAX_COMPONENT_BYTES;
+    for component in components {
+        if component.len() as u64 > limit {
+            anyhow::bail!("this connector brings a component larger than the {limit}-byte limit");
+        }
     }
     Ok(())
 }
@@ -1365,6 +1407,82 @@ mod tests {
         image
     }
 
+    /// A fileset layer and a component layer, each declaring `each` bytes, so what the two kinds spend together is visible.
+    fn connector_carrying_both_kinds(each: u64) -> FakeImage {
+        let mut image = build_connector_artifact();
+        let fileset = vec![b'f'; 8];
+        let component = vec![b'c'; 8];
+        let (fileset_digest, component_digest) = (sha256_hex(&fileset), sha256_hex(&component));
+        image.manifest.layers = vec![
+            OciDescriptor {
+                media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+                digest: fileset_digest.clone(),
+                size: each as i64,
+                ..Default::default()
+            },
+            OciDescriptor {
+                media_type: lns_artifact::build::COMPONENT_LAYER_MEDIA_TYPE.to_string(),
+                digest: component_digest.clone(),
+                size: each as i64,
+                ..Default::default()
+            },
+        ];
+        image.blobs = vec![(fileset_digest, fileset), (component_digest, component)];
+        image
+    }
+
+    #[tokio::test]
+    async fn pull_connector_brings_the_component_the_artifact_carries() {
+        ensure_global_trace_subscriber();
+        let registry = connector_carrying_both_kinds(8).into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let fetched = pull_connector_with(&registry, &pinned).await.unwrap();
+
+        assert_eq!(fetched.components, vec![vec![b'c'; 8]]);
+    }
+
+    #[tokio::test]
+    async fn a_component_past_its_own_ceiling_is_refused_by_name_and_not_by_the_budget() {
+        // The transfer budget is wider than one component, so what refuses an oversized one says which thing was too big.
+        ensure_global_trace_subscriber();
+        let oversized = vec![b'c'; lns_artifact::build::MAX_COMPONENT_BYTES as usize + 1];
+        let mut image = build_connector_artifact();
+        let digest = sha256_hex(&oversized);
+        image.manifest.layers = vec![OciDescriptor {
+            media_type: lns_artifact::build::COMPONENT_LAYER_MEDIA_TYPE.to_string(),
+            digest: digest.clone(),
+            size: oversized.len() as i64,
+            ..Default::default()
+        }];
+        image.blobs = vec![(digest, oversized)];
+        let registry = image.into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("component larger than"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_budget_covers_every_layer_kind_a_connector_brings() {
+        // Two budgets would let an artifact bring twice what one connector may.
+        ensure_global_trace_subscriber();
+        let each = crate::connector::store::MAX_CONNECTOR_TRANSFER_BYTES * 2 / 3;
+        let registry = connector_carrying_both_kinds(each).into_registry();
+        let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
+
+        let err = pull_connector_with(&registry, &pinned).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("one connector may bring"),
+            "neither kind is over the limit on its own, so only a shared budget refuses this; got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn pull_connector_brings_the_packed_fileset_the_artifact_carries() {
         ensure_global_trace_subscriber();
@@ -1403,7 +1521,7 @@ mod tests {
         ensure_global_trace_subscriber();
         let registry = connector_carrying_a_layer(
             b"small".to_vec(),
-            Some(crate::connector::store::MAX_CONNECTOR_FILESET_BYTES + 1),
+            Some(crate::connector::store::MAX_CONNECTOR_TRANSFER_BYTES + 1),
         )
         .into_registry();
         let pinned = format!("registry.example.test/c@sha256:{}", "c".repeat(64));
@@ -1430,7 +1548,7 @@ mod tests {
         // A budget checked only against declared sizes trusts the registry to describe itself honestly.
         ensure_global_trace_subscriber();
         let registry = connector_carrying_a_layer(
-            vec![b'a'; crate::connector::store::MAX_CONNECTOR_FILESET_BYTES as usize + 1],
+            vec![b'a'; crate::connector::store::MAX_CONNECTOR_TRANSFER_BYTES as usize + 1],
             Some(16),
         )
         .into_registry();
