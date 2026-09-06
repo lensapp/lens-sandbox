@@ -526,8 +526,9 @@ boundary; the question did not go with it. A headless service raises no card at
 all ([service.md](service.md)), so there the list is the only place a question is
 read.
 
-A connector question you **answered** becomes an entry too, granted or declined.
-One you never answered leaves only the destination entry it rode on.
+A connector card becomes an entry when the service raises it. The entry reads
+`undecided` until you answer. It reads `granted` or `declined` after you answer.
+A card you closed leaves the question listed, as every other card does.
 
 The list also shows lines that ask nothing — a rule the run could not write, a
 destination it could not express. Each is listed as a **notice**. A notice
@@ -535,16 +536,17 @@ carries no verdict and nothing answers it.
 
 | Verb | What it does |
 |---|---|
-| `ls` | Lists the run's entries: the sandbox, what was asked, and the answer it has — `undecided`, `withdrawn`, `always allow`, or `always deny` for a destination; `granted` or `declined` for a connector; `notice` for a line that asked nothing. A run nothing has asked about prints that, and exits `0`. |
+| `ls` | Lists the run's entries: the sandbox, whether the question is a destination or a connector, what it asks about, and the answer it has — `undecided`, `withdrawn`, `always allow`, or `always deny` for a destination; `undecided`, `granted`, or `declined` for a connector. A notice asks nothing, so it names no question and its answer reads `notice`. A run nothing has asked about prints that, and exits `0`. |
 | `answer` | Answers one destination entry, or answers it again. The newest answer replaces the one before it. |
 | `rm` | Removes one notice. A destination or a connector entry is not removable. |
 
 **`answer` decides egress, and nothing else.** Only a destination entry takes an
-answer. A connector entry is listed, as granted or declined, and is not
-answerable here: connecting is done per machine and granting per run, both
-through [`lns connector`](#33-lns-connector). A notice is listed and answers
-nothing. Answering either is a refusal: it says why that entry is not answered here,
-and exits `1`.
+answer. A connector entry is listed with the answer it has, and is not answerable
+here: at a terminal you grant a connector through
+[`lns connector`](#33-lns-connector), and in the **Approvals** view you grant it
+on the row ([§7.1](#71-the-four-questions)). A notice is listed and answers
+nothing. Answering a connector entry or a notice is a refusal: it says why that
+entry is not answered here, and exits `1`.
 
 An entry records the question and the answer it got. What the answer *does* lives
 where it always did — an egress rule in the run's `decisions.yaml`
@@ -758,8 +760,8 @@ you may also answer early, at your terminal, with the same disclosure.
 
 **A question outlives the card that asked it.** A card that asks about a
 destination becomes an entry in the run's own directory
-([§3.7](#37-lns-approval)); a connector card does so when you answer it, and the
-credential card never does. Only a card answers a held request. Only a card has a
+([§3.7](#37-lns-approval)); a connector card does so when the service raises it,
+and the credential card never does. Only a card answers a held request. Only a card has a
 call waiting on the answer.
 
 Two surfaces read the entries back. The service's tray menu opens an
@@ -768,10 +770,21 @@ Two surfaces read the entries back. The service's tray menu opens an
 only surface left when the service runs headless ([service.md](service.md)). Both give an
 **egress** answer late, or change one. Both offer the same three answers, and
 neither offers a once verdict. Both remove a notice, and neither removes a
-destination or a connector entry. A connector question stays `lns connector`'s: both
-surfaces list the connector questions you answered on a card, and neither changes
-them. A grant you gave early at your terminal raised no card, so neither surface
-lists it — `lns audit` records it.
+destination or a connector entry.
+
+You answer a connector entry where you answer any connector. In the **Approvals**
+view that is the row: it offers the same grant the card offered — a method, and a
+connection where that method authenticates — for this run. It discloses what the
+card discloses before it asks: the destinations the method opens, the variables it
+sets, the files it writes, the authority of each connection, and any `deny` the
+grant overrides ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
+The row holds no request, so it grants for the next attempt rather than a call
+that is waiting. It is the card's own surface, so the audit chain records that
+answer's source as `card` ([§3.3](#33-lns-connector)).
+At your terminal you grant with `lns connector grant`, and `lns approval` lists
+the entry without deciding it. A grant you gave
+early at your terminal raised no card, so neither surface lists it — `lns audit`
+records it.
 
 ### 7.2 Answering
 
@@ -854,7 +867,7 @@ A run keeps its own decisions with the run, in `~/.lns/`, and not in your projec
 | Path | Holds |
 |---|---|
 | `~/.lns/runs/<RUN>/decisions.yaml` | What that run decided: the egress rules you approved at its prompts. It goes when the run does; `lns sandbox save --kind mixin` writes it somewhere you keep. |
-| `~/.lns/runs/<RUN>/approvals.json` | What that run was asked: one entry per question — a destination, a connector, or a notice — and the answer each got ([§3.7](#37-lns-approval)). It records the question and points at the decision; `decisions.yaml` and the grant file hold the decision itself. Service state, not a document you keep, and it goes when the run does. |
+| `~/.lns/runs/<RUN>/approvals.json` | What that run was asked: one entry per question — a destination, a connector, or a notice — and the answer each has ([§3.7](#37-lns-approval)). It records the question and points at the decision; `decisions.yaml` and the grant file hold the decision itself. Service state, not a document you keep, and it goes when the run does. |
 
 **`lns` writes no file you did not point it at.** Two commands write into your
 project: `lns artifact init`, to `./lns.yaml` or the `-f` you give it, and
