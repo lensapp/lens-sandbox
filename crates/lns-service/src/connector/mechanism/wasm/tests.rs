@@ -51,6 +51,26 @@ fn a_component_reaches_a_host_its_method_declares_and_gets_what_came_back() {
 }
 
 #[test]
+fn a_call_beginning_gives_the_component_the_whole_of_what_one_call_may_write_down() {
+    // The ceiling is per call, and a `Host` that carried a spent counter into the next one would silently record nothing of it.
+    let (_runtime, component) = compiled("fetching");
+    let parts = Parts::new();
+    let host = parts.host(reaching(&["auth.some-provider.example"]));
+    for _ in 0..crate::connector::mechanism::host::MAX_RECORDED_ENTRIES_PER_CALL + 1 {
+        let _ = host.run(&["claude".to_string()]);
+    }
+    parts.recorder.taken();
+
+    component.connect(&host, 0).expect("the component answers");
+
+    assert_eq!(
+        parts.recorder.taken().reached,
+        [("auth.some-provider.example".to_string(), false)],
+        "what this call reached is written down, whatever the call before it spent"
+    );
+}
+
+#[test]
 fn a_component_reaching_a_host_its_method_did_not_declare_is_refused_and_told_so() {
     let (_runtime, component) = compiled("fetching");
     let parts = Parts::new();
