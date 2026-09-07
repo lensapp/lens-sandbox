@@ -457,18 +457,6 @@ fn a_component_reaching_past_what_lns_lends_it_cannot_start_at_all() {
 }
 
 #[test]
-fn this_build_serves_no_loopback_callback_and_says_so_rather_than_hanging() {
-    let (_runtime, component) = compiled("binding");
-    let parts = Parts::new();
-
-    let step = component
-        .connect(&parts.host(reaching(&[])), 0)
-        .expect("the component answers");
-
-    assert!(matches!(&step, Step::Failed(why) if why.contains("no loopback callback")));
-}
-
-#[test]
 fn a_component_renews_what_it_produced_and_reports_the_next_expiry() {
     let (_runtime, component) = compiled("asking");
     let parts = Parts::new();

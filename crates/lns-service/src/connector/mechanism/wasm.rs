@@ -365,19 +365,5 @@ impl bindings::lns::connector::entropy::Host for Data {
     }
 }
 
-impl bindings::lns::connector::callback::Host for Data {
-    fn bind(&mut self) -> Result<bindings::lns::connector::callback::Binding, wit::CallError> {
-        Err(wit::CallError::Refused(
-            "this build serves no loopback callback".to_string(),
-        ))
-    }
-
-    fn wait(&mut self, _handle: u32) -> Result<String, wit::CallError> {
-        Err(wit::CallError::Refused(
-            "this build serves no loopback callback".to_string(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests;
