@@ -551,7 +551,6 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                 &state.approval_answers,
             )
             .rows;
-            let selected = state.selected_sandbox.clone();
             if rows.is_empty() {
                 ui.colored_label(TEXT_MUTED, "Nothing has been asked.");
                 return;
@@ -560,21 +559,25 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
             // The scrollbar's lane is never the columns' to claim: it appears only once the list scrolls, and nothing recomputes the widths when it does.
             let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
             let table = ui.available_width() - DISCLOSURE_COL - 2.0 * f32::from(ROW_INSET) - bar;
-            approval_header(ui, selected.as_deref(), table);
+            approval_header(ui, table);
+            let grouped = approvals::groups(&state.approvals, &rows);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for i in rows {
-                        let entry = &state.approvals[i];
-                        let open = state
-                            .open
-                            .as_mut()
-                            .filter(|open| open.id == entry.id)
-                            .map(|open| (&mut open.draft, open.offer.as_ref()));
-                        if let Some(act) = approval_row(ui, entry, selected.as_deref(), table, open)
-                        {
-                            chosen = Some((entry.id.clone(), act));
+                    for group in grouped {
+                        sandbox_heading(ui, &group);
+                        for i in group.rows {
+                            let entry = &state.approvals[i];
+                            let open = state
+                                .open
+                                .as_mut()
+                                .filter(|open| open.id == entry.id)
+                                .map(|open| (&mut open.draft, open.offer.as_ref()));
+                            if let Some(act) = approval_row(ui, entry, table, open) {
+                                chosen = Some((entry.id.clone(), act));
+                            }
                         }
+                        ui.add_space(6.0);
                     }
                 });
         });
@@ -612,13 +615,36 @@ const DISCLOSURE_COL: f32 = 18.0;
 /// The inner margin every row frame carries, which the header must clear to sit above its own cells.
 const ROW_INSET: i8 = 6;
 
-fn approval_header(ui: &mut egui::Ui, selected: Option<&str>, available: f32) {
+/// The run every row beneath it was asked of, which the rows themselves no longer carry.
+fn sandbox_heading(ui: &mut egui::Ui, group: &approvals::Group) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(f32::from(ROW_INSET));
+        glyph(ui, icons::ICON_DNS, TEXT_MUTED, 14.0);
+        ui.label(
+            RichText::new(&group.sandbox)
+                .monospace()
+                .size(FS_SECONDARY)
+                .color(TEXT_PRIMARY),
+        );
+        if group.waiting > 0 {
+            ui.label(
+                RichText::new(format!("{} waiting", group.waiting))
+                    .size(FS_LABEL)
+                    .color(STATUS_WARNING),
+            );
+        }
+    });
+    ui.add_space(2.0);
+}
+
+fn approval_header(ui: &mut egui::Ui, available: f32) {
     let gutter = ui.spacing().item_spacing.x;
     ui.horizontal(|ui| {
         ui.add_space(DISCLOSURE_COL + f32::from(ROW_INSET));
-        for (column, width) in approvals::columns(selected)
+        for (column, width) in approvals::columns()
             .into_iter()
-            .zip(approvals::widths(selected, available, gutter))
+            .zip(approvals::widths(available, gutter))
         {
             cell(
                 ui,
@@ -635,7 +661,6 @@ fn approval_header(ui: &mut egui::Ui, selected: Option<&str>, available: f32) {
 fn approval_row(
     ui: &mut egui::Ui,
     entry: &Entry,
-    selected: Option<&str>,
     available: f32,
     open: Option<(
         &mut crate::tray::OfferDraft,
@@ -664,6 +689,7 @@ fn approval_row(
                     vec2(DISCLOSURE_COL, ROW_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
+                        ui.set_min_size(vec2(DISCLOSURE_COL, ROW_HEIGHT));
                         let mark = if expanded {
                             icons::ICON_EXPAND_MORE
                         } else {
@@ -672,9 +698,9 @@ fn approval_row(
                         glyph(ui, mark, TEXT_MUTED, 16.0);
                     },
                 );
-                for (column, width) in approvals::columns(selected)
+                for (column, width) in approvals::columns()
                     .into_iter()
-                    .zip(approvals::widths(selected, available, gutter))
+                    .zip(approvals::widths(available, gutter))
                 {
                     approval_cell(ui, width, column.cell(entry));
                 }
@@ -701,45 +727,47 @@ fn approval_cell(ui: &mut egui::Ui, width: f32, held: approvals::Cell) {
     ui.allocate_ui_with_layout(
         vec2(width, ROW_HEIGHT),
         Layout::left_to_right(Align::Center),
-        |ui| match held {
-            approvals::Cell::Question(text) => {
-                ui.add(
-                    egui::Label::new(RichText::new(text).size(FS_LABEL).color(CATEGORY)).truncate(),
-                );
-            }
-            approvals::Cell::Subject { text, raw } => {
-                if raw {
-                    ui.label(RichText::new("RAW").size(FS_LABEL).color(STATUS_WARNING));
+        |ui| {
+            // A cell shrinks to its own text unless it is told not to, and a table of shrunken cells leaves the heads over nothing and the last column short of the window.
+            ui.set_min_size(vec2(width, ROW_HEIGHT));
+            match held {
+                approvals::Cell::Question(asked) => {
+                    glyph(ui, mark(asked), CATEGORY, 16.0).on_hover_text(asked.hint());
                 }
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(text)
-                            .monospace()
-                            .size(FS_SECONDARY)
-                            .color(TEXT_PRIMARY),
-                    )
-                    .truncate(),
-                );
-            }
-            approvals::Cell::Answer { text, tone } => {
-                ui.add(
-                    egui::Label::new(RichText::new(text).size(FS_LABEL).color(answer_ink(tone)))
+                approvals::Cell::Subject { text, raw } => {
+                    if raw {
+                        ui.label(RichText::new("RAW").size(FS_LABEL).color(STATUS_WARNING));
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text)
+                                .monospace()
+                                .size(FS_SECONDARY)
+                                .color(TEXT_PRIMARY),
+                        )
                         .truncate(),
-                );
-            }
-            approvals::Cell::Sandbox(text) => {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(text)
-                            .monospace()
-                            .size(FS_LABEL)
-                            .color(TEXT_MUTED),
-                    )
-                    .truncate(),
-                );
+                    );
+                }
+                approvals::Cell::Answer { text, tone } => {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text).size(FS_LABEL).color(answer_ink(tone)),
+                        )
+                        .truncate(),
+                    );
+                }
             }
         },
     );
+}
+
+/// The mark that stands for a question, in place of the word the column used to spend its width on.
+fn mark(asked: approvals::Asked) -> MaterialIcon {
+    match asked {
+        approvals::Asked::Destination => icons::ICON_SWAP_HORIZ,
+        approvals::Asked::Connector => icons::ICON_LINK,
+        approvals::Asked::Notice => icons::ICON_INFO,
+    }
 }
 
 fn answer_ink(tone: approvals::Tone) -> Color32 {
@@ -784,10 +812,9 @@ fn approval_expansion(
                             }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .button("Remove from the list")
+                            if icon_button(ui, icons::ICON_DELETE)
                                 .on_hover_text(
-                                    "Removes the record. What this entry decided stays decided.",
+                                    "Remove from the list. What this entry decided stays decided.",
                                 )
                                 .clicked()
                             {
@@ -1571,6 +1598,8 @@ fn cell(ui: &mut egui::Ui, width: f32, text: RichText) {
         vec2(width, ROW_HEIGHT),
         Layout::left_to_right(Align::Center),
         |ui| {
+            // Without a floor the cell is as wide as its own text, which leaves every head over the wrong column and the table short of the window.
+            ui.set_min_size(vec2(width, ROW_HEIGHT));
             ui.add(egui::Label::new(text).truncate());
         },
     );
@@ -1588,12 +1617,12 @@ fn icon_button(ui: &mut egui::Ui, icon: MaterialIcon) -> egui::Response {
     .on_hover_cursor(CursorIcon::PointingHand)
 }
 
-fn glyph(ui: &mut egui::Ui, icon: MaterialIcon, color: Color32, size: f32) {
+fn glyph(ui: &mut egui::Ui, icon: MaterialIcon, color: Color32, size: f32) -> egui::Response {
     ui.label(
         RichText::new(icon.codepoint)
             .font(FontId::new(size, icon.font_family()))
             .color(color),
-    );
+    )
 }
 
 fn status_dot(ui: &mut egui::Ui, status: &str) {

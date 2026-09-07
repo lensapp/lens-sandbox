@@ -75,40 +75,33 @@ pub enum Column {
     Question,
     Subject,
     Answer,
-    Sandbox,
 }
 
 /// What one column holds for one row, carrying what the view needs to draw it rather than a string the view must interpret by position.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Cell {
-    Question(String),
+    Question(Asked),
     Subject { text: String, raw: bool },
     Answer { text: String, tone: Tone },
-    Sandbox(String),
 }
 
-const W_QUESTION: f32 = 104.0;
+/// One mark, and the space around it.
+const W_QUESTION: f32 = 22.0;
 const W_ANSWER: f32 = 128.0;
-const W_SANDBOX: f32 = W_ANSWER;
 /// Enough of the subject to read a hostname, whatever the window's width.
 const W_SUBJECT_LEAST: f32 = 120.0;
 
-/// The columns the table has. The sandbox is one of them only while the list spans more than one run — narrowed, the sidebar says which.
-pub fn columns(selected: Option<&str>) -> Vec<Column> {
-    let mut columns = vec![Column::Question, Column::Subject, Column::Answer];
-    if selected.is_none() {
-        columns.push(Column::Sandbox);
-    }
-    columns
+/// The columns the table has. The sandbox is not one of them: the list is gathered under the run that was asked, which says it once for every row beneath it.
+pub fn columns() -> Vec<Column> {
+    vec![Column::Question, Column::Subject, Column::Answer]
 }
 
 impl Column {
     pub fn head(self) -> &'static str {
         match self {
-            Self::Question => "QUESTION",
+            Self::Question => "",
             Self::Subject => "ASKED ABOUT",
             Self::Answer => "ANSWER",
-            Self::Sandbox => "SANDBOX",
         }
     }
 
@@ -118,14 +111,13 @@ impl Column {
             Self::Question => Some(W_QUESTION),
             Self::Subject => None,
             Self::Answer => Some(W_ANSWER),
-            Self::Sandbox => Some(W_SANDBOX),
         }
     }
 
     /// What this column holds for this row.
     pub fn cell(self, entry: &Entry) -> Cell {
         match self {
-            Self::Question => Cell::Question(question(entry)),
+            Self::Question => Cell::Question(asked(entry)),
             Self::Subject => Cell::Subject {
                 text: entry.subject().to_string(),
                 raw: is_raw(entry),
@@ -134,14 +126,13 @@ impl Column {
                 text: entry.state.label().to_string(),
                 tone: tone(entry),
             },
-            Self::Sandbox => Cell::Sandbox(entry.sandbox.clone().unwrap_or_default()),
         }
     }
 }
 
 /// Every column's width, in the order [`columns`] gives them, for a row of `available` width whose layout puts `gutter` between each pair of items. The subject takes what the fixed columns and the gutters leave, so the answer never loses its place — or its ellipsis — to a long hostname.
-pub fn widths(selected: Option<&str>, available: f32, gutter: f32) -> Vec<f32> {
-    let columns = columns(selected);
+pub fn widths(available: f32, gutter: f32) -> Vec<f32> {
+    let columns = columns();
     let fixed: f32 = columns
         .iter()
         .filter_map(|column| column.fixed_width())
@@ -152,6 +143,38 @@ pub fn widths(selected: Option<&str>, available: f32, gutter: f32) -> Vec<f32> {
         .iter()
         .map(|column| column.fixed_width().unwrap_or(subject))
         .collect()
+}
+
+/// The rows of one run, under the name that run is known by.
+pub struct Group {
+    pub sandbox: String,
+    pub rows: Vec<usize>,
+    pub waiting: usize,
+}
+
+/// The name a group carries when the entry names no run of its own.
+const UNSTAMPED: &str = "no sandbox";
+
+/// The listed rows, gathered under the run each was asked of, in the order the list first names them. A row's own sandbox is the hardest thing to read off a flat table, and it is the thing that decides whether an answer is safe to give.
+pub fn groups(entries: &[Entry], rows: &[usize]) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (i, entry) in rows.iter().filter_map(|&i| Some((i, entries.get(i)?))) {
+        let run = entry.sandbox.as_deref().unwrap_or(UNSTAMPED);
+        let at = match groups.iter().position(|group| group.sandbox == run) {
+            Some(at) => at,
+            None => {
+                groups.push(Group {
+                    sandbox: run.to_string(),
+                    rows: Vec::new(),
+                    waiting: 0,
+                });
+                groups.len() - 1
+            }
+        };
+        groups[at].rows.push(i);
+        groups[at].waiting += usize::from(waits(entry));
+    }
+    groups
 }
 
 /// Whether the open row is one the view still shows, so a filter that still shows it does not throw away a grant half composed on it.
@@ -173,12 +196,32 @@ pub fn still_listed(open: Option<&str>, entries: &[Entry]) -> bool {
     }
 }
 
-/// What the row asks about, in the words `lns approval ls` prints and the case a row's eyebrow reads in.
-pub fn question(entry: &Entry) -> String {
-    let asked = crate::approval_flow::answering::kind_of(entry);
-    match asked {
-        lns_ipc::ApprovalEntryKind::Notice => "NOTICE".to_string(),
-        named => named.question().to_uppercase(),
+/// What a row asks about. The view draws it as a mark, so the word itself never takes a column's width from the thing it asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asked {
+    Destination,
+    Connector,
+    Notice,
+}
+
+pub fn asked(entry: &Entry) -> Asked {
+    match crate::approval_flow::answering::kind_of(entry) {
+        lns_ipc::ApprovalEntryKind::Destination => Asked::Destination,
+        lns_ipc::ApprovalEntryKind::Connector => Asked::Connector,
+        lns_ipc::ApprovalEntryKind::Notice => Asked::Notice,
+    }
+}
+
+impl Asked {
+    /// What resting on the mark says. A mark nobody can name is worse than the word it replaced, so every one of them answers "what am I looking at".
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Destination => "Destination — a host this sandbox asked to reach",
+            Self::Connector => "Connector — a service this sandbox asked you to connect",
+            Self::Notice => {
+                "Notice — something the service has to tell you, with no verdict to give"
+            }
+        }
     }
 }
 
@@ -534,7 +577,7 @@ mod tests {
             EntryState::AlwaysAllowed,
         );
 
-        let held: Vec<Cell> = columns(None)
+        let held: Vec<Cell> = columns()
             .into_iter()
             .map(|column| column.cell(&entry))
             .collect();
@@ -542,7 +585,7 @@ mod tests {
         assert_eq!(
             held,
             vec![
-                Cell::Question("DESTINATION".to_string()),
+                Cell::Question(Asked::Destination),
                 Cell::Subject {
                     text: "db.internal:5432".to_string(),
                     raw: true,
@@ -551,55 +594,37 @@ mod tests {
                     text: "always allow".to_string(),
                     tone: Tone::Allowed,
                 },
-                Cell::Sandbox("dapper_thistle".to_string()),
             ]
         );
     }
 
     #[test]
-    fn narrowing_to_one_sandbox_drops_the_column_the_sidebar_names() {
+    fn every_head_names_its_own_column_and_the_marks_name_themselves() {
+        // The first column holds a mark, which a head would only repeat; every other column says what it holds.
+        assert_eq!(Column::Question.head(), "");
+        assert_eq!(Column::Subject.head(), "ASKED ABOUT");
+        assert_eq!(Column::Answer.head(), "ANSWER");
         assert_eq!(
-            columns(Some(ID_A)),
-            vec![Column::Question, Column::Subject, Column::Answer]
-        );
-        assert_eq!(
-            columns(None).len(),
-            widths(None, 800.0, 10.0).len(),
+            columns().len(),
+            widths(800.0, 10.0).len(),
             "a column with no width would leave the heads above nothing"
         );
     }
 
     #[test]
-    fn every_head_names_its_own_column() {
-        for column in columns(None) {
-            assert!(!column.head().is_empty(), "{column:?}");
-        }
-        assert_eq!(Column::Subject.head(), "ASKED ABOUT");
-    }
-
-    #[test]
-    fn the_columns_and_the_gutters_between_them_fit_the_row() {
-        // A row that overruns clips its last column mid-glyph, with no ellipsis to say it was cut — and the last column is the sandbox, or the answer once the list is narrowed.
+    fn the_columns_and_the_gutters_between_them_fill_the_row() {
+        // Short of the row, the table reads as a narrow strip in a wide window; over it, the last column clips mid-glyph with no ellipsis to say it was cut.
         let gutter = 10.0;
-        let wide = widths(None, 800.0, gutter);
+        let wide = widths(800.0, gutter);
 
         assert_eq!(
             wide.iter().sum::<f32>() + wide.len() as f32 * gutter,
             800.0,
             "the widths plus the gutters are the whole row"
         );
-        assert_eq!(
-            wide[2], wide[3],
-            "the sandbox reads in the answer's own width"
-        );
-        assert!(wide[1] > wide[0], "the subject is the column that grows");
-        assert_eq!(
-            widths(Some(ID_A), 800.0, gutter).len(),
-            3,
-            "narrowed, there is one column fewer to fit"
-        );
+        assert!(wide[1] > wide[2], "the subject is the column that grows");
 
-        let subject = widths(None, 100.0, gutter)[1];
+        let subject = widths(100.0, gutter)[1];
         assert!(
             subject >= 120.0,
             "a window too small to fit the table still shows enough subject to read a hostname, got {subject}"
@@ -607,20 +632,63 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_no_run_stamped_still_fills_its_sandbox_cell() {
-        // A persisted list that omits the field reads back as no run, and a missing cell would put every later column under the wrong head.
-        let unstamped = Entry::new(
+    fn the_list_is_gathered_under_the_run_that_was_asked() {
+        // A sandbox column is one word in a row of words; the name that heads a block is the one a developer reads before answering.
+        let held = vec![
+            destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided,
+            ),
+            destination("bold_otter", "api.stripe.com", false, EntryState::Undecided),
+            destination(
+                "dapper_thistle",
+                "api.github.com",
+                false,
+                EntryState::AlwaysAllowed,
+            ),
+        ];
+        let rows = listing(&held, None, &sandboxes(), &everything()).rows;
+
+        let grouped = groups(&held, &rows);
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].sandbox, "dapper_thistle");
+        assert_eq!(
+            grouped[0].rows,
+            vec![0, 2],
+            "a run's rows gather under it, wherever the list holds them"
+        );
+        assert_eq!(
+            grouped[0].waiting, 1,
+            "a heading counts what that run still waits on"
+        );
+        assert_eq!(grouped[1].sandbox, "bold_otter");
+        assert_eq!(grouped[1].rows, vec![1]);
+    }
+
+    #[test]
+    fn an_entry_no_run_stamped_is_gathered_under_a_heading_that_says_so() {
+        // A persisted list that omits the field reads back as no run, and a blank heading reads as a bug.
+        let unstamped = vec![Entry::new(
             None,
             EntryKind::Notice {
                 message: "the rule could not be written".into(),
             },
             EntryState::Noted,
-        );
+        )];
 
-        assert_eq!(
-            Column::Sandbox.cell(&unstamped),
-            Cell::Sandbox(String::new())
-        );
+        let grouped = groups(&unstamped, &[0]);
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].sandbox, "no sandbox");
+    }
+
+    #[test]
+    fn a_row_index_the_list_no_longer_holds_heads_nothing() {
+        // The rows and the entries are read a frame apart, and a heading built from an index that is gone would name a run at random.
+        assert!(groups(&[], &[0]).is_empty());
     }
 
     #[test]
@@ -661,20 +729,33 @@ mod tests {
     fn every_row_says_what_it_asks_about() {
         // A connector shown by name alone reads as a destination nobody can answer, which is what the developer reported.
         assert_eq!(
-            question(&destination(
+            asked(&destination(
                 "dapper_thistle",
                 "api.linear.app",
                 false,
                 EntryState::Undecided
             )),
-            "DESTINATION"
+            Asked::Destination
         );
-        assert_eq!(question(&connector("dapper_thistle")), "CONNECTOR");
+        assert_eq!(asked(&connector("dapper_thistle")), Asked::Connector);
         assert_eq!(
-            question(&notice("dapper_thistle")),
-            "NOTICE",
+            asked(&notice("dapper_thistle")),
+            Asked::Notice,
             "a notice names no question at a terminal, and the row still has to say what it is"
         );
+    }
+
+    #[test]
+    fn every_mark_names_itself_to_anyone_who_rests_on_it() {
+        // The word left the column; a mark that answers nothing is a column of shapes.
+        for (mark, word) in [
+            (Asked::Destination, "Destination"),
+            (Asked::Connector, "Connector"),
+            (Asked::Notice, "Notice"),
+        ] {
+            let hint = mark.hint();
+            assert!(hint.starts_with(word), "{mark:?} rests as {hint:?}");
+        }
     }
 
     #[test]
