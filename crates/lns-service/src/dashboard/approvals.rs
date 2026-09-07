@@ -16,10 +16,8 @@ pub fn answers() -> Vec<&'static str> {
 ///
 /// The chosen answers are deliberately not applied: the chooser lives inside the view, and a count that read `0` because of a filter nobody can see from the sidebar would say the opposite of the truth.
 pub fn waiting(entries: &[Entry], selected: Option<&str>, sandboxes: &[Sandbox]) -> usize {
-    listing(entries, selected, sandboxes, &BTreeSet::new())
-        .rows
-        .iter()
-        .filter(|i| waits(&entries[**i]))
+    matching(entries, selected, sandboxes, &BTreeSet::new())
+        .filter(|(_, entry)| waits(entry))
         .count()
 }
 
@@ -30,25 +28,38 @@ pub struct Listing {
 
 /// The rows the view shows: what one sandbox was asked, carrying one of the chosen answers, or everything when neither is chosen.
 ///
-/// An entry is stamped with the run's name, and the sidebar selects a run by id, so the selection is resolved through the sandbox list before it can match.
+/// What still waits comes first, because the view is a live one and an answered row is a record of work already done.
 pub fn listing(
     entries: &[Entry],
     selected: Option<&str>,
     sandboxes: &[Sandbox],
     answers: &BTreeSet<String>,
 ) -> Listing {
+    let mut rows: Vec<(bool, usize)> = matching(entries, selected, sandboxes, answers)
+        .map(|(i, entry)| (!waits(entry), i))
+        .collect();
+    rows.sort_by_key(|(settled, _)| *settled);
+    Listing {
+        rows: rows.into_iter().map(|(_, i)| i).collect(),
+    }
+}
+
+/// Every entry the two filters keep, with the index the view reads it back by. An entry is stamped with the run's name, and the sidebar selects a run by id, so the selection is resolved through the sandbox list before it can match.
+fn matching<'a>(
+    entries: &'a [Entry],
+    selected: Option<&'a str>,
+    sandboxes: &'a [Sandbox],
+    answers: &'a BTreeSet<String>,
+) -> impl Iterator<Item = (usize, &'a Entry)> {
     let asked = selected.map(|id| named(id, sandboxes));
-    let rows: Vec<usize> = entries
+    entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| match asked {
+        .filter(move |(_, entry)| match asked {
             Some(run) => entry.sandbox.as_deref() == Some(run),
             None => true,
         })
-        .filter(|(_, entry)| answers.is_empty() || answers.contains(entry.state.label()))
-        .map(|(i, _)| i)
-        .collect();
-    Listing { rows }
+        .filter(move |(_, entry)| answers.is_empty() || answers.contains(entry.state.label()))
 }
 
 /// How loudly a row's answer reads. The answer is the thing the developer came back for, so it is not a muted footnote.
@@ -414,6 +425,43 @@ mod tests {
             listing(&held, Some("dapper_thistle"), &[], &everything()).rows,
             vec![0],
             "the handle itself is the last thing left to match on"
+        );
+    }
+
+    #[test]
+    fn what_still_waits_is_listed_first_and_a_group_that_waits_heads_the_list() {
+        // The view is live. An answered row is a record; a row with no answer is the reason the developer opened the window.
+        let held = vec![
+            destination(
+                "bold_otter",
+                "api.github.com",
+                false,
+                EntryState::AlwaysAllowed,
+            ),
+            notice("bold_otter"),
+            destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided,
+            ),
+            destination("bold_otter", "api.stripe.com", false, EntryState::Withdrawn),
+        ];
+
+        let rows = listing(&held, None, &sandboxes(), &everything()).rows;
+
+        assert_eq!(
+            rows,
+            vec![2, 3, 0, 1],
+            "the two that wait come first, each keeping the place the run raised it in"
+        );
+        assert_eq!(
+            groups(&held, &rows)
+                .iter()
+                .map(|group| group.sandbox.clone())
+                .collect::<Vec<_>>(),
+            vec!["dapper_thistle", "bold_otter"],
+            "a run that is waiting on an answer heads the list, whatever the file's order"
         );
     }
 

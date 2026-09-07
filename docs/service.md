@@ -23,9 +23,10 @@ lns service stop     # ask it to shut down
 Its tray menu opens two views and quits the service. The **Audit** view shows the
 timeline of what the runs did. The **Approvals** view shows what they were
 asked, one row per question, gathered under the sandbox that was asked. A mark
-names each question. Point to the mark to read what it asks. Open a row to see the
-action its card showed, and everything that answers it. An open row answers the
-entry, and clears it from the list, the way
+names each question. Point to the mark to read what it asks. Questions that
+still wait for an answer are at the top. Open a row to see the action its card
+showed, and everything that answers it. An open row answers the entry, and
+clears it from the list, the way
 [`lns approval`](cli-reference.md#lns-approval) does. Choose a sandbox or an
 answer to narrow the list. An open connector row offers the grant its card
 offered, so a connector card you closed is answered there too. **Quit** stops

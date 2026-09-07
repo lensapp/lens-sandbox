@@ -20,6 +20,11 @@ use crate::approval_flow::window::{
 };
 use crate::ui::theme;
 
+// Two lists under one panel share a scroll id, so each list names its own.
+const TIMELINE_LIST: &str = "timeline-list";
+const APPROVALS_LIST: &str = "approvals-list";
+const SIDEBAR_LIST: &str = "sidebar-sandboxes";
+
 const TRAFFIC_LIGHT_INSET: f32 = 80.0;
 const SIDEBAR_WIDTH: f32 = 216.0;
 const ROW_HEIGHT: f32 = 26.0;
@@ -360,6 +365,8 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
             {
                 state.view = View::Approvals;
                 state.approval_notice = None;
+                // The detail panel is not view-gated, so an audit row left open would sit over the approvals list and narrow it.
+                state.selected = None;
             }
             if menu_item(
                 ui,
@@ -381,17 +388,23 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
                 });
                 ui.add_space(2.0);
             }
-            for sb in &sandboxes {
-                sidebar_item(
-                    ui,
-                    state,
-                    Some(&sb.id),
-                    &sb.name,
-                    &sb.image,
-                    &sb.id,
-                    &sb.status,
-                );
-            }
+            // A machine holds as many runs as it likes, and the panel is one window tall.
+            egui::ScrollArea::vertical()
+                .id_salt(SIDEBAR_LIST)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for sb in &sandboxes {
+                        sidebar_item(
+                            ui,
+                            state,
+                            Some(&sb.id),
+                            &sb.name,
+                            &sb.image,
+                            &sb.id,
+                            &sb.status,
+                        );
+                    }
+                });
         });
 }
 
@@ -509,6 +522,7 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
             };
             let visible = visible_indices(&state.rows, &filters);
             egui::ScrollArea::vertical()
+                .id_salt(TIMELINE_LIST)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if visible.is_empty() {
@@ -562,6 +576,7 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
             approval_header(ui, table);
             let grouped = approvals::groups(&state.approvals, &rows);
             egui::ScrollArea::vertical()
+                .id_salt(APPROVALS_LIST)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for group in grouped {
@@ -1653,5 +1668,184 @@ fn kind_color(kind: &str) -> Color32 {
         "approval" => STATUS_WARNING,
         "connection" => ACCENT_GREEN,
         _ => CATEGORY,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use egui_kittest::kittest::Queryable as _;
+
+    use super::*;
+    use crate::approval_flow::entries::{EntryKind, EntryState};
+
+    const WINDOW: Vec2 = Vec2 { x: 960.0, y: 640.0 };
+    const OVER_THE_LIST: egui::Pos2 = egui::Pos2 { x: 600.0, y: 400.0 };
+    const OVER_THE_SIDEBAR: egui::Pos2 = egui::Pos2 { x: 120.0, y: 400.0 };
+
+    fn asked_about(host: &str) -> Entry {
+        Entry::new(
+            Some("dapper_thistle".to_string()),
+            EntryKind::Destination {
+                destination: host.to_string(),
+                action: format!("CONNECT {host}:443"),
+                raw: false,
+            },
+            EntryState::Undecided,
+        )
+    }
+
+    fn run(i: usize) -> Sandbox {
+        Sandbox {
+            id: format!("{i:032x}"),
+            name: format!("run_{i:02}"),
+            image: "alpine:latest".into(),
+            status: "running".into(),
+        }
+    }
+
+    fn logged(detail: &str) -> TimelineRow {
+        TimelineRow {
+            ts: "2026-06-29T13:30:00Z".into(),
+            when: "2026-06-29 13:30:00".into(),
+            run: "dapper_thistle".into(),
+            kind: "egress".into(),
+            detail: detail.to_string(),
+            connector: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    fn state_of(view: View, listed: usize, runs: usize) -> DashboardState {
+        DashboardState {
+            view,
+            approvals: (0..listed)
+                .map(|i| asked_about(&format!("api{i:02}.linear.app")))
+                .collect(),
+            sandboxes: (0..runs).map(run).collect(),
+            rows: (0..listed)
+                .map(|i| logged(&format!("GET /{i:02}")))
+                .collect(),
+            ..DashboardState::new()
+        }
+    }
+
+    /// Drives the real window headless. The icon font binds on a first pass that draws nothing, because egui applies an added font on the pass after it is given.
+    fn window(mut state: DashboardState, timeline: &Arc<AtomicBool>) -> egui_kittest::Harness<'_> {
+        let switch = timeline.clone();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(WINDOW)
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                if switch.load(Ordering::Relaxed) {
+                    state.view = View::Timeline;
+                }
+                render(ui, &mut state);
+            });
+        harness.run();
+        harness
+    }
+
+    fn wheel(harness: &mut egui_kittest::Harness<'_>, at: egui::Pos2, notches: usize) {
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(at));
+        harness.run();
+        for _ in 0..notches {
+            harness.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -120.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            });
+            harness.run();
+        }
+    }
+
+    fn top_of(harness: &egui_kittest::Harness<'_>, label: &str) -> f32 {
+        harness.get_by_label(label).rect().min.y
+    }
+
+    #[test]
+    fn the_approvals_list_scrolls_under_the_wheel() {
+        // A list longer than the window is a list of questions nobody can reach, and the ones out of reach are the ones a run is still waiting on.
+        let still = Arc::new(AtomicBool::new(false));
+        let mut harness = window(state_of(View::Approvals, 40, 1), &still);
+
+        let before = top_of(&harness, "api05.linear.app");
+        wheel(&mut harness, OVER_THE_LIST, 2);
+        let after = top_of(&harness, "api05.linear.app");
+
+        assert!(
+            after < before - 20.0,
+            "the row did not move: it sat at {before} before the wheel and at {after} after"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_scrolls_when_a_machine_holds_more_runs_than_fit() {
+        // The panel is one window tall and a machine holds as many runs as it likes; the last ones were unreachable.
+        let still = Arc::new(AtomicBool::new(false));
+        let mut harness = window(state_of(View::Approvals, 1, 30), &still);
+
+        let before = top_of(&harness, "run_04");
+        wheel(&mut harness, OVER_THE_SIDEBAR, 2);
+        let after = top_of(&harness, "run_04");
+
+        assert!(
+            after < before - 20.0,
+            "the sandbox did not move: it sat at {before} before the wheel and at {after} after"
+        );
+    }
+
+    #[test]
+    fn opening_the_approvals_view_closes_the_audit_detail() {
+        // The detail panel is not view-gated: an audit row left open stayed over the approvals list and took a third of its width.
+        let still = Arc::new(AtomicBool::new(false));
+        let mut harness = window(
+            DashboardState {
+                selected: Some(0),
+                detail_row: Some(logged("GET /00")),
+                ..state_of(View::Timeline, 40, 1)
+            },
+            &still,
+        );
+
+        assert!(
+            harness.query_by_label("When").is_some(),
+            "the detail panel is not open, so this pins nothing"
+        );
+        harness.get_by_label("Approvals").click();
+        harness.run();
+
+        assert!(harness.query_by_label("When").is_none());
+    }
+
+    #[test]
+    fn each_list_keeps_its_own_place() {
+        // Both lists sit in one panel, so with one scroll id between them the timeline opened at wherever the approvals list had been left — above its own first row, which reads as an empty window.
+        let still = Arc::new(AtomicBool::new(false));
+        let untouched = window(state_of(View::Timeline, 40, 1), &still);
+        let top = top_of(&untouched, "GET /00");
+
+        let switch = Arc::new(AtomicBool::new(false));
+        let mut moved = window(state_of(View::Approvals, 40, 1), &switch);
+        wheel(&mut moved, OVER_THE_LIST, 3);
+        switch.store(true, Ordering::Relaxed);
+        moved.run();
+
+        assert_eq!(
+            top_of(&moved, "GET /00"),
+            top,
+            "the timeline opened where the approvals list was left"
+        );
     }
 }
