@@ -190,11 +190,14 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
             handler::grant_disclosed(
                 store,
                 name,
-                digest,
                 &self.holder,
                 method,
                 connection,
-                paths_counted_at_boot_for(&self.holder).as_deref(),
+                &handler::AsRaised {
+                    digest,
+                    counted_at_boot: paths_counted_at_boot_for(&self.holder).as_deref(),
+                    now_millis: super::mechanism::real::now_millis(),
+                },
             )
         })?;
         // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
@@ -477,7 +480,23 @@ fn values_a_granted_method_sets(
 }
 
 fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
-    with_run_store(holder, handler::granted_supply)
+    with_run_store(holder, |store, holder| {
+        handler::granted_supply(store, holder, super::mechanism::real::now_millis())
+    })
+}
+
+/// Every connector this machine holds, one at a time, against the three stores. A connector that fails does not take the others with it.
+pub fn with_every_connector(
+    mut f: impl FnMut(&ConnectorStore<'_>, &str) -> Result<()>,
+) -> Result<()> {
+    with_stores(|store| {
+        for entry in store.installed()? {
+            if let Err(e) = f(store, &entry.name) {
+                crate::log::warn!("{}: {e:#}", entry.name);
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Opens the three stores against the holder a grant is keyed by.
@@ -604,6 +623,43 @@ mod tests {
 
     const RUN: &str = "1a2b3c4d0000000000000000000000aa";
     const OTHER_RUN: &str = "9f8e7d6c0000000000000000000000bb";
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn one_connector_that_cannot_be_looked_at_does_not_take_the_others_with_it() {
+        // The refresh pass runs beside the tick that spends component deadlines, so one broken connector must not stop the sweep.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let project = tempfile::tempdir().expect("tempdir");
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                project.path().join("lns.yaml"),
+                serde_json::json!({
+                    "apiVersion": "lns.run/v1",
+                    "kind": "connector",
+                    "name": name,
+                    "spec": {
+                        "serves": [format!("api.{name}.example")],
+                        "methods": [{ "name": "token", "auth": { "kind": "token" } }],
+                    },
+                })
+                .to_string(),
+            )
+            .expect("write");
+            answer(Call::Install(project.path().display().to_string()))
+                .await
+                .expect("install");
+        }
+
+        let mut looked_at = Vec::new();
+        with_every_connector(|_store, name| {
+            looked_at.push(name.to_string());
+            anyhow::bail!("this one cannot be looked at")
+        })
+        .expect("one connector's failure is not the pass's");
+
+        assert_eq!(looked_at, ["alpha", "beta"]);
+    }
 
     #[test]
     fn a_connect_that_did_not_finish_answers_the_caller_rather_than_faulting() {

@@ -175,6 +175,16 @@ mod tests {
     use super::*;
     use lns_ipc::{ApprovalKind, Decision, LedgerEvent};
 
+    /// Both, because `lns_home()` prefers `LNS_HOME`: guarding `HOME` alone would let a test write to the developer's real ledger.
+    fn a_home_of_its_own(
+        d: &tempfile::TempDir,
+    ) -> (crate::test_env::EnvVarGuard, crate::test_env::EnvVarGuard) {
+        (
+            crate::test_env::EnvVarGuard::set("HOME", d.path()),
+            crate::test_env::EnvVarGuard::set("LNS_HOME", d.path()),
+        )
+    }
+
     struct FakeClock(u64);
     impl Clock for FakeClock {
         fn now_unix(&self) -> u64 {
@@ -269,7 +279,7 @@ mod tests {
     fn what_a_connectors_own_code_did_lands_on_the_machine_chain_and_no_runs() {
         // A component runs on the machine's behalf and no run can account for it (§3.2.6).
         let d = tempfile::tempdir().unwrap();
-        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _home = a_home_of_its_own(&d);
 
         append_mechanism_event(
             &FakeClock(1_780_000_000),
@@ -298,7 +308,7 @@ mod tests {
     #[serial_test::serial(env)]
     fn a_pulled_sandboxs_tool_acquisition_is_readable_off_the_machine_chain() {
         let d = tempfile::tempdir().unwrap();
-        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _home = a_home_of_its_own(&d);
         let cx = crate::ocsf_audit::OcsfCtx::at_unix(
             "pull-1a2b3c4d5e6f".into(),
             String::new(),
@@ -338,7 +348,7 @@ mod tests {
     #[serial_test::serial(env)]
     fn append_ledger_record_writes_under_data_root() {
         let d = tempfile::tempdir().unwrap();
-        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _home = a_home_of_its_own(&d);
         append_ledger_record(&sample("aa07")).unwrap();
         let content = std::fs::read_to_string(lns_ipc::connection_ledger().unwrap()).unwrap();
         assert!(content.contains("\"lns_run\":\"aa07\""), "{content}");
@@ -387,7 +397,7 @@ mod tests {
     #[serial_test::serial(env)]
     fn the_file_recorder_persists_under_data_root() {
         let d = tempfile::tempdir().unwrap();
-        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _home = a_home_of_its_own(&d);
         let recorder = RunLedgerRecorder::new(
             "aa07".into(),
             "vm".into(),
@@ -472,7 +482,7 @@ mod tests {
     #[serial_test::serial(env)]
     fn concurrent_runs_appending_produce_one_unbroken_chain() {
         let d = tempfile::tempdir().unwrap();
-        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        let _home = a_home_of_its_own(&d);
         let threads: u32 = 8;
         let per_thread: u32 = 25;
         std::thread::scope(|scope| {

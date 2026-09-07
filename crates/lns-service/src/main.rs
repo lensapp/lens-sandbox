@@ -46,6 +46,17 @@ fn run_ipc_runtime(
     rt.block_on(async {
         spawn_signal_listener(shutdown.clone());
         tokio::spawn(lns_service::update_check::run_periodic(shutdown.clone()));
+        // From here rather than from the first connect: a connection's values run out whether or not anybody signs in again, and a restarted service must still renew them (sandbox-spec §3.2.6).
+        match lns_service::connector::mechanism::real::shared() {
+            Ok(mechanisms) => {
+                lns_service::connector::refresh::keep(
+                    &tokio::runtime::Handle::current(),
+                    mechanisms,
+                    std::sync::Arc::new(lns_service::connector::mechanism::real::RealRecorder),
+                );
+            }
+            Err(e) => log::warn!("nothing will be renewed on this machine: {e:#}"),
+        }
 
         let result = ipc::run_server(socket, shutdown.clone(), started_at).await;
         shutdown.signal();

@@ -263,16 +263,24 @@ pub fn forget(store: &ConnectorStore<'_>, name: &str, holder: &GrantHolder) -> R
     Ok(store.forget(holder, name)?)
 }
 
+/// What the card knew when it was raised: the bytes it disclosed, the paths the run counted at boot, and the moment the person answered.
+pub struct AsRaised<'a> {
+    pub digest: &'a str,
+    pub counted_at_boot: Option<&'a [String]>,
+    pub now_millis: u64,
+}
+
 /// Grants a method from the card, refusing bytes other than the ones the card disclosed, and answers with what the guest is to be given (§3.2.4).
 pub fn grant_disclosed(
     store: &ConnectorStore<'_>,
     name: &str,
-    disclosed_digest: &str,
     holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
-    counted_at_boot: Option<&[String]>,
+    raised: &AsRaised<'_>,
 ) -> Result<(Granted, crate::approval_flow::protocol::GrantedPayload)> {
+    let (disclosed_digest, counted_at_boot, now_millis) =
+        (raised.digest, raised.counted_at_boot, raised.now_millis);
     let entry = installed_entry(store, name)?;
     if entry.digest != disclosed_digest {
         anyhow::bail!(
@@ -281,7 +289,13 @@ pub fn grant_disclosed(
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
     let settled = grant(store, name, holder, method, connection, counted_at_boot)?;
-    let payload = supplied_by(store, &entry, method, settled.connection.as_deref())?;
+    let payload = supplied_by(
+        store,
+        &entry,
+        method,
+        settled.connection.as_deref(),
+        now_millis,
+    )?;
     Ok((settled, payload))
 }
 
@@ -294,7 +308,7 @@ fn refuse_a_path_another_connector_writes(
     method: &str,
 ) -> Result<()> {
     let taken = paths_written_by_other_connectors(store, holder, name)?;
-    for path in written_paths(&supplied_by(store, entry, method, None)?) {
+    for path in written_paths(&supplied_by(store, entry, method, None, ANY_MOMENT)?) {
         if let Some(writer) = taken.get(&path) {
             anyhow::bail!(
                 "{writer} already writes {path} in this run: two connectors writing one file would leave the guest with neither, so disconnect {writer} from this run first"
@@ -315,7 +329,7 @@ fn refuse_a_path_this_run_never_counted(
     let Some(counted) = counted_at_boot else {
         return Ok(());
     };
-    for path in written_paths(&supplied_by(store, entry, method, None)?) {
+    for path in written_paths(&supplied_by(store, entry, method, None, ANY_MOMENT)?) {
         if !counted.iter().any(|claim| claim == &path) {
             anyhow::bail!(
                 "{name} writes {path}, and this run did not count it when it booted — the connector was installed since. Restart the run to grant it."
@@ -325,13 +339,16 @@ fn refuse_a_path_this_run_never_counted(
     Ok(())
 }
 
+/// Which paths a method writes is decided by its filesets, and no value behind it can change that — so a caller that only wants the paths reads them at a moment where nothing has run out.
+const ANY_MOMENT: u64 = 0;
+
 fn paths_written_by_other_connectors(
     store: &ConnectorStore<'_>,
     holder: &GrantHolder,
     granting: &str,
 ) -> Result<BTreeMap<String, String>> {
     let mut taken = BTreeMap::new();
-    for (connector, payload) in granted_supply(store, holder)? {
+    for (connector, payload) in granted_supply(store, holder, ANY_MOMENT)? {
         if connector == granting {
             continue;
         }
@@ -367,6 +384,7 @@ pub fn undecided(
 pub fn granted_supply(
     store: &ConnectorStore<'_>,
     holder: &GrantHolder,
+    now_millis: u64,
 ) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
     let mut supplied = BTreeMap::new();
     for entry in store.installed()? {
@@ -383,7 +401,7 @@ pub fn granted_supply(
         if digest != entry.digest {
             continue;
         }
-        match supplied_by(store, &entry, &method, connection.as_deref()) {
+        match supplied_by(store, &entry, &method, connection.as_deref(), now_millis) {
             Ok(payload) => {
                 supplied.insert(entry.name.clone(), payload);
             }
@@ -424,6 +442,7 @@ fn supplied_by(
     entry: &Installed,
     method: &str,
     connection: Option<&str>,
+    now_millis: u64,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
@@ -431,6 +450,8 @@ fn supplied_by(
         Some(label) => store
             .connections_of(&entry.name)?
             .remove(label)
+            // A connection whose values have run out supplies none, so the placeholder is left unarmed and the next request raises the connect prompt (§4.1).
+            .filter(|held| !held.has_run_out(now_millis))
             .map(|held| lns_ipc::SecretValues(held.values))
             .unwrap_or_default(),
         None => lns_ipc::SecretValues::default(),
@@ -1019,6 +1040,7 @@ mod tests {
                         method: "token".to_string(),
                         authority: Authority::default(),
                         values: Default::default(),
+                        expires_at_millis: None,
                     },
                 )
                 .unwrap();
@@ -1050,6 +1072,7 @@ mod tests {
                     method: "token".to_string(),
                     authority: Authority::of(["repo:read"]),
                     values: Default::default(),
+                    expires_at_millis: None,
                 },
             )
             .unwrap();
@@ -1110,15 +1133,18 @@ mod tests {
     ) -> Result<Connected> {
         Ok(Connected {
             connection: label.to_string(),
-            invalidated: store.record_authentication(
-                name,
-                label,
-                Connection {
-                    method: method.to_string(),
-                    authority: Authority::default(),
-                    values,
-                },
-            )?,
+            invalidated: store
+                .record_authentication(
+                    name,
+                    label,
+                    Connection {
+                        method: method.to_string(),
+                        authority: Authority::default(),
+                        values,
+                        expires_at_millis: None,
+                    },
+                )?
+                .invalidated,
         })
     }
 
@@ -1722,11 +1748,14 @@ mod tests {
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
 
@@ -1867,11 +1896,14 @@ mod tests {
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
         assert_eq!(
@@ -1903,22 +1935,28 @@ mod tests {
         grant_disclosed(
             &rig.store(),
             "alpha",
-            "sha256:a",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:a",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("first");
 
         let err = grant_disclosed(
             &rig.store(),
             "beta",
-            "sha256:b",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:b",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("the second grant claims a path the first already writes");
 
@@ -1990,8 +2028,8 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied =
-                granted_supply(&rig.store(), &a_run()).expect("the store itself is readable");
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT)
+                .expect("the store itself is readable");
         });
 
         assert_eq!(
@@ -2066,7 +2104,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT).unwrap();
         });
 
         assert_eq!(
@@ -2104,7 +2142,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT).unwrap();
         });
 
         assert_eq!(
@@ -2152,11 +2190,14 @@ mod tests {
         let err = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "token",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("and granting it is refused for the same reason");
         assert!(format!("{err:#}").contains("newer lns"), "{err:#}");
@@ -2176,11 +2217,14 @@ mod tests {
         let err = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:the-one-the-card-showed",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:the-one-the-card-showed",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("the bytes changed under the card");
 
@@ -2236,11 +2280,14 @@ mod tests {
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "token",
             Some("work"),
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
 
