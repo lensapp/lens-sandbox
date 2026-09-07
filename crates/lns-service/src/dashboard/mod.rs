@@ -337,9 +337,6 @@ fn sidebar(ui: &mut egui::Ui, state: &mut DashboardState) {
         .frame(Frame::new().fill(CHROME_FILL).inner_margin(Margin::same(8)))
         .show_inside(ui, |ui| {
             ui.add_space(26.0);
-            if menu_item(ui, icons::ICON_SEARCH, "Search", state.search_open, None).clicked() {
-                state.search_open = true;
-            }
             if menu_item(
                 ui,
                 icons::ICON_RECEIPT_LONG,
@@ -514,7 +511,12 @@ fn central(ui: &mut egui::Ui, state: &mut DashboardState) {
         )
         .show_inside(ui, |ui| {
             ui.add_space(16.0);
-            kind_chooser(ui, state);
+            ui.horizontal(|ui| {
+                kind_chooser(ui, state);
+                if search_button(ui).clicked() {
+                    state.search_open = true;
+                }
+            });
             ui.add_space(12.0);
             let filters = Filters {
                 kinds: state.kinds.iter().cloned().collect(),
@@ -1179,6 +1181,29 @@ fn kind_chooser(ui: &mut egui::Ui, state: &mut DashboardState) {
     }
 }
 
+fn search_button(ui: &mut egui::Ui) -> egui::Response {
+    Frame::new()
+        .fill(INPUT_FILL)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                glyph(ui, icons::ICON_SEARCH, TEXT_MUTED, 16.0);
+                ui.label(
+                    RichText::new("Search")
+                        .size(SELECT_FONT)
+                        .color(TEXT_PRIMARY),
+                );
+            });
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Search every sandbox's audit trail")
+}
+
 fn control_button(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
     let border = if open { CATEGORY } else { BORDER };
     Frame::new()
@@ -1621,6 +1646,7 @@ fn search_modal(ui: &mut egui::Ui, state: &mut DashboardState, reveal: f32) {
     if let Some(i) = pick {
         state.selected_sandbox = Some(state.rows[i].run.clone());
         state.selected = Some(i);
+        state.detail_row = Some(state.rows[i].clone());
         state.search_open = false;
     } else if state.search_open && modal.should_close() {
         state.search_open = false;
@@ -1776,7 +1802,7 @@ mod tests {
             kind: "egress".into(),
             detail: detail.to_string(),
             connector: None,
-            raw: serde_json::Value::Null,
+            raw: serde_json::json!({ "message": detail }),
         }
     }
 
@@ -1938,6 +1964,80 @@ mod tests {
         harness.run();
 
         assert!(harness.query_by_label("api01.linear.app").is_none());
+    }
+
+    #[test]
+    fn search_belongs_to_the_view_it_searches() {
+        // Search reads the audit trail alone, so beside the two views it read as a third one — and it did nothing for the list it sat next to.
+        let still = Arc::new(AtomicBool::new(false));
+        let approvals = window(state_of(View::Approvals, 4, 1), &still);
+
+        assert!(
+            approvals.query_by_label("Search").is_none(),
+            "the approvals view offers no control that cannot search it"
+        );
+
+        let timeline = Arc::new(AtomicBool::new(true));
+        let mut audit = window(state_of(View::Timeline, 4, 1), &timeline);
+        audit.run();
+
+        audit.get_by_label("Search").click();
+        audit.run();
+
+        assert!(
+            audit
+                .query_by_label("Type to search every sandbox's audit trail.")
+                .is_some(),
+            "the audit view's own control opens the search over its own rows"
+        );
+    }
+
+    #[test]
+    fn a_searched_row_opens_the_event_it_names() {
+        // The pick selected a row and left the panel reading whichever event was open before it, or nothing at all.
+        let timeline = Arc::new(AtomicBool::new(true));
+        let mut harness = window(
+            DashboardState {
+                selected: Some(0),
+                detail_row: Some(logged("GET /before-the-search")),
+                ..state_of(View::Timeline, 4, 1)
+            },
+            &timeline,
+        );
+        harness.get_by_label("Search").click();
+        harness.run();
+
+        // The row is in the timeline behind the modal as well as in the results, and the modal draws last.
+        let result = harness
+            .query_all_by_label("GET /02")
+            .last()
+            .expect("the search lists the row it matched");
+        result.click();
+        harness.run();
+
+        assert!(
+            harness.query_by_label("When").is_some(),
+            "the panel opened on nothing"
+        );
+        // The panel prints the event's own payload, which is the one place the two rows read differently.
+        assert!(
+            harness
+                .query_all_by_label("GET /before-the-search")
+                .next()
+                .is_none(),
+            "the panel is still reading the event that was open before the search"
+        );
+        assert!(
+            harness
+                .query_all_by_label(
+                    r#"{
+  "message": "GET /02"
+}"#
+                )
+                .next()
+                .is_some(),
+            "the panel does not show the event the developer picked"
+        );
     }
 
     #[test]
