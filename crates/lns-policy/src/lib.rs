@@ -638,22 +638,17 @@ impl RouteRule {
     }
 
     pub fn allow_host(host: impl Into<String>) -> Self {
-        Self {
-            match_pattern: host.into(),
-            verdict: Verdict::Allow,
-            transport: Transport::Direct,
-            scheme: None,
-            description: None,
-            tls_terminate: false,
-            rules: Vec::new(),
-            binaries: None,
-        }
+        Self::for_host(host, Verdict::Allow)
     }
 
     pub fn deny_host(host: impl Into<String>) -> Self {
+        Self::for_host(host, Verdict::Deny)
+    }
+
+    fn for_host(host: impl Into<String>, verdict: Verdict) -> Self {
         Self {
             match_pattern: host.into(),
-            verdict: Verdict::Deny,
+            verdict,
             transport: Transport::Direct,
             scheme: None,
             description: None,
@@ -673,9 +668,9 @@ impl RouteRule {
             return Ok(());
         };
         if binaries.is_empty() {
+            let pattern = &self.match_pattern;
             return Err(invalid_data(format!(
-                "the rule for {:?} has an empty binaries filter: it matches no caller, so it denies the host for everyone — omit binaries to let any caller through",
-                self.match_pattern
+                "the rule for {pattern:?} has an empty binaries filter: it matches no caller, so it denies the host for everyone — omit binaries to let any caller through"
             )));
         }
         binaries
@@ -684,11 +679,11 @@ impl RouteRule {
     }
 
     fn validate_binary(&self, binary: &str) -> io::Result<()> {
+        let pattern = &self.match_pattern;
         match unmatchable_binary(binary) {
             None => Ok(()),
             Some(why) => Err(invalid_data(format!(
-                "the rule for {:?} lists the binary {binary:?}, which {why}: binaries are matched against the kernel-resolved /proc/<pid>/exe, so it can never match",
-                self.match_pattern
+                "the rule for {pattern:?} lists the binary {binary:?}, which {why}: binaries are matched against the kernel-resolved /proc/<pid>/exe, so it can never match"
             ))),
         }
     }
