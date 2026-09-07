@@ -178,6 +178,39 @@ fn workload_carries_the_tool_var(w: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
+#[then("a login shell in the guest finds the tool directories again")]
+fn login_shell_finds_the_tool_dirs(w: &mut BehaviourWorld) -> Result<(), String> {
+    let rig = w.tools.as_ref().ok_or("no launch happened")?;
+    if let Some(error) = &rig.error {
+        return Err(format!("the launch failed: {error}"));
+    }
+    let ensured = rig.ensured.as_ref().ok_or("no tools were composed")?;
+    let spec = lns_service::tools::login_shell::profile_spec(&ensured.bin_paths, true)
+        .ok_or("the run staged no login-shell snippet for its declared tools")?;
+    if spec.guest_path != lns_service::tools::login_shell::GUEST_PROFILE_SNIPPET_PATH {
+        return Err(format!(
+            "the snippet must land where /etc/profile sources it, got {}",
+            spec.guest_path
+        ));
+    }
+    let body = spec
+        .source
+        .as_bytes()
+        .map(String::from_utf8_lossy)
+        .ok_or("the snippet carries no inline body")?;
+    for dir in &ensured.bin_paths {
+        if !body.contains(dir.as_str()) {
+            return Err(format!("expected {dir} in the snippet:\n{body}"));
+        }
+    }
+    if !body.contains("$PATH") {
+        return Err(format!(
+            "the snippet must extend the login shell's own PATH, not replace it:\n{body}"
+        ));
+    }
+    Ok(())
+}
+
 #[then("the workload keeps the sandbox's value")]
 fn workload_keeps_its_own_value(w: &mut BehaviourWorld) -> Result<(), String> {
     let env = composed_workload_env(w)?;
