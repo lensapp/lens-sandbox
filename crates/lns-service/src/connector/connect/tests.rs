@@ -277,11 +277,16 @@ fn a_connect_asks_what_the_mechanism_asks_for_and_says_whose_words_they_are() {
         session,
         message,
         fields,
+        from_code,
     } = turn
     else {
         panic!("this mechanism asks: {turn:?}");
     };
     assert!(!session.is_empty());
+    assert!(
+        from_code,
+        "these words are a component's, so whatever shows them says so"
+    );
     assert_eq!(message, "open the picker");
     assert_eq!(fields[0].name, "access_token");
     assert!(fields[0].secret);
@@ -730,6 +735,7 @@ fn a_caller_who_cannot_be_asked_again_is_told_what_is_still_wanted() {
     let still_asking = Connecting::Asks {
         session: "some-provider/sign-in/1".to_string(),
         message: String::new(),
+        from_code: true,
         fields: vec![Field {
             name: "workspace".to_string(),
             label: "the workspace".to_string(),
@@ -747,6 +753,22 @@ fn a_caller_who_cannot_be_asked_again_is_told_what_is_still_wanted() {
             .to_string()
             .contains("the provider said no")
     );
+}
+
+#[test]
+fn a_mechanism_lns_implements_has_no_author_to_attribute() {
+    // §3.2.6 exempts a document's own `label`: it sits in what the card discloses and is checked before the connector installs. Attributing it would say a component wrote words no component wrote.
+    let rig = Rig::holding(TOKEN_DOCUMENT, None);
+    let mechanisms = OneMechanism::answering(vec![asking("token", true)]);
+
+    let turn = driver(&rig, &mechanisms, 0)
+        .begin("some-provider", "paste", "work")
+        .expect("the mechanism answers");
+
+    let Connecting::Asks { from_code, .. } = turn else {
+        panic!("this mechanism asks: {turn:?}");
+    };
+    assert!(!from_code);
 }
 
 #[test]

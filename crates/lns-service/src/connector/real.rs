@@ -51,9 +51,11 @@ fn one_turn(name: &str, turn: super::connect::Connecting) -> Response {
             session,
             message,
             fields,
+            from_code,
         } => Response::ConnectorAsks {
             session,
             message,
+            from_code,
             fields: fields
                 .into_iter()
                 .map(|field| lns_ipc::ConnectorFieldView {

@@ -215,6 +215,8 @@ pub struct ConnectorCliRig {
     pub asks_message: String,
     /// What the mechanism asks for: name, label, and whether it is a secret. Empty is a round that shows something and collects nothing.
     pub asks_fields: Option<Vec<(String, String, bool)>>,
+    /// Whether the words of the ask are a component's rather than a document's, which decides whether the CLI attributes them.
+    pub asks_from_code: bool,
     pub granted: Option<(String, Option<String>)>,
     pub disconnected: Option<usize>,
     pub forgot: Option<bool>,

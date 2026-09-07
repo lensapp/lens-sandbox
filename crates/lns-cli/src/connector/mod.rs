@@ -251,8 +251,15 @@ async fn connect(
                 session,
                 message,
                 fields,
+                from_code,
             } => {
-                let values = ask_for_each(&args.name, &message, &fields, terminal, prompt)?;
+                let asking = Asking {
+                    connector: &args.name,
+                    message: &message,
+                    fields: &fields,
+                    from_code,
+                };
+                let values = ask_for_each(&asking, terminal, prompt)?;
                 turn = send(
                     svc,
                     Request::AnswerConnect {
@@ -340,16 +347,42 @@ async fn method_to_connect(
     Ok((connector, method))
 }
 
+/// One round of a connect, as the terminal is about to show it.
+struct Asking<'a> {
+    connector: &'a str,
+    message: &'a str,
+    fields: &'a [lns_ipc::ConnectorFieldView],
+    /// Whether the words below are a component's. A document's `label` sits in what the card discloses and is checked before it installs; these arrive after every such check (sandbox-spec §3.2.6).
+    from_code: bool,
+}
+
+impl Asking<'_> {
+    /// Says whose words follow, before any of them is read. The message and every field label are the connector's alike (sandbox-spec §3.2.6), so the questions are announced whether or not a message precedes them — attributing only the message would leave the labels reading as lns's own prompts.
+    fn attribution(&self) -> Option<String> {
+        if !self.from_code {
+            return None;
+        }
+        let mut lines = Vec::new();
+        // A mechanism lns implements sends no message, so this is the connector's whenever there is one.
+        if !self.message.is_empty() {
+            lines.push(format!("{} says: {}", self.connector, self.message));
+        }
+        if !self.fields.is_empty() {
+            lines.push(format!("{} asks, in its own words:", self.connector));
+        }
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
 /// Ask for each value the mechanism named, in the order it named them, under the key it will read them back under. What is asked for is the mechanism's decision, so nothing here reads it off the document (sandbox-spec §3.2.6).
 fn ask_for_each(
-    connector: &str,
-    message: &str,
-    fields: &[lns_ipc::ConnectorFieldView],
+    asking: &Asking<'_>,
     terminal: &mut dyn Terminal,
     prompt: &mut impl Write,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    if !message.is_empty() {
-        writeln!(prompt, "{connector} says: {message}")?;
+    let fields = asking.fields;
+    if let Some(attribution) = asking.attribution() {
+        writeln!(prompt, "{attribution}")?;
     }
     let mut values = std::collections::BTreeMap::new();
     for field in fields {
@@ -1900,6 +1933,7 @@ mod tests {
             Some(Response::ConnectorAsks {
                 session: "some-provider/token/1".into(),
                 message: String::new(),
+                from_code: false,
                 fields: vec![lns_ipc::ConnectorFieldView {
                     name: "token".into(),
                     label: "token".into(),
