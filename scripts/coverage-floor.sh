@@ -105,13 +105,12 @@ crates/lns-service/examples/audit_dashboard.rs           dev-only egui preview h
 # LLVM opener-line phantom DAs — LLVM maps the execution counter for a multi-line construct to
 # the first instruction of the body, leaving the opener line with 0 count even when the body runs.
 # Drop these entries when coverage-strip-ast is extended to recognise and strip opener lines for
-# `} else {`, multi-line struct/enum literals, match-arm `=>` patterns, and `()` closure
-# invocation sites.
+# `} else {`, match-arm `=>` patterns, and `()` closure invocation sites. A struct-literal field
+# whose value computes nothing is already stripped, which is what retired the runtime_layer and
+# ingest entries.
 crates/lns-cli/src/service.rs                            99%+ — `println!` string literal, `} else {` opener, `anyhow::bail!` format-arg lines, named `writeln!` args, and `assert!` message-string lines in full-workspace builds; LLVM maps counters to body lines. Drop when opener-line and macro-arg stripping lands in coverage-strip-ast.
 crates/lns-service/src/content_store/mod.rs              99%+ — `})();` closure-invocation expression; LLVM maps counter past the opener. Drop when opener-line stripping lands in coverage-strip-ast.
-crates/lns-service/src/ingest.rs                         99%+ — `..Default::default()` struct-update in test helper; LLVM maps counter to initialiser body. Drop when opener-line stripping lands in coverage-strip-ast.
 crates/lns-service/src/log.rs                            99%+ — a single multi-line `assert!` format-arg closer (`buf.text(),`) in a test; LLVM maps the counter to the macro body, not the arg line. The local-render tty gate (local_log_layer_accepts target/in_run_scope/stderr_is_tty) and detect_color are host-tested at 100%. Drop when macro-arg-line stripping lands in coverage-strip-ast.
-crates/lns-service/src/runtime_layer/mod.rs              99%+ — `} else {` branch-opener and a struct-literal opener inside a test vec; LLVM maps counters to body lines. Drop when opener-line stripping lands in coverage-strip-ast.
 EOF
 
 # LF==0 means no executable lines after AST strip — vacuously 100%.

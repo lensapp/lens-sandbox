@@ -213,6 +213,8 @@ struct ExecutableLineCollector<'a> {
     phantom_entry_lines: BTreeSet<usize>,
     inert_macro_arg_lines: BTreeSet<usize>,
     macro_expression_lines: BTreeSet<usize>,
+    inert_field_lines: BTreeSet<usize>,
+    evaluable_lines: BTreeSet<usize>,
     source_lines: Vec<&'a str>,
 }
 
@@ -223,6 +225,8 @@ impl<'a> ExecutableLineCollector<'a> {
             phantom_entry_lines: BTreeSet::new(),
             inert_macro_arg_lines: BTreeSet::new(),
             macro_expression_lines: BTreeSet::new(),
+            inert_field_lines: BTreeSet::new(),
+            evaluable_lines: BTreeSet::new(),
             source_lines: source.lines().collect(),
         }
     }
@@ -305,6 +309,42 @@ impl<'a> ExecutableLineCollector<'a> {
         }
         self.macro_expression_lines.extend(expression_lines);
     }
+
+    /// LLVM gives a struct-literal field of its own a region that intermittently reports 0 while every other line of the same literal counts, and which field it picks moves with the object set.
+    fn note_inert_field_lines(&mut self, literal: &syn::ExprStruct) {
+        let open = literal.brace_token.span.open().start().line;
+        let close = literal.brace_token.span.close().end().line;
+        // A literal on one line is the whole measured body of whatever holds it, so its count is the only "never ran" signal there is.
+        if open == close {
+            return;
+        }
+        for field in &literal.fields {
+            let span = field.expr.span();
+            if span.start().line != span.end().line {
+                continue;
+            }
+            let line = span.start().line;
+            // The braces' own lines carry the construct around the literal — a call, a match arm, a closure — whose count is real.
+            if line == open || line == close {
+                continue;
+            }
+            if is_constant_expr(&field.expr) {
+                self.inert_field_lines.insert(line);
+            } else {
+                self.evaluable_lines.insert(line);
+            }
+        }
+    }
+}
+
+/// Whether this expression computes nothing at run time: a literal, a path to a unit variant or constant, or a sign or parentheses over either.
+fn is_constant_expr(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(_) | syn::Expr::Path(_) => true,
+        syn::Expr::Unary(unary) => is_constant_expr(&unary.expr),
+        syn::Expr::Paren(paren) => is_constant_expr(&paren.expr),
+        _ => false,
+    }
 }
 
 /// The lines a macro's argument tokens span, first token to last; `None` for an invocation with no arguments.
@@ -359,6 +399,12 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
                 self.lines.remove(&line);
             }
         }
+        // The same guard, over the literal's own field lines: one that computes nothing shares its line with no field that does.
+        for line in std::mem::take(&mut self.inert_field_lines) {
+            if !self.evaluable_lines.contains(&line) {
+                self.lines.remove(&line);
+            }
+        }
     }
 
     fn visit_block(&mut self, block: &'ast syn::Block) {
@@ -397,6 +443,9 @@ impl<'ast, 'a> Visit<'ast> for ExecutableLineCollector<'a> {
     fn visit_expr(&mut self, expr: &'ast syn::Expr) {
         let span = expr.span();
         self.mark_span(span.start(), span.end());
+        if let syn::Expr::Struct(literal) = expr {
+            self.note_inert_field_lines(literal);
+        }
         syn::visit::visit_expr(self, expr);
     }
 
@@ -560,6 +609,144 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("writing"));
+    }
+
+    #[test]
+    fn a_struct_literal_field_holding_a_constant_is_not_a_line_that_ran() {
+        // LLVM gives such a field its own region and reports 0 for it while every other line of the same literal counts, and which field it picks moves with the object set.
+        let src = r#"
+struct Mount { name: String, size: Option<u64>, read_only: bool, mode: i32 }
+
+fn parse(name: &str) -> Mount {
+    Mount {
+        name: name.to_string(),
+        size: None,
+        read_only: false,
+        mode: -1,
+    }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(
+            c.lines.contains(&6),
+            "a field whose value is a call still runs"
+        );
+        assert!(!c.lines.contains(&7), "`size: None` evaluates nothing");
+        assert!(!c.lines.contains(&8), "nor does a bool literal");
+        assert!(
+            !c.lines.contains(&9),
+            "nor a negated literal, which is still a constant"
+        );
+    }
+
+    #[test]
+    fn a_literal_written_on_one_line_is_kept_because_it_is_all_the_body_there_is() {
+        // `fn new(..) -> Self { Self { socket } }` over three lines has exactly one measured line; dropping it makes an uncalled constructor read as covered.
+        let src = r#"
+fn new(socket: String) -> Wire {
+    Wire { socket }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(
+            c.lines.contains(&3),
+            "the only line of the construct must keep its count"
+        );
+    }
+
+    #[test]
+    fn a_field_on_the_literals_own_brace_line_is_kept() {
+        // `.map(|(rows, cols)| Winsize { rows, cols })` counts the closure that never ran, and the closure sits on the brace line.
+        let src = r#"
+fn widen(size: Option<(u16, u16)>) -> Option<Winsize> {
+    size.map(|(rows, cols)| Winsize {
+        rows,
+        cols })
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(
+            c.lines.contains(&3),
+            "the `.map` runs on the opening line, so its count is real"
+        );
+        assert!(
+            c.lines.contains(&5),
+            "and the closing line carries the call's own tail"
+        );
+        assert!(!c.lines.contains(&4), "the field between them is inert");
+    }
+
+    #[test]
+    fn a_field_value_spanning_two_lines_is_left_alone() {
+        let src = r#"
+fn make(n: u64) -> Pair {
+    Pair {
+        a: match n {
+            0 => None,
+            _ => Some(n),
+        },
+        b: 1,
+    }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(
+            c.lines.contains(&4),
+            "a field whose value is a match runs on its own first line"
+        );
+        assert!(!c.lines.contains(&8), "`b: 1` still goes");
+    }
+
+    #[test]
+    fn a_parenthesised_constant_is_still_a_constant() {
+        let src = r#"
+fn make() -> Pair {
+    Pair {
+        a: (0),
+        b: -(1),
+    }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(!c.lines.contains(&4), "parentheses compute nothing");
+        assert!(!c.lines.contains(&5), "nor a sign over them");
+    }
+
+    #[test]
+    fn a_field_sharing_its_line_with_something_evaluable_is_kept() {
+        // The rule drops a line only when nothing on it can run, the same guard the macro-argument rule uses.
+        let src = r#"
+struct Pair { a: Option<u64>, b: u64 }
+
+fn make(n: u64) -> Pair {
+    Pair {
+        a: None, b: n + 1,
+    }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(
+            c.lines.contains(&6),
+            "`b: n + 1` runs on that line, so the line stays"
+        );
     }
 
     #[test]
