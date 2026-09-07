@@ -46,7 +46,7 @@ impl RealMechanisms {
         })
     }
 
-    /// One second of every running component's deadline, and one sweep of what nobody came back for, for as long as this machine runs.
+    /// Spends one second of every running component's deadline, and sweeps what nobody came back for. This thread does nothing else: whatever ran a component here would stop the clock its own deadline is measured in.
     pub fn tick(self: &Arc<Self>) {
         let ticking = Arc::clone(self);
         std::thread::spawn(move || {
@@ -203,7 +203,7 @@ impl Entropy for RealEntropy {
     }
 }
 
-struct RealRecorder;
+pub struct RealRecorder;
 
 impl Recorder for RealRecorder {
     fn reached(&self, connector: &str, host: &str, refused: bool) {
@@ -212,6 +212,10 @@ impl Recorder for RealRecorder {
 
     fn ran(&self, connector: &str, program: &str, refused: bool) {
         wrote(connector, "ran", program, refused);
+    }
+
+    fn renewed(&self, connector: &str, target: &str, refused: bool) {
+        wrote(connector, "renewed", target, refused);
     }
 }
 
@@ -228,10 +232,19 @@ fn wrote(connector: &str, verb: &str, target: &str, refused: bool) {
     }
 }
 
+/// The engine this machine runs components in, as an `Arc` the schedule can hold.
+pub fn shared() -> Result<Arc<RealMechanisms>> {
+    mechanisms()?;
+    ENGINE
+        .get()
+        .and_then(Clone::clone)
+        .ok_or_else(|| anyhow::anyhow!("this machine could not start a component runtime"))
+}
+
+static ENGINE: std::sync::OnceLock<Option<Arc<RealMechanisms>>> = std::sync::OnceLock::new();
+
 /// The engine, the four things lns lends a component, and the connects this process is part-way through. One of each, because a component runtime is expensive and a session outlives the request that opened it.
 pub fn mechanisms() -> Result<&'static RealMechanisms> {
-    static ENGINE: std::sync::OnceLock<Option<std::sync::Arc<RealMechanisms>>> =
-        std::sync::OnceLock::new();
     ENGINE
         .get_or_init(|| {
             let started = RealMechanisms::new().map(std::sync::Arc::new);
@@ -278,6 +291,33 @@ pub fn driver<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_with_no_runtime_reaches_nothing_and_runs_nothing() {
+        // The refresh pass used to run on such a thread, which made every renewal that calls a provider fail before it left the machine.
+        let refused = RealHttp
+            .fetch(
+                &HttpRequest {
+                    method: "GET".to_string(),
+                    url: "https://auth.example.com/token".to_string(),
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .expect_err("there is no runtime here");
+
+        assert!(
+            matches!(refused, CallError::Failed(ref why) if why.contains("no runtime")),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            RealExec
+                .run(&["true".to_string()], std::time::Duration::from_secs(5))
+                .expect_err("there is no runtime here"),
+            CallError::Failed(_)
+        ));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reaching_a_host_from_a_runtime_thread_answers_rather_than_panicking() {

@@ -138,7 +138,7 @@ fn done(values: &[(&str, &str)], authority: &[&str]) -> Step {
     })
 }
 
-const CODE_DOCUMENT: &str = r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]}}"#;
+pub(crate) const CODE_DOCUMENT: &str = r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]}}"#;
 
 /// The installed set and the two decision files, in memory, so a driver test says nothing about disks.
 #[derive(Default)]
@@ -189,34 +189,43 @@ impl crate::connector::store::InstalledSet for FakeSet {
     }
 }
 
-struct FakeMap<T>(Mutex<lns_policy::decision_store::DecisionFile<T>>);
+pub(crate) struct FakeMap<T> {
+    state: Mutex<lns_policy::decision_store::DecisionFile<T>>,
+    pub(crate) fail_save: Mutex<bool>,
+}
 
 impl<T> Default for FakeMap<T> {
     fn default() -> Self {
-        Self(Mutex::new(lns_policy::decision_store::DecisionFile::new()))
+        Self {
+            state: Mutex::new(lns_policy::decision_store::DecisionFile::new()),
+            fail_save: Mutex::new(false),
+        }
     }
 }
 
 impl<T: Clone + Send + Sync> lns_policy::decision_store::DecisionStore<T> for FakeMap<T> {
     fn load(&self) -> std::io::Result<lns_policy::decision_store::DecisionFile<T>> {
-        Ok(self.0.lock().expect("map lock").clone())
+        Ok(self.state.lock().expect("map lock").clone())
     }
 
     fn save(&self, state: &lns_policy::decision_store::DecisionFile<T>) -> std::io::Result<()> {
-        *self.0.lock().expect("map lock") = state.clone();
+        if *self.fail_save.lock().expect("map lock") {
+            return Err(std::io::Error::other("disk full"));
+        }
+        *self.state.lock().expect("map lock") = state.clone();
         Ok(())
     }
 }
 
-struct Rig {
+pub(crate) struct Rig {
     set: FakeSet,
-    values: FakeMap<Connection>,
+    pub(crate) values: FakeMap<Connection>,
     grants: FakeMap<crate::connector::store::RunDecision>,
     sessions: InMemorySessions,
 }
 
 impl Rig {
-    fn holding(document: &str, component: Option<&[u8]>) -> Self {
+    pub(crate) fn holding(document: &str, component: Option<&[u8]>) -> Self {
         let rig = Self {
             set: FakeSet::default(),
             values: FakeMap::default(),
@@ -227,7 +236,7 @@ impl Rig {
         rig
     }
 
-    fn installs(&self, digest: &str, document: &str, component: Option<&[u8]>) {
+    pub(crate) fn installs(&self, digest: &str, document: &str, component: Option<&[u8]>) {
         self.store()
             .install(
                 digest,
@@ -241,7 +250,7 @@ impl Rig {
             .expect("a connector this machine holds");
     }
 
-    fn store(&self) -> ConnectorStore<'_> {
+    pub(crate) fn store(&self) -> ConnectorStore<'_> {
         ConnectorStore::new(&self.set, &self.values, &self.grants)
     }
 }
