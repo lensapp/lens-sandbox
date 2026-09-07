@@ -617,12 +617,8 @@ pub(crate) mod tests {
         });
 
         let listed = FileEntryStore::with_fs(path, fs).list();
-        assert_eq!(
-            listed.len(),
-            hosts.len(),
-            "an entry went missing: {:?}",
-            listed.iter().map(Entry::subject).collect::<Vec<_>>()
-        );
+        let kept: Vec<&str> = listed.iter().map(Entry::subject).collect();
+        assert_eq!(kept.len(), hosts.len(), "an entry went missing: {kept:?}");
     }
 
     #[test]
