@@ -1868,14 +1868,24 @@ lns holds the state and nothing else: it is opaque to lns, is never persisted, i
 only ever handed back to the component that produced it, and — like every other
 resource this section bounds — has a size ceiling, past which the connect fails.
 
+**What lns lends a component**, and nothing else: outbound HTTP, over TLS and only
+to the hosts the method declares; random bytes, one bounded draw at a time, because
+a mechanism that cannot draw a PKCE verifier or a state parameter cannot implement
+the flows this kind exists for, and a component with no clock and no filesystem has
+nowhere else to draw unpredictable ones; and, where the method declared `exec`,
+host execution. It is lent no listener of its own, so a flow whose redirect leg
+needs one is expressed as a device code instead — the `message` of an ask is what
+makes that expressible. The moment a call is made is a parameter lns passes on
+every call, which is why a component needs no clock to be told the time.
+
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
 clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
-step-state, connector-text, and component-size ceilings. Step state between calls, and any
-answer to a field marked secret, are secret material — a device code, a PKCE
-verifier, a password — so lns holds each in memory only, for a bounded lifetime,
-never logs it, never persists it, and drops an answer once the `resume` that
-consumed it returns.
+step-state, connector-text, random-draw, and component-size ceilings. Step state
+between calls, and any answer to a field marked secret, are secret material — a
+device code, a PKCE verifier, a password — so lns holds each in memory only, for a
+bounded lifetime, never logs it, never persists it, and drops an answer once the
+`resume` that consumed it returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
