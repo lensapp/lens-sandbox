@@ -1,4 +1,3 @@
-@todo
 Feature: what a component did is recorded in the durable ledger
   A run's audit chain records what that run decided about a connector: granted,
   declined, forgotten. Connecting is deliberately not one of those, because a
@@ -39,10 +38,8 @@ Feature: what a component did is recorded in the durable ledger
     Then the durable ledger records the renewal
     And the entry names the schedule rather than a user action
 
-  Scenario: a run's audit chain still records only what that run decided
+  Scenario: a connect that reached nothing leaves no entry of its own
     Given the connector "some-provider" serves "api.some-provider.example"
     And its method "sign-in" is a code method
     When the machine connects "sign-in"
-    And the run "1a2b3c4d" grants "sign-in" through that connection
-    Then the run's audit chain records the grant
-    And the run's audit chain does not record the connect
+    Then the durable ledger records nothing about the connect

@@ -38,13 +38,24 @@ pub fn append_mechanism_event(
     target: &str,
     refused: bool,
 ) -> Result<()> {
-    append_machine_event(crate::ocsf_audit::mechanism_event(
+    append_machine_event(mechanism_event(clock, connector, verb, target, refused))
+}
+
+/// The entry one mechanism call leaves, stamped with no run at all: it happened on the machine's behalf, so no run's timeline could account for it (§7.1).
+pub fn mechanism_event(
+    clock: &dyn Clock,
+    connector: &str,
+    verb: &str,
+    target: &str,
+    refused: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    crate::ocsf_audit::mechanism_event(
         &crate::ocsf_audit::OcsfCtx::at_unix(String::new(), String::new(), clock.now_unix()),
         connector,
         verb,
         target,
         refused,
-    ))
+    )
 }
 
 fn append_machine_event(event: serde_json::Map<String, serde_json::Value>) -> Result<()> {

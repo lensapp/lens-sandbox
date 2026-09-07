@@ -255,44 +255,6 @@ fn service_holds(world: &mut BehaviourWorld, name: String, serves: String) {
     world.connector.held.push(view(&name, &serves, Vec::new()));
 }
 
-#[given(expr = "its method {string} carries code reaching {string}")]
-fn method_carries_code(world: &mut BehaviourWorld, method: String, hosts: String) {
-    with_method(world, &method, |view| {
-        view.carries_code = true;
-        view.hosts = hosts
-            .split(", ")
-            .filter(|host| !host.is_empty())
-            .map(str::to_string)
-            .collect();
-    });
-}
-
-#[given(expr = "its method {string} carries code that runs programs on this machine")]
-fn method_runs_programs(world: &mut BehaviourWorld, method: String) {
-    with_method(world, &method, |view| {
-        view.carries_code = true;
-        view.runs_programs = true;
-    });
-}
-
-fn with_method(
-    world: &mut BehaviourWorld,
-    method: &str,
-    edit: impl FnOnce(&mut lns_ipc::ConnectorMethodView),
-) {
-    let held = world
-        .connector
-        .held
-        .last_mut()
-        .expect("the connector must be installed before its method is described");
-    let view = held
-        .methods
-        .iter_mut()
-        .find(|view| view.name == method)
-        .unwrap_or_else(|| panic!("no method named {method}"));
-    edit(view);
-}
-
 #[given(expr = "the machine holds the connection {string} of {string} for method {string}")]
 fn machine_holds_connection(
     world: &mut BehaviourWorld,

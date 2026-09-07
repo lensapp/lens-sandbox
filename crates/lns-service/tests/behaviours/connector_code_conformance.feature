@@ -1,4 +1,3 @@
-@todo
 Feature: every mechanism behaves the same from outside
   `token`, and the OAuth kinds when they return, are mechanisms lns implements. A
   `code` method is the same interface with the author's implementation behind it.

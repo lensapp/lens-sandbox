@@ -170,6 +170,59 @@ fn work(_now_millis: u64) -> Step {
     answered("access_token", &format!("{clock:?}{read}{reached}"))
 }
 
+/// Reaches a host no method here declares, so the bound is the only thing that can refuse it.
+#[cfg(feature = "straying")]
+fn work(_now_millis: u64) -> Step {
+    let request = lns::connector::http::Request {
+        method: "GET".to_string(),
+        url: "https://other.some-provider.example/token".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    match lns::connector::http::fetch(&request) {
+        Ok(response) => answered("access_token", &format!("{}", response.status)),
+        Err(error) => how_it_was_refused(&error),
+    }
+}
+
+/// Done from what it was handed, asking nothing and reaching nothing.
+#[cfg(any(
+    feature = "granting",
+    feature = "hurrying",
+    feature = "refusing",
+    feature = "keeping",
+    feature = "clinging"
+))]
+fn work(_now_millis: u64) -> Step {
+    answered("access_token", "first")
+}
+
+#[cfg(feature = "failing")]
+fn work(_now_millis: u64) -> Step {
+    Step::Failed("the provider said no".to_string())
+}
+
+/// Asks for two fields, one secret and one not, in the order it wants them read.
+#[cfg(feature = "picking")]
+fn work(_now_millis: u64) -> Step {
+    Step::Ask(Ask {
+        message: "choose a workspace, then paste a key for it".to_string(),
+        fields: vec![
+            Field {
+                name: "workspace_id".to_string(),
+                label: "workspace id".to_string(),
+                secret: false,
+            },
+            Field {
+                name: "api_key".to_string(),
+                label: "api key".to_string(),
+                secret: true,
+            },
+        ],
+        state: b"asked".to_vec(),
+    })
+}
+
 #[cfg(feature = "expiring")]
 fn work(now_millis: u64) -> Step {
     let drawn = lns::connector::entropy::bytes(u32::MAX);
@@ -206,22 +259,66 @@ impl Guest for Fixture {
     }
 
     fn refresh(values: Vec<Answer>, now_millis: u64) -> Result<Outcome, String> {
-        Ok(Outcome {
-            values: values
-                .into_iter()
-                .map(|answer| Answer {
-                    name: answer.name,
-                    value: format!("{}-renewed", answer.value),
-                })
-                .collect(),
-            authority: vec!["read".to_string()],
-            expires_at_millis: Some(now_millis + 3_600_000),
-        })
+        renew(values, now_millis)
     }
 
     fn revoke(_values: Vec<Answer>, _now_millis: u64) -> Result<(), String> {
-        Ok(())
+        dropped()
     }
+}
+
+fn renewed(values: Vec<Answer>) -> Vec<Answer> {
+    values
+        .into_iter()
+        .map(|answer| Answer {
+            name: answer.name,
+            value: format!("{}-renewed", answer.value),
+        })
+        .collect()
+}
+
+#[cfg(not(any(feature = "hurrying", feature = "refusing", feature = "keeping")))]
+fn renew(values: Vec<Answer>, now_millis: u64) -> Result<Outcome, String> {
+    Ok(Outcome {
+        values: renewed(values),
+        authority: vec!["read".to_string()],
+        expires_at_millis: Some(now_millis + 3_600_000),
+    })
+}
+
+/// Reports values that run out in a second, which lns's own floor then bounds.
+#[cfg(feature = "hurrying")]
+fn renew(values: Vec<Answer>, now_millis: u64) -> Result<Outcome, String> {
+    Ok(Outcome {
+        values: renewed(values),
+        authority: vec!["read".to_string()],
+        expires_at_millis: Some(now_millis + 1000),
+    })
+}
+
+#[cfg(feature = "refusing")]
+fn renew(_values: Vec<Answer>, _now_millis: u64) -> Result<Outcome, String> {
+    Err("the provider would not renew it".to_string())
+}
+
+/// Restates neither the scopes nor when the values run out, so lns decides what each then means.
+#[cfg(feature = "keeping")]
+fn renew(values: Vec<Answer>, _now_millis: u64) -> Result<Outcome, String> {
+    Ok(Outcome {
+        values: renewed(values),
+        authority: Vec::new(),
+        expires_at_millis: None,
+    })
+}
+
+#[cfg(not(feature = "clinging"))]
+fn dropped() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(feature = "clinging")]
+fn dropped() -> Result<(), String> {
+    Err("this component will not let go".to_string())
 }
 
 export!(Fixture);

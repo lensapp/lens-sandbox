@@ -1,6 +1,12 @@
 pub mod approval_entries;
 pub mod approval_flow;
 pub mod artifact_dispatch;
+pub mod connector_code;
+pub mod connector_code_bounds;
+pub mod connector_code_conformance;
+pub mod connector_code_flow;
+pub mod connector_code_ledger;
+pub mod connector_code_renewal;
 pub mod connector_connect;
 pub mod connector_install;
 pub mod declared_launch;
