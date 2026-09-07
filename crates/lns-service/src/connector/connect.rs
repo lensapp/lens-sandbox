@@ -237,13 +237,15 @@ fn settle(
             })
         }
         Step::Done(outcome) => {
+            let values = declared_values(method, &outcome);
+            refuse_an_answer_missing_what_the_method_produces(method, &values)?;
             let recorded = store.record_authentication(
                 name,
                 label,
                 Connection {
                     method: method.name.clone(),
                     authority: Authority::of(outcome.authority.iter().cloned()),
-                    values: declared_values(method, &outcome),
+                    values,
                     expires_at_millis: outcome.expires_at_millis,
                 },
             )?;
@@ -256,19 +258,45 @@ fn settle(
     }
 }
 
-/// Only what the method's `auth` says it produces. A mechanism returning more returned something its document never declared, and no credential could draw on it (§3.2.6).
-pub(super) fn declared_values(
-    method: &Method,
-    outcome: &Outcome,
-) -> std::collections::BTreeMap<String, String> {
+/// What this method's `auth` says it produces, or nothing for a kind this version does not know (§3.2.2).
+fn produced_by(method: &Method) -> Vec<String> {
     method
         .auth
         .as_ref()
         .and_then(lns_artifact::connector::Auth::outputs)
         .unwrap_or_default()
+}
+
+/// Only what the method's `auth` says it produces. A mechanism returning more returned something its document never declared, and no credential could draw on it (§3.2.6).
+pub(super) fn declared_values(
+    method: &Method,
+    outcome: &Outcome,
+) -> std::collections::BTreeMap<String, String> {
+    produced_by(method)
         .into_iter()
         .filter_map(|name| Some((name.clone(), outcome.values.get(&name)?.clone())))
         .collect()
+}
+
+/// An answer is held to the whole of `outputs`, which is the list §5 checked every credential `field` against before the connector installed.
+///
+/// Kept whole or not at all: a connection with a hole reports `connected` and then reaches the destination unarmed.
+pub(super) fn refuse_an_answer_missing_what_the_method_produces(
+    method: &Method,
+    values: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let missing: Vec<String> = produced_by(method)
+        .into_iter()
+        .filter(|output| !values.contains_key(output))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "method {} finished without {}, which its auth declares it produces",
+            method.name,
+            missing.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// A name is the key an answer is stored under, so one lns could not key by is refused before the user is asked for anything. This holds for every mechanism; how long a name may be is bounded at the component boundary instead.
