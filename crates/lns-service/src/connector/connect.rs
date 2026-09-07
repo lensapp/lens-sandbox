@@ -264,7 +264,7 @@ pub(super) fn declared_values(
         .collect()
 }
 
-/// A name is the key an answer is stored under, so one lns could not key by is refused before the user is asked for anything.
+/// A name is the key an answer is stored under, so one lns could not key by is refused before the user is asked for anything. This holds for every mechanism; how long a name may be is bounded at the component boundary instead.
 fn refuse_a_field_name_no_answer_could_be_keyed_by(fields: &[Field]) -> Result<()> {
     for field in fields {
         if field.name.trim().is_empty() || field.name.chars().any(char::is_control) {
