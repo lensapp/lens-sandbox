@@ -1,5 +1,5 @@
 pub mod cache;
-pub mod libc;
+pub mod image_survey;
 pub mod login_shell;
 pub mod mise;
 pub(crate) mod provisioner;

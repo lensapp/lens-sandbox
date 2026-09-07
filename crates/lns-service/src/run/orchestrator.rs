@@ -377,12 +377,14 @@ async fn orchestrate(
         )?;
     }
 
+    let mut login_shell_spec = None;
     let ensured_tools = if tool_requests.is_empty() {
         None
     } else {
+        let surveyed = crate::tools::image_survey::survey_off_runtime(&image.digests, &image.bytes)?;
         let target = crate::tools::ProvisionTarget {
             arch: crate::tools::host_arch(),
-            libc: crate::tools::libc::detect_libc_off_runtime(&image.digests, &image.bytes)?,
+            libc: surveyed.libc,
         };
         crate::tools::registry::refuse_libc_unsupported(
             &tool_requests,
@@ -407,6 +409,10 @@ async fn orchestrate(
             },
         )
         .await?;
+        login_shell_spec = crate::tools::login_shell::profile_spec(
+            &ensured.bin_paths,
+            surveyed.reads_etc_profile,
+        );
         Some(ensured)
     };
 
@@ -418,6 +424,7 @@ async fn orchestrate(
     if let Some(ensured) = &ensured_tools {
         fileset_specs.extend(ensured.specs.iter().cloned());
     }
+    fileset_specs.extend(login_shell_spec);
     fileset_specs.extend(workload_ca_spec);
     fileset_specs.extend(crate::connector::writes::written_paths_manifest(
         &connector_writes,

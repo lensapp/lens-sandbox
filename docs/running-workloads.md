@@ -831,9 +831,12 @@ spec:
   same versions, because prune reclaims the cached trees without touching what
   this machine already resolved.
 - Tools land read-only on the workload's `PATH`, ahead of the base image's own
-  copies. One caveat: a **login** shell (`sh -lc`, `bash -lc`) sources
-  `/etc/profile`, which on most images resets `PATH` outright and so discards the
-  tool dirs — run your command without `-l`, or re-export `PATH` yourself.
+  copies. A **login** shell (`sh -lc`, `bash -lc`) keeps them too: it sources
+  `/etc/profile`, which on most images resets `PATH` outright, so the run also
+  writes `/etc/profile.d/lens-tools.sh` — the file `/etc/profile` sources right
+  after that reset — which puts the same tool dirs back in front of whatever
+  `PATH` the shell then has. An image that ships no `/etc/profile` sources
+  nothing, so there the tool dirs reach only the processes lns starts.
   Nothing tool-related persists in the workload's writable layer — the
   per-machine tool cache is a host-side input, not guest state, so a workload
   that shadows a tool in its own overlay affects only that run and never the
