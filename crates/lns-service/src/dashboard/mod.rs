@@ -178,8 +178,7 @@ pub fn load(state: &mut DashboardState) {
 fn load_approvals(state: &mut DashboardState) {
     match crate::cache::root() {
         Ok(root) => {
-            state.approvals =
-                crate::approval_flow::answering::entries(&root, &crate::run_registry::known_ids());
+            state.approvals = crate::approval_flow::answering::entries(&root);
         }
         Err(e) => set_error(state, e),
     }
@@ -954,12 +953,7 @@ fn toggle(state: &mut DashboardState, id: &str) {
 /// The offer the run still holds for this row, which is what the form discloses.
 fn offer_behind(id: &str) -> Option<lns_ipc::ConnectorView> {
     let root = crate::cache::root().ok()?;
-    crate::approval_flow::answering::offered(
-        &root,
-        &crate::run_registry::known_ids(),
-        crate::run_registry::approvals,
-        id,
-    )
+    crate::approval_flow::answering::offered(&root, crate::run_registry::approvals, id)
 }
 
 fn grant_connector(
@@ -974,7 +968,6 @@ fn grant_connector(
     };
     let granted = crate::approval_flow::answering::grant(
         &root,
-        &crate::run_registry::known_ids(),
         crate::run_registry::approvals,
         id,
         method,
@@ -1126,12 +1119,8 @@ fn remove_entry(state: &mut DashboardState, id: &str) {
         Ok(root) => root,
         Err(e) => return set_error(state, e),
     };
-    let outcome = crate::approval_flow::answering::remove(
-        &root,
-        &crate::run_registry::known_ids(),
-        crate::run_registry::approvals,
-        id,
-    );
+    let outcome =
+        crate::approval_flow::answering::remove(&root, crate::run_registry::approvals, id);
     state.approval_notice = approvals::removal_reported(&outcome);
     load_approvals(state);
 }
@@ -1141,13 +1130,8 @@ fn answer_entry(state: &mut DashboardState, id: &str, answer: lns_ipc::ApprovalA
         Ok(root) => root,
         Err(e) => return set_error(state, e),
     };
-    let outcome = crate::approval_flow::answering::decide(
-        &root,
-        &crate::run_registry::known_ids(),
-        crate::run_registry::approvals,
-        id,
-        answer,
-    );
+    let outcome =
+        crate::approval_flow::answering::decide(&root, crate::run_registry::approvals, id, answer);
     state.approval_notice = approvals::reported(&outcome);
     load_approvals(state);
 }

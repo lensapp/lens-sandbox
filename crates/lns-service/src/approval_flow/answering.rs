@@ -49,8 +49,56 @@ fn answer_of(answer: ApprovalAnswer) -> Answer {
 /// Where a live run's session is found; a run this process is not hosting has none, and is answered through its own files.
 pub type LiveSession = fn(&str) -> Option<Arc<ApprovalSession>>;
 
-/// Every entry these runs hold, in one order. The runs arrive in whatever order the registry holds them, and a list that reorders itself between reads cannot be followed by either surface.
-pub fn entries(root: &Path, runs: &[String]) -> Vec<Entry> {
+/// The runs this machine keeps a directory for, sorted; the registry holds only what this process started.
+fn listed_runs(root: &Path) -> Vec<String> {
+    let Ok(held) = std::fs::read_dir(crate::cache::runs_dir(root)) else {
+        return Vec::new();
+    };
+    let mut runs: Vec<String> = held
+        .flatten()
+        .filter(|run| run.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|run| run.file_name().into_string().ok())
+        .collect();
+    runs.sort();
+    runs
+}
+
+/// Every run either surface answers over: the ones on disk, and the ones this process started, which a run that has yet to write its directory is only in.
+fn known_runs(root: &Path) -> Vec<String> {
+    let mut runs = listed_runs(root);
+    for started in crate::run_registry::snapshot() {
+        if !runs.contains(&started.id) {
+            runs.push(started.id);
+        }
+    }
+    runs.sort();
+    runs
+}
+
+/// The run a handle names: an id or a unique prefix of one, judged over every run this machine keeps, and otherwise a name, which only the registry can answer for.
+pub fn resolve_run(root: &Path, handle: &str) -> Result<String, crate::run_registry::ResolveError> {
+    if handle.is_empty() {
+        return Err(crate::run_registry::ResolveError::Unknown {
+            handle: handle.to_string(),
+        });
+    }
+    let known = known_runs(root);
+    let mut matching = known.iter().filter(|run| run.starts_with(handle));
+    match (matching.next(), matching.next()) {
+        (Some(only), None) => Ok(only.clone()),
+        (Some(_), Some(_)) => Err(crate::run_registry::ResolveError::Ambiguous {
+            handle: handle.to_string(),
+        }),
+        _ => crate::run_registry::resolve(handle),
+    }
+}
+
+/// Every entry this machine holds, in one order. A list that reorders itself between reads cannot be followed by either surface.
+pub fn entries(root: &Path) -> Vec<Entry> {
+    entries_in(root, &known_runs(root))
+}
+
+fn entries_in(root: &Path, runs: &[String]) -> Vec<Entry> {
     let mut held: Vec<Entry> = runs
         .iter()
         .flat_map(|run| offline::list(root, run))
@@ -59,9 +107,14 @@ pub fn entries(root: &Path, runs: &[String]) -> Vec<Entry> {
     held
 }
 
-pub fn list(root: &Path, runs: &[String]) -> Response {
+pub fn list(root: &Path) -> Response {
+    list_in(root, &known_runs(root))
+}
+
+/// One run's own entries, for the sandbox a caller named.
+pub fn list_in(root: &Path, runs: &[String]) -> Response {
     Response::ApprovalList {
-        approvals: entries(root, runs)
+        approvals: entries_in(root, runs)
             .iter()
             .map(view)
             .collect::<Vec<ApprovalInfo>>(),
@@ -69,35 +122,23 @@ pub fn list(root: &Path, runs: &[String]) -> Response {
 }
 
 /// The answer itself, for a caller that renders the outcome its own way — the service's own window does.
-pub fn decide(
-    root: &Path,
-    runs: &[String],
-    live: LiveSession,
-    id: &str,
-    answer: ApprovalAnswer,
-) -> AnswerOutcome {
-    match holder_of(root, runs, id) {
+pub fn decide(root: &Path, live: LiveSession, id: &str, answer: ApprovalAnswer) -> AnswerOutcome {
+    match holder_of(root, id) {
         Some((run, _)) => apply(root, &run, live, id, answer),
         None => AnswerOutcome::UnknownId,
     }
 }
 
-pub fn answer(
-    root: &Path,
-    runs: &[String],
-    live: LiveSession,
-    id: &str,
-    answer: ApprovalAnswer,
-) -> Response {
-    let Some((run, asked)) = holder_of(root, runs, id) else {
+pub fn answer(root: &Path, live: LiveSession, id: &str, answer: ApprovalAnswer) -> Response {
+    let Some((run, asked)) = holder_of(root, id) else {
         return Response::ApprovalUnknown { id: id.to_string() };
     };
     render(asked, id, apply(root, &run, live, id, answer))
 }
 
 /// Removes one entry, at whichever surface asked. A notice holds no rule, so removal reaches only the list.
-pub fn remove(root: &Path, runs: &[String], live: LiveSession, id: &str) -> RemoveOutcome {
-    match holder_of(root, runs, id) {
+pub fn remove(root: &Path, live: LiveSession, id: &str) -> RemoveOutcome {
+    match holder_of(root, id) {
         Some((run, _)) => clear(root, &run, live, id),
         None => RemoveOutcome::UnknownId,
     }
@@ -112,12 +153,12 @@ fn clear(root: &Path, run: &str, live: LiveSession, id: &str) -> RemoveOutcome {
 }
 
 /// [`remove`], rendered for the terminal.
-pub fn removal(root: &Path, runs: &[String], live: LiveSession, id: &str) -> Response {
+pub fn removal(root: &Path, live: LiveSession, id: &str) -> Response {
     let kept = |reason| Response::ApprovalKept {
         id: id.to_string(),
         reason,
     };
-    match remove(root, runs, live, id) {
+    match remove(root, live, id) {
         RemoveOutcome::Removed => Response::ApprovalRemoved { id: id.to_string() },
         RemoveOutcome::UnknownId => Response::ApprovalUnknown { id: id.to_string() },
         RemoveOutcome::NotCleared(reason) => kept(reason),
@@ -125,13 +166,8 @@ pub fn removal(root: &Path, runs: &[String], live: LiveSession, id: &str) -> Res
 }
 
 /// What the Approvals view can still grant on a connector row: the offer the run holds. A run that is not up, or that no longer holds the offer, has nothing for the row to answer.
-pub fn offered(
-    root: &Path,
-    runs: &[String],
-    live: LiveSession,
-    id: &str,
-) -> Option<lns_ipc::ConnectorView> {
-    let (run, asked) = holder_of(root, runs, id)?;
+pub fn offered(root: &Path, live: LiveSession, id: &str) -> Option<lns_ipc::ConnectorView> {
+    let (run, asked) = holder_of(root, id)?;
     let EntryKind::Connector { name } = &asked.kind else {
         return None;
     };
@@ -149,13 +185,12 @@ pub enum Granting {
 /// Grants the connector an entry names, with the card's own effect: the run's own session records it, publishes it, and releases every request the offer was holding.
 pub fn grant(
     root: &Path,
-    runs: &[String],
     live: LiveSession,
     id: &str,
     method: &str,
     connection: ConnectionChoice,
 ) -> Granting {
-    let Some((run, asked)) = holder_of(root, runs, id) else {
+    let Some((run, asked)) = holder_of(root, id) else {
         return Granting::UnknownId;
     };
     let EntryKind::Connector { name } = &asked.kind else {
@@ -187,8 +222,8 @@ fn apply(
     }
 }
 
-fn holder_of(root: &Path, runs: &[String], id: &str) -> Option<(String, Entry)> {
-    runs.iter().find_map(|run| {
+fn holder_of(root: &Path, id: &str) -> Option<(String, Entry)> {
+    known_runs(root).iter().find_map(|run| {
         offline::list(root, run)
             .into_iter()
             .find(|entry| entry.id == id)
@@ -255,10 +290,6 @@ mod tests {
         None
     }
 
-    fn runs() -> Vec<String> {
-        vec![RUN.to_string()]
-    }
-
     #[test]
     fn a_destination_lists_as_answerable_with_the_action_the_card_showed() {
         let home = tempfile::TempDir::new().expect("tempdir");
@@ -266,7 +297,7 @@ mod tests {
 
         let entry = Entry::new(Some(RUN.to_string()), destination(), EntryState::Undecided);
         assert_eq!(
-            list(home.path(), &runs()),
+            list(home.path()),
             Response::ApprovalList {
                 approvals: vec![ApprovalInfo {
                     id: entry.id,
@@ -287,7 +318,7 @@ mod tests {
         seed(home.path(), connector(), EntryState::Granted);
         seed(home.path(), notice(), EntryState::Noted);
 
-        let listed = list(home.path(), &runs());
+        let listed = list(home.path());
         let rendered = serde_json::to_string(&listed).expect("responses serialize");
         assert_eq!(
             listed,
@@ -335,7 +366,7 @@ mod tests {
         };
 
         assert_eq!(
-            subjects(&list(home.path(), &runs())),
+            subjects(&list(home.path())),
             vec![
                 "api.linear.app".to_string(),
                 "linear".to_string(),
@@ -345,10 +376,80 @@ mod tests {
     }
 
     #[test]
+    fn the_runs_a_list_spans_are_the_ones_on_disk() {
+        // The registry holds what this process started; the directories hold every run whose questions are still there to answer.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        seed(home.path(), destination(), EntryState::Undecided);
+        std::fs::create_dir_all(crate::cache::run_dir(home.path(), "bb02")).expect("run dir");
+        std::fs::write(
+            crate::cache::runs_dir(home.path()).join("stray"),
+            b"not a run",
+        )
+        .expect("write a file among the run dirs");
+
+        assert_eq!(listed_runs(home.path()), vec!["aa01", "bb02"]);
+    }
+
+    #[test]
+    fn a_machine_that_has_run_nothing_yet_holds_no_runs() {
+        // The runs directory appears with the first run, and the window reads the list before then.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        assert!(listed_runs(home.path()).is_empty());
+    }
+
+    #[test]
+    fn an_empty_handle_names_no_run_however_few_there_are() {
+        // Every id starts with the empty string, so a prefix match would answer the one run on the machine.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        seed(home.path(), destination(), EntryState::Undecided);
+
+        assert_eq!(
+            resolve_run(home.path(), ""),
+            Err(crate::run_registry::ResolveError::Unknown {
+                handle: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn a_prefix_two_runs_answer_to_is_ambiguous_wherever_the_second_run_is() {
+        // The list spans every run on disk, so judging a prefix against the registry alone would answer with one run's entries and say nothing about the other.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        for run in ["5417ab00", "5417ab99"] {
+            std::fs::create_dir_all(crate::cache::run_dir(home.path(), run)).expect("run dir");
+        }
+
+        assert_eq!(
+            resolve_run(home.path(), "5417ab"),
+            Err(crate::run_registry::ResolveError::Ambiguous {
+                handle: "5417ab".to_string()
+            })
+        );
+        assert_eq!(
+            resolve_run(home.path(), "5417ab9"),
+            Ok("5417ab99".to_string()),
+            "a prefix only one run answers to still names it"
+        );
+    }
+
+    #[test]
+    fn a_handle_no_run_answers_to_is_unknown() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        seed(home.path(), destination(), EntryState::Undecided);
+
+        assert_eq!(
+            resolve_run(home.path(), "never-was"),
+            Err(crate::run_registry::ResolveError::Unknown {
+                handle: "never-was".to_string()
+            })
+        );
+    }
+
+    #[test]
     fn a_run_nothing_was_asked_about_lists_nothing() {
         let home = tempfile::TempDir::new().expect("tempdir");
         assert_eq!(
-            list(home.path(), &runs()),
+            list(home.path()),
             Response::ApprovalList {
                 approvals: Vec::new()
             }
@@ -362,7 +463,6 @@ mod tests {
 
         let answered = answer(
             home.path(),
-            &runs(),
             no_live_session,
             &entry.id,
             ApprovalAnswer::AlwaysAllow,
@@ -397,7 +497,6 @@ mod tests {
 
         let answered = answer(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             ApprovalAnswer::AlwaysDeny,
@@ -457,7 +556,6 @@ mod tests {
 
         let answered = answer(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             ApprovalAnswer::AlwaysAllow,
@@ -475,7 +573,6 @@ mod tests {
         assert_eq!(
             decide(
                 home.path(),
-                &runs(),
                 no_live_session,
                 &entry.id,
                 ApprovalAnswer::AlwaysAllow
@@ -492,7 +589,6 @@ mod tests {
         assert_eq!(
             decide(
                 home.path(),
-                &runs(),
                 no_live_session,
                 "never-was",
                 ApprovalAnswer::AlwaysAllow
@@ -582,7 +678,7 @@ mod tests {
         let (session, _port) = offering(home.path(), "linear");
         LIVE.with(|live| *live.borrow_mut() = Some(session));
 
-        let offer = offered(home.path(), &runs(), live_from_thread, &entry.id);
+        let offer = offered(home.path(), live_from_thread, &entry.id);
 
         LIVE.with(|live| *live.borrow_mut() = None);
         assert_eq!(
@@ -601,7 +697,6 @@ mod tests {
 
         let granted = grant(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             "token",
@@ -616,7 +711,7 @@ mod tests {
             "the row grants through the run's own session, so the guest is told at once"
         );
         assert_eq!(
-            entries(home.path(), &runs())[0].state,
+            entries(home.path())[0].state,
             EntryState::Granted,
             "and the row reads granted afterwards"
         );
@@ -632,7 +727,6 @@ mod tests {
 
         let granted = grant(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             "token",
@@ -664,7 +758,6 @@ mod tests {
 
         let first = grant(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             "token",
@@ -672,7 +765,6 @@ mod tests {
         );
         let again = grant(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             "token",
@@ -711,7 +803,7 @@ mod tests {
             port.granted.lock().expect("granted").as_slice(),
             ["decline linear"]
         );
-        let listed = entries(home.path(), &runs());
+        let listed = entries(home.path());
         let row = listed
             .iter()
             .find(|held| held.subject() == "linear")
@@ -729,11 +821,10 @@ mod tests {
         let home = tempfile::TempDir::new().expect("tempdir");
         let entry = seed(home.path(), connector(), EntryState::Undecided);
 
-        assert!(offered(home.path(), &runs(), no_live_session, &entry.id).is_none());
+        assert!(offered(home.path(), no_live_session, &entry.id).is_none());
         assert_eq!(
             grant(
                 home.path(),
-                &runs(),
                 no_live_session,
                 &entry.id,
                 "token",
@@ -750,10 +841,9 @@ mod tests {
         let (session, _port) = offering(home.path(), "linear");
         LIVE.with(|live| *live.borrow_mut() = Some(session));
 
-        let offer = offered(home.path(), &runs(), live_from_thread, &entry.id);
+        let offer = offered(home.path(), live_from_thread, &entry.id);
         let granted = grant(
             home.path(),
-            &runs(),
             live_from_thread,
             &entry.id,
             "token",
@@ -771,7 +861,6 @@ mod tests {
         assert_eq!(
             grant(
                 home.path(),
-                &runs(),
                 no_live_session,
                 "never-was",
                 "token",
@@ -787,12 +876,12 @@ mod tests {
         let entry = seed(home.path(), notice(), EntryState::Noted);
 
         assert_eq!(
-            removal(home.path(), &runs(), no_live_session, &entry.id),
+            removal(home.path(), no_live_session, &entry.id),
             Response::ApprovalRemoved {
                 id: entry.id.clone()
             }
         );
-        assert!(entries(home.path(), &runs()).is_empty());
+        assert!(entries(home.path()).is_empty());
     }
 
     #[test]
@@ -806,7 +895,7 @@ mod tests {
         )
         .expect("block the install");
 
-        let refused = removal(home.path(), &runs(), no_live_session, &entry.id);
+        let refused = removal(home.path(), no_live_session, &entry.id);
 
         let refused = serde_json::to_value(&refused).expect("responses serialize");
         assert_eq!(
@@ -821,7 +910,7 @@ mod tests {
             "the refusal must say what stopped it, got {refused}"
         );
         assert_eq!(
-            entries(home.path(), &runs()).len(),
+            entries(home.path()).len(),
             1,
             "the notice is still listed, so the answer must say so"
         );
@@ -834,7 +923,6 @@ mod tests {
         let entry = seed(home.path(), destination(), EntryState::Undecided);
         answer(
             home.path(),
-            &runs(),
             no_live_session,
             &entry.id,
             ApprovalAnswer::AlwaysAllow,
@@ -842,7 +930,7 @@ mod tests {
         let decisions = crate::cache::decisions_path(home.path(), RUN);
         let rule = std::fs::read_to_string(&decisions).expect("the rule was written");
 
-        let removed = removal(home.path(), &runs(), no_live_session, &entry.id);
+        let removed = removal(home.path(), no_live_session, &entry.id);
 
         assert_eq!(
             removed,
@@ -850,7 +938,7 @@ mod tests {
                 id: entry.id.clone()
             }
         );
-        assert!(entries(home.path(), &runs()).is_empty());
+        assert!(entries(home.path()).is_empty());
         assert_eq!(
             std::fs::read_to_string(&decisions).expect("read back"),
             rule,
@@ -864,12 +952,12 @@ mod tests {
         seed(home.path(), notice(), EntryState::Noted);
 
         assert_eq!(
-            removal(home.path(), &runs(), no_live_session, "never-was"),
+            removal(home.path(), no_live_session, "never-was"),
             Response::ApprovalUnknown {
                 id: "never-was".to_string()
             }
         );
-        assert_eq!(entries(home.path(), &runs()).len(), 1);
+        assert_eq!(entries(home.path()).len(), 1);
     }
 
     #[test]
@@ -898,7 +986,7 @@ mod tests {
         ))));
         LIVE.with(|live| *live.borrow_mut() = Some(session.clone()));
 
-        let outcome = remove(home.path(), &runs(), live_from_thread, &entry.id);
+        let outcome = remove(home.path(), live_from_thread, &entry.id);
 
         LIVE.with(|live| *live.borrow_mut() = None);
         assert_eq!(outcome, RemoveOutcome::Removed);
@@ -913,7 +1001,6 @@ mod tests {
         assert_eq!(
             answer(
                 home.path(),
-                &runs(),
                 no_live_session,
                 "never-was",
                 ApprovalAnswer::AlwaysAllow
@@ -937,7 +1024,6 @@ mod tests {
 
         let refused = answer(
             home.path(),
-            &runs(),
             no_live_session,
             &entry.id,
             ApprovalAnswer::AlwaysDeny,
@@ -959,7 +1045,6 @@ mod tests {
 
         let refused = answer(
             home.path(),
-            &runs(),
             no_live_session,
             &entry.id,
             ApprovalAnswer::AskAgain,

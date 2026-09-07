@@ -5,8 +5,12 @@ pub fn root() -> Result<PathBuf> {
     Ok(lns_ipc::lns_home()?)
 }
 
+pub fn runs_dir(root: &Path) -> PathBuf {
+    root.join("runs")
+}
+
 pub fn run_dir(root: &Path, run_id: &str) -> PathBuf {
-    root.join("runs").join(run_id)
+    runs_dir(root).join(run_id)
 }
 
 /// `sandbox-spec.md` §8.3 keeps a run's decisions in the run's own directory, so removing the run removes what it decided.

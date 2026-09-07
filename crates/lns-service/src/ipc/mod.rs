@@ -486,31 +486,27 @@ fn answer_approval(verb: ApprovalVerb) -> Response {
         }
     };
     match verb {
-        ApprovalVerb::List(None) => {
-            crate::approval_flow::answering::list(&root, &crate::run_registry::known_ids())
-        }
-        ApprovalVerb::List(Some(handle)) => match crate::run_registry::resolve(&handle) {
-            Ok(id) => crate::approval_flow::answering::list(&root, &[id]),
-            Err(crate::run_registry::ResolveError::Unknown { handle }) => {
-                Response::RunUnknown { run: handle }
+        ApprovalVerb::List(None) => crate::approval_flow::answering::list(&root),
+        ApprovalVerb::List(Some(handle)) => {
+            match crate::approval_flow::answering::resolve_run(&root, &handle) {
+                Ok(id) => crate::approval_flow::answering::list_in(&root, &[id]),
+                Err(crate::run_registry::ResolveError::Unknown { handle }) => {
+                    Response::RunUnknown { run: handle }
+                }
+                Err(ambiguous) => Response::Error {
+                    message: ambiguous.to_string(),
+                },
             }
-            Err(ambiguous) => Response::Error {
-                message: ambiguous.to_string(),
-            },
-        },
+        }
         ApprovalVerb::Answer(id, answer) => crate::approval_flow::answering::answer(
             &root,
-            &crate::run_registry::known_ids(),
             crate::run_registry::approvals,
             &id,
             answer,
         ),
-        ApprovalVerb::Remove(id) => crate::approval_flow::answering::removal(
-            &root,
-            &crate::run_registry::known_ids(),
-            crate::run_registry::approvals,
-            &id,
-        ),
+        ApprovalVerb::Remove(id) => {
+            crate::approval_flow::answering::removal(&root, crate::run_registry::approvals, &id)
+        }
     }
 }
 
@@ -2104,6 +2100,128 @@ mod tests {
             "a question is a line of the list like any other, got {question}"
         );
         assert_eq!(question["id"], asked.id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_lists_a_run_this_service_did_not_start() {
+        // The registry holds what this process started, and the entries outlive the process. A service restarted under an unanswered question must still show it.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        seed_approval(home.path(), forgotten);
+
+        let listed =
+            handle_request(&Request::ListApprovals { sandbox: None }, Instant::now()).await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "ApprovalList", "got {listed}");
+        assert_eq!(listed["approvals"][0]["subject"], "api.linear.app");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_scopes_the_list_to_a_run_this_service_did_not_start() {
+        // A run the registry forgot has no name left to be called by, so its id — whole or as a prefix — is what names it.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        seed_approval(home.path(), forgotten);
+        seed_approval(home.path(), "bb02bb02bb02bb02bb02bb02bb02bb02");
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("aa01aa".to_string()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["approvals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed["approvals"][0]["sandbox"], forgotten);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_answers_an_entry_of_a_run_this_service_did_not_start() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        let entry = seed_approval(home.path(), forgotten);
+
+        let answered = handle_request(
+            &Request::AnswerApproval {
+                id: entry.id.clone(),
+                answer: lns_ipc::ApprovalAnswer::AlwaysAllow,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let answered = as_json(answered);
+        assert_eq!(answered["type"], "ApprovalAnswered", "got {answered}");
+        assert!(
+            crate::cache::decisions_path(home.path(), forgotten).exists(),
+            "the answer writes that run's own decisions"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_keeps_an_ambiguous_forgotten_prefix_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        seed_approval(home.path(), "5417ab000000000000000000000000aa");
+        seed_approval(home.path(), "5417ab000000000000000000000000bb");
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("5417ab".into()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(
+            listed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ambiguous run id prefix: 5417ab")),
+            "got {listed}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_will_not_answer_a_prefix_a_forgotten_run_also_holds() {
+        // The list spans every run on disk, so a prefix judged against the registry alone would hand back the live run's entries and leave the other run's hidden.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let live = "aa01000000000000000000000000000a";
+        let forgotten = "aa9f000000000000000000000000000b";
+        register_running(live);
+        seed_approval(home.path(), live);
+        seed_approval(home.path(), forgotten);
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("aa".to_string()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(live);
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(
+            listed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ambiguous run id prefix: aa")),
+            "got {listed}"
+        );
     }
 
     #[tokio::test]

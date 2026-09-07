@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use cucumber::{given, then, when};
 use lns_policy::{Policy, Verdict};
+use lns_service::approval_flow::answering;
 use lns_service::approval_flow::entries::{
     Entry, EntryKind, EntryState, EntryStore, FileEntryStore, RemoveOutcome,
 };
@@ -216,6 +217,69 @@ fn when_developer_answers(world: &mut BehaviourWorld, words: String) {
         matches!(outcome, AnswerOutcome::Recorded(_)),
         "the answer must be recorded, got {outcome:?}"
     );
+}
+
+#[given("this service holds no record of that sandbox")]
+fn given_no_record_of_the_sandbox(_world: &mut BehaviourWorld) {
+    assert!(
+        lns_service::run_registry::resolve(STOPPED_RUN).is_err(),
+        "the registry must answer for nothing here, the way a restarted service answers for nothing"
+    );
+}
+
+#[when("the service lists what every run was asked")]
+fn when_service_lists_every_run(world: &mut BehaviourWorld) {
+    let root = stopped(world).home.path().to_path_buf();
+    let listed = answering::list(&root);
+    world.response = Some(listed);
+}
+
+#[when(regex = r#"^the developer answers "([^"]+)" on that entry through the service$"#)]
+fn when_developer_answers_through_the_service(world: &mut BehaviourWorld, words: String) {
+    let answer = match words.as_str() {
+        "always allow" => lns_ipc::ApprovalAnswer::AlwaysAllow,
+        "always deny" => lns_ipc::ApprovalAnswer::AlwaysDeny,
+        "ask again" => lns_ipc::ApprovalAnswer::AskAgain,
+        other => panic!("no such answer: {other}"),
+    };
+    let root = stopped(world).home.path().to_path_buf();
+    let id = stopped(world).entry_id.clone().expect("a stopped entry");
+    let answered = answering::answer(&root, no_live_session, &id, answer);
+    world.response = Some(answered);
+}
+
+/// A run this service holds no record of has no session behind it, which is the whole of the case.
+fn no_live_session(
+    _: &str,
+) -> Option<std::sync::Arc<lns_service::approval_flow::session::ApprovalSession>> {
+    None
+}
+
+#[then(regex = r#"^the list holds "([^"]+)"$"#)]
+fn then_list_holds(world: &mut BehaviourWorld, subject: String) {
+    let listed = listed_approvals(world);
+    assert!(
+        listed.iter().any(|row| row.subject == subject),
+        "the list does not hold {subject:?}: {listed:?}"
+    );
+}
+
+#[then("the list names the sandbox by its id")]
+fn then_list_names_the_id(world: &mut BehaviourWorld) {
+    let listed = listed_approvals(world);
+    assert!(
+        listed
+            .iter()
+            .all(|row| row.sandbox.as_deref() == Some(STOPPED_RUN)),
+        "a run with no name left is named by its id: {listed:?}"
+    );
+}
+
+fn listed_approvals(world: &mut BehaviourWorld) -> Vec<lns_ipc::ApprovalInfo> {
+    match world.response.clone().expect("a listing") {
+        lns_ipc::Response::ApprovalList { approvals } => approvals,
+        other => panic!("the service did not list the approvals: {other:?}"),
+    }
 }
 
 #[when("the developer reads that entry")]

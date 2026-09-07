@@ -84,6 +84,22 @@ Feature: the approvals a run keeps
     When lns-service restarts
     Then the run's approvals still list "api.linear.app" as undecided
 
+  # A restarted service holds no record of the runs the one before it started,
+  # and the entries are in the runs' own directories. The list reads them from
+  # there, or a restart hides every question a developer has not answered yet.
+  Scenario: A run this service holds no record of is still listed
+    Given a stopped sandbox whose approvals list "api.linear.app" as undecided
+    And this service holds no record of that sandbox
+    When the service lists what every run was asked
+    Then the list holds "api.linear.app"
+    And the list names the sandbox by its id
+
+  Scenario: A run this service holds no record of is answerable by its id
+    Given a stopped sandbox whose approvals list "api.linear.app" as undecided
+    And this service holds no record of that sandbox
+    When the developer answers "always allow" on that entry through the service
+    Then that sandbox's "decisions.yaml" contains a new allow rule for "api.linear.app"
+
   Scenario: Removing the sandbox removes its approvals
     Given a stopped sandbox whose approvals list "api.linear.app" as undecided
     When the developer removes the sandbox
