@@ -366,6 +366,8 @@ pub enum Response {
         session: String,
         message: String,
         fields: Vec<ConnectorFieldView>,
+        /// Whether the message and the field labels are a component's words rather than the document's. The document is disclosed on the card and checked before it installs; an ask's text is not, so lns attributes it (§3.2.6).
+        from_code: bool,
     },
     /// The connect ended without a connection, and the offer stands. The reason is the mechanism's, already bounded and scrubbed by the service.
     ConnectorConnectFailed {

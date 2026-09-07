@@ -296,12 +296,37 @@ Feature: lns connector, on this machine
   Scenario: a mechanism that asks in its own words says whose words they are
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
     And the mechanism asks in its own words, saying "open the workspace picker first"
     And the user types ""
     And the user types "sk-live-real"
     When the user runs connector command "connect some-provider --method token"
     Then the connector command succeeds
     And the prompt says "some-provider says: open the workspace picker first"
+
+  Scenario: a component asking with no words of its own still has its questions attributed
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks for "confirm your login password", which it does not mark secret
+    And the user types ""
+    And the user types "acme"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt attributes "confirm your login password" to "some-provider" before it asks it
+
+  Scenario: a message of its own does not let a component's questions pass as lns's
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks in its own words, saying "signing you in"
+    And the mechanism asks for "confirm your login password", which it does not mark secret
+    And the user types ""
+    And the user types "acme"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt says "some-provider says: signing you in"
+    And the prompt attributes "confirm your login password" to "some-provider" before it asks it
 
   Scenario: a field the mechanism does not mark secret is asked for plainly
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
@@ -313,10 +338,12 @@ Feature: lns connector, on this machine
     Then the connector command succeeds
     And the prompt says "which workspace: "
     And the prompt does not say "not shown"
+    And the prompt does not say "some-provider asks"
 
   Scenario: a round that collects nothing waits for the user to press on
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
     And the mechanism asks in its own words, saying "go to example.test/device and enter WDJB-MJHT"
     And the mechanism asks for nothing at all
     And the user types ""
