@@ -55,3 +55,5 @@ Feature: users discover the CLI surface
     And the output contains "SANDBOX"
     And the output contains "--kind"
     And the output contains "--format"
+    And the output contains "mechanism"
+    And the output does not contain "cli-spec"
