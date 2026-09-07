@@ -247,6 +247,7 @@ fn when_notice_removed(world: &mut BehaviourWorld) {
     );
 }
 
+#[given("the developer removes that entry")]
 #[when("the developer removes that entry")]
 fn when_entry_removed(world: &mut BehaviourWorld) {
     let rig = world.approval();

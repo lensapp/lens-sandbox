@@ -6,9 +6,11 @@ Feature: the approvals a run keeps
   answer again. The newest answer on an entry replaces the one before
   it. The gate does not change: a request nothing decides in time still
   fails closed, and an answer given after the request has gone writes
-  the rule without replaying the call. A request an existing rule
-  decides never reaches this layer — the guest's own gate stops at the
-  first matching rule — so no entry is possible for one.
+  the rule without replaying the call. A card can be raised for a
+  destination the run has already answered: the policy frame reaches the
+  guest a moment after the answer is written, and a connector hold asks
+  about a destination for as long as the connector is undecided. Such a
+  card is listed, and it leaves the answer the entry already has.
 
   Scenario: A closed card stays in the run's approvals as undecided
     Given a workload is running in the sandbox
@@ -58,6 +60,24 @@ Feature: the approvals a run keeps
     When the developer picks "always allow" on the first
     And the second request times out
     Then the run's approvals list "api.linear.app" as always allowed
+
+  # The frame reaches the guest a moment after the answer is written, so a
+  # request already in flight raises a card the answer has already decided.
+  Scenario: A card raised while the answer travels leaves the answer the entry has
+    Given the run records what it decides in "decisions.yaml"
+    And the run's approvals list "api.linear.app" as always allowed
+    When a workload reaches "api.linear.app"
+    Then the run's approvals list "api.linear.app" as always allowed
+
+  # `rm` clears the record and keeps the rule, and a connector hold re-asks
+  # about a destination the policy already allows. Both leave a rule with no
+  # entry beside it, and the card the run raises is still one to list.
+  Scenario: A run that holds the rule but no record of the question lists the card it raises
+    Given the run records what it decides in "decisions.yaml"
+    And the run's approvals list "api.linear.app" as always allowed
+    And the developer removes that entry
+    When a workload reaches "api.linear.app"
+    Then the run's approvals list "api.linear.app" as undecided
 
   Scenario: The run's approvals survive a service restart
     Given the run's approvals list "api.linear.app" as undecided

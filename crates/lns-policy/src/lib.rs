@@ -487,6 +487,16 @@ impl Policy {
     pub fn remove_approved_tcp_rule(&mut self, destination: &str) -> bool {
         remove_approved(&mut self.network.egress.tcp, destination)
     }
+
+    /// Whether an approval's own entry for this pattern is still in the table, which is what says an answer given earlier is still in force.
+    pub fn holds_approved_rule(&self, pattern: &str) -> bool {
+        holds_approved(&self.network.egress.http, pattern)
+    }
+
+    /// Whether an approval's own raw entry for this destination is still in the table; see [`Policy::holds_approved_rule`].
+    pub fn holds_approved_tcp_rule(&self, destination: &str) -> bool {
+        holds_approved(&self.network.egress.tcp, destination)
+    }
 }
 
 /// What became of a decision meant to outlive the request it was made on.
@@ -586,8 +596,16 @@ fn place_approved<R: Placed>(
 /// Removes every entry an approval wrote for this destination, and only those: a rule the author typed is theirs to delete, even where it says the same thing.
 fn remove_approved<R: Placed>(table: &mut Vec<R>, pattern: &str) -> bool {
     let before = table.len();
-    table.retain(|rule| !(rule.is_approved() && rule.match_pattern() == pattern));
+    table.retain(|rule| !approved_for(rule, pattern));
     table.len() != before
+}
+
+fn holds_approved<R: Placed>(table: &[R], pattern: &str) -> bool {
+    table.iter().any(|rule| approved_for(rule, pattern))
+}
+
+fn approved_for<R: Placed>(rule: &R, pattern: &str) -> bool {
+    rule.is_approved() && rule.match_pattern() == pattern
 }
 
 pub trait PolicyStore: Send + Sync {
@@ -1680,6 +1698,33 @@ egress:
 
         assert!(!p.remove_approved_rule("api.linear.app"));
         assert!(p.network.egress.http.is_empty());
+    }
+
+    #[test]
+    fn a_rule_an_approval_wrote_reads_back_as_still_in_force() {
+        // A card raised again for a destination this run already answered is the gate racing a policy frame, and the answer decides which of the two the entry reports.
+        let mut p = Policy::default();
+        p.add_approved_rule(RouteRule::allow_host("api.linear.app").approved());
+        p.add_approved_tcp_rule(TcpEgressRule::allow_destination("db.internal:5432").approved());
+
+        assert!(p.holds_approved_rule("api.linear.app"));
+        assert!(p.holds_approved_tcp_rule("db.internal:5432"));
+        assert!(!p.holds_approved_rule("api.github.com"));
+        assert!(!p.holds_approved_tcp_rule("db.internal:5433"));
+    }
+
+    #[test]
+    fn a_rule_the_author_typed_is_not_one_an_approval_wrote() {
+        // The developer's own file is not an answer this run gave, so an entry must not read as decided by it.
+        let mut p = Policy::default();
+        p.add_rule(RouteRule::allow_host("api.linear.app"));
+        p.network
+            .egress
+            .tcp
+            .push(TcpEgressRule::allow_destination("db.internal:5432"));
+
+        assert!(!p.holds_approved_rule("api.linear.app"));
+        assert!(!p.holds_approved_tcp_rule("db.internal:5432"));
     }
 
     #[test]

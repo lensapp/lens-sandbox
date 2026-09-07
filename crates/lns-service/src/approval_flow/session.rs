@@ -296,6 +296,30 @@ impl ApprovalSession {
         }
     }
 
+    /// Lists the card, and reopens the question unless the run still holds the rule its own entry wrote — a frame still travelling, or a connector hold, raises a card the entry has already answered.
+    fn reopen_unless_decided(&self, entry: &PendingEntry) {
+        let asked = Entry::new(self.run.clone(), entry.entry_kind(), EntryState::Undecided);
+        let listed = self
+            .entries()
+            .list()
+            .into_iter()
+            .any(|held| held.id == asked.id);
+        if listed && self.holds_rule_for(entry) {
+            return;
+        }
+        self.entries().record(asked);
+    }
+
+    fn holds_rule_for(&self, entry: &PendingEntry) -> bool {
+        let policy = self.policy.lock().expect("policy mutex poisoned");
+        match entry.treatment {
+            Treatment::Inspected => policy.holds_approved_rule(&entry.host),
+            Treatment::Raw => entry
+                .raw_destination()
+                .is_some_and(|destination| policy.holds_approved_tcp_rule(destination)),
+        }
+    }
+
     fn note_connector(&self, name: &str, state: EntryState) {
         self.entries().record(self.connector_entry(name, state));
     }
@@ -596,9 +620,8 @@ impl ApprovalSession {
             },
         );
         drop(pending);
-        // A fresh card means the gate found no rule, so an answer this entry used to carry is not in force any more — unlike a timeout, this one does overwrite it.
         if let Some(raised) = self.pending_entry(&req.id) {
-            self.note(&raised, EntryState::Undecided);
+            self.reopen_unless_decided(&raised);
         }
         let offer = self.offer_for(&req);
         if let Some(offer) = &offer {
@@ -3536,6 +3559,37 @@ pub(crate) mod tests {
             session.current_policy().network.egress.tcp.is_empty(),
             "asking again takes the raw rule back too"
         );
+    }
+
+    #[test]
+    fn a_card_raised_after_the_rule_is_gone_opens_the_entry_again() {
+        // `ask again` takes the rule back, so the next card is a question nothing decides — and the entry has to say so.
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, entries) = keeping_entries(&session);
+        session.submit_pending(pending("r1", "api.linear.app"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+        let id = entries.list()[0].id.clone();
+        assert_eq!(
+            session.answer_entry(&id, Answer::AskAgain),
+            AnswerOutcome::Recorded(EntryState::Undecided)
+        );
+
+        session.submit_pending(pending("r2", "api.linear.app"), Instant::now());
+
+        assert_eq!(entries.list()[0].state, EntryState::Undecided);
+    }
+
+    #[test]
+    fn a_raw_card_reads_the_answer_its_own_port_scoped_rule_carries() {
+        // The raw table is keyed by destination and port, so asking the http table would report every raw answer as gone.
+        let (session, _n, _store, _rx) = fixture();
+        let (_dir, entries) = keeping_entries(&session);
+        session.submit_pending(raw_pending("r1", "db.internal:5432"), Instant::now());
+        session.record_decision("r1", Decision::AllowAlways);
+
+        session.submit_pending(raw_pending("r2", "db.internal:5432"), Instant::now());
+
+        assert_eq!(entries.list()[0].state, EntryState::AlwaysAllowed);
     }
 
     #[test]
