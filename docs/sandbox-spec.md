@@ -1849,6 +1849,28 @@ and every line lns draws lns's. A line break is one of these, so a message is on
 paragraph lns wraps. The reason a `failed` carries is connector text under the
 same rule, wherever lns shows it.
 
+**Every name a component supplies is connector text, wherever lns shows it.** The
+host an outbound call named and the program an execution named are the component's
+words, and lns prints them back in the record of what it did
+([§7.1](#71-connectors), [cli-spec §3.6](cli-spec.md#36-lns-audit)). lns MUST
+render each by the rule above before it writes it down.
+
+A record is the one place that rule cuts rather than refuses. An ask can be failed
+because nothing has happened yet; a call that already left the machine cannot be,
+and the entry is the only record there will ever be. So lns MUST bound a record
+two ways instead, and each way answers a harm the ask rule answers by refusing:
+
+- **By length**, and a cut record MUST say in lns's own text that it was cut. A
+  shortened name that read as a whole one would enter the ledger as a name the
+  component never used — `login.example.com.attacker.example` cut to
+  `login.example.com` is a forged host in the one record that answers for the
+  component, which is worse than the long name it replaced.
+- **By count**, under a ceiling lns sets on the entries one call may write. That
+  ceiling MUST NOT be `callSeconds` or fuel: a component that spends those has
+  already written thousands of entries, which buries the neighbouring ones as
+  surely as one unbounded name would. Past it lns records that it elided the rest,
+  and that entry is lns's own.
+
 Everything [§1.5](#15-one-disclosure) fixes verbatim — the disclosures, the bounds,
 the digest — is lns's own text, and an ask's connector text MUST be surrounded by
 it and MUST NOT be able to occupy, redraw, or imitate it. Text that could forge a
@@ -1884,14 +1906,15 @@ every call, which is why a component needs no clock to be told the time.
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
 clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
-step-state, connector-text, random-draw, field-count, field-name, and
-component-size ceilings. An ask that crosses one fails the connect, for the reason
-the connector-text ceiling does: a round trimmed to fit is one the user answers
-without knowing what was taken out. Step state between calls, and any answer to a
-field marked secret, are secret material — a device code, a PKCE verifier, a
-password — so lns holds each in memory only, for a bounded lifetime, never logs
-it, never persists it, and drops an answer once the `resume` that consumed it
-returns.
+step-state, connector-text, random-draw, field-count, field-name,
+record-length, record-count, and component-size ceilings. An ask that crosses one
+fails the connect, for the reason the connector-text ceiling does: a round trimmed
+to fit is one the user answers without knowing what was taken out. The two record
+ceilings are the exception, and the rule above says why one cuts and the other
+elides. Step state between calls, and any answer to a field marked secret, are
+secret material — a device code, a PKCE verifier, a password — so lns holds each
+in memory only, for a bounded lifetime, never logs it, never persists it, and
+drops an answer once the `resume` that consumed it returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
