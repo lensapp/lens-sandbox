@@ -340,18 +340,21 @@ enum VolumeVerb<'a> {
     Prune { dry_run: bool },
 }
 
-enum ApprovalVerb<'a> {
-    List(Option<&'a str>),
-    Answer(&'a str, lns_ipc::ApprovalAnswer),
-    Remove(&'a str),
+/// Owned, because the store behind every one of these verbs is blocking file I/O and answers off the runtime thread.
+enum ApprovalVerb {
+    List(Option<String>),
+    Answer(String, lns_ipc::ApprovalAnswer),
+    Remove(String),
 }
 
-impl<'a> ApprovalVerb<'a> {
-    fn of(request: &'a Request) -> Option<Self> {
+impl ApprovalVerb {
+    fn of(request: &Request) -> Option<Self> {
         match request {
-            Request::ListApprovals { sandbox } => Some(ApprovalVerb::List(sandbox.as_deref())),
-            Request::AnswerApproval { id, answer } => Some(ApprovalVerb::Answer(id, *answer)),
-            Request::RemoveApproval { id } => Some(ApprovalVerb::Remove(id)),
+            Request::ListApprovals { sandbox } => Some(ApprovalVerb::List(sandbox.clone())),
+            Request::AnswerApproval { id, answer } => {
+                Some(ApprovalVerb::Answer(id.clone(), *answer))
+            }
+            Request::RemoveApproval { id } => Some(ApprovalVerb::Remove(id.clone())),
             _ => None,
         }
     }
@@ -458,7 +461,22 @@ async fn handle_connector_request(call: crate::connector::real::Call) -> Respons
     }
 }
 
-fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
+/// Reads and writes each run's own files, so it answers off the runtime thread.
+async fn handle_approval_request(verb: ApprovalVerb) -> Response {
+    joined(tokio::task::spawn_blocking(move || answer_approval(verb)).await)
+}
+
+/// A task that ended in a panic says nothing about what it did, so the caller is told only that, and the operator is told why.
+fn joined(finished: Result<Response, tokio::task::JoinError>) -> Response {
+    finished.unwrap_or_else(|e| {
+        crate::log::error!("the approvals task did not finish: {e}");
+        Response::Error {
+            message: "the approvals task did not finish".to_string(),
+        }
+    })
+}
+
+fn answer_approval(verb: ApprovalVerb) -> Response {
     let root = match crate::cache::root() {
         Ok(root) => root,
         Err(e) => {
@@ -471,7 +489,7 @@ fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
         ApprovalVerb::List(None) => {
             crate::approval_flow::answering::list(&root, &crate::run_registry::known_ids())
         }
-        ApprovalVerb::List(Some(handle)) => match crate::run_registry::resolve(handle) {
+        ApprovalVerb::List(Some(handle)) => match crate::run_registry::resolve(&handle) {
             Ok(id) => crate::approval_flow::answering::list(&root, &[id]),
             Err(crate::run_registry::ResolveError::Unknown { handle }) => {
                 Response::RunUnknown { run: handle }
@@ -484,30 +502,37 @@ fn handle_approval_request(verb: ApprovalVerb<'_>) -> Response {
             &root,
             &crate::run_registry::known_ids(),
             crate::run_registry::approvals,
-            id,
+            &id,
             answer,
         ),
         ApprovalVerb::Remove(id) => crate::approval_flow::answering::removal(
             &root,
             &crate::run_registry::known_ids(),
             crate::run_registry::approvals,
-            id,
+            &id,
         ),
     }
 }
 
-pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+/// The verbs a handler of their own answers whole; every other request opens a stream the caller drives.
+async fn answered_whole(request: &Request) -> Option<Response> {
     if let Some(verb) = VolumeVerb::of(request) {
-        return handle_volume_request(verb).await;
+        return Some(handle_volume_request(verb).await);
     }
     if let Some(call) = connector_call(request) {
-        return handle_connector_request(call).await;
+        return Some(handle_connector_request(call).await);
     }
     if let Some(verb) = ApprovalVerb::of(request) {
-        return handle_approval_request(verb);
+        return Some(handle_approval_request(verb).await);
+    }
+    None
+}
+
+pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+    if let Some(answered) = answered_whole(request).await {
+        return answered;
     }
     match request {
-        // A volume or connector verb was answered above; each of the rest opens a stream the caller drives.
         Request::ListVolumes
         | Request::CreateVolume { .. }
         | Request::InspectVolume { .. }
@@ -2079,6 +2104,28 @@ mod tests {
             "a question is a line of the list like any other, got {question}"
         );
         assert_eq!(question["id"], asked.id);
+    }
+
+    #[tokio::test]
+    async fn a_task_that_panicked_says_only_that_and_names_it_in_the_log() {
+        // The store holds locks it expects, so the blocking task can die. Saying "could not be read" would tell someone who ran `answer` that nothing was written, which a panic cannot promise.
+        let died = tokio::task::spawn_blocking(|| panic!("approvals locks poisoned"))
+            .await
+            .expect_err("the task must have died");
+
+        let mut answered = None;
+        let said = crate::test_env::captured_messages(|| answered = Some(joined(Err(died))));
+
+        assert_eq!(
+            answered,
+            Some(Response::Error {
+                message: "the approvals task did not finish".to_string()
+            })
+        );
+        assert!(
+            said.iter().any(|m| m.contains("approvals locks poisoned")),
+            "the operator has to be told what the task died of, got {said:?}"
+        );
     }
 
     #[tokio::test]
