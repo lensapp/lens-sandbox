@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -175,10 +176,23 @@ impl Fs for RealFs {
     }
 }
 
+/// The lock every store over one run's file takes, because each surface builds a store of its own and a lock per store would order none of them.
+static WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn write_lock_for(path: &Path) -> Arc<Mutex<()>> {
+    WRITE_LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("approvals locks poisoned")
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 pub struct FileEntryStore {
     path: PathBuf,
     fs: Arc<dyn Fs>,
-    write_lock: Mutex<()>,
+    write_lock: Arc<Mutex<()>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -189,9 +203,9 @@ impl FileEntryStore {
 
     pub fn with_fs(path: PathBuf, fs: Arc<dyn Fs>) -> Self {
         Self {
+            write_lock: write_lock_for(&path),
             path,
             fs,
-            write_lock: Mutex::new(()),
             wake: Arc::new(crate::dashboard::live::note_write),
         }
     }
@@ -286,7 +300,6 @@ enum Held {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[derive(Default)]
     pub(crate) struct FakeFs {
@@ -520,6 +533,60 @@ pub(crate) mod tests {
         assert!(store.forget(&cleared.id).is_ok());
 
         assert!(woken.load(std::sync::atomic::Ordering::Relaxed) > after_recording);
+    }
+
+    #[test]
+    fn two_stores_over_one_run_take_one_lock_and_two_runs_take_their_own() {
+        // Every surface builds its own store, so ordering their writes needs a lock they share.
+        let fs = Arc::new(FakeFs::default());
+        let one = FileEntryStore::with_fs(PathBuf::from("/run/aa01/approvals.json"), fs.clone());
+        let same = FileEntryStore::with_fs(PathBuf::from("/run/aa01/approvals.json"), fs.clone());
+        let other = FileEntryStore::with_fs(PathBuf::from("/run/bb02/approvals.json"), fs);
+
+        assert!(Arc::ptr_eq(&one.write_lock, &same.write_lock));
+        assert!(
+            !Arc::ptr_eq(&one.write_lock, &other.write_lock),
+            "one run's writes must not wait on another run's"
+        );
+    }
+
+    #[test]
+    fn every_answer_recorded_at_once_through_its_own_store_is_kept() {
+        // Read-modify-write is the whole of a recording, so two surfaces racing over one run lose whichever entry lands second.
+        let fs = Arc::new(FakeFs::default());
+        let path = PathBuf::from("/run/racing/approvals.json");
+        let hosts = [
+            "a.example",
+            "b.example",
+            "c.example",
+            "d.example",
+            "e.example",
+            "f.example",
+            "g.example",
+            "h.example",
+        ];
+
+        std::thread::scope(|scope| {
+            for host in hosts {
+                let fs = fs.clone();
+                let path = path.clone();
+                scope.spawn(move || {
+                    FileEntryStore::with_fs(path, fs).record(Entry::new(
+                        Some("reviewer".into()),
+                        destination(host),
+                        EntryState::Undecided,
+                    ));
+                });
+            }
+        });
+
+        let listed = FileEntryStore::with_fs(path, fs).list();
+        assert_eq!(
+            listed.len(),
+            hosts.len(),
+            "an entry went missing: {:?}",
+            listed.iter().map(Entry::subject).collect::<Vec<_>>()
+        );
     }
 
     #[test]
