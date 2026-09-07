@@ -8,6 +8,7 @@
 pub mod host;
 pub mod real;
 pub mod selection;
+pub(crate) mod text;
 pub mod token;
 pub mod traits;
 pub mod wasm;

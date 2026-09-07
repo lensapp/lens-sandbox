@@ -217,6 +217,15 @@ impl Recorder for RealRecorder {
     fn renewed(&self, connector: &str, target: &str, refused: bool) {
         wrote(connector, "renewed", target, refused);
     }
+
+    fn elided(&self, connector: &str, after: u32) {
+        wrote(
+            connector,
+            "elided",
+            &format!("the rest of this call after {after} entries"),
+            false,
+        );
+    }
 }
 
 /// §3.2.6 makes every execution and every outbound call a durable record; failing to write one must not fail the connect it describes.
