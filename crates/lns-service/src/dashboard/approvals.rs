@@ -275,9 +275,10 @@ fn named<'a>(id: &'a str, sandboxes: &'a [Sandbox]) -> &'a str {
         .map_or(id, |sandbox| sandbox.name.as_str())
 }
 
-/// Whether this question still has no answer.
+/// Whether this question still has no answer — a notice asks nothing, so it never waits.
 fn waits(entry: &Entry) -> bool {
-    entry.is_answerable() && matches!(entry.state, EntryState::Undecided | EntryState::Withdrawn)
+    !matches!(entry.kind, EntryKind::Notice { .. })
+        && matches!(entry.state, EntryState::Undecided | EntryState::Withdrawn)
 }
 
 /// The answers this entry's row offers, leaving out the one it already has and the one that would write nothing.
@@ -512,6 +513,45 @@ mod tests {
         assert!(
             !archive_shown(Some(false), &nothing_waiting),
             "a developer who closes it has closed it"
+        );
+    }
+
+    #[test]
+    fn an_undecided_connector_waits_with_the_destinations() {
+        // A closed connector card is the one card the terminal cannot answer, so the view is where it comes back — filed in the archive it is the one row nothing points at.
+        let held = vec![
+            connector("dapper_thistle"),
+            Entry::new(
+                Some("dapper_thistle".to_string()),
+                EntryKind::Connector {
+                    name: "some-provider".into(),
+                },
+                EntryState::Granted,
+            ),
+            notice("dapper_thistle"),
+        ];
+
+        let listed = listing(&held, None, &sandboxes(), &everything());
+
+        assert_eq!(
+            listed.waiting,
+            vec![0],
+            "the undecided connector is what the run is waiting on"
+        );
+        assert_eq!(
+            listed.archived,
+            vec![1, 2],
+            "a connector already answered, and a notice, are the archive"
+        );
+        assert_eq!(
+            waiting(&held, None, &sandboxes()),
+            1,
+            "and the badge counts it, or nothing says the row is there"
+        );
+        assert_eq!(
+            groups(&held, &listed.waiting)[0].waiting,
+            1,
+            "the run's own heading counts it too"
         );
     }
 

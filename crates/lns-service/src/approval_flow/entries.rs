@@ -97,7 +97,7 @@ impl Entry {
         )
     }
 
-    /// Whether this entry is one an answer can decide, as opposed to a notice or a connector the run already granted.
+    /// Whether `lns approval answer` decides this entry, which only a destination's verdict is.
     pub fn is_answerable(&self) -> bool {
         matches!(self.kind, EntryKind::Destination { .. })
     }
