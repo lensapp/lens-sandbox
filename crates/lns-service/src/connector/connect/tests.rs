@@ -368,6 +368,27 @@ fn a_connection_keeps_only_what_the_method_says_it_produces() {
 }
 
 #[test]
+fn a_mechanism_that_finishes_without_what_it_declared_it_produces_stores_nothing() {
+    // Honouring `outputs` in one direction only stores a connection reported as connected whose credential can never arm, and the user meets that as a request the destination rejects.
+    let rig = Rig::holding(CODE_DOCUMENT, Some(b"the mechanism"));
+    let mechanisms = OneMechanism::answering(vec![done(&[], &["repo:read"])]);
+
+    let err = driver(&rig, &mechanisms, 0)
+        .begin("some-provider", "sign-in", "work")
+        .expect_err("a connection with a hole in it is not one this machine will hold");
+
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("access_token"), "{rendered}");
+    assert!(
+        rig.store()
+            .connections_of("some-provider")
+            .expect("connections")
+            .is_empty(),
+        "nothing is kept from an answer that did not honour the document"
+    );
+}
+
+#[test]
 fn a_mechanism_that_fails_stores_nothing_and_leaves_the_offer_standing() {
     let rig = Rig::holding(CODE_DOCUMENT, Some(b"the mechanism"));
     let mechanisms =

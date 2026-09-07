@@ -180,7 +180,8 @@ fn a_component_decides_its_own_fields_and_gets_back_the_state_it_gave() {
         ]
     );
 
-    let answers = Answers::from([("access_token".to_string(), "abc".to_string())]);
+    // Distinct from anything the fixture can produce on its own, so a host that stopped delivering answers cannot pass this by synthesising the same value.
+    let answers = Answers::from([("access_token".to_string(), "typed".to_string())]);
     let step = component
         .resume(&host, &state, &answers, 0)
         .expect("the component finishes");
@@ -194,7 +195,7 @@ fn a_component_decides_its_own_fields_and_gets_back_the_state_it_gave() {
     );
     assert_eq!(
         outcome.values.get("access_token").map(String::as_str),
-        Some("abc")
+        Some("typed")
     );
 }
 

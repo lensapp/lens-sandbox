@@ -246,6 +246,13 @@ impl Guest for Fixture {
             name: "resumed".to_string(),
             value: String::from_utf8_lossy(&state).to_string(),
         });
+        // A round that collected nothing still produces the value the method declares — a device code is waited on precisely so a token comes back.
+        if !values.iter().any(|held| held.name == "access_token") {
+            values.push(Answer {
+                name: "access_token".to_string(),
+                value: "abc".to_string(),
+            });
+        }
         Step::Done(Outcome {
             values,
             authority: vec!["read".to_string()],
