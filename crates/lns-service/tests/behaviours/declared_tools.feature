@@ -12,6 +12,9 @@ Feature: declared developer tools are provisioned once per machine, outside work
   policy cage (covered against a live guest by the @microvm suite). A tool whose
   binaries are launchers rather than the payload itself resolves the rest through
   its own environment, so the workload gets those vars too — unless it sets them.
+  A login shell is the one process that throws the composed PATH away: /etc/profile
+  assigns PATH outright, so the same tool dirs are also written to the profile.d
+  snippet it sources next.
 
   Scenario: The strictest policy does not gate provisioning
     Given a lns.yaml declaring tools ["node@22"] that denies every destination
@@ -50,6 +53,11 @@ Feature: declared developer tools are provisioned once per machine, outside work
     And the sandbox sets that var itself
     When I run the sandbox
     Then the workload keeps the sandbox's value
+
+  Scenario: A declared tool survives a login shell
+    Given a lns.yaml declaring tools ["node@22"]
+    When I run the sandbox
+    Then a login shell in the guest finds the tool directories again
 
   Scenario: Tool provisioning is audited
     When tools are provisioned for a run

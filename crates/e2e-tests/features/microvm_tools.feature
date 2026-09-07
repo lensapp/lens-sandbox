@@ -14,6 +14,9 @@ Feature: declared developer tools reach a real guest
   version, because the tool also has to *write* inside its own tree: cargo puts
   its package-cache lock and registry under a CARGO_HOME the engine placed
   there, and `rustc --version` passes even when that directory is read-only.
+  A login shell is covered here too: `/etc/profile` assigns PATH outright, so
+  only a real guest proves that the snippet the run writes under
+  /etc/profile.d puts the tool dirs back after that reset.
 
   Scenario: A declared tool is available to the workload
     Given the LNS service is running
@@ -26,6 +29,12 @@ Feature: declared developer tools reach a real guest
     And a lns.yaml declaring tools ["node@22"] over the pinned base image
     When the sandbox runs "npm --version"
     Then it prints an npm version
+
+  Scenario: A declared tool survives a login shell
+    Given the LNS service is running
+    And a lns.yaml declaring tools ["node@22"] over the pinned base image
+    When the sandbox runs "/bin/sh -lc 'command -v node'"
+    Then it prints the node binary inside the run's tool tree
 
   Scenario: Provisioning is disclosed, audited, and reused on the next run
     Given a clean lns cache home

@@ -944,6 +944,23 @@ fn nothing_provisioned_again(world: &mut E2eWorld) {
     );
 }
 
+#[then("it prints the node binary inside the run's tool tree")]
+fn prints_a_tool_tree_path(world: &mut E2eWorld) {
+    let result = world.result.as_ref().expect("a run result");
+    assert_eq!(
+        result.exit_code, 0,
+        "a login shell in the guest could not find the declared tool:\n{}\n{}",
+        result.stdout, result.stderr
+    );
+    let wanted = format!("{}/node/", lns_service::tools::cache::TOOLS_ROOT);
+    assert!(
+        result.stdout.contains(&wanted),
+        "expected a path under {wanted}, got:\n{}\n{}",
+        result.stdout,
+        result.stderr
+    );
+}
+
 #[then("it prints a node 22 version")]
 fn prints_a_node_22_version(world: &mut E2eWorld) {
     let result = world.result.as_ref().expect("a run result");

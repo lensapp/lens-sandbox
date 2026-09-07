@@ -108,8 +108,9 @@ pub async fn pre_provision_for_pull(
         .collect();
     let target = ProvisionTarget {
         arch: super::host_arch(),
-        libc: super::libc::detect_libc_off_runtime(&base_image.layer_digests, &layers)
-            .map_err(|e| ProvisionError::Engine(format!("reading the base image: {e:#}")))?,
+        libc: super::image_survey::survey_off_runtime(&base_image.layer_digests, &layers)
+            .map_err(|e| ProvisionError::Engine(format!("reading the base image: {e:#}")))?
+            .libc,
     };
     super::registry::refuse_libc_unsupported(&requests, &target, &sandbox.base_image)?;
     let content_store = crate::content_store::ContentStore::new(cache_dir()?.join("content"));
