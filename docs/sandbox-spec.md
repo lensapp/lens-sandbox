@@ -1818,12 +1818,11 @@ what to ask for before it runs, so the values can be collected first and handed
 over at once. A component does not: which fields it needs, and how many rounds it
 takes, is the implementation's own decision — a device code shows a URL and then
 waits, a password grant asks twice, a token exchange asks once. So `connect`
-returns one of three answers — **ask**; **done**, with the values, scopes, and
-account it produced, and where it has one their expiry; or **failed**, with a
-reason — and where it asked, lns
-collects what it asked for and calls **`resume`** with the state verbatim and the
-answers. `resume` answers the same three, so a connect runs for as many rounds as
-the implementation needs.
+returns one of three answers — **ask**; **done**, with the values and scopes it
+produced, and where it has one their expiry; or **failed**, with a reason — and
+where it asked, lns collects what it asked for and calls **`resume`** with the
+state verbatim and the answers. `resume` answers the same three, so a connect runs
+for as many rounds as the implementation needs.
 
 An **ask** carries the opaque state, a **message** in the component's own words,
 and the fields it wants — each named, labelled, and marked secret or not, so lns
@@ -1880,16 +1879,24 @@ consumed it returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
-renewal omits scopes or an account, lns carries forward the ones the connection
-already held. A renewal returns the same shape a successful connect does, so this
-is one rule in one place rather than two.
+renewal omits scopes, lns carries forward the ones the connection already held. A
+renewal returns the same shape a successful connect does, so this is one rule in
+one place rather than two.
+
+**A connection records no account.** It already carries a name for the sign-in it
+came from: its **label**. A mechanism suggests one and the user confirms it
+([cli-spec §3.3](cli-spec.md#33-lns-connector)), and the card discloses it beside
+the authority ([§3.2.4](#324-installing-connecting-and-applying)), so `work` and
+`jane@example.com` are both spellings a user may choose and both say which
+sign-in this is. A second name beside it would be one lns could not choose
+between, and the card would show two.
 
 **An expiry is the exception to that carry-forward, and deliberately so.** Scopes
-and an account describe who the connection is, which a renewal does not change; an
-expiry describes the values, which a renewal replaces. So a renewal's expiry
-replaces the recorded one whole, and a renewal that reports none leaves the
-connection with none. Carrying the old one forward would disarm the injection the
-moment a successful refresh landed, since the expiry being carried is by definition
+describe what the connection may do, which a renewal does not change; an expiry
+describes the values, which a renewal replaces. So a renewal's expiry replaces
+the recorded one whole, and a renewal that reports none leaves the connection
+with none. Carrying the old one forward would disarm the injection the moment a
+successful refresh landed, since the expiry being carried is by definition
 already past.
 
 **An expiry is what a component reports, and the only thing about the schedule it
