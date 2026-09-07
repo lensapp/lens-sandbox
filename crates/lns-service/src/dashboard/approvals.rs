@@ -21,27 +21,43 @@ pub fn waiting(entries: &[Entry], selected: Option<&str>, sandboxes: &[Sandbox])
         .count()
 }
 
-/// What the view lists.
+/// What the view lists, as two lists: the questions a run is waiting on, and the archive of the ones it is not.
 pub struct Listing {
-    pub rows: Vec<usize>,
+    pub waiting: Vec<usize>,
+    pub archived: Vec<usize>,
+}
+
+impl Listing {
+    /// Every row either list holds, for the reconciling a row's own id needs — an open row is open whichever list it sits in.
+    pub fn rows(&self) -> Vec<usize> {
+        self.waiting.iter().chain(&self.archived).copied().collect()
+    }
 }
 
 /// The rows the view shows: what one sandbox was asked, carrying one of the chosen answers, or everything when neither is chosen.
 ///
-/// What still waits comes first, because the view is a live one and an answered row is a record of work already done.
+/// The view is a live one, so a question with no answer is never filed behind a question that has one.
 pub fn listing(
     entries: &[Entry],
     selected: Option<&str>,
     sandboxes: &[Sandbox],
     answers: &BTreeSet<String>,
 ) -> Listing {
-    let mut rows: Vec<(bool, usize)> = matching(entries, selected, sandboxes, answers)
-        .map(|(i, entry)| (!waits(entry), i))
-        .collect();
-    rows.sort_by_key(|(settled, _)| *settled);
+    let (waiting, archived) =
+        matching(entries, selected, sandboxes, answers).partition(|(_, entry)| waits(entry));
     Listing {
-        rows: rows.into_iter().map(|(_, i)| i).collect(),
+        waiting: only_rows(waiting),
+        archived: only_rows(archived),
     }
+}
+
+fn only_rows(matched: Vec<(usize, &Entry)>) -> Vec<usize> {
+    matched.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Whether the archive is on screen: what the developer chose, or — while they have chosen nothing — whether the live list is empty.
+pub fn archive_shown(chosen: Option<bool>, listing: &Listing) -> bool {
+    chosen.unwrap_or(listing.waiting.is_empty())
 }
 
 /// Every entry the two filters keep, with the index the view reads it back by. An entry is stamped with the run's name, and the sidebar selects a run by id, so the selection is resolved through the sandbox list before it can match.
@@ -401,11 +417,11 @@ mod tests {
         ];
 
         assert_eq!(
-            listing(&held, Some(ID_A), &sandboxes(), &everything()).rows,
+            listing(&held, Some(ID_A), &sandboxes(), &everything()).rows(),
             vec![0]
         );
         assert_eq!(
-            listing(&held, None, &sandboxes(), &everything()).rows,
+            listing(&held, None, &sandboxes(), &everything()).rows(),
             vec![0, 1],
             "with no sandbox chosen the view spans every run"
         );
@@ -422,15 +438,15 @@ mod tests {
         )];
 
         assert_eq!(
-            listing(&held, Some("dapper_thistle"), &[], &everything()).rows,
+            listing(&held, Some("dapper_thistle"), &[], &everything()).rows(),
             vec![0],
             "the handle itself is the last thing left to match on"
         );
     }
 
     #[test]
-    fn what_still_waits_is_listed_first_and_a_group_that_waits_heads_the_list() {
-        // The view is live. An answered row is a record; a row with no answer is the reason the developer opened the window.
+    fn what_waits_and_what_is_archived_are_two_lists() {
+        // The view is live: a row with no answer is the reason the developer opened the window, and a settled one is a record they asked to keep out of the way.
         let held = vec![
             destination(
                 "bold_otter",
@@ -448,20 +464,54 @@ mod tests {
             destination("bold_otter", "api.stripe.com", false, EntryState::Withdrawn),
         ];
 
-        let rows = listing(&held, None, &sandboxes(), &everything()).rows;
+        let listed = listing(&held, None, &sandboxes(), &everything());
 
         assert_eq!(
-            rows,
-            vec![2, 3, 0, 1],
-            "the two that wait come first, each keeping the place the run raised it in"
+            listed.waiting,
+            vec![2, 3],
+            "an undecided question and a withdrawn one both still want an answer"
         );
         assert_eq!(
-            groups(&held, &rows)
+            listed.archived,
+            vec![0, 1],
+            "the answered question and the notice are the archive"
+        );
+        assert_eq!(
+            groups(&held, &listed.waiting)
                 .iter()
                 .map(|group| group.sandbox.clone())
                 .collect::<Vec<_>>(),
             vec!["dapper_thistle", "bold_otter"],
-            "a run that is waiting on an answer heads the list, whatever the file's order"
+            "each list is gathered under its own runs"
+        );
+        assert_eq!(
+            listed.rows(),
+            vec![2, 3, 0, 1],
+            "an open row is reconciled against both lists at once"
+        );
+    }
+
+    #[test]
+    fn the_archive_opens_itself_until_the_developer_says_otherwise() {
+        // One collapsed heading over an empty view says the run was asked nothing, which is the opposite of the truth — and a heading that cannot collapse is a control that lies about being one.
+        let waiting = Listing {
+            waiting: vec![0],
+            archived: vec![1],
+        };
+        let nothing_waiting = Listing {
+            waiting: Vec::new(),
+            archived: vec![0],
+        };
+
+        assert!(!archive_shown(None, &waiting));
+        assert!(archive_shown(Some(true), &waiting));
+        assert!(
+            archive_shown(None, &nothing_waiting),
+            "with nothing to answer, the archive is the view"
+        );
+        assert!(
+            !archive_shown(Some(false), &nothing_waiting),
+            "a developer who closes it has closed it"
         );
     }
 
@@ -525,15 +575,15 @@ mod tests {
         ];
 
         assert_eq!(
-            listing(&held, None, &sandboxes(), &only(["undecided"])).rows,
+            listing(&held, None, &sandboxes(), &only(["undecided"])).rows(),
             vec![0]
         );
         assert_eq!(
-            listing(&held, None, &sandboxes(), &only(["notice"])).rows,
+            listing(&held, None, &sandboxes(), &only(["notice"])).rows(),
             vec![2]
         );
         assert_eq!(
-            listing(&held, None, &sandboxes(), &everything()).rows,
+            listing(&held, None, &sandboxes(), &everything()).rows(),
             vec![0, 1, 2],
             "choosing nothing is choosing every answer, as the audit view's kinds are"
         );
@@ -697,7 +747,7 @@ mod tests {
                 EntryState::AlwaysAllowed,
             ),
         ];
-        let rows = listing(&held, None, &sandboxes(), &everything()).rows;
+        let rows = listing(&held, None, &sandboxes(), &everything()).rows();
 
         let grouped = groups(&held, &rows);
 

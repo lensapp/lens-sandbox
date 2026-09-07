@@ -73,6 +73,7 @@ pub struct DashboardState {
     pub open: Option<OpenRow>,
     pub answer_open: bool,
     pub sandbox_open: bool,
+    pub archive_open: Option<bool>,
     pub rows: Vec<TimelineRow>,
     pub warnings: Vec<String>,
     pub sandboxes: Vec<Sandbox>,
@@ -558,14 +559,13 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                 );
                 ui.add_space(10.0);
             }
-            let rows = approvals::listing(
+            let listed = approvals::listing(
                 &state.approvals,
                 state.selected_sandbox.as_deref(),
                 &state.sandboxes,
                 &state.approval_answers,
-            )
-            .rows;
-            if rows.is_empty() {
+            );
+            if listed.waiting.is_empty() && listed.archived.is_empty() {
                 ui.colored_label(TEXT_MUTED, "Nothing has been asked.");
                 return;
             }
@@ -574,27 +574,31 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
             let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
             let table = ui.available_width() - DISCLOSURE_COL - 2.0 * f32::from(ROW_INSET) - bar;
             approval_header(ui, table);
-            let grouped = approvals::groups(&state.approvals, &rows);
+            let waiting = approvals::groups(&state.approvals, &listed.waiting);
+            let shown = approvals::archive_shown(state.archive_open, &listed);
+            let archived = if shown {
+                approvals::groups(&state.approvals, &listed.archived)
+            } else {
+                Vec::new()
+            };
+            let mut chose = None;
             egui::ScrollArea::vertical()
                 .id_salt(APPROVALS_LIST)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for group in grouped {
-                        sandbox_heading(ui, &group);
-                        for i in group.rows {
-                            let entry = &state.approvals[i];
-                            let open = state
-                                .open
-                                .as_mut()
-                                .filter(|open| open.id == entry.id)
-                                .map(|open| (&mut open.draft, open.offer.as_ref()));
-                            if let Some(act) = approval_row(ui, entry, table, open) {
-                                chosen = Some((entry.id.clone(), act));
-                            }
-                        }
-                        ui.add_space(6.0);
+                    if let Some(act) = approval_groups(ui, state, waiting, table) {
+                        chosen = Some(act);
+                    }
+                    if !listed.archived.is_empty() {
+                        chose = archive_heading(ui, listed.archived.len(), shown);
+                    }
+                    if let Some(act) = approval_groups(ui, state, archived, table) {
+                        chosen = Some(act);
                     }
                 });
+            if chose.is_some() {
+                state.archive_open = chose;
+            }
         });
     match chosen {
         Some((id, RowAction::Answer(answer))) => answer_entry(state, &id, answer),
@@ -629,6 +633,60 @@ enum RowAction {
 const DISCLOSURE_COL: f32 = 18.0;
 /// The inner margin every row frame carries, which the header must clear to sit above its own cells.
 const ROW_INSET: i8 = 6;
+
+/// One list of rows, gathered under the runs they were asked of, and whichever of them the developer clicked.
+fn approval_groups(
+    ui: &mut egui::Ui,
+    state: &mut DashboardState,
+    groups: Vec<approvals::Group>,
+    table: f32,
+) -> Option<(String, RowAction)> {
+    let mut chosen = None;
+    for group in groups {
+        sandbox_heading(ui, &group);
+        for i in group.rows {
+            let entry = &state.approvals[i];
+            let open = state
+                .open
+                .as_mut()
+                .filter(|open| open.id == entry.id)
+                .map(|open| (&mut open.draft, open.offer.as_ref()));
+            if let Some(act) = approval_row(ui, entry, table, open) {
+                chosen = Some((entry.id.clone(), act));
+            }
+        }
+        ui.add_space(6.0);
+    }
+    chosen
+}
+
+/// The archive of what nothing is waiting on, behind one click, and what that click chose if it came.
+fn archive_heading(ui: &mut egui::Ui, held: usize, shown: bool) -> Option<bool> {
+    ui.add_space(2.0);
+    let mark = if shown {
+        icons::ICON_EXPAND_MORE
+    } else {
+        icons::ICON_CHEVRON_RIGHT
+    };
+    let row = Frame::new()
+        .inner_margin(Margin::symmetric(ROW_INSET, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                glyph(ui, mark, TEXT_MUTED, 16.0);
+                ui.label(
+                    RichText::new(format!("Archive ({held})"))
+                        .size(FS_LABEL)
+                        .color(TEXT_MUTED),
+                );
+            });
+        })
+        .response
+        .interact(Sense::click());
+    row_click(&row);
+    row.clicked().then_some(!shown)
+}
 
 /// The run every row beneath it was asked of, which the rows themselves no longer carry.
 fn sandbox_heading(ui: &mut egui::Ui, group: &approvals::Group) {
@@ -1032,7 +1090,7 @@ fn keep_open_if_shown(state: &mut DashboardState) {
         &state.sandboxes,
         &state.approval_answers,
     )
-    .rows;
+    .rows();
     if !approvals::still_shown(
         state.open.as_ref().map(|open| open.id.as_str()),
         &state.approvals,
@@ -1686,6 +1744,10 @@ mod tests {
     const OVER_THE_SIDEBAR: egui::Pos2 = egui::Pos2 { x: 120.0, y: 400.0 };
 
     fn asked_about(host: &str) -> Entry {
+        answered(host, EntryState::Undecided)
+    }
+
+    fn answered(host: &str, state: EntryState) -> Entry {
         Entry::new(
             Some("dapper_thistle".to_string()),
             EntryKind::Destination {
@@ -1693,7 +1755,7 @@ mod tests {
                 action: format!("CONNECT {host}:443"),
                 raw: false,
             },
-            EntryState::Undecided,
+            state,
         )
     }
 
@@ -1827,6 +1889,55 @@ mod tests {
         harness.run();
 
         assert!(harness.query_by_label("When").is_none());
+    }
+
+    #[test]
+    fn an_archived_row_waits_behind_one_click() {
+        // The live list is what a run is waiting on. Everything settled is a record, and a record that fills the window buries the work.
+        let still = Arc::new(AtomicBool::new(false));
+        let mut harness = window(
+            DashboardState {
+                approvals: vec![
+                    asked_about("api00.linear.app"),
+                    answered("api01.linear.app", EntryState::AlwaysAllowed),
+                ],
+                ..state_of(View::Approvals, 0, 1)
+            },
+            &still,
+        );
+
+        assert!(
+            harness.query_by_label("api00.linear.app").is_some(),
+            "the question with no answer is the one list that needs no click"
+        );
+        assert!(harness.query_by_label("api01.linear.app").is_none());
+
+        harness.get_by_label("Archive (1)").click();
+        harness.run();
+
+        assert!(harness.query_by_label("api01.linear.app").is_some());
+    }
+
+    #[test]
+    fn the_archive_closes_when_a_run_has_nothing_waiting() {
+        // With nothing to answer the archive opens itself, and a heading that draws a chevron and takes the click has to answer it.
+        let still = Arc::new(AtomicBool::new(false));
+        let mut harness = window(
+            DashboardState {
+                approvals: vec![answered("api01.linear.app", EntryState::AlwaysAllowed)],
+                ..state_of(View::Approvals, 0, 1)
+            },
+            &still,
+        );
+
+        assert!(
+            harness.query_by_label("api01.linear.app").is_some(),
+            "with nothing waiting the archive is the view"
+        );
+        harness.get_by_label("Archive (1)").click();
+        harness.run();
+
+        assert!(harness.query_by_label("api01.linear.app").is_none());
     }
 
     #[test]
