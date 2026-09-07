@@ -109,10 +109,10 @@ unset lens_tools_prefix lens_tools_dir
     #[test]
     fn a_tool_dir_carrying_a_quote_arrives_as_one_literal_word() {
         let spec = profile_spec(&dirs(&["/t/it's/bin"]), true).expect("a snippet");
+        let body = body(&spec);
         assert!(
-            body(&spec).contains(r"for lens_tools_dir in '/t/it'\''s/bin'; do"),
-            "a dir the shell would re-read as syntax must arrive quoted: {}",
-            body(&spec)
+            body.contains(r"for lens_tools_dir in '/t/it'\''s/bin'; do"),
+            "a dir the shell would re-read as syntax must arrive quoted: {body}"
         );
     }
 
