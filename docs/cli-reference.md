@@ -476,12 +476,12 @@ after. The list also shows lines that ask
 nothing, such as a rule the run could not write; each is listed as a notice, with
 no verdict to give.
 
-The service shows the same entries: its tray menu opens an **Approvals** view,
-which answers an entry the way this command does. An undecided connector row
-there offers the grant its card offered — a method, a connection, and the same
-disclosure — so a connector card you closed is answered where you found it. This
-command lists a connector entry without deciding it; `lns connector grant` is its
-verb at a terminal.
+The service shows the same entries. Its tray menu opens an **Approvals** view,
+one row per question. Open a row to answer it, the way this command does. An open
+connector row offers the grant its card offered — a method, a connection, and the
+same disclosure — so a connector card you closed is answered where you found it.
+This command lists a connector entry without deciding it; `lns connector grant`
+is its verb at a terminal.
 
 `answer` decides a destination entry, and only that. A connector entry is listed
 as granted or declined and is answered through [`lns connector`](#lns-connector);

@@ -64,8 +64,8 @@ pub struct DashboardState {
     pub approvals: Vec<Entry>,
     pub approval_notice: Option<String>,
     pub approval_answers: std::collections::BTreeSet<String>,
-    /// The connector row the developer opened, and the grant they are composing on it.
-    pub granting: Option<OpenGrant>,
+    /// The row the developer expanded, if any.
+    pub open: Option<OpenRow>,
     pub answer_open: bool,
     pub sandbox_open: bool,
     pub rows: Vec<TimelineRow>,
@@ -176,6 +176,12 @@ fn load_approvals(state: &mut DashboardState) {
                 crate::approval_flow::answering::entries(&root, &crate::run_registry::known_ids());
         }
         Err(e) => set_error(state, e),
+    }
+    if !approvals::still_listed(
+        state.open.as_ref().map(|open| open.id.as_str()),
+        &state.approvals,
+    ) {
+        state.open = None;
     }
 }
 
@@ -545,23 +551,28 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
                 &state.approval_answers,
             )
             .rows;
+            let selected = state.selected_sandbox.clone();
+            if rows.is_empty() {
+                ui.colored_label(TEXT_MUTED, "Nothing has been asked.");
+                return;
+            }
+            // Outside the scroll area, so the heads stay above the rows they name.
+            // The scrollbar's lane is never the columns' to claim: it appears only once the list scrolls, and nothing recomputes the widths when it does.
+            let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
+            let table = ui.available_width() - DISCLOSURE_COL - 2.0 * f32::from(ROW_INSET) - bar;
+            approval_header(ui, selected.as_deref(), table);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if rows.is_empty() {
-                        ui.colored_label(TEXT_MUTED, "Nothing has been asked.");
-                        return;
-                    }
                     for i in rows {
                         let entry = &state.approvals[i];
-                        let asked_by =
-                            approvals::asked_by(entry, state.selected_sandbox.as_deref());
                         let open = state
-                            .granting
+                            .open
                             .as_mut()
                             .filter(|open| open.id == entry.id)
                             .map(|open| (&mut open.draft, open.offer.as_ref()));
-                        if let Some(act) = approval_row(ui, entry, asked_by, open) {
+                        if let Some(act) = approval_row(ui, entry, selected.as_deref(), table, open)
+                        {
                             chosen = Some((entry.id.clone(), act));
                         }
                     }
@@ -570,7 +581,7 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
     match chosen {
         Some((id, RowAction::Answer(answer))) => answer_entry(state, &id, answer),
         Some((id, RowAction::Remove)) => remove_entry(state, &id),
-        Some((id, RowAction::Unfold)) => unfold(state, &id),
+        Some((id, RowAction::Toggle)) => toggle(state, &id),
         Some((id, RowAction::Grant(method, connection))) => {
             grant_connector(state, &id, &method, connection);
         }
@@ -578,9 +589,9 @@ fn approvals_panel(ui: &mut egui::Ui, state: &mut DashboardState) {
     }
 }
 
-/// The row the developer opened, the grant they are composing, and the offer it discloses — read once when the row opens, because it is the run's own held offer and the frame must not re-read every file to draw it.
+/// The expanded row: what it asks about, the grant being composed on it where it is a connector, and the offer that grant discloses — read once when the row opens, because it is the run's own held offer and the frame must not re-read every file to draw it.
 #[derive(Debug)]
-pub struct OpenGrant {
+pub struct OpenRow {
     id: String,
     draft: crate::tray::OfferDraft,
     offer: Option<lns_ipc::ConnectorView>,
@@ -591,88 +602,202 @@ pub struct OpenGrant {
 enum RowAction {
     Answer(lns_ipc::ApprovalAnswer),
     Remove,
-    /// Show, or stop showing, what granting this connector would apply.
-    Unfold,
+    /// Expand this row, or collapse it.
+    Toggle,
     /// Grant it, with the method and connection the row composed.
     Grant(String, crate::approval_flow::session::ConnectionChoice),
+}
+
+const DISCLOSURE_COL: f32 = 18.0;
+/// The inner margin every row frame carries, which the header must clear to sit above its own cells.
+const ROW_INSET: i8 = 6;
+
+fn approval_header(ui: &mut egui::Ui, selected: Option<&str>, available: f32) {
+    let gutter = ui.spacing().item_spacing.x;
+    ui.horizontal(|ui| {
+        ui.add_space(DISCLOSURE_COL + f32::from(ROW_INSET));
+        for (column, width) in approvals::columns(selected)
+            .into_iter()
+            .zip(approvals::widths(selected, available, gutter))
+        {
+            cell(
+                ui,
+                width,
+                RichText::new(column.head())
+                    .size(FS_LABEL)
+                    .color(TEXT_MUTED),
+            );
+        }
+    });
+    ui.add_space(2.0);
 }
 
 fn approval_row(
     ui: &mut egui::Ui,
     entry: &Entry,
-    asked_by: Option<&str>,
+    selected: Option<&str>,
+    available: f32,
     open: Option<(
         &mut crate::tray::OfferDraft,
         Option<&lns_ipc::ConnectorView>,
     )>,
 ) -> Option<RowAction> {
     let mut chosen = None;
-    Frame::new()
-        .fill(SELECT_FILL)
+    let expanded = open.is_some();
+    let fill = if expanded {
+        SELECT_FILL
+    } else {
+        Color32::TRANSPARENT
+    };
+    let gutter = ui.spacing().item_spacing.x;
+    // One block, not two: the open row and what it opened must not read as separate cards with a gap between them.
+    let joined = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let row = Frame::new()
+        .fill(fill)
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(10, 8))
+        .inner_margin(Margin::symmetric(ROW_INSET, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(DISCLOSURE_COL, ROW_HEIGHT),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        let mark = if expanded {
+                            icons::ICON_EXPAND_MORE
+                        } else {
+                            icons::ICON_CHEVRON_RIGHT
+                        };
+                        glyph(ui, mark, TEXT_MUTED, 16.0);
+                    },
+                );
+                for (column, width) in approvals::columns(selected)
+                    .into_iter()
+                    .zip(approvals::widths(selected, available, gutter))
+                {
+                    approval_cell(ui, width, column.cell(entry));
+                }
+            });
+        })
+        .response
+        .interact(Sense::click());
+    row_click(&row);
+    if row.clicked() {
+        chosen = Some(RowAction::Toggle);
+    }
+    if let Some((draft, offer)) = open
+        && let Some(act) = approval_expansion(ui, entry, draft, offer)
+    {
+        chosen = Some(act);
+    }
+    ui.spacing_mut().item_spacing.y = joined;
+    ui.add_space(2.0);
+    chosen
+}
+
+/// One cell of a collapsed row, drawn by what it holds rather than by where it sits.
+fn approval_cell(ui: &mut egui::Ui, width: f32, held: approvals::Cell) {
+    ui.allocate_ui_with_layout(
+        vec2(width, ROW_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| match held {
+            approvals::Cell::Question(text) => {
+                ui.add(
+                    egui::Label::new(RichText::new(text).size(FS_LABEL).color(CATEGORY)).truncate(),
+                );
+            }
+            approvals::Cell::Subject { text, raw } => {
+                if raw {
+                    ui.label(RichText::new("RAW").size(FS_LABEL).color(STATUS_WARNING));
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text)
+                            .monospace()
+                            .size(FS_SECONDARY)
+                            .color(TEXT_PRIMARY),
+                    )
+                    .truncate(),
+                );
+            }
+            approvals::Cell::Answer { text, tone } => {
+                ui.add(
+                    egui::Label::new(RichText::new(text).size(FS_LABEL).color(answer_ink(tone)))
+                        .truncate(),
+                );
+            }
+            approvals::Cell::Sandbox(text) => {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text)
+                            .monospace()
+                            .size(FS_LABEL)
+                            .color(TEXT_MUTED),
+                    )
+                    .truncate(),
+                );
+            }
+        },
+    );
+}
+
+fn answer_ink(tone: approvals::Tone) -> Color32 {
+    match tone {
+        approvals::Tone::Waiting => STATUS_WARNING,
+        approvals::Tone::Allowed => ACCENT_GREEN,
+        approvals::Tone::Denied => STATUS_CRITICAL,
+        approvals::Tone::Quiet => TEXT_MUTED,
+    }
+}
+
+/// What the row shows once it is open: the action the card showed, then everything that can answer it.
+fn approval_expansion(
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    draft: &mut crate::tray::OfferDraft,
+    offer: Option<&lns_ipc::ConnectorView>,
+) -> Option<RowAction> {
+    let mut chosen = None;
+    Frame::new()
+        .fill(SELECT_FILL)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(ROW_INSET, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add_space(DISCLOSURE_COL + f32::from(ROW_INSET));
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(approvals::question(entry))
-                                .size(FS_LABEL)
-                                .color(CATEGORY),
-                        );
-                        ui.label(
-                            RichText::new(entry.subject())
-                                .monospace()
-                                .size(FS_BODY)
-                                .color(TEXT_PRIMARY),
-                        );
-                        if approvals::is_raw(entry) {
-                            ui.label(RichText::new("RAW").size(FS_LABEL).color(STATUS_WARNING));
-                        }
-                    });
                     if let Some(action) = approvals::action(entry) {
                         ui.label(RichText::new(action).size(FS_LABEL).color(TEXT_MUTED));
-                    }
-                    if let Some(run) = asked_by {
-                        ui.label(
-                            RichText::new(run)
-                                .monospace()
-                                .size(FS_LABEL)
-                                .color(TEXT_MUTED),
-                        );
-                    }
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icons::ICON_CLOSE)
-                        .on_hover_text("Remove from the list")
-                        .clicked()
-                    {
-                        chosen = Some(RowAction::Remove);
-                    }
-                    for answer in approvals::offers(entry).into_iter().rev() {
-                        if ui.button(approvals::label(answer)).clicked() {
-                            chosen = Some(RowAction::Answer(answer));
-                        }
+                        ui.add_space(8.0);
                     }
                     if approvals::is_grantable(entry)
-                        && ui
-                            .button(if open.is_some() { "Cancel" } else { "Connect" })
-                            .clicked()
+                        && let Some(act) = grant_form(ui, offer, draft)
                     {
-                        chosen = Some(RowAction::Unfold);
+                        chosen = Some(act);
                     }
-                    ui.add_space(4.0);
-                    decision_badge(ui, entry);
+                    ui.horizontal(|ui| {
+                        for answer in approvals::offers(entry) {
+                            if ui.button(approvals::label(answer)).clicked() {
+                                chosen = Some(RowAction::Answer(answer));
+                            }
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .button("Remove from the list")
+                                .on_hover_text(
+                                    "Removes the record. What this entry decided stays decided.",
+                                )
+                                .clicked()
+                            {
+                                chosen = Some(RowAction::Remove);
+                            }
+                        });
+                    });
                 });
             });
-            if let Some((draft, offer)) = open
-                && let Some(grant) = grant_form(ui, offer, draft)
-            {
-                chosen = Some(grant);
-            }
         });
-    ui.add_space(6.0);
     chosen
 }
 
@@ -711,13 +836,13 @@ fn grant_form(
         .then(|| RowAction::Grant(method.name.clone(), crate::tray::connection_choice(draft)))
 }
 
-fn unfold(state: &mut DashboardState, id: &str) {
+fn toggle(state: &mut DashboardState, id: &str) {
     state.approval_notice = None;
-    if state.granting.as_ref().is_some_and(|open| open.id == id) {
-        state.granting = None;
+    if state.open.as_ref().is_some_and(|open| open.id == id) {
+        state.open = None;
         return;
     }
-    state.granting = Some(OpenGrant {
+    state.open = Some(OpenRow {
         id: id.to_string(),
         draft: crate::tray::OfferDraft::default(),
         offer: offer_behind(id),
@@ -754,38 +879,8 @@ fn grant_connector(
         connection,
     );
     state.approval_notice = approvals::granting_reported(&granted);
-    state.granting = None;
+    state.open = None;
     load_approvals(state);
-}
-
-/// The answer, painted as loudly as what it permits: this is the thing the developer opened the view to see.
-fn decision_badge(ui: &mut egui::Ui, entry: &Entry) {
-    let ink = match approvals::tone(entry) {
-        approvals::Tone::Waiting => STATUS_WARNING,
-        approvals::Tone::Allowed => ACCENT_GREEN,
-        approvals::Tone::Denied => STATUS_CRITICAL,
-        approvals::Tone::Quiet => TEXT_MUTED,
-    };
-    Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(
-            ink.r(),
-            ink.g(),
-            ink.b(),
-            28,
-        ))
-        .stroke(Stroke::new(
-            1.0_f32,
-            Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 90),
-        ))
-        .corner_radius(CornerRadius::same(theme::BADGE_CORNER_RADIUS))
-        .inner_margin(Margin::symmetric(8, 3))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(entry.state.label().to_uppercase())
-                    .size(FS_LABEL)
-                    .color(ink),
-            );
-        });
 }
 
 /// The two filters over the list: which sandbox asked, and which answer a row carries.
@@ -861,11 +956,15 @@ fn answer_chooser(ui: &mut egui::Ui, state: &mut DashboardState) {
             popup_body(ui, |ui| {
                 if dropdown_item(ui, "any answer", state.approval_answers.is_empty()) {
                     state.approval_answers.clear();
+                    keep_open_if_shown(state);
                 }
                 for answer in approvals::answers() {
                     let picked = state.approval_answers.contains(answer);
-                    if dropdown_item(ui, answer, picked) && !state.approval_answers.remove(answer) {
-                        state.approval_answers.insert(answer.to_string());
+                    if dropdown_item(ui, answer, picked) {
+                        if !state.approval_answers.remove(answer) {
+                            state.approval_answers.insert(answer.to_string());
+                        }
+                        keep_open_if_shown(state);
                     }
                 }
             });
@@ -880,6 +979,25 @@ fn choose_sandbox(state: &mut DashboardState, id: Option<String>) {
     state.selected_sandbox = id;
     state.selected = None;
     state.sandbox_open = false;
+    keep_open_if_shown(state);
+}
+
+/// A row the filter no longer shows is not a row that is open — and one it still shows keeps the grant half composed on it.
+fn keep_open_if_shown(state: &mut DashboardState) {
+    let rows = approvals::listing(
+        &state.approvals,
+        state.selected_sandbox.as_deref(),
+        &state.sandboxes,
+        &state.approval_answers,
+    )
+    .rows;
+    if !approvals::still_shown(
+        state.open.as_ref().map(|open| open.id.as_str()),
+        &state.approvals,
+        &rows,
+    ) {
+        state.open = None;
+    }
 }
 
 fn popup_body(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {

@@ -69,6 +69,110 @@ pub fn tone(entry: &Entry) -> Tone {
     }
 }
 
+/// One column of the table. `cell` is a total match over this, so a column added here fails to build until the view says how to draw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Question,
+    Subject,
+    Answer,
+    Sandbox,
+}
+
+/// What one column holds for one row, carrying what the view needs to draw it rather than a string the view must interpret by position.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cell {
+    Question(String),
+    Subject { text: String, raw: bool },
+    Answer { text: String, tone: Tone },
+    Sandbox(String),
+}
+
+const W_QUESTION: f32 = 104.0;
+const W_ANSWER: f32 = 128.0;
+const W_SANDBOX: f32 = W_ANSWER;
+/// Enough of the subject to read a hostname, whatever the window's width.
+const W_SUBJECT_LEAST: f32 = 120.0;
+
+/// The columns the table has. The sandbox is one of them only while the list spans more than one run — narrowed, the sidebar says which.
+pub fn columns(selected: Option<&str>) -> Vec<Column> {
+    let mut columns = vec![Column::Question, Column::Subject, Column::Answer];
+    if selected.is_none() {
+        columns.push(Column::Sandbox);
+    }
+    columns
+}
+
+impl Column {
+    pub fn head(self) -> &'static str {
+        match self {
+            Self::Question => "QUESTION",
+            Self::Subject => "ASKED ABOUT",
+            Self::Answer => "ANSWER",
+            Self::Sandbox => "SANDBOX",
+        }
+    }
+
+    /// This column's own width, or `None` for the one that takes what the others leave.
+    fn fixed_width(self) -> Option<f32> {
+        match self {
+            Self::Question => Some(W_QUESTION),
+            Self::Subject => None,
+            Self::Answer => Some(W_ANSWER),
+            Self::Sandbox => Some(W_SANDBOX),
+        }
+    }
+
+    /// What this column holds for this row.
+    pub fn cell(self, entry: &Entry) -> Cell {
+        match self {
+            Self::Question => Cell::Question(question(entry)),
+            Self::Subject => Cell::Subject {
+                text: entry.subject().to_string(),
+                raw: is_raw(entry),
+            },
+            Self::Answer => Cell::Answer {
+                text: entry.state.label().to_string(),
+                tone: tone(entry),
+            },
+            Self::Sandbox => Cell::Sandbox(entry.sandbox.clone().unwrap_or_default()),
+        }
+    }
+}
+
+/// Every column's width, in the order [`columns`] gives them, for a row of `available` width whose layout puts `gutter` between each pair of items. The subject takes what the fixed columns and the gutters leave, so the answer never loses its place — or its ellipsis — to a long hostname.
+pub fn widths(selected: Option<&str>, available: f32, gutter: f32) -> Vec<f32> {
+    let columns = columns(selected);
+    let fixed: f32 = columns
+        .iter()
+        .filter_map(|column| column.fixed_width())
+        .sum();
+    let gutters = columns.len() as f32 * gutter;
+    let subject = (available - fixed - gutters).max(W_SUBJECT_LEAST);
+    columns
+        .iter()
+        .map(|column| column.fixed_width().unwrap_or(subject))
+        .collect()
+}
+
+/// Whether the open row is one the view still shows, so a filter that still shows it does not throw away a grant half composed on it.
+pub fn still_shown(open: Option<&str>, entries: &[Entry], rows: &[usize]) -> bool {
+    match open {
+        Some(id) => rows
+            .iter()
+            .filter_map(|i| entries.get(*i))
+            .any(|entry| entry.id == id),
+        None => false,
+    }
+}
+
+/// Whether the row the developer opened is still one the list holds. An id is a digest of the question, so a row that goes and is asked again carries the same id — leaving the expansion keyed to it would reopen it with a grant composed before it went.
+pub fn still_listed(open: Option<&str>, entries: &[Entry]) -> bool {
+    match open {
+        Some(id) => entries.iter().any(|entry| entry.id == id),
+        None => false,
+    }
+}
+
 /// What the row asks about, in the words `lns approval ls` prints and the case a row's eyebrow reads in.
 pub fn question(entry: &Entry) -> String {
     let asked = crate::approval_flow::answering::kind_of(entry);
@@ -131,14 +235,6 @@ pub fn action(entry: &Entry) -> Option<&str> {
 /// Whether LNS can read this traffic, which the card says and the row must say too.
 pub fn is_raw(entry: &Entry) -> bool {
     matches!(entry.kind, EntryKind::Destination { raw: true, .. })
-}
-
-/// Which run asked, as the row shows it and as `lns approval ls` prints it — whole, never shortened. A list narrowed to one sandbox says so in the sidebar already.
-pub fn asked_by<'a>(entry: &'a Entry, selected: Option<&str>) -> Option<&'a str> {
-    match selected {
-        Some(_) => None,
-        None => entry.sandbox.as_deref(),
-    }
 }
 
 pub fn label(answer: ApprovalAnswer) -> &'static str {
@@ -429,6 +525,139 @@ mod tests {
     }
 
     #[test]
+    fn every_column_holds_what_it_says_it_holds() {
+        // The sandbox reads whole: two runs can be asked about one host, and a shortened name is one nobody can answer safely.
+        let entry = destination(
+            "dapper_thistle",
+            "db.internal:5432",
+            true,
+            EntryState::AlwaysAllowed,
+        );
+
+        let held: Vec<Cell> = columns(None)
+            .into_iter()
+            .map(|column| column.cell(&entry))
+            .collect();
+
+        assert_eq!(
+            held,
+            vec![
+                Cell::Question("DESTINATION".to_string()),
+                Cell::Subject {
+                    text: "db.internal:5432".to_string(),
+                    raw: true,
+                },
+                Cell::Answer {
+                    text: "always allow".to_string(),
+                    tone: Tone::Allowed,
+                },
+                Cell::Sandbox("dapper_thistle".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn narrowing_to_one_sandbox_drops_the_column_the_sidebar_names() {
+        assert_eq!(
+            columns(Some(ID_A)),
+            vec![Column::Question, Column::Subject, Column::Answer]
+        );
+        assert_eq!(
+            columns(None).len(),
+            widths(None, 800.0, 10.0).len(),
+            "a column with no width would leave the heads above nothing"
+        );
+    }
+
+    #[test]
+    fn every_head_names_its_own_column() {
+        for column in columns(None) {
+            assert!(!column.head().is_empty(), "{column:?}");
+        }
+        assert_eq!(Column::Subject.head(), "ASKED ABOUT");
+    }
+
+    #[test]
+    fn the_columns_and_the_gutters_between_them_fit_the_row() {
+        // A row that overruns clips its last column mid-glyph, with no ellipsis to say it was cut — and the last column is the sandbox, or the answer once the list is narrowed.
+        let gutter = 10.0;
+        let wide = widths(None, 800.0, gutter);
+
+        assert_eq!(
+            wide.iter().sum::<f32>() + wide.len() as f32 * gutter,
+            800.0,
+            "the widths plus the gutters are the whole row"
+        );
+        assert_eq!(
+            wide[2], wide[3],
+            "the sandbox reads in the answer's own width"
+        );
+        assert!(wide[1] > wide[0], "the subject is the column that grows");
+        assert_eq!(
+            widths(Some(ID_A), 800.0, gutter).len(),
+            3,
+            "narrowed, there is one column fewer to fit"
+        );
+
+        let subject = widths(None, 100.0, gutter)[1];
+        assert!(
+            subject >= 120.0,
+            "a window too small to fit the table still shows enough subject to read a hostname, got {subject}"
+        );
+    }
+
+    #[test]
+    fn an_entry_no_run_stamped_still_fills_its_sandbox_cell() {
+        // A persisted list that omits the field reads back as no run, and a missing cell would put every later column under the wrong head.
+        let unstamped = Entry::new(
+            None,
+            EntryKind::Notice {
+                message: "the rule could not be written".into(),
+            },
+            EntryState::Noted,
+        );
+
+        assert_eq!(
+            Column::Sandbox.cell(&unstamped),
+            Cell::Sandbox(String::new())
+        );
+    }
+
+    #[test]
+    fn a_row_a_filter_hides_is_no_longer_open_and_one_it_keeps_stays() {
+        // Closing a row throws away the grant being composed on it, so a filter that still shows the row must leave it alone.
+        let held = vec![
+            destination(
+                "dapper_thistle",
+                "api.linear.app",
+                false,
+                EntryState::Undecided,
+            ),
+            destination("bold_otter", "api.stripe.com", false, EntryState::Undecided),
+        ];
+
+        assert!(still_shown(Some(&held[0].id), &held, &[0, 1]));
+        assert!(still_shown(Some(&held[0].id), &held, &[0]));
+        assert!(!still_shown(Some(&held[0].id), &held, &[1]));
+        assert!(!still_shown(None, &held, &[0, 1]));
+    }
+
+    #[test]
+    fn a_row_that_left_the_list_is_no_longer_open() {
+        // Removing a row is done from inside its own expansion, and an id is a digest of the question, so the same question asked again would reopen with the grant composed before it went.
+        let held = vec![destination(
+            "dapper_thistle",
+            "api.linear.app",
+            false,
+            EntryState::Undecided,
+        )];
+
+        assert!(still_listed(Some(&held[0].id), &held));
+        assert!(!still_listed(Some(&held[0].id), &[]));
+        assert!(!still_listed(None, &held), "nothing open is not listed");
+    }
+
+    #[test]
     fn every_row_says_what_it_asks_about() {
         // A connector shown by name alone reads as a destination nobody can answer, which is what the developer reported.
         assert_eq!(
@@ -566,24 +795,6 @@ mod tests {
         );
         assert_eq!(action(&notice("aa01")), None);
         assert!(!is_raw(&notice("aa01")));
-    }
-
-    #[test]
-    fn a_row_names_its_run_in_full_while_the_list_spans_more_than_one() {
-        // Two runs can be asked about the same host, and an answer reaches one run's decisions; a row that does not say which — or that shortens the name until two runs read alike — is a row nobody can answer safely.
-        let entry = destination(
-            "dapper_thistle",
-            "api.linear.app",
-            false,
-            EntryState::Undecided,
-        );
-
-        assert_eq!(asked_by(&entry, None), Some("dapper_thistle"));
-        assert_eq!(
-            asked_by(&entry, Some(ID_A)),
-            None,
-            "the sidebar already names the sandbox the list was narrowed to"
-        );
     }
 
     #[test]
