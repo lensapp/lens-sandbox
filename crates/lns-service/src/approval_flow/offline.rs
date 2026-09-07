@@ -21,6 +21,14 @@ pub fn remove(root: &Path, run_id: &str, id: &str) -> RemoveOutcome {
     )
 }
 
+/// The sandbox the answered entry is stamped with, which is what a notice raised beside it must carry too.
+fn sandbox_stamping(root: &Path, run_id: &str, id: &str) -> Option<String> {
+    list(root, run_id)
+        .into_iter()
+        .find(|held| held.id == id)
+        .and_then(|held| held.sandbox)
+}
+
 /// Answers an entry of a run this process is not hosting: the same session logic over the run's own files, publishing to nobody because no guest is listening.
 pub fn answer(root: &Path, run_id: &str, id: &str, answer: Answer) -> AnswerOutcome {
     let decisions = crate::cache::decisions_path(root, run_id);
@@ -41,8 +49,11 @@ pub fn answer(root: &Path, run_id: &str, id: &str, answer: Answer) -> AnswerOutc
         Arc::new(FilePolicyStore::new(decisions)),
         sink,
         Duration::from_secs(0),
-    )
-    .for_run(run_id.to_string());
+    );
+    let session = match sandbox_stamping(root, run_id, id) {
+        Some(sandbox) => session.for_run(sandbox),
+        None => session,
+    };
     session.set_entry_store(Arc::new(FileEntryStore::new(crate::cache::approvals_path(
         root, run_id,
     ))));
@@ -143,6 +154,41 @@ mod tests {
             std::fs::read_to_string(&decisions).expect("read back"),
             before,
             "and the run still decides that destination exactly as it did"
+        );
+    }
+
+    #[test]
+    fn a_notice_an_offline_answer_raises_is_filed_under_the_sandbox_the_list_names() {
+        // Every other entry of the run carries the name the cards spoke for, and the id is a digest of that name: stamping a notice with the run id files it under a sandbox of its own.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = Entry::new(
+            Some("reviewer".to_string()),
+            EntryKind::Destination {
+                destination: "db.internal:5432".into(),
+                action: "CONNECT db.internal:5432".into(),
+                raw: true,
+            },
+            EntryState::Undecided,
+        );
+        let path = crate::cache::approvals_path(home.path(), "aa01");
+        std::fs::create_dir_all(path.parent().expect("run dir")).expect("run dir");
+        FileEntryStore::new(path).record(entry.clone());
+        let mut held = Policy::default();
+        held.add_rule(lns_policy::RouteRule::allow_host("db.internal"));
+        held.save_atomic(&crate::cache::decisions_path(home.path(), "aa01"))
+            .expect("seed the run's decisions");
+
+        answer(home.path(), "aa01", &entry.id, Answer::AlwaysAllow);
+
+        let noticed: Vec<Option<String>> = list(home.path(), "aa01")
+            .into_iter()
+            .filter(|held| matches!(held.kind, EntryKind::Notice { .. }))
+            .map(|held| held.sandbox)
+            .collect();
+        assert_eq!(
+            noticed,
+            vec![Some("reviewer".to_string())],
+            "the notice must sit under the same sandbox as the question that raised it"
         );
     }
 
