@@ -91,7 +91,7 @@ Until that command runs, no hook exists and nothing says so — git has no dead-
 
 Three separate cargo target dirs, because cargo fingerprints the flags each step uses. Mixing them makes every step recompile what the previous one just built.
 
-- `target/` — `make dev`, `make lint`, `make test`, raw cargo, rust-analyzer. These agree on flags, so switching between them is free. Do not add `CARGO_INCREMENTAL` or extra `RUSTFLAGS` to `lint` or `test`.
+- `target/` — `make dev`, `make lint`, `make test`, `make test-crates`, raw cargo, rust-analyzer. These agree on flags, so switching between them is free. Do not add `CARGO_INCREMENTAL` or extra `RUSTFLAGS` to `lint` or `test`.
 - `target/complexity/` — `make complexity` only. It passes different clippy args than `lint`, so it gets its own dir.
 - `target/llvm-cov-target/` — `make coverage` only. It is instrumented.
 
@@ -113,7 +113,7 @@ Never inject a failure by removing a permission bit — root ignores it. Take th
 
 ### Gate telemetry
 
-Every gate step records itself — `make lint`, `test`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `<git-common-dir>/lns-gate/timings.tsv` — `.git/lns-gate/` in a plain checkout. That is the shared git directory, so every worktree of the repo appends to one history instead of restarting it per branch, and the log itself lands outside every working tree, where `cargo clean` and a branch switch cannot disturb it.
+Every gate step records itself — `make lint`, `test`, `test-crates`, `complexity`, `coverage`, `coverage-data`, `parity` — no matter who runs it: a terminal, an agent, the pre-push hook, CI. Each public target is a timed wrapper around its own `-impl` target, so telemetry is not something a caller has to remember. Rows land in `<git-common-dir>/lns-gate/timings.tsv` — `.git/lns-gate/` in a plain checkout. That is the shared git directory, so every worktree of the repo appends to one history instead of restarting it per branch, and the log itself lands outside every working tree, where `cargo clean` and a branch switch cannot disturb it.
 
 `make gate-report` reads the last 30 days: runs, failures, and min/median/max seconds per step, a count per coverage verdict, and `coverage-data` split by cold and warm cache — a full artifact clean and a counter-only clean are different runs and averaging them hides both. `scripts/gate-timing.sh report --since <days>` or `--all` widens it.
 
@@ -164,7 +164,7 @@ Scenarios that require booting a real microVM (`lns run <image>`) need Vz/KVM an
 
 ## Commands
 
-Run from the workspace root. For crate-scoped iteration, use cargo directly: `cd crates/foo && cargo test` (or `cargo test -p foo` from anywhere).
+Run from the workspace root. For crate-scoped iteration, use `make test-crates CRATES="lns-cli lns-ipc"` — a raw `cargo test -p foo` works but records no gate timing, so the telemetry undercounts the test step. Drop to cargo directly when you need a test-name filter (`cargo test -p lns-cli --lib <module>`).
 
 ```
 make dev             cargo build -p lns-cli -p lns-service (debug, skips cross-builds — inner loop)
@@ -173,6 +173,7 @@ make build-lns       just bin/lns
 make build-lns-service  just bin/lns-service
 make lint            cargo fmt --all -- --check + cargo clippy --workspace --all-targets -- -D warnings
 make test            cargo test --workspace --exclude e2e-tests --all-targets
+make test-crates     CRATES="a b" — the same tests narrowed to those crates, timed (inner loop)
 make complexity      per-crate cargo clippy -- -D clippy::cognitive_complexity (feature-unification)
 make fmt             cargo fmt --all
 make coverage          full workspace coverage gate (all crates, 100% floor)

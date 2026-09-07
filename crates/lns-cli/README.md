@@ -279,7 +279,7 @@ make test            # cargo test --workspace --exclude e2e-tests --all-targets
 make coverage        # instrumented tests + per-file 100% coverage floor
 ```
 
-For crate-scoped iteration: `cd crates/lns-cli && cargo test` (or `cargo test -p lns-cli` from anywhere).
+For crate-scoped iteration: `make test-crates CRATES="lns-cli"` from the workspace root. A raw `cargo test -p lns-cli` works but records no gate timing.
 
 The local pre-push gate is `make lint && make complexity && make coverage` — see [`CLAUDE.md`](../../CLAUDE.md) for the full definition and the broader CI required suite.
 

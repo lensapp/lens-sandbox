@@ -1,5 +1,5 @@
-.PHONY: dev build build-lns build-lns-service test lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests \
-	lint-impl test-impl complexity-impl coverage-impl coverage-data-impl parity-impl coverage-affected-impl
+.PHONY: dev build build-lns build-lns-service test test-crates lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests \
+	lint-impl test-impl test-crates-impl complexity-impl coverage-impl coverage-data-impl parity-impl coverage-affected-impl
 
 CARGO ?= cargo
 
@@ -124,6 +124,26 @@ test:
 
 test-impl:
 	$(CARGO) test --workspace --exclude e2e-tests --all-targets $(CARGO_LOCKED)
+
+# The crate-scoped inner loop. A raw `cargo test -p …` is invisible to the
+# telemetry, so the narrow run gets a timed target too, labelled with the
+# crates it ran: `make test-crates CRATES="lns-cli lns-ipc"`.
+TEST_CRATES_SCOPE := $(foreach c,$(CRATES),-p $(c))
+
+test-crates:
+	@$(TIMED) test-crates -- $(MAKE) --no-print-directory test-crates-impl
+
+test-crates-impl:
+	@if [ -z "$(strip $(CRATES))" ]; then \
+		echo 'make test-crates: set CRATES="lns-cli lns-ipc"' >&2; \
+		exit 2; \
+	fi
+	@if [ -n "$(filter e2e-tests,$(CRATES))" ]; then \
+		echo 'make test-crates: e2e-tests is Layer 1 — run `make e2e`' >&2; \
+		exit 2; \
+	fi
+	@./scripts/gate-timing.sh detail test-crates "$(strip $(CRATES))"
+	$(CARGO) test $(TEST_CRATES_SCOPE) --all-targets $(CARGO_LOCKED)
 
 # Per-crate cargo invocations (not workspace-wide): workspace feature
 # unification expands shared deps differently than per-crate clippy,
