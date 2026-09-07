@@ -29,6 +29,12 @@ const MAX_CONNECTOR_TEXT_BYTES: usize = 4 * 1024;
 /// The most step state a component may hold between calls. It is secret material lns keeps in memory, so it is a device code or a verifier, never a working set.
 const MAX_STATE_BYTES: usize = 64 * 1024;
 
+/// The most values one round may ask for. A sign-in asks for a handful, and nobody answers more than this to connect one account.
+const MAX_FIELDS: usize = 32;
+
+/// The most one field name may run to. It is the key lns stores an answer under, never words anybody reads, so the connector-text ceiling does not cover it; what a name may *contain* is decided for every mechanism in `connect::refuse_a_field_name_no_answer_could_be_keyed_by`.
+const MAX_FIELD_NAME_BYTES: usize = 128;
+
 /// The work one declared second buys. The deadline bounds how long a component runs; fuel bounds how much it runs, so a machine under load cannot lend it less than a machine at rest.
 const FUEL_PER_SECOND: u64 = 500_000_000;
 
@@ -256,6 +262,20 @@ fn step_of(step: wit::Step) -> Result<Step> {
                     "this connector's component held more than {MAX_STATE_BYTES} bytes between calls"
                 );
             }
+            if ask.fields.len() > MAX_FIELDS {
+                anyhow::bail!(
+                    "this connector's component asked for more than {MAX_FIELDS} values at once"
+                );
+            }
+            if ask
+                .fields
+                .iter()
+                .any(|field| field.name.len() > MAX_FIELD_NAME_BYTES)
+            {
+                anyhow::bail!(
+                    "this connector's component asked for a value under a name longer than the {MAX_FIELD_NAME_BYTES} bytes lns keys an answer by"
+                );
+            }
             let spoken: usize =
                 ask.message.len() + ask.fields.iter().map(|f| f.label.len()).sum::<usize>();
             Step::Ask {
@@ -289,13 +309,46 @@ fn connector_text(words: &str, spoken: usize) -> Result<String> {
     Ok(scrubbed(words))
 }
 
-/// Nothing that could move a cursor, clear a screen, or start a line of its own survives (§3.2.6).
+/// Nothing that could move a cursor, clear a screen, start a line of its own, or reorder or hide the words beside it survives (§3.2.6).
 fn scrubbed(words: &str) -> String {
     words
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if draws_in_its_own_place(c) { c } else { ' ' })
         .collect()
 }
+
+/// Whether one character occupies the place lns drew it in. Everything Unicode assigns to Cc, Cf, Zl or Zp does not, and each of those is a way to redraw the line lns surrounds this text with.
+fn draws_in_its_own_place(c: char) -> bool {
+    !c.is_control()
+        && !DRAWS_ELSEWHERE
+            .iter()
+            .any(|(first, last)| (*first..=*last).contains(&c))
+}
+
+/// Every Cf, Zl and Zp range in Unicode 17.0 — the separators, the bidi marks, overrides and isolates that reverse what follows them, and the zero-width, annotation and tag characters that hide it — ZWNJ and ZWJ included, which does mangle a Persian word or an emoji family, because either one can hide a word boundary in the middle of a disclosure; Cc is `char::is_control` and is not repeated here.
+const DRAWS_ELSEWHERE: &[(char, char)] = &[
+    ('\u{00ad}', '\u{00ad}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061c}', '\u{061c}'),
+    ('\u{06dd}', '\u{06dd}'),
+    ('\u{070f}', '\u{070f}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08e2}', '\u{08e2}'),
+    ('\u{180e}', '\u{180e}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{2028}', '\u{202e}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{fff9}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0001}', '\u{e0001}'),
+    ('\u{e0020}', '\u{e007f}'),
+];
 
 fn outcome_of(outcome: wit::Outcome) -> Outcome {
     Outcome {

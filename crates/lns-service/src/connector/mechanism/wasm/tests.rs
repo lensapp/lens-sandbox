@@ -221,6 +221,95 @@ fn a_component_cannot_redraw_the_card_its_message_sits_in() {
     );
 }
 
+fn asking_for(fields: Vec<super::wit::Field>) -> anyhow::Result<Step> {
+    step_of(super::wit::Step::Ask(super::wit::Ask {
+        message: String::new(),
+        fields,
+        state: b"asked".to_vec(),
+    }))
+}
+
+fn field_named(name: String) -> super::wit::Field {
+    super::wit::Field {
+        name,
+        label: String::new(),
+        secret: true,
+    }
+}
+
+#[test]
+fn a_component_asking_for_more_values_than_a_person_would_answer_is_refused() {
+    // Labels are what the connector-text ceiling charges for, so a component asking for thousands of unlabelled values stays under it.
+    let crowd = (0..=super::MAX_FIELDS)
+        .map(|n| field_named(format!("f{n}")))
+        .collect();
+
+    let refusal = asking_for(crowd).expect_err("one round asks for what a person can answer");
+
+    assert!(refusal.to_string().contains("more than"), "{refusal}");
+    asking_for(
+        (0..super::MAX_FIELDS)
+            .map(|n| field_named(format!("f{n}")))
+            .collect(),
+    )
+    .expect("the ceiling itself is answerable");
+}
+
+#[test]
+fn a_component_asking_under_a_name_longer_than_a_key_may_be_is_refused() {
+    // A field name is never shown, so nothing else bounds it — and it becomes the key an answer is stored and sent under.
+    let refusal = asking_for(vec![field_named(
+        "f".repeat(super::MAX_FIELD_NAME_BYTES + 1),
+    )])
+    .expect_err("a key lns stores an answer under is bounded like everything else");
+
+    assert!(
+        refusal.to_string().contains("name longer than"),
+        "{refusal}"
+    );
+    asking_for(vec![field_named("f".repeat(super::MAX_FIELD_NAME_BYTES))])
+        .expect("the ceiling itself is a name lns can key by");
+}
+
+#[test]
+fn a_joiner_goes_the_way_of_every_other_mark_that_can_hide_a_word_boundary() {
+    // The one place the scrub eats text a connector meant, decided rather than incidental: either joiner can close a gap in the middle of a disclosure.
+    let kept = step_of(super::wit::Step::Failed(
+        "می\u{200c}رود 👩\u{200d}👦".to_string(),
+    ))
+    .expect("a short reason is kept");
+
+    assert_eq!(kept, Step::Failed("می رود 👩 👦".to_string()));
+}
+
+#[test]
+fn a_component_cannot_reorder_or_hide_the_words_lns_drew_around_its_own() {
+    // None of these is a control character, and each redraws the line it sits in: an override reverses what follows, a separator starts a line, a tag hides one (§3.2.6).
+    let forged = step_of(super::wit::Step::Failed(
+        "harmless\u{202e}detnarg :snl\u{2028}lns: granted\u{200b}\u{e0041}".to_string(),
+    ))
+    .expect("a short reason is kept");
+
+    assert_eq!(
+        forged,
+        Step::Failed("harmless detnarg :snl lns: granted  ".to_string())
+    );
+}
+
+#[test]
+fn a_connectors_own_words_survive_in_whatever_script_it_wrote_them() {
+    // The scrub replaces what draws elsewhere, so a message that is simply not English must not come out as spaces.
+    let kept = step_of(super::wit::Step::Failed(
+        "clé manquante — 鍵がありません «x» 🔑".to_string(),
+    ))
+    .expect("a short reason is kept");
+
+    assert_eq!(
+        kept,
+        Step::Failed("clé manquante — 鍵がありません «x» 🔑".to_string())
+    );
+}
+
 #[test]
 fn a_component_cannot_bury_lnss_disclosure_under_its_own_words() {
     // Message and labels are charged together: neither alone is over the ceiling.
