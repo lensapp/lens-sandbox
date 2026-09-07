@@ -1,12 +1,19 @@
 //! Every bound here is decided from the method that declared the mechanism and never from the mechanism, so a component cannot widen its own reach.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::traits::{Entropy, Exec, Http, Recorder};
 use super::{Bounds, CallError, ExecOutput, HttpRequest, HttpResponse};
 
 /// The most entropy one call may draw. A component needs a PKCE verifier or a state parameter, not a keystream.
 const MAX_ENTROPY_BYTES: u32 = 1024;
+
+/// The most one written-down target may run to. A host name and a program name are short, and a component may call until its fuel runs out — each call leaving a durable entry.
+pub(super) const MAX_RECORDED_TARGET_BYTES: usize = 256;
+
+/// The most entries one call may write. Deliberately not `callSeconds` or fuel: a component that spends those has already written thousands, which buries the neighbouring entries as surely as one unbounded name would (§3.2.6).
+pub(super) const MAX_RECORDED_ENTRIES_PER_CALL: u32 = 64;
 
 /// Cheap to clone, because a component runtime needs one per call.
 #[derive(Clone)]
@@ -17,6 +24,8 @@ pub struct Host {
     exec: Arc<dyn Exec>,
     entropy: Arc<dyn Entropy>,
     recorder: Arc<dyn Recorder>,
+    /// What this call has written down so far. Shared across the clone a runtime takes per call, and reset when that call begins.
+    written: Arc<AtomicU32>,
 }
 
 impl Host {
@@ -35,7 +44,13 @@ impl Host {
             exec,
             entropy,
             recorder,
+            written: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// One call begins, so what it may write down starts again. Whatever runs a component calls this; a mechanism lns implements writes nothing and needs it not at all.
+    pub fn begins_a_call(&self) {
+        self.written.store(0, Ordering::Relaxed);
     }
 
     pub fn bounds(&self) -> &Bounds {
@@ -46,20 +61,20 @@ impl Host {
     pub fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, CallError> {
         let target = Target::of(&request.url).map_err(CallError::Refused)?;
         if !target.is_tls() {
-            self.recorder.reached(&self.connector, &target.host, true);
+            self.reached(&target.host, true);
             return Err(CallError::Refused(format!(
                 "{} is not https: lns carries a mechanism's calls over TLS or not at all",
                 request.url
             )));
         }
         if !self.bounds.allows(&target.host, target.port) {
-            self.recorder.reached(&self.connector, &target.host, true);
+            self.reached(&target.host, true);
             return Err(CallError::Refused(format!(
                 "{} is not among the hosts this method declares",
                 target.host
             )));
         }
-        self.recorder.reached(&self.connector, &target.host, false);
+        self.reached(&target.host, false);
         self.http.fetch(
             &HttpRequest {
                 // The parse the bound was decided from, so no spelling can be read one way here and another on the wire.
@@ -76,13 +91,42 @@ impl Host {
             .first()
             .ok_or_else(|| CallError::Refused("a program to run was not named".to_string()))?;
         if !self.bounds.exec {
-            self.recorder.ran(&self.connector, program, true);
+            self.ran(program, true);
             return Err(CallError::Refused(
                 "this method does not declare host execution".to_string(),
             ));
         }
-        self.recorder.ran(&self.connector, program, false);
+        self.ran(program, false);
         self.exec.run(argv, self.within())
+    }
+
+    /// A host a component reached. What it named is rendered before it lands in the ledger, because `lns audit` prints that entry (§3.2.6).
+    fn reached(&self, host: &str, refused: bool) {
+        if let Some(named) = self.room_to_write(host) {
+            self.recorder.reached(&self.connector, &named, refused);
+        }
+    }
+
+    /// A program a component asked for, under the same rule. A refused attempt is written down too, so this holds for a method that declared no host execution at all.
+    fn ran(&self, program: &str, refused: bool) {
+        if let Some(named) = self.room_to_write(program) {
+            self.recorder.ran(&self.connector, &named, refused);
+        }
+    }
+
+    /// The name to write down, or `None` where this call has written all it may. The entry at the ceiling is lns's own and says the rest was elided, so a silent stop cannot read as a call that did nothing more.
+    fn room_to_write(&self, target: &str) -> Option<String> {
+        match self.written.fetch_add(1, Ordering::Relaxed) {
+            written if written < MAX_RECORDED_ENTRIES_PER_CALL => {
+                Some(super::text::cut(target, MAX_RECORDED_TARGET_BYTES))
+            }
+            written if written == MAX_RECORDED_ENTRIES_PER_CALL => {
+                self.recorder
+                    .elided(&self.connector, MAX_RECORDED_ENTRIES_PER_CALL);
+                None
+            }
+            _ => None,
+        }
     }
 
     /// How long one call has. The runtime's epoch cannot interrupt a host call already in flight, so the deadline travels with it (§3.2.6).

@@ -34,6 +34,9 @@ impl crate::connector::mechanism::traits::Recorder for Wrote {
             .expect("wrote lock")
             .push((format!("{connector} {target}"), refused));
     }
+
+    // no-op: a ceiling on what one call writes down is the mechanism host's, and this pass makes no component call of its own.
+    fn elided(&self, _connector: &str, _after: u32) {}
 }
 
 fn labels(due: &[(String, Connection)]) -> Vec<String> {

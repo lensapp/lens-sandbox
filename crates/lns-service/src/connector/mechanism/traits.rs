@@ -54,4 +54,6 @@ pub trait Recorder: Send + Sync {
     fn ran(&self, connector: &str, program: &str, refused: bool);
     /// A renewal lns scheduled. It leaves no state behind, so the entry is the only record there will ever be that it happened (§3.2.6).
     fn renewed(&self, connector: &str, target: &str, refused: bool);
+    /// lns's own entry, written once, where one call reached the ceiling on how much of itself it may write down (§3.2.6).
+    fn elided(&self, connector: &str, after: u32);
 }

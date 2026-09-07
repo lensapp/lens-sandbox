@@ -8,6 +8,8 @@ use super::*;
 pub struct Calls {
     pub reached: Vec<(String, bool)>,
     pub ran: Vec<(String, bool)>,
+    /// lns's own entry, where one call wrote all it may.
+    pub elided: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -16,7 +18,7 @@ pub struct Spy {
 }
 
 impl Spy {
-    fn taken(&self) -> Calls {
+    pub(crate) fn taken(&self) -> Calls {
         std::mem::take(&mut self.calls.lock().expect("spy lock"))
     }
 }
@@ -40,6 +42,10 @@ impl Recorder for Spy {
 
     // no-op: a renewal is the refresh pass's to record, and nothing here runs one.
     fn renewed(&self, _connector: &str, _target: &str, _refused: bool) {}
+
+    fn elided(&self, _connector: &str, after: u32) {
+        self.calls.lock().expect("spy lock").elided.push(after);
+    }
 }
 
 #[derive(Default)]
@@ -420,6 +426,93 @@ fn a_method_declaring_no_host_execution_runs_nothing_and_the_attempt_is_written_
     assert!(matches!(refusal, CallError::Refused(ref why) if why.contains("host execution")));
     assert!(parts.exec.seen.lock().expect("exec lock").is_empty());
     assert_eq!(parts.recorder.taken().ran, [("claude".to_string(), true)]);
+}
+
+#[test]
+fn a_host_written_down_is_cut_to_the_ceiling_like_every_other_target() {
+    // A URL parser accepts a host far longer than anything that resolves, and a refused reach is written down as readily as one that landed.
+    let parts = Parts::new();
+    let host = parts.host(declaring(&["auth.some-provider.example"]));
+    let sprawling = format!("{}.example.com", "a".repeat(300));
+
+    host.fetch(&get(&format!("https://{sprawling}/token")))
+        .expect_err("that host is not among the ones this method declares");
+
+    let reached = parts.recorder.taken().reached;
+    assert_eq!(
+        (reached[0].0.len(), reached[0].1),
+        (super::host::MAX_RECORDED_TARGET_BYTES, true)
+    );
+}
+
+#[test]
+fn what_a_component_is_written_down_as_having_run_is_rendered_on_lnss_own_terms() {
+    // The ledger is the only account of a component nobody can read, and `lns audit` prints it: a program name that could redraw the line would forge that account. A refused attempt is recorded too, so this holds for a method that declared no host execution at all.
+    let parts = Parts::new();
+    let host = parts.host(Bounds::default());
+
+    host.run(&["\u{1b}[2Kclaude\u{202e}auth".to_string()])
+        .expect_err("a method that did not declare host execution runs nothing");
+
+    assert_eq!(
+        parts.recorder.taken().ran,
+        [(" [2Kclaude auth".to_string(), true)],
+        "every character that does not draw in the place lns drew it is replaced"
+    );
+}
+
+#[test]
+fn a_program_name_past_the_ceiling_is_cut_rather_than_written_down_whole() {
+    // A component may call until its fuel runs out, and each call leaves a durable line; an unbounded name makes the ledger the place a connector writes megabytes to.
+    let parts = Parts::new();
+    let host = parts.host(Bounds::default());
+
+    host.run(&["a".repeat(super::host::MAX_RECORDED_TARGET_BYTES + 1)])
+        .expect_err("a method that did not declare host execution runs nothing");
+
+    assert_eq!(
+        parts.recorder.taken().ran[0].0.len(),
+        super::host::MAX_RECORDED_TARGET_BYTES
+    );
+}
+
+#[test]
+fn one_call_writes_down_only_so_much_of_itself_and_says_where_it_stopped() {
+    // A component may call until its fuel runs out. Thousands of entries bury the neighbouring ones as surely as one unbounded name would, and those are the only evidence anything happened (§3.2.6).
+    let parts = Parts::new();
+    let host = parts.host(Bounds::default());
+
+    for _ in 0..super::host::MAX_RECORDED_ENTRIES_PER_CALL + 10 {
+        host.run(&["claude".to_string()])
+            .expect_err("this method declares no host execution");
+    }
+
+    let calls = parts.recorder.taken();
+    assert_eq!(
+        calls.ran.len(),
+        super::host::MAX_RECORDED_ENTRIES_PER_CALL as usize
+    );
+    assert_eq!(
+        calls.elided,
+        [super::host::MAX_RECORDED_ENTRIES_PER_CALL],
+        "lns says once that it stopped writing, so a silent stop cannot read as a call that did nothing more"
+    );
+}
+
+#[test]
+fn the_next_call_may_write_down_as_much_as_the_first() {
+    // The ceiling is what one call may write, not what a component may write for as long as it is installed.
+    let parts = Parts::new();
+    let host = parts.host(Bounds::default());
+    for _ in 0..super::host::MAX_RECORDED_ENTRIES_PER_CALL + 1 {
+        let _ = host.run(&["claude".to_string()]);
+    }
+    parts.recorder.taken();
+
+    host.begins_a_call();
+    let _ = host.run(&["claude".to_string()]);
+
+    assert_eq!(parts.recorder.taken().ran.len(), 1);
 }
 
 #[test]

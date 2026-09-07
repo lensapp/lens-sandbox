@@ -112,6 +112,15 @@ impl lns_service::connector::mechanism::traits::Recorder for Lent {
     fn renewed(&self, connector: &str, target: &str, refused: bool) {
         self.wrote(connector, "renewed", target, refused);
     }
+
+    fn elided(&self, connector: &str, after: u32) {
+        self.wrote(
+            connector,
+            "elided",
+            &format!("the rest of this call after {after} entries"),
+            false,
+        );
+    }
 }
 
 /// The machine's mechanisms, counting how many times one was made ready to call, because a press may move that count and nothing a workload does may (§3.2.6).
