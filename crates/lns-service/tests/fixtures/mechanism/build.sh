@@ -6,7 +6,7 @@ set -eu
 cd "$(dirname "$0")"
 check=${1:-}
 stale=""
-for name in fetching running asking hanging expiring trapping binding prying hoarding showing shouting forging labelling; do
+for name in fetching running asking hanging expiring trapping binding prying hoarding showing shouting forging labelling straying granting failing picking hurrying refusing keeping clinging; do
     cargo build --release --target wasm32-wasip2 --no-default-features --features "$name"
     built=target/wasm32-wasip2/release/mechanism_fixture.wasm
     if [ "$check" = "--check" ]; then

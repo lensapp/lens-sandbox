@@ -1,4 +1,3 @@
-@todo
 Feature: a code method's component decides the connect flow
   A declarative kind tells lns what to ask for, so lns owns the flow. A `code`
   method does not: its component is a step machine lns drives, and every prompt,
@@ -21,10 +20,11 @@ Feature: a code method's component decides the connect flow
   Scenario: the component decides to wait, and lns resumes it afterwards
     Given the connector "some-provider" serves "api.some-provider.example"
     And its method "sign-in" is a code method
-    And its component returns a wait before it completes
+    And its component shows the user something and waits
     When the machine connects "sign-in"
     Then the card shows what the component asked to display
-    And lns resumes the component only once the wait it asked for has elapsed
+    And no field is asked for
+    And lns resumes the component only once the user has pressed on
 
   Scenario: the component completes with no question at all
     Given the connector "some-provider" serves "api.some-provider.example"

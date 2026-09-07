@@ -1,4 +1,3 @@
-@todo
 Feature: what the disclosure says about a connector that carries code
   A declarative connector can be read before it is trusted: the disclosure shows
   the destinations it opens, the variables it sets, and the files it writes, and

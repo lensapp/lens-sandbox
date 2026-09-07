@@ -1,4 +1,3 @@
-@todo
 Feature: lns bounds a component it cannot read
   A declarative connector can be read before it is trusted. A component cannot, so
   what stands in for reading it is the bound lns enforces around it: the hosts it

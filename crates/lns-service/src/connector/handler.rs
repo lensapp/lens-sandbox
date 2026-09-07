@@ -201,13 +201,44 @@ pub struct Granted {
 }
 
 /// Drop one connection, or every connection of a connector. The connector stays installed and grants naming a dropped connection stay (cli-spec §3.3).
+///
+/// The press authorises `revoke`, so each connection being dropped is told to its mechanism first — and a value lns cannot revoke is one it must still stop holding, so nothing here decides whether the drop happens (§3.2.6).
 pub fn disconnect(
     store: &ConnectorStore<'_>,
+    mechanisms: Option<&dyn super::mechanism::traits::Mechanisms>,
     name: &str,
     connection: Option<&str>,
+    now_millis: u64,
 ) -> Result<usize> {
     installed_entry(store, name)?;
+    for (label, held) in store.connections_of(name)? {
+        if connection.is_some_and(|only| only != label) {
+            continue;
+        }
+        if let Err(e) = revoked(store, mechanisms, name, &held, now_millis) {
+            crate::log::warn!("could not tell {name} that {label} is revoked: {e:#}");
+        }
+    }
     Ok(store.drop_connections(name, connection)?)
+}
+
+fn revoked(
+    store: &ConnectorStore<'_>,
+    mechanisms: Option<&dyn super::mechanism::traits::Mechanisms>,
+    name: &str,
+    held: &Connection,
+    now_millis: u64,
+) -> Result<()> {
+    let Some(mechanisms) = mechanisms else {
+        anyhow::bail!("this machine has no mechanism to tell");
+    };
+    let installed = installed_entry(store, name)?;
+    let definition = lns_artifact::connector::parse(&installed.document)?;
+    let method = offerable_method(&definition, &held.method)?;
+    let prepared = super::connect::prepare(store, mechanisms, name, &definition, method)?;
+    prepared
+        .mechanism
+        .revoke(&prepared.host, &held.values, now_millis)
 }
 
 /// Record one run's grant of one method, replacing whatever it decided before.
@@ -1124,6 +1155,18 @@ mod tests {
     }
 
     /// A connection the machine already holds. What produces one is `connector::connect`, tested there; these tests are about what the other verbs do beside one.
+    /// The machine's own mechanisms, lending nothing that leaves this process.
+    fn mechanisms() -> crate::connector::mechanism::real::RealMechanisms {
+        let parts = crate::connector::mechanism::tests::Parts::new();
+        crate::connector::mechanism::real::RealMechanisms::lending(
+            parts.http,
+            parts.exec,
+            std::sync::Arc::new(crate::connector::mechanism::tests::Counting),
+            parts.recorder,
+        )
+        .expect("the component runtime starts")
+    }
+
     fn connect(
         store: &ConnectorStore<'_>,
         name: &str,
@@ -1156,10 +1199,20 @@ mod tests {
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
 
         assert_eq!(
-            disconnect(&rig.store(), "some-provider", Some("work")).unwrap(),
+            disconnect(
+                &rig.store(),
+                Some(&mechanisms()),
+                "some-provider",
+                Some("work"),
+                0
+            )
+            .unwrap(),
             1
         );
-        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 1);
+        assert_eq!(
+            disconnect(&rig.store(), Some(&mechanisms()), "some-provider", None, 0).unwrap(),
+            1
+        );
         assert_eq!(
             rig.store().installed().unwrap().len(),
             1,
@@ -1172,7 +1225,10 @@ mod tests {
         // The caller exits 1 on this, so it must be an answer rather than an error.
         let rig = Rig::new();
         installed(&rig).await;
-        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 0);
+        assert_eq!(
+            disconnect(&rig.store(), Some(&mechanisms()), "some-provider", None, 0).unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

@@ -325,36 +325,6 @@ Feature: lns connector, on this machine
     Then the connector command succeeds
     And the prompt says "press enter when you have done that: "
 
-  Scenario: a method carrying code discloses bounds, because it has no behaviour to show
-    Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And its method "token" carries code reaching "auth.some-provider.example"
-    And the service grants "some-provider" the method "token"
-    And the user types "y"
-    When the user runs connector command "grant some-provider --run reviewer --method token"
-    Then the connector command succeeds
-    And the disclosure says "auth.some-provider.example"
-    And the disclosure names the digest the connector is installed at
-    And the disclosure says "lns cannot show what this code does. It can only bound where it runs, what it reaches, and how long it has."
-
-  Scenario: a method carrying code that reaches nothing says so rather than saying nothing
-    Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And its method "token" carries code reaching ""
-    And the service grants "some-provider" the method "token"
-    And the user types "y"
-    When the user runs connector command "grant some-provider --run reviewer --method token"
-    Then the connector command succeeds
-    And the disclosure says "it may contact no hosts."
-
-  Scenario: a method that runs programs cannot claim the stronger disclosure
-    Given the service holds the connector "some-provider" serving "api.some-provider.example"
-    And its method "token" carries code that runs programs on this machine
-    And the service grants "some-provider" the method "token"
-    And the user types "y"
-    When the user runs connector command "grant some-provider --run reviewer --method token"
-    Then the connector command succeeds
-    And the disclosure says "lns cannot show what this code does, and it runs programs on your machine with your own access. lns cannot bound what those reach."
-    And the disclosure does not say "It can only bound where it runs"
-
   Scenario: a method carrying no code discloses nothing about code
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service grants "some-provider" the method "token"
