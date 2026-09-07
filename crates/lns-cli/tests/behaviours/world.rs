@@ -209,6 +209,12 @@ pub struct ConnectorCliRig {
     pub refuse_grant_message: Option<String>,
     pub unreachable: bool,
     pub connected: Option<String>,
+    /// What the mechanism answers instead of finishing, so the CLI is seen reporting a refusal it did not make.
+    pub connect_refused: Option<String>,
+    /// The connector author's own words, which the CLI shows as theirs.
+    pub asks_message: String,
+    /// What the mechanism asks for: name, label, and whether it is a secret. Empty is a round that shows something and collects nothing.
+    pub asks_fields: Option<Vec<(String, String, bool)>>,
     pub granted: Option<(String, Option<String>)>,
     pub disconnected: Option<usize>,
     pub forgot: Option<bool>,
