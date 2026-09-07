@@ -545,7 +545,19 @@ pub async fn answer(call: Call) -> Result<Response> {
             Ok(one_turn(&turn.connector, turn.connecting))
         }
         Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
-            dropped: handler::disconnect(&store, &name, connection.as_deref())?,
+            // A revoke is a component call, so it is spent off the thread every component deadline is measured in.
+            // A machine that cannot start a component runtime still drops what the user pressed Disconnect on; it just has nobody to tell.
+            dropped: super::mechanism::real::off_the_runtime_thread(|| {
+                handler::disconnect(
+                    &store,
+                    super::mechanism::real::mechanisms()
+                        .ok()
+                        .map(|ready| ready as &dyn super::mechanism::traits::Mechanisms),
+                    &name,
+                    connection.as_deref(),
+                    super::mechanism::real::now_millis(),
+                )
+            })?,
             name,
         }),
         Call::Grant {

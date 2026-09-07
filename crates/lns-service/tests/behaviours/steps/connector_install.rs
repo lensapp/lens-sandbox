@@ -46,6 +46,7 @@ fn the_machine_installs_the_connector(w: &mut BehaviourWorld) {
 }
 
 #[given(regex = r#"^the run "([^"]+)" granted the method "([^"]+)"$"#)]
+#[given(regex = r#"^the run "([^"]+)" grants the method "([^"]+)"$"#)]
 #[when(regex = r#"^the run "([^"]+)" grants the method "([^"]+)"$"#)]
 fn the_run_granted_the_method(w: &mut BehaviourWorld, run: String, method: String) {
     let rig = rig(w);
@@ -53,6 +54,107 @@ fn the_run_granted_the_method(w: &mut BehaviourWorld, run: String, method: Strin
         .last_declared_name()
         .expect("a connector must be described before a run grants it");
     rig.grant(&run, &name, &method);
+}
+
+#[when(regex = r#"^the machine installs the connector from a registry reference$"#)]
+async fn the_machine_installs_from_a_registry_reference(w: &mut BehaviourWorld) {
+    rig(w).install_from("ghcr.io/acme/some-provider:1").await;
+}
+
+#[given(regex = r#"^the machine installs the connector from a local path$"#)]
+#[when(regex = r#"^the machine installs the connector from a local path$"#)]
+async fn the_machine_installs_from_a_local_path(w: &mut BehaviourWorld) {
+    rig(w).install_from("/work/some-provider").await;
+    // The first install is the one a later edit must not reach back into, so a reinstall does not overwrite what it captured.
+    if rig(w).carries_a_component() && rig(w).bytes_captured_at_install.is_none() {
+        let captured = rig(w).component_captured();
+        let digest = rig(w)
+            .installed_named("some-provider")
+            .expect("installed")
+            .digest;
+        rig(w).bytes_captured_at_install = Some(captured);
+        rig(w).digest_at_install = Some(digest);
+    }
+}
+
+#[when(regex = r#"^the component file changes on disk$"#)]
+fn the_component_file_changes_on_disk(w: &mut BehaviourWorld) {
+    rig(w).the_component_changes("failing");
+}
+
+#[then(regex = r#"^the refusal says host execution is local-install only$"#)]
+fn the_refusal_says_local_install_only(w: &mut BehaviourWorld) {
+    let refusal = refusal_of(w);
+    assert!(
+        refusal.contains("local path") && refusal.contains("runs programs"),
+        "the refusal says what it refused and what would be allowed: {refusal}"
+    );
+}
+
+#[then(regex = r#"^the machine still holds the connector at the digest it installed$"#)]
+fn the_machine_still_holds_the_installed_digest(w: &mut BehaviourWorld) {
+    let on_disk = rig(w).components().pop().expect("a component on disk");
+    let captured = rig(w).component_captured();
+    assert_ne!(
+        captured, on_disk,
+        "this scenario edits the file, so what is on disk is no longer what was captured"
+    );
+    assert_eq!(
+        captured,
+        rig(w)
+            .bytes_captured_at_install
+            .clone()
+            .expect("the install captured a component"),
+        "the installed connector runs what was captured, not what is on disk now (§7.1)"
+    );
+}
+
+#[then(regex = r#"^the run keeps its grant$"#)]
+fn the_run_keeps_its_grant(w: &mut BehaviourWorld) {
+    assert_eq!(
+        rig(w)
+            .granted_method("1a2b3c4d", "some-provider")
+            .as_deref(),
+        Some("sign-in"),
+        "nothing this machine holds changed, so nothing the run consented to did"
+    );
+    assert!(
+        rig(w).offered_to("1a2b3c4d").is_empty(),
+        "the run is not asked again about bytes that did not change"
+    );
+}
+
+#[then(regex = r#"^the machine holds the connector at a different digest$"#)]
+fn the_machine_holds_a_different_digest(w: &mut BehaviourWorld) {
+    let before = rig(w)
+        .bytes_captured_at_install
+        .clone()
+        .expect("the first install captured a component");
+    assert_ne!(
+        rig(w).component_captured(),
+        before,
+        "a reinstall captures the bytes on disk now"
+    );
+    assert_ne!(
+        rig(w)
+            .installed_named("some-provider")
+            .expect("installed")
+            .digest,
+        rig(w)
+            .digest_at_install
+            .clone()
+            .expect("the first install recorded a digest"),
+        "and this machine now holds them under a digest of their own, which is what a grant binds to"
+    );
+}
+
+#[then(regex = r#"^the run is offered the connector again$"#)]
+fn the_run_is_offered_again(w: &mut BehaviourWorld) {
+    assert_eq!(
+        rig(w).offered_to("1a2b3c4d"),
+        vec!["some-provider".to_string()],
+        "a grant binds to the digest, so different bytes are bytes nobody consented to (§3.2.4)"
+    );
 }
 
 #[when(regex = r#"^the machine uninstalls the connector "([^"]+)"$"#)]

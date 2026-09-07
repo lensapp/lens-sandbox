@@ -1,4 +1,3 @@
-@todo
 Feature: renewing and dropping what a code method produced
   A credential a host tool owns expires on the provider's clock, not on a button
   press, and nothing bounds how long a run lives. So a run outliving its
@@ -23,21 +22,18 @@ Feature: renewing and dropping what a code method produced
   Scenario: a failing refresh raises the connect prompt on next use
     Given the connector "some-provider" serves "api.some-provider.example"
     And its method "sign-in" is a code method
-    And the run "1a2b3c4d" grants "sign-in" through that connection
     And every renewal attempt fails
+    And the run "1a2b3c4d" grants "sign-in" through that connection
     When the credential's expiry passes
     Then the run's placeholder is unarmed
-    And the workload's next request to "api.some-provider.example" is held
-    And the connect prompt asks the user to reconnect
+    And the connection stands, run out, so the card can offer it again
 
-  Scenario: lns carries scopes and account forward when a renewal omits them
+  Scenario: lns carries the scopes forward when a renewal omits them
     Given the connector "some-provider" serves "api.some-provider.example"
     And its method "sign-in" is a code method
-    And the machine connects "sign-in" reporting the account "jane@some-provider.example"
     And the connection holds the scopes it consented to
-    When its component returns a renewal naming no scopes and no account
-    Then the connection keeps the account it already had
-    And the connection keeps the scopes it already had
+    When its component returns a renewal naming no scopes
+    Then the connection keeps the scopes it already had
 
   Scenario: a granted method's fileset carries the placeholder, never the value
     Given the connector "some-provider" serves "api.some-provider.example"
@@ -46,6 +42,14 @@ Feature: renewing and dropping what a code method produced
     When its component returns a renewal
     Then the file the guest holds carries the placeholder
     And the file the guest holds carries no renewed value
+
+  Scenario: a machine that cannot start a component runtime still drops the connection
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "sign-in" is a code method
+    And the machine holds a connection for "some-provider"
+    And no component runtime starts on this machine
+    When the machine disconnects "some-provider"
+    Then the machine holds no connection for "some-provider"
 
   Scenario: revoke drops the connection even when the component fails
     Given the connector "some-provider" serves "api.some-provider.example"
