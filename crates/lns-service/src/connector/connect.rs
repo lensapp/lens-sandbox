@@ -24,6 +24,8 @@ pub enum Connecting {
         session: String,
         message: String,
         fields: Vec<Field>,
+        /// Whether these words came from code nobody can read, which decides whether whatever shows them attributes them (§3.2.6).
+        from_code: bool,
     },
     Connected(super::handler::Connected),
     Failed(String),
@@ -227,6 +229,11 @@ fn settle(
                 session,
                 message,
                 fields,
+                from_code: method
+                    .auth
+                    .as_ref()
+                    .and_then(lns_artifact::connector::Auth::code)
+                    .is_some(),
             })
         }
         Step::Done(outcome) => {

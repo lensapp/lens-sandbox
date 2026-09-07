@@ -70,6 +70,7 @@ struct FakeConnectorService {
     connect_refused: Option<String>,
     asks_message: String,
     asks_fields: Option<Vec<(String, String, bool)>>,
+    asks_from_code: bool,
     granted: Option<(String, Option<String>)>,
     disconnected: Option<usize>,
     forgot: Option<bool>,
@@ -95,6 +96,7 @@ impl FakeConnectorService {
             connect_refused: rig.connect_refused.clone(),
             asks_message: rig.asks_message.clone(),
             asks_fields: rig.asks_fields.clone(),
+            asks_from_code: rig.asks_from_code,
             granted: rig.granted.clone(),
             disconnected: rig.disconnected,
             forgot: rig.forgot,
@@ -152,6 +154,7 @@ impl FakeConnectorService {
                 Response::ConnectorAsks {
                     session: format!("{name}/{method}/1"),
                     message: self.asks_message.clone(),
+                    from_code: self.asks_from_code,
                     fields: self.asks_fields.clone().map_or_else(
                         || {
                             vec![lns_ipc::ConnectorFieldView {
@@ -513,6 +516,11 @@ fn mechanism_says(world: &mut BehaviourWorld, message: String) {
     world.connector.asks_message = message;
 }
 
+#[given(expr = "the mechanism is code lns cannot read")]
+fn mechanism_is_code(world: &mut BehaviourWorld) {
+    world.connector.asks_from_code = true;
+}
+
 #[given(expr = "the mechanism asks for {string}, which it does not mark secret")]
 fn mechanism_asks_plainly(world: &mut BehaviourWorld, label: String) {
     world.connector.asks_fields = Some(vec![("workspace".to_string(), label, false)]);
@@ -833,6 +841,29 @@ fn disclosure_names_digest(world: &mut BehaviourWorld) {
 fn prompt_says(world: &mut BehaviourWorld, said: String) {
     let run = run_of(world);
     assert!(run.output.contains(&said), "got: {}", run.output);
+}
+
+/// The attribution has to come before the question: a name printed after it attributes nothing the user has already read.
+#[then(expr = "the prompt attributes {string} to {string} before it asks it")]
+fn prompt_attributes_before_asking(
+    world: &mut BehaviourWorld,
+    question: String,
+    connector: String,
+) {
+    let run = run_of(world);
+    let attributed = run
+        .output
+        .find(&format!("{connector} asks"))
+        .unwrap_or_else(|| panic!("nothing attributed the question: {}", run.output));
+    let asked = run
+        .output
+        .find(&question)
+        .unwrap_or_else(|| panic!("the question was never asked: {}", run.output));
+    assert!(
+        attributed < asked,
+        "a question a component wrote must not reach the user as lns's own: {}",
+        run.output
+    );
 }
 
 #[then(expr = "the prompt does not say {string}")]
