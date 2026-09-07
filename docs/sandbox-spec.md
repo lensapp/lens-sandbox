@@ -1841,10 +1841,13 @@ lns MUST present an ask's connector text as the connector's, attributed by that
 connector's `name`; MUST refuse an ask whose connector text exceeds a size
 ceiling, failing the connect rather than truncating, so the refusal is visible
 instead of the user reading half a sentence and trusting it; and MUST render it by
-replacing every control character — line breaks included, so a message is one
-paragraph lns wraps — leaving no escape sequence as a sequence and every line lns
-draws lns's. The reason a `failed` carries is connector text under the same rule,
-wherever lns shows it.
+replacing every character that does not draw in the place lns drew it — a control
+character, a line or paragraph separator, and every mark that reorders or hides
+what follows it, which is Unicode `Cc`, `Cf`, `Zl`, and `Zp` exactly — leaving no
+escape sequence as a sequence, no text reversed against the order lns laid out,
+and every line lns draws lns's. A line break is one of these, so a message is one
+paragraph lns wraps. The reason a `failed` carries is connector text under the
+same rule, wherever lns shows it.
 
 Everything [§1.5](#15-one-disclosure) fixes verbatim — the disclosures, the bounds,
 the digest — is lns's own text, and an ask's connector text MUST be surrounded by
@@ -1881,11 +1884,14 @@ every call, which is why a component needs no clock to be told the time.
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
 clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
-step-state, connector-text, random-draw, and component-size ceilings. Step state
-between calls, and any answer to a field marked secret, are secret material — a
-device code, a PKCE verifier, a password — so lns holds each in memory only, for a
-bounded lifetime, never logs it, never persists it, and drops an answer once the
-`resume` that consumed it returns.
+step-state, connector-text, random-draw, field-count, field-name, and
+component-size ceilings. An ask that crosses one fails the connect, for the reason
+the connector-text ceiling does: a round trimmed to fit is one the user answers
+without knowing what was taken out. Step state between calls, and any answer to a
+field marked secret, are secret material — a device code, a PKCE verifier, a
+password — so lns holds each in memory only, for a bounded lifetime, never logs
+it, never persists it, and drops an answer once the `resume` that consumed it
+returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
