@@ -437,8 +437,8 @@ unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 Filters compose:
 
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`,
-  `approval`, `connector`, `tool`.
-- `--connector <id>` — only what one connector was decided about.
+  `approval`, `connector`, `mechanism`, `tool`.
+- `--connector <id>` — only the lines about one connector, whichever kind they are.
 - `--format jsonl` — one raw JSON event per line instead of the table.
 
 A `connector` event is what one run decided: `granted`, `declined`, or `forgot`. A
@@ -446,6 +446,11 @@ grant records the method, the account behind it, and the digest it bound to.
 Connecting records nothing — a connection belongs to the machine and to no run, so
 no run's timeline could account for it. A grant reserved for a name no run holds yet
 shows with no run against it, and stays that way once a run takes the reservation.
+
+A `mechanism` event is what a connector's own code did: a host it reached, a
+program it started, and a renewal `lns` ran on its schedule. These happen on the
+machine's behalf, outside any run, and they leave no state behind — a renewal that
+ran while nobody watched is readable here and nowhere else.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline
