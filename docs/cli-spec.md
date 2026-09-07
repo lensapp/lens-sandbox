@@ -520,11 +520,11 @@ lns approval rm <ID>
 prints it.
 
 A card that asks about a destination becomes an **entry** in that run's own
-directory, and stays there. One you close, one that times out, and one a workload
-withdrew by exiting are all still listed. The request failed closed at the
-boundary; the question did not go with it. A headless service raises no card at
-all ([service.md](service.md)), so there the list is the only place a question is
-read.
+directory, and is listed until you remove it or the run goes. One you close, one
+that times out, and one a workload withdrew by exiting are all still listed. The
+request failed closed at the boundary; the question did not go with it. A
+headless service raises no card at all ([service.md](service.md)), so there the
+list is the only place a question is read.
 
 A connector card becomes an entry when the service raises it. The entry reads
 `undecided` until you answer. It reads `granted` or `declined` after you answer.
@@ -538,7 +538,7 @@ carries no verdict and nothing answers it.
 |---|---|
 | `ls` | Lists the run's entries: the sandbox, whether the question is a destination or a connector, what it asks about, and the answer it has — `undecided`, `withdrawn`, `always allow`, or `always deny` for a destination; `undecided`, `granted`, or `declined` for a connector. A notice asks nothing, so it names no question and its answer reads `notice`. A run nothing has asked about prints that, and exits `0`. |
 | `answer` | Answers one destination entry, or answers it again. The newest answer replaces the one before it. |
-| `rm` | Removes one notice. A destination or a connector entry is not removable. |
+| `rm` | Removes one entry from the list. What that entry decided stays decided. |
 
 **`answer` decides egress, and nothing else.** Only a destination entry takes an
 answer. A connector entry is listed with the answer it has, and is not answerable
@@ -574,22 +574,22 @@ Answering an entry never replays the request that raised it. The call failed whe
 nothing decided it. The answer decides what happens next time.
 
 An entry of a **stopped** sandbox is answerable, and edits that run's
-`decisions.yaml` without starting it. Entries go when the run goes, with `lns rm`
-and `lns sandbox prune`.
+`decisions.yaml` without starting it.
 
-**`rm` removes a notice, and only a notice.** A notice asked nothing. Clearing it
-loses nothing, and a run that could not write a rule says so once per reason
-rather than once per attempt.
+**`rm` removes the record, and nothing else.** It takes any entry. The rule an
+answered entry wrote stays in `decisions.yaml`, and a grant stays granted. No
+guest is told anything. The list is what the run was asked, so clearing a line of
+it clears the question, not the answer's effect.
 
-A destination or a connector entry is kept. The entry is the record of what the
-run was asked, and on a headless service this list is the only place that record
-is read. An answered destination entry is also the only handle `ask-again` has:
-the rule itself says `approved during a run`, so removing the entry would not
-make the rule unattributable, but it would leave the file as the only way to take
-that rule back. So `rm` on either is a refusal: it says why that entry is not
-removed, and exits `1`.
+Two things follow. A question the run can still reach comes back: a destination
+nothing decides raises a fresh card, and a fresh entry, the next time a workload
+reaches it. And a rule whose entry you removed has no entry left to take it back.
+`ask-again` needs one, so that rule is yours to edit in the file. It still says
+`approved during a run`, so it still reads as a rule an answer wrote.
 
-A removed notice comes back if the run meets the same thing again.
+A notice the run raises again is listed again.
+
+Entries also go with the run, at `lns rm` and `lns sandbox prune`.
 
 A request an existing rule decides raises no card, so it leaves no entry. That
 includes everything a closed directory refuses ([policy.md](policy.md)). You
@@ -769,8 +769,8 @@ Two surfaces read the entries back. The service's tray menu opens an
 ([§3.7](#37-lns-approval)) lists the same entries at your terminal, and is the
 only surface left when the service runs headless ([service.md](service.md)). Both give an
 **egress** answer late, or change one. Both offer the same three answers, and
-neither offers a once verdict. Both remove a notice, and neither removes a
-destination or a connector entry.
+neither offers a once verdict. Both remove any entry, and a removal changes no
+rule.
 
 You answer a connector entry where you answer any connector. In the **Approvals**
 view that is the row: it offers the same grant the card offered — a method, and a
