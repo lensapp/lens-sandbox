@@ -1,4 +1,4 @@
-.PHONY: dev build build-lns build-lns-service test test-crates lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests \
+.PHONY: dev build build-lns build-lns-service test test-crates lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests fixture-components \
 	lint-impl test-impl test-crates-impl complexity-impl coverage-impl coverage-data-impl parity-impl coverage-affected-impl
 
 CARGO ?= cargo
@@ -113,7 +113,7 @@ complexity-impl coverage-data-impl: export CARGO_INCREMENTAL := 0
 lint:
 	@$(TIMED) lint -- $(MAKE) --no-print-directory lint-impl
 
-lint-impl: shell-tests
+lint-impl: shell-tests fixture-components
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace --all-targets $(CARGO_LOCKED) -- -D warnings -D clippy::undocumented_unsafe_blocks
 
@@ -192,6 +192,20 @@ shell-tests:
 			echo "shell-tests note: reported no result (a tool is missing here):$$silent"; \
 		fi; \
 		exit $$status
+
+# The mechanism components the wasm tests run are committed beside their source,
+# so nothing in the test run would notice that source changing under them. This
+# rebuilds and compares. It needs the wasm32-wasip2 target, which a Rust-only
+# checkout need not have, so it prints what it skipped rather than blocking a
+# commit — and in CI, where the lint job installs the target, a skip fails the
+# step, because silence must not read as agreement.
+fixture-components:
+	@if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-wasip2; then \
+		echo "fixture-components note: skipped (rustup target add wasm32-wasip2 to run it)"; \
+		[ -z "$${CI:-}" ] || { echo "fixture-components: CI installs the target, so a skip here is a dead step"; exit 1; }; \
+	else \
+		crates/lns-service/tests/fixtures/mechanism/build.sh --check; \
+	fi
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:

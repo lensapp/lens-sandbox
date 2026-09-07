@@ -92,10 +92,18 @@ jobs:
         with:
           # Per-job cache-shared-key so lint/test/coverage don't fight
           # for the same target/ slot. `make complexity` nests its own dir
-          # inside target/, which rust-cache stores with the rest.
-          cache-workspaces: .
+          # inside target/, which rust-cache stores with the rest. The
+          # mechanism fixtures are their own workspace, so their target dir
+          # is cached separately or every run rebuilds all of them.
+          cache-workspaces: |
+            .
+            crates/lns-service/tests/fixtures/mechanism
           cache-on-failure: true
           cache-shared-key: lns-ci-lint
+
+      # `make lint` rebuilds the committed mechanism components and compares.
+      # Without the target it would skip, and a stale component would reach main.
+      - run: rustup target add wasm32-wasip2
 
       - run: CARGO_LOCKED=--locked make lint
       - run: make complexity
