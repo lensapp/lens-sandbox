@@ -69,6 +69,26 @@ Feature: the approvals a run keeps
     When a workload reaches "api.linear.app"
     Then the run's approvals list "api.linear.app" as always allowed
 
+  # A once verdict answers the request in hand and earns no rule, so it changes
+  # nothing about what the run has decided. Reading the entry back as undecided
+  # would say the destination is open to question while the rule still allows it.
+  Scenario: A once verdict on a card the entry already answered leaves the answer it has
+    Given the run records what it decides in "decisions.yaml"
+    And the run's approvals list "api.linear.app" as always allowed
+    When a workload reaches "api.linear.app"
+    And the developer picks "allow once"
+    Then the run's approvals list "api.linear.app" as always allowed
+
+  # The other way to earn no rule: the answer the entry already gave shadows
+  # the one the developer just picked, so nothing is written and what the run
+  # decides is still the answer the entry carries.
+  Scenario: An always verdict refused as shadowed leaves the answer the entry has
+    Given the run records what it decides in "decisions.yaml"
+    And the run's approvals list "api.linear.app" as always allowed
+    When a workload reaches "api.linear.app"
+    And the developer picks "always deny"
+    Then the run's approvals list "api.linear.app" as always allowed
+
   # `rm` clears the record and keeps the rule, and a connector hold re-asks
   # about a destination the policy already allows. Both leave a rule with no
   # entry beside it, and the card the run raises is still one to list.

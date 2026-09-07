@@ -715,10 +715,17 @@ impl ApprovalSession {
         if rule_stands {
             self.save_persisted();
         }
-        // Only a rule that stands changes what the run has decided; every other answer leaves the question open.
-        self.note(&entry, state_after(decision, rule_stands));
+        self.note_the_card(&entry, decision, rule_stands);
         self.record_approval(&entry, decision, None);
         DecisionOutcome::Resolved
+    }
+
+    /// What a card's own answer leaves on the entry: only a rule that stands changes what the run has decided, so every other verdict leaves the answer the entry already carries.
+    fn note_the_card(&self, entry: &PendingEntry, decision: Decision, rule_stands: bool) {
+        match AlwaysVerdict::of(decision).filter(|_| rule_stands) {
+            Some(verdict) => self.note(entry, verdict.state()),
+            None => self.note_if_open(entry, EntryState::Undecided),
+        }
     }
 
     /// Sends the wire decision unless the request already timed out, because the guest forgot that id when it did.
@@ -1092,14 +1099,6 @@ fn unwritten_because(approval: Approval) -> Option<String> {
         Approval::Unreachable(pattern) => Some(format!(
             "this exact rule is already in the policy file, but behind the rule for {pattern:?} that the guest reaches first — move it ahead of that rule to stop being asked"
         )),
-    }
-}
-
-/// What the run has decided about a destination after this answer: a once verdict, and one that wrote no rule, leave the question open.
-fn state_after(decision: Decision, rule_stands: bool) -> EntryState {
-    match AlwaysVerdict::of(decision) {
-        Some(verdict) if rule_stands => verdict.state(),
-        _ => EntryState::Undecided,
     }
 }
 
