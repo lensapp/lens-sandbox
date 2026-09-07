@@ -3,6 +3,10 @@
 //! These stand in for a real connector's implementation. lns cannot read what a
 //! component does, so what the tests need is a component that does one legible
 //! thing and reports which way the host answered it.
+//!
+//! One build compiles one feature of the twenty, so what the other nineteen use
+//! is dead in each of them — and `make lint` builds them all.
+#![allow(unused_imports, dead_code)]
 
 wit_bindgen::generate!({ world: "mechanism", path: "../../../wit" });
 
