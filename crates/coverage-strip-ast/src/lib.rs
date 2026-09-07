@@ -337,12 +337,21 @@ impl<'a> ExecutableLineCollector<'a> {
     }
 }
 
-/// Whether this expression computes nothing at run time: a literal, a path to a unit variant or constant, or a sign or parentheses over either.
+/// Whether this expression computes nothing at run time: a literal, a path to a unit variant or constant, or a sign or parentheses over a literal.
 fn is_constant_expr(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Lit(_) | syn::Expr::Path(_) => true,
-        syn::Expr::Unary(unary) => is_constant_expr(&unary.expr),
+        // `*`, `!` and `-` over anything but a literal may dispatch to a `Deref`, `Not` or `Neg` impl, whose call is a count worth measuring.
+        syn::Expr::Unary(unary) => is_literal_expr(&unary.expr),
         syn::Expr::Paren(paren) => is_constant_expr(&paren.expr),
+        _ => false,
+    }
+}
+
+fn is_literal_expr(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(_) => true,
+        syn::Expr::Paren(paren) => is_literal_expr(&paren.expr),
         _ => false,
     }
 }
@@ -725,6 +734,25 @@ fn make() -> Pair {
 
         assert!(!c.lines.contains(&4), "parentheses compute nothing");
         assert!(!c.lines.contains(&5), "nor a sign over them");
+    }
+
+    #[test]
+    fn a_field_whose_operator_can_dispatch_to_an_impl_is_kept() {
+        // `*` over a smart pointer calls `Deref::deref` and `!` over a flags type calls `Not::not`; a line that calls a function has a count the gate must keep measuring.
+        let src = r#"
+fn take(held: &Rc<Body>, flags: Flags) -> Pair {
+    Pair {
+        body: *held,
+        open: !flags,
+    }
+}
+"#;
+        let ast = syn::parse_file(src).unwrap();
+        let mut c = ExecutableLineCollector::new(src);
+        c.visit_file(&ast);
+
+        assert!(c.lines.contains(&4), "a deref may run a `Deref` impl");
+        assert!(c.lines.contains(&5), "and a `!` may run a `Not` impl");
     }
 
     #[test]
