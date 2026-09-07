@@ -227,6 +227,30 @@ pub fn egress(
     ev.build()
 }
 
+/// What a connector's own code did on this machine: a host it reached, or a program it started. It happens outside any run, so it lands on the machine-level chain (`docs/sandbox-spec.md` §3.2.6).
+pub fn mechanism(ctx: &Context, connector: &str, verb: &str, target: &str, refused: bool) -> Value {
+    let outcome = if refused { "refused" } else { "allowed" };
+    Event::new(
+        "mechanism",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("{connector} {verb} {target} ({outcome})").into(),
+    )
+    .set("service", json!({"name": connector}))
+    .set("actor", lns_actor())
+    .note("lns_connector", connector.into())
+    .note("lns_verb", verb.into())
+    .note("lns_target", target.into())
+    .note("lns_outcome", outcome.into())
+    .build()
+}
+
 pub fn workload_launch(ctx: &Context, image: &str) -> Value {
     Event::new(
         "launch",
@@ -510,6 +534,37 @@ mod tests {
             run: "9e8d7c6b0000",
             microvm: "calm-finch",
         }
+    }
+
+    #[test]
+    fn what_a_connectors_own_code_did_is_readable_without_reading_the_code() {
+        // §3.2.6 makes every outbound call and every execution a durable record, because nobody can read what the component does.
+        let reached = mechanism(
+            &ctx(),
+            "some-provider",
+            "reached",
+            "auth.example.com",
+            false,
+        );
+        assert_schema_valid(&reached);
+        assert_eq!(
+            reached["message"],
+            "some-provider reached auth.example.com (allowed)"
+        );
+        assert_eq!(reached["unmapped"]["lns_connector"], "some-provider");
+        assert_eq!(reached["unmapped"]["lns_verb"], "reached");
+        assert_eq!(reached["unmapped"]["lns_target"], "auth.example.com");
+        assert_eq!(reached["unmapped"]["lns_outcome"], "allowed");
+        assert_eq!(reached["service"]["name"], "some-provider");
+    }
+
+    #[test]
+    fn a_call_a_bound_refused_is_recorded_as_refused_rather_than_left_out() {
+        let refused = mechanism(&ctx(), "some-provider", "ran", "claude", true);
+
+        assert_schema_valid(&refused);
+        assert_eq!(refused["message"], "some-provider ran claude (refused)");
+        assert_eq!(refused["unmapped"]["lns_outcome"], "refused");
     }
 
     #[test]

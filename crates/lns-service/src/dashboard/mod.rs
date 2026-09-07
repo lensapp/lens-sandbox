@@ -929,7 +929,7 @@ fn grant_form(
     let method = method.clone();
     ui.add_space(8.0);
     crate::tray::render_connection_choice(ui, offer, &method, draft);
-    crate::tray::render_disclosure(ui, &method);
+    crate::tray::render_disclosure(ui, offer, &method);
     ui.add_space(10.0);
     let ready = crate::tray::ready_to_grant(&method, draft);
     ui.add_enabled(ready, egui::Button::new("Grant to this sandbox"))

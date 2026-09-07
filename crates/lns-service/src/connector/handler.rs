@@ -95,27 +95,35 @@ fn view_of(
             .spec
             .methods
             .iter()
-            .map(|method| ConnectorMethodView {
-                name: method.name.clone(),
-                label: method.label().to_string(),
-                auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
-                offerable: can_apply(method),
-                opens: opened_by(method),
-                writes: method
-                    .filesets
-                    .iter()
-                    .map(|fileset| lns_artifact::connector::guest_directory(&fileset.guest_path))
-                    .collect(),
-                env: method.env.keys().cloned().collect(),
-                credentials: method
-                    .credentials
-                    .iter()
-                    .map(|credential| credential.owner().to_string())
-                    .collect(),
-                asks: asked_of(method),
-                help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
-                // Filled where a run's document is in hand; the store alone cannot say what a method overrides.
-                overrides: None,
+            .map(|method| {
+                let code = code_of(method);
+                ConnectorMethodView {
+                    name: method.name.clone(),
+                    label: method.label().to_string(),
+                    auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
+                    offerable: can_apply(method),
+                    opens: opened_by(method),
+                    writes: method
+                        .filesets
+                        .iter()
+                        .map(|fileset| {
+                            lns_artifact::connector::guest_directory(&fileset.guest_path)
+                        })
+                        .collect(),
+                    hosts: code.clone().map(|code| code.hosts).unwrap_or_default(),
+                    runs_programs: code.as_ref().is_some_and(|code| code.exec),
+                    carries_code: code.is_some(),
+                    env: method.env.keys().cloned().collect(),
+                    credentials: method
+                        .credentials
+                        .iter()
+                        .map(|credential| credential.owner().to_string())
+                        .collect(),
+                    asks: asked_of(method),
+                    help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
+                    // Filled where a run's document is in hand; the store alone cannot say what a method overrides.
+                    overrides: None,
+                }
             })
             .collect(),
         connections: connection_views(connections),
@@ -153,6 +161,15 @@ fn opened_by(method: &lns_artifact::connector::Method) -> Vec<String> {
         .collect()
 }
 
+/// The `code` block a method connects with, where it has one and it reads (§3.2.6).
+fn code_of(method: &lns_artifact::connector::Method) -> Option<lns_artifact::connector::CodeAuth> {
+    method
+        .auth
+        .as_ref()
+        .and_then(lns_artifact::connector::Auth::code)
+        .and_then(Result::ok)
+}
+
 fn connection_views(connections: &BTreeMap<String, Connection>) -> Vec<ConnectorConnectionView> {
     connections
         .iter()
@@ -181,38 +198,6 @@ pub struct Granted {
     pub displaced: Option<String>,
     /// True when the run already held exactly this grant, which cli-spec §3.3 makes an exit-1 answer rather than a change.
     pub unchanged: bool,
-}
-
-/// Store what an authentication returned as a connection. A method with no `auth` has nothing to connect and is granted instead (cli-spec §3.3).
-pub fn connect(
-    store: &ConnectorStore<'_>,
-    name: &str,
-    method: &str,
-    label: &str,
-    values: std::collections::BTreeMap<String, String>,
-) -> Result<Connected> {
-    let definition = definition_of(store, name)?;
-    let method = offerable_method(&definition, method)?;
-    if method.auth.is_none() {
-        anyhow::bail!(
-            "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
-            method.name
-        );
-    }
-    let invalidated = store.record_authentication(
-        name,
-        label,
-        super::store::Connection {
-            method: method.name.clone(),
-            // A `kind: token` exchange reports no authority (§3.2.4).
-            authority: super::store::Authority::default(),
-            values,
-        },
-    )?;
-    Ok(Connected {
-        connection: label.to_string(),
-        invalidated,
-    })
 }
 
 /// Drop one connection, or every connection of a connector. The connector stays installed and grants naming a dropped connection stay (cli-spec §3.3).
@@ -542,20 +527,12 @@ fn displaced_method(decision: super::store::RunDecision) -> Option<String> {
     }
 }
 
-fn installed_entry(store: &ConnectorStore<'_>, name: &str) -> Result<Installed> {
+pub(super) fn installed_entry(store: &ConnectorStore<'_>, name: &str) -> Result<Installed> {
     store
         .installed()?
         .into_iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| anyhow::anyhow!("no connector named {name} is installed on this machine"))
-}
-
-fn definition_of(
-    store: &ConnectorStore<'_>,
-    name: &str,
-) -> Result<lns_artifact::connector::ConnectorDefinition> {
-    let entry = installed_entry(store, name)?;
-    lns_artifact::connector::parse(&entry.document)
 }
 
 /// What this version can deliver, which is narrower than what a document may declare: install keeps a packed fileset's bytes, but nothing reads them back into the files a grant sends, so a method writing one cannot be applied yet (§3.2.2).
@@ -568,7 +545,7 @@ fn can_apply(method: &lns_artifact::connector::Method) -> bool {
 }
 
 /// The named method, refused when this version cannot deliver it — the card could not either (§3.2.2).
-fn offerable_method<'a>(
+pub(super) fn offerable_method<'a>(
     definition: &'a lns_artifact::connector::ConnectorDefinition,
     method: &str,
 ) -> Result<&'a lns_artifact::connector::Method> {
@@ -1123,49 +1100,26 @@ mod tests {
         [("SOME_TOKEN".to_string(), "real-secret".to_string())].into()
     }
 
-    #[tokio::test]
-    async fn connecting_stores_a_connection_the_machine_then_holds() {
-        let rig = Rig::new();
-        installed(&rig).await;
-        let connected = connect(&rig.store(), "some-provider", "token", "work", values())
-            .expect("token is an offerable method that authenticates");
-        assert_eq!(connected.connection, "work");
-        assert!(connected.invalidated.is_empty());
-        assert_eq!(
-            rig.store().connections_of("some-provider").unwrap()["work"].method,
-            "token"
-        );
-    }
-
-    #[tokio::test]
-    async fn connecting_a_method_that_does_not_authenticate_is_refused_and_names_granting() {
-        // cli-spec §3.3: a method with no `auth` has nothing to connect, so it is granted instead.
-        let rig = Rig::new();
-        installed(&rig).await;
-        let err = connect(&rig.store(), "some-provider", "open", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("nothing to connect"), "{err}");
-        assert!(err.contains("grant it instead"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn connecting_names_the_connector_that_is_not_installed() {
-        let rig = Rig::new();
-        let err = connect(&rig.store(), "absent", "token", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("absent"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn connecting_a_method_the_connector_does_not_declare_is_refused() {
-        let rig = Rig::new();
-        installed(&rig).await;
-        let err = connect(&rig.store(), "some-provider", "mystery", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no method named mystery"), "{err}");
+    /// A connection the machine already holds. What produces one is `connector::connect`, tested there; these tests are about what the other verbs do beside one.
+    fn connect(
+        store: &ConnectorStore<'_>,
+        name: &str,
+        method: &str,
+        label: &str,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<Connected> {
+        Ok(Connected {
+            connection: label.to_string(),
+            invalidated: store.record_authentication(
+                name,
+                label,
+                Connection {
+                    method: method.to_string(),
+                    authority: Authority::default(),
+                    values,
+                },
+            )?,
+        })
     }
 
     #[tokio::test]

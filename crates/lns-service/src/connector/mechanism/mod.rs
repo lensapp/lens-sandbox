@@ -6,6 +6,8 @@
 //! answer the same shapes.
 
 pub mod host;
+pub mod real;
+pub mod selection;
 pub mod token;
 pub mod traits;
 pub mod wasm;
@@ -25,7 +27,7 @@ pub struct Field {
 pub type Answers = BTreeMap<String, String>;
 
 /// What a finished connect produced. `expires_at_millis` is what the mechanism believes; lns owns the schedule and a renewal may not shorten it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     pub values: Answers,
     pub authority: BTreeSet<String>,
@@ -33,7 +35,7 @@ pub struct Outcome {
 }
 
 /// One turn of a connect. A mechanism that needs nothing from the user answers `Done` on its first call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Step {
     Ask {
         /// The connector author's words, not lns's, so whatever shows them says whose they are (§3.2.6).
@@ -43,6 +45,37 @@ pub enum Step {
     },
     Done(Outcome),
     Failed(String),
+}
+
+impl std::fmt::Debug for Outcome {
+    /// Hand-written so a `log::debug!` of an outcome cannot print the value it carries.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Outcome")
+            .field("values", &format_args!("<{} redacted>", self.values.len()))
+            .field("authority", &self.authority)
+            .field("expires_at_millis", &self.expires_at_millis)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Step {
+    /// Hand-written so a `log::debug!` of a step cannot print the state it holds, and so an `Outcome`'s own redaction is not bypassed by printing the step around it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ask {
+                message,
+                fields,
+                state,
+            } => f
+                .debug_struct("Ask")
+                .field("message", message)
+                .field("fields", fields)
+                .field("state", &format_args!("<{} bytes redacted>", state.len()))
+                .finish(),
+            Self::Done(outcome) => f.debug_tuple("Done").field(outcome).finish(),
+            Self::Failed(why) => f.debug_tuple("Failed").field(why).finish(),
+        }
+    }
 }
 
 /// A call the host refused is told apart from one that failed, so a component can distinguish a bound it crossed from a network that was down.
@@ -125,4 +158,4 @@ pub struct ExecOutput {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

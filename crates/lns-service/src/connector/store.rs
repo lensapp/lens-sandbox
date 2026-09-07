@@ -276,6 +276,7 @@ fn names_connection_with_other_authority(
 /// Held across every load-mutate-save. Process-wide rather than per store, because each entry point opens a store of its own over the same three files, so a lock one instance owned would serialize nothing.
 static WRITE: Mutex<()> = Mutex::new(());
 
+#[derive(Clone, Copy)]
 pub struct ConnectorStore<'a> {
     installed: &'a dyn InstalledSet,
     values: &'a dyn DecisionStore<Connection>,
@@ -344,6 +345,11 @@ impl<'a> ConnectorStore<'a> {
     /// One packed fileset of an installed connector, by its index in the document's `path` entries.
     pub fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
         self.installed.fileset_layer(name, index)
+    }
+
+    /// One component of an installed connector, by its index among the document's `code` methods.
+    pub fn component(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+        self.installed.component(name, index)
     }
 
     /// Removes every connection the connector held, then the connector, and leaves what runs granted untouched (§7.1).

@@ -62,7 +62,7 @@ impl Host {
             )));
         }
         self.recorder.reached(&self.connector, target.host, false);
-        self.http.fetch(request)
+        self.http.fetch(request, self.within())
     }
 
     /// Run a program on the machine with the user's own access. Available only where the method declared it (§3.2.6).
@@ -77,7 +77,12 @@ impl Host {
             ));
         }
         self.recorder.ran(&self.connector, program, false);
-        self.exec.run(argv)
+        self.exec.run(argv, self.within())
+    }
+
+    /// How long one call has. The runtime's epoch cannot interrupt a host call already in flight, so the deadline travels with it (§3.2.6).
+    fn within(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.bounds.call_seconds))
     }
 
     pub fn bytes(&self, count: u32) -> Vec<u8> {

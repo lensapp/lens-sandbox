@@ -15,12 +15,33 @@ pub trait Mechanism: Send + Sync {
     fn revoke(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<()>;
 }
 
+/// The mechanism a method connects with, and the bounds lns holds around it. One implementation reads `token` natively; the other compiles the component the method carries (§3.2.6).
+pub trait Mechanisms: Send + Sync {
+    fn for_method(
+        &self,
+        connector: &str,
+        method: &lns_artifact::connector::Method,
+        component: Option<Vec<u8>>,
+    ) -> Result<Prepared>;
+}
+
+/// One mechanism, ready to call, and the host it calls through.
+pub struct Prepared {
+    pub mechanism: Box<dyn Mechanism>,
+    pub host: Host,
+}
+
 pub trait Http: Send + Sync {
-    fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, CallError>;
+    /// `within` is the deadline the method declared. An epoch tick cannot interrupt a host call already in flight, so the call has to carry it.
+    fn fetch(
+        &self,
+        request: &HttpRequest,
+        within: std::time::Duration,
+    ) -> Result<HttpResponse, CallError>;
 }
 
 pub trait Exec: Send + Sync {
-    fn run(&self, argv: &[String]) -> Result<ExecOutput, CallError>;
+    fn run(&self, argv: &[String], within: std::time::Duration) -> Result<ExecOutput, CallError>;
 }
 
 pub trait Entropy: Send + Sync {

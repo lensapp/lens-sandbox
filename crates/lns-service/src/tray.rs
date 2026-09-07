@@ -1286,7 +1286,7 @@ fn render_connector_card(
             match method {
                 Some(method) => {
                     render_connection_choice(ui, offer, method, draft);
-                    render_disclosure(ui, method);
+                    render_disclosure(ui, offer, method);
                     ready.set(ready_to_grant(method, draft));
                 }
                 // §3.2.2: the card names what needed a newer lns, and keeps `Never here` — the hold outranks an ordinary allow, so declining is the only answer that ends it.
@@ -1329,11 +1329,23 @@ pub(crate) fn chosen_method<'a>(
     offer: &'a lns_ipc::ConnectorView,
     draft: &OfferDraft,
 ) -> Option<&'a lns_ipc::ConnectorMethodView> {
-    let offerable = || offer.methods.iter().find(|method| method.offerable);
-    match &draft.method {
-        Some(named) => offer.methods.iter().find(|method| &method.name == named),
-        None => offerable(),
+    if let Some(named) = &draft.method {
+        return offer.methods.iter().find(|method| &method.name == named);
     }
+    let offerable = || offer.methods.iter().filter(|method| method.offerable);
+    // One this card can finish, first: a method whose mechanism decides its own fields can only be connected at a terminal, so choosing it over a method beside it would leave the user nothing to press.
+    offerable()
+        .find(|method| completable_here(offer, method))
+        .or_else(|| offerable().next())
+}
+
+/// Whether pressing Connect on this card could lead anywhere: the card asks for it itself, or the machine already holds a connection it could be granted through.
+fn completable_here(offer: &lns_ipc::ConnectorView, method: &lns_ipc::ConnectorMethodView) -> bool {
+    asks_here(method)
+        || offer
+            .connections
+            .iter()
+            .any(|held| held.method == method.name)
 }
 
 /// Which connection the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
@@ -1437,6 +1449,15 @@ fn render_new_connection(
     if !draft.connecting {
         return;
     }
+    if !asks_here(method) {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(CONNECT_AT_A_TERMINAL)
+                .size(theme::FONT_CAPTION)
+                .color(window::TEXT_MUTED),
+        );
+        return;
+    }
     if let Some(help) = &method.help {
         ui.add_space(6.0);
         ui.label(
@@ -1459,6 +1480,9 @@ fn render_new_connection(
         secret_input(ui, value, asked_for);
     }
 }
+
+/// What the card says instead of a form it cannot draw. A run is offered the connections this machine held when it started, so one made now reaches it at its next start — the same answer the fileset refusal gives.
+const CONNECT_AT_A_TERMINAL: &str = "This method signs in through its own code, which decides what to ask for, so this card cannot ask. Run `lns connector connect` at a terminal and start this run again.";
 
 /// Suggests a name nothing already holds, because reusing one silently replaces the connection under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
 fn begin_connecting(
@@ -1489,8 +1513,11 @@ fn secret_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Resp
 }
 
 /// What applying this method will do, each line named by §3.2.4 and omitted when there is nothing to say.
-fn disclosure_lines(method: &lns_ipc::ConnectorMethodView) -> Vec<String> {
-    [
+fn disclosure_lines(
+    offer: &lns_ipc::ConnectorView,
+    method: &lns_ipc::ConnectorMethodView,
+) -> Vec<String> {
+    let mut lines: Vec<String> = [
         ("Opens", method.opens.clone()),
         ("Sets", method.sets()),
         ("Writes", method.writes.clone()),
@@ -1498,7 +1525,34 @@ fn disclosure_lines(method: &lns_ipc::ConnectorMethodView) -> Vec<String> {
     .into_iter()
     .filter(|(_, items)| !items.is_empty())
     .map(|(label, items)| format!("{label}: {}", items.join(", ")))
-    .collect()
+    .collect();
+    if method.carries_code {
+        let reaches = if method.hosts.is_empty() {
+            lns_ipc::NO_HOSTS_DISCLOSURE.to_string()
+        } else {
+            method.hosts.join(", ")
+        };
+        lines.push(format!("Code may contact: {reaches}"));
+        lines.push(format!("Installed at: {}", offer.digest));
+    }
+    lines
+}
+
+/// A `code` method's mechanism decides what to ask and may take more than one round, which a card cannot show; so the card discloses and grants, and the asking happens where there is a terminal to ask at.
+fn asks_here(method: &lns_ipc::ConnectorMethodView) -> bool {
+    !method.carries_code
+}
+
+/// The sentence a card MUST carry verbatim for a method whose mechanism is code nobody can read, and which of the two it is (§1.5). The blunter one withdraws a guarantee, so it is drawn as a warning.
+fn code_disclosure(method: &lns_ipc::ConnectorMethodView) -> Option<&'static str> {
+    if !method.carries_code {
+        return None;
+    }
+    Some(if method.runs_programs {
+        lns_ipc::UNBOUNDED_CODE_DISCLOSURE
+    } else {
+        lns_ipc::BOUNDED_CODE_DISCLOSURE
+    })
 }
 
 /// The deny this method would overturn, which §3.2.4 makes the card name. Absent where it overturns none, and where the run ships no document to overturn one in.
@@ -1510,8 +1564,12 @@ fn override_line(method: &lns_ipc::ConnectorMethodView) -> Option<String> {
     ))
 }
 
-pub(crate) fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMethodView) {
-    for line in disclosure_lines(method) {
+pub(crate) fn render_disclosure(
+    ui: &mut egui::Ui,
+    offer: &lns_ipc::ConnectorView,
+    method: &lns_ipc::ConnectorMethodView,
+) {
+    for line in disclosure_lines(offer, method) {
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(line)
@@ -1519,7 +1577,10 @@ pub(crate) fn render_disclosure(ui: &mut egui::Ui, method: &lns_ipc::ConnectorMe
                 .color(window::TEXT_MUTED),
         );
     }
-    if let Some(line) = override_line(method) {
+    for line in code_disclosure(method)
+        .into_iter()
+        .chain(override_line(method).as_deref())
+    {
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(line)
@@ -1561,6 +1622,10 @@ pub(crate) fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &Offe
     }
     if !draft.connecting {
         return draft.connection.is_some();
+    }
+    if !asks_here(method) {
+        // The card cannot collect what a mechanism decides round by round, so it grants a connection made elsewhere.
+        return false;
     }
     !draft.label.trim().is_empty()
         && method
@@ -2035,6 +2100,9 @@ mod tests {
                         asks: credentials.iter().map(|c| c.to_string()).collect(),
                         help: None,
                         overrides: None,
+                        hosts: Vec::new(),
+                        runs_programs: false,
+                        carries_code: false,
                     }],
                     connections: connections
                         .iter()
@@ -2383,6 +2451,9 @@ mod tests {
             asks: vec!["SOME_TOKEN".into()],
             help: None,
             overrides: None,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         };
         assert!(
             !ready_to_grant(&method, &waiting),
@@ -2413,11 +2484,158 @@ mod tests {
             asks: vec!["token".into()],
             help: None,
             overrides: None,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         };
         assert_eq!(
-            disclosure_lines(&method),
+            disclosure_lines(&installed_at("sha256:abc"), &method),
             ["Sets: SOME_REGION, SOME_TOKEN"],
             "the secret field is labelled by the sign-in now, so the disclosure is the only place the variable is named"
+        );
+    }
+
+    fn installed_at(digest: &str) -> lns_ipc::ConnectorView {
+        lns_ipc::ConnectorView {
+            name: "some-provider".into(),
+            digest: digest.into(),
+            serves: Vec::new(),
+            methods: Vec::new(),
+            connections: Vec::new(),
+        }
+    }
+
+    fn carrying_code(hosts: &[&str], runs_programs: bool) -> lns_ipc::ConnectorMethodView {
+        lns_ipc::ConnectorMethodView {
+            name: "sign-in".into(),
+            label: "sign-in".into(),
+            auth_label: Some("sign-in".into()),
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            asks: vec!["access_token".into()],
+            help: None,
+            overrides: None,
+            hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+            runs_programs,
+            carries_code: true,
+        }
+    }
+
+    #[test]
+    fn a_card_offers_a_method_it_can_finish_over_one_it_cannot() {
+        // A connector commonly declares a code sign-in and a paste-a-token fallback; choosing the first would leave the user only `Never here`.
+        let offer = lns_ipc::ConnectorView {
+            methods: vec![carrying_code(&[], false), opening(None)],
+            ..installed_at("sha256:abc")
+        };
+
+        let chosen = chosen_method(&offer, &OfferDraft::default()).expect("one is offerable");
+
+        assert_eq!(chosen.name, "token");
+    }
+
+    #[test]
+    fn a_card_still_offers_a_code_method_where_a_connection_for_it_is_already_held() {
+        let mut offer = lns_ipc::ConnectorView {
+            methods: vec![carrying_code(&[], false)],
+            ..installed_at("sha256:abc")
+        };
+        offer.connections.push(lns_ipc::ConnectorConnectionView {
+            label: "work".into(),
+            method: "sign-in".into(),
+            authority: Vec::new(),
+        });
+
+        let chosen = chosen_method(&offer, &OfferDraft::default()).expect("one is offerable");
+
+        assert_eq!(chosen.name, "sign-in");
+    }
+
+    #[test]
+    fn a_card_does_not_invite_a_paste_of_what_a_component_is_supposed_to_produce() {
+        // The mechanism decides what to ask and may take more than one round; a card can show neither.
+        let carrying = carrying_code(&[], false);
+
+        assert!(!asks_here(&carrying), "the card draws no form for it");
+        assert!(
+            !ready_to_grant(
+                &carrying,
+                &OfferDraft {
+                    connecting: true,
+                    label: "work".into(),
+                    ..OfferDraft::default()
+                }
+            ),
+            "and there is nothing it could collect that would make one ready"
+        );
+        assert!(
+            asks_here(&opening(None)),
+            "a method lns implements still asks here"
+        );
+    }
+
+    #[test]
+    fn a_card_that_cannot_ask_names_a_route_it_can_actually_complete() {
+        // A run is offered the connections this machine held when it started, so "grant it here afterwards" would be a promise the card cannot keep.
+        assert!(
+            CONNECT_AT_A_TERMINAL.contains("lns connector connect")
+                && CONNECT_AT_A_TERMINAL.contains("start this run again"),
+            "got: {CONNECT_AT_A_TERMINAL}"
+        );
+    }
+
+    #[test]
+    fn the_card_discloses_the_bounds_of_a_method_it_cannot_show_the_behaviour_of() {
+        // §1.5: a component cannot be read, so what stands in for reading it is the hosts it may reach and the digest the grant binds to.
+        let lines = disclosure_lines(
+            &installed_at("sha256:abc"),
+            &carrying_code(&["auth.some-provider.example"], false),
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "Code may contact: auth.some-provider.example",
+                "Installed at: sha256:abc",
+            ]
+        );
+        assert_eq!(
+            code_disclosure(&carrying_code(&["auth.some-provider.example"], false)),
+            Some(lns_ipc::BOUNDED_CODE_DISCLOSURE)
+        );
+    }
+
+    #[test]
+    fn the_card_says_a_method_reaches_nothing_rather_than_saying_nothing() {
+        let lines = disclosure_lines(&installed_at("sha256:abc"), &carrying_code(&[], false));
+
+        assert_eq!(
+            lines[0],
+            format!("Code may contact: {}", lns_ipc::NO_HOSTS_DISCLOSURE)
+        );
+    }
+
+    #[test]
+    fn a_card_for_a_method_that_runs_programs_cannot_claim_the_stronger_disclosure() {
+        // The blunter sentence withdraws the guarantee the first makes, so carrying the first would state something false.
+        let said = code_disclosure(&carrying_code(&[], true)).expect("a code method says one");
+
+        assert_eq!(said, lns_ipc::UNBOUNDED_CODE_DISCLOSURE);
+        assert!(!said.contains("It can only bound where it runs"));
+    }
+
+    #[test]
+    fn a_method_carrying_no_code_says_nothing_about_code() {
+        let plain = opening(None);
+
+        assert_eq!(code_disclosure(&plain), None);
+        assert!(
+            !disclosure_lines(&installed_at("sha256:abc"), &plain)
+                .iter()
+                .any(|line| line.starts_with("Code may contact"))
         );
     }
 
@@ -2434,6 +2652,9 @@ mod tests {
             asks: Vec::new(),
             help: None,
             overrides,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         }
     }
 
@@ -2468,6 +2689,9 @@ mod tests {
             asks: Vec::new(),
             help: None,
             overrides: None,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         };
         let mut first = OfferDraft::default();
         begin_connecting(&method, &mut first, &holding(&[]));

@@ -30,6 +30,23 @@ pub fn append_tool_provisioned(
     ))
 }
 
+/// What a connector's own code did belongs to no run, so it lands on the machine-level chain beside a tool this machine fetched (§3.2.6).
+pub fn append_mechanism_event(
+    clock: &dyn Clock,
+    connector: &str,
+    verb: &str,
+    target: &str,
+    refused: bool,
+) -> Result<()> {
+    append_machine_event(crate::ocsf_audit::mechanism_event(
+        &crate::ocsf_audit::OcsfCtx::at_unix(String::new(), String::new(), clock.now_unix()),
+        connector,
+        verb,
+        target,
+        refused,
+    ))
+}
+
 fn append_machine_event(event: serde_json::Map<String, serde_json::Value>) -> Result<()> {
     // The machine-global ledger is written by every concurrent run; serialize so the hash chain can't interleave.
     static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -245,6 +262,36 @@ mod tests {
         append_ledger_record_at(&path, &anchor_path, &sample("aa02")).unwrap();
         let anchor = crate::audit::read_anchor(&anchor_path).expect("anchor written");
         assert_eq!(anchor.line_count, 2);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn what_a_connectors_own_code_did_lands_on_the_machine_chain_and_no_runs() {
+        // A component runs on the machine's behalf and no run can account for it (§3.2.6).
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+
+        append_mechanism_event(
+            &FakeClock(1_780_000_000),
+            "some-provider",
+            "ran",
+            "claude",
+            false,
+        )
+        .unwrap();
+
+        let path = lns_ipc::connection_ledger().unwrap();
+        let events: Vec<_> = lns_audit::stream_ledger(&path)
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        let row = lns_audit::read(&events[0]).unwrap();
+        assert_eq!(row.run, "", "no run holds what a connector's code did");
+        assert!(
+            row.detail.contains("claude") && row.detail.contains("some-provider"),
+            "got: {}",
+            row.detail
+        );
     }
 
     #[test]
