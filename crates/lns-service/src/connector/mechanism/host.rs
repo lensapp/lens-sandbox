@@ -44,25 +44,30 @@ impl Host {
 
     /// Reach one host the method declared, over TLS. Anything else is refused before the request is built, so nothing leaves the machine (§3.2.6).
     pub fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, CallError> {
-        let target = Target::of(&request.url).ok_or_else(|| {
-            CallError::Refused(format!("{} names no host lns can read", request.url))
-        })?;
-        if !target.is_tls {
-            self.recorder.reached(&self.connector, target.host, true);
+        let target = Target::of(&request.url).map_err(CallError::Refused)?;
+        if !target.is_tls() {
+            self.recorder.reached(&self.connector, &target.host, true);
             return Err(CallError::Refused(format!(
                 "{} is not https: lns carries a mechanism's calls over TLS or not at all",
                 request.url
             )));
         }
-        if !self.bounds.allows(target.host, target.port) {
-            self.recorder.reached(&self.connector, target.host, true);
+        if !self.bounds.allows(&target.host, target.port) {
+            self.recorder.reached(&self.connector, &target.host, true);
             return Err(CallError::Refused(format!(
                 "{} is not among the hosts this method declares",
                 target.host
             )));
         }
-        self.recorder.reached(&self.connector, target.host, false);
-        self.http.fetch(request, self.within())
+        self.recorder.reached(&self.connector, &target.host, false);
+        self.http.fetch(
+            &HttpRequest {
+                // The parse the bound was decided from, so no spelling can be read one way here and another on the wire.
+                url: target.sending.to_string(),
+                ..request.clone()
+            },
+            self.within(),
+        )
     }
 
     /// Run a program on the machine with the user's own access. Available only where the method declared it (§3.2.6).
@@ -90,31 +95,37 @@ impl Host {
     }
 }
 
-/// The port an https URL reaches when it names none.
-const HTTPS: &str = "443";
-
-/// What one URL reaches, as the bound reads it: no userinfo, and the port it lands on whether or not the URL spelled it out.
-struct Target<'a> {
-    is_tls: bool,
-    host: &'a str,
-    port: &'a str,
+/// What one URL reaches, read by the parser that will send it: a bound decided from a second reading of the same string is one a spelling can be dressed past.
+struct Target {
+    sending: reqwest::Url,
+    /// Spelled the way the `match` grammar spells a host, so an address literal is bare rather than bracketed and the two sides of a bound can be compared at all.
+    host: String,
+    port: u16,
 }
 
-impl<'a> Target<'a> {
-    /// `None` where there is nothing lns could match a bound against, which is a refusal rather than a default.
-    fn of(url: &'a str) -> Option<Self> {
-        let (scheme, rest) = url.split_once("://")?;
-        let authority = rest
-            .split(['/', '?', '#'])
-            .next()
-            .filter(|part| !part.is_empty())?;
-        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-        let (host, port) = lns_policy::matching::split_destination(host_port);
-        (!host.is_empty()).then_some(Self {
-            is_tls: scheme.eq_ignore_ascii_case("https"),
-            host,
-            port: port.unwrap_or(HTTPS),
+impl Target {
+    /// A bound holds against a host and a port, so anything lns cannot read one of is refused — and told apart, because "no port" is not a thing an author can act on by rereading the host.
+    fn of(url: &str) -> Result<Self, String> {
+        let sending = reqwest::Url::parse(url)
+            .map_err(|e| format!("{url} is not a URL lns can read: {e}"))?;
+        let host = sending
+            .host_str()
+            .ok_or_else(|| format!("{url} names no host lns can read"))?;
+        let port = sending.port_or_known_default().ok_or_else(|| {
+            format!(
+                "{url} names no port, and lns cannot work out the one {}:// lands on",
+                sending.scheme()
+            )
+        })?;
+        Ok(Self {
+            host: lns_policy::matching::unbracketed(host).to_string(),
+            port,
+            sending,
         })
+    }
+
+    fn is_tls(&self) -> bool {
+        self.sending.scheme() == "https"
     }
 }
 
@@ -122,32 +133,58 @@ impl<'a> Target<'a> {
 mod tests {
     use super::*;
 
+    fn read_as(target: &Target) -> (&str, u16, bool) {
+        (&target.host, target.port, target.is_tls())
+    }
+
     #[test]
     fn a_url_is_read_as_the_host_and_port_it_reaches_and_never_as_its_userinfo() {
         let target = Target::of("https://user:pw@auth.example.com:8443/a?b#c").expect("a target");
-        assert_eq!(
-            (target.host, target.port, target.is_tls),
-            ("auth.example.com", "8443", true)
-        );
+        assert_eq!(read_as(&target), ("auth.example.com", 8443, true));
     }
 
     #[test]
     fn an_https_url_naming_no_port_reaches_the_one_https_means() {
         let target = Target::of("HTTPS://auth.example.com/token").expect("a target");
-        assert_eq!(
-            (target.host, target.port, target.is_tls),
-            ("auth.example.com", "443", true)
-        );
+        assert_eq!(read_as(&target), ("auth.example.com", 443, true));
     }
 
     #[test]
-    fn a_url_naming_no_host_is_read_as_none_rather_than_as_the_empty_bound() {
-        for url in [
-            "auth.example.com/token",
-            "https:///token",
-            "https://:443/token",
+    fn a_backslash_ends_an_authority_here_exactly_as_it_does_on_the_wire() {
+        // The one spelling a second reading of the string gets wrong: `rsplit('@')` reads the host after it, and the sender reads the host before.
+        let target =
+            Target::of(r"https://evil.example.com\@auth.example.com/token").expect("a target");
+        assert_eq!(read_as(&target), ("evil.example.com", 443, true));
+    }
+
+    #[test]
+    fn a_url_naming_no_host_is_refused_rather_than_read_as_the_empty_bound() {
+        for (url, said) in [
+            ("auth.example.com/token", "not a URL"),
+            ("https://:443/token", "not a URL"),
+            ("data:text/plain,x", "names no host"),
         ] {
-            assert!(Target::of(url).is_none(), "{url}");
+            let Err(refusal) = Target::of(url) else {
+                panic!("{url} names no bound lns could hold against it")
+            };
+            assert!(refusal.contains(said), "{url}: {refusal}");
         }
+    }
+
+    #[test]
+    fn a_scheme_with_no_port_to_land_on_is_refused_rather_than_given_one() {
+        // A bound holds against a host and a port, so a scheme lns cannot work a port out for is one it cannot hold a bound against — and the refusal says which half it could not read.
+        let Err(refusal) = Target::of("foo://auth.example.com/token") else {
+            panic!("there is no port for a bound to hold against")
+        };
+        assert!(refusal.contains("names no port"), "{refusal}");
+        assert!(refusal.contains("foo://"), "{refusal}");
+    }
+
+    #[test]
+    fn a_url_whose_host_is_only_a_path_segment_to_read_is_still_read_the_way_it_is_sent() {
+        // `https:///token` reaches a host named `token`, so the bound is held against that and refuses it — a reader that called this hostless would disagree with the sender.
+        let target = Target::of("https:///token").expect("the sender reads a host here");
+        assert_eq!(read_as(&target), ("token", 443, true));
     }
 }

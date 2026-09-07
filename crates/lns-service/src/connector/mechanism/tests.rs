@@ -186,16 +186,95 @@ fn an_undeclared_host_is_refused_before_anything_leaves_the_machine() {
 }
 
 #[test]
-fn a_url_lns_cannot_read_a_host_from_is_refused_rather_than_reached() {
+fn a_bound_holds_against_the_host_the_request_reaches_and_not_a_spelling_beside_it() {
+    // A backslash ends the authority of a special-scheme URL, so this reaches evil.some-provider.example whatever the userinfo before it reads.
     let parts = Parts::new();
     let host = parts.host(declaring(&["auth.some-provider.example"]));
 
     let refusal = host
-        .fetch(&get("auth.some-provider.example/token"))
-        .expect_err("a bound cannot be held against a host lns cannot read");
+        .fetch(&get(
+            r"https://evil.some-provider.example\@auth.some-provider.example/token",
+        ))
+        .expect_err("the bound holds against the host the request would reach");
 
-    assert!(matches!(refusal, CallError::Refused(ref why) if why.contains("no host")));
-    assert!(parts.recorder.taken().reached.is_empty());
+    assert!(
+        matches!(refusal, CallError::Refused(ref why) if why.contains("evil.some-provider.example")),
+        "{refusal:?}"
+    );
+    assert!(parts.http.seen.lock().expect("http lock").is_empty());
+    assert_eq!(
+        parts.recorder.taken().reached,
+        [("evil.some-provider.example".to_string(), true)],
+        "and the record names the host it would have reached, not the one it was dressed as"
+    );
+}
+
+#[test]
+fn a_bound_naming_an_address_literal_holds_against_the_url_that_reaches_it() {
+    // The pattern grammar carries an IPv6 literal unbracketed, so a host read out bracketed would match no spelling of one and the bound would silently hold nothing.
+    for declared in ["[2001:db8::1]:8443", "[2001:db8::1]", "2001:db8::1"] {
+        let parts = Parts::new();
+        let host = parts.host(declaring(&[declared]));
+
+        host.fetch(&get("https://[2001:db8::1]:8443/token"))
+            .unwrap_or_else(|e| panic!("{declared} names the host this reaches: {e:?}"));
+
+        assert_eq!(
+            parts.recorder.taken().reached,
+            [("2001:db8::1".to_string(), false)],
+            "and it is written down the way the pattern grammar spells it"
+        );
+    }
+}
+
+#[test]
+fn a_bound_pinned_to_a_port_reads_it_as_a_number_and_not_as_its_spelling() {
+    // `unusable_port` accepts `0443`, so a bound could be validated and then hold against nothing a URL could ever say.
+    let parts = Parts::new();
+    let host = parts.host(declaring(&["auth.some-provider.example:0443"]));
+
+    host.fetch(&get("https://auth.some-provider.example:443/token"))
+        .expect("a port is the number it names, however the author wrote it");
+}
+
+#[test]
+fn what_is_sent_is_the_url_the_bound_was_decided_from() {
+    // One parse decides both, so no spelling can be read one way by the bound and another on the wire.
+    let parts = Parts::new();
+    let host = parts.host(declaring(&["auth.some-provider.example"]));
+
+    host.fetch(&get("https://auth.some-provider.example"))
+        .expect("a declared host is reachable");
+
+    assert_eq!(
+        *parts.http.seen.lock().expect("http lock"),
+        ["https://auth.some-provider.example/"]
+    );
+}
+
+#[test]
+fn a_url_no_bound_could_be_held_against_is_refused_rather_than_reached() {
+    // Each half a bound needs gets its own refusal, because "reread the host" is no help to an author whose scheme has no port.
+    for (url, said) in [
+        ("auth.some-provider.example/token", "is not a URL"),
+        ("foo://auth.some-provider.example/token", "names no port"),
+    ] {
+        let parts = Parts::new();
+        let host = parts.host(declaring(&["auth.some-provider.example"]));
+
+        let refusal = host
+            .fetch(&get(url))
+            .expect_err("a bound cannot be held against this");
+
+        assert!(
+            matches!(refusal, CallError::Refused(ref why) if why.contains(said)),
+            "{url}: {refusal:?}"
+        );
+        assert!(
+            parts.recorder.taken().reached.is_empty(),
+            "there is no host to write down"
+        );
+    }
 }
 
 #[test]
@@ -395,8 +474,8 @@ fn bounds_come_from_the_method_that_declared_the_mechanism() {
             session_seconds: 60,
         }
     );
-    assert!(bounds.allows("auth.some-provider.example", "443"));
-    assert!(!bounds.allows("other.some-provider.example", "443"));
+    assert!(bounds.allows("auth.some-provider.example", 443));
+    assert!(!bounds.allows("other.some-provider.example", 443));
 }
 
 #[test]

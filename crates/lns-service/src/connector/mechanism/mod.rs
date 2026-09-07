@@ -127,10 +127,13 @@ impl Bounds {
     }
 
     /// A bound that names a port holds only against that port; one that names none holds against whichever the URL reaches, the way a `match` entry does.
-    pub fn allows(&self, host: &str, port: &str) -> bool {
+    ///
+    /// The port is compared as a number, so `0443` and `443` are one port rather than two spellings a URL could only ever say one of.
+    pub fn allows(&self, host: &str, port: u16) -> bool {
         self.hosts.iter().any(|pattern| {
             let (name, only) = lns_policy::matching::split_destination(pattern);
-            lns_policy::matching::domain_matches(name, host) && only.is_none_or(|p| p == port)
+            lns_policy::matching::domain_matches(name, host)
+                && only.is_none_or(|declared| declared.parse() == Ok(port))
         })
     }
 }
