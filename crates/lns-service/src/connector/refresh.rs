@@ -215,6 +215,9 @@ fn renew(
     let outcome = prepared
         .mechanism
         .refresh(&prepared.host, &connection.values, now_millis)?;
+    // A renewal returns the same shape a connect does, so it keeps only what the method says it produces and is held to producing all of it — one rule in one place (§3.2.6).
+    let values = super::connect::declared_values(method, &outcome);
+    super::connect::refuse_an_answer_missing_what_the_method_produces(method, &values)?;
     Ok(Connection {
         method: connection.method.clone(),
         authority: if outcome.authority.is_empty() {
@@ -222,8 +225,7 @@ fn renew(
         } else {
             Authority::of(outcome.authority.clone())
         },
-        // A renewal returns the same shape a connect does, so it keeps only what the method says it produces — one rule in one place (§3.2.6).
-        values: super::connect::declared_values(method, &outcome),
+        values,
         expires_at_millis: outcome.expires_at_millis,
     })
 }

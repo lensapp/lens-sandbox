@@ -296,6 +296,47 @@ fn a_renewal_keeps_only_what_the_method_says_it_produces() {
     );
 }
 
+#[test]
+fn a_renewal_missing_what_the_method_produces_leaves_the_connection_as_it_was() {
+    // A renewal replaces the connection whole, so a hole would overwrite a working value and push the expiry that disarms it forward (§4.1).
+    let rig = holding(Some(1_000));
+    let mechanisms = Renewing::answering(Ok(Outcome {
+        values: std::collections::BTreeMap::new(),
+        authority: std::collections::BTreeSet::new(),
+        expires_at_millis: Some(9_000_000),
+    }));
+    let wrote = Wrote::default();
+    let schedule = Schedule::default();
+
+    let renewed = once(
+        &rig.store(),
+        &mechanisms,
+        &wrote,
+        &schedule,
+        "some-provider",
+        1_000,
+    )
+    .expect("a renewal that did not honour the document is an answer, not a fault");
+
+    assert!(renewed.is_empty());
+    let held = only_connection(&rig);
+    assert_eq!(
+        held.values.get("access_token").map(String::as_str),
+        Some("old"),
+        "the value that still works is not replaced by one that never arrived"
+    );
+    assert_eq!(
+        held.expires_at_millis,
+        Some(1_000),
+        "and the expiry that would disarm it is not pushed forward"
+    );
+    assert_eq!(
+        wrote.0.lock().expect("wrote lock").clone(),
+        [("some-provider work".to_string(), true)],
+        "nobody watched this happen, so the refusal is the only record of it"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial(env, global_runs)]
 async fn a_pass_over_a_connector_holding_no_connection_renews_nothing_and_says_nothing() {
