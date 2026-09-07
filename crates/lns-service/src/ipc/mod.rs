@@ -2045,7 +2045,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
-    async fn handle_request_removes_one_notice_and_keeps_a_question() {
+    async fn handle_request_removes_any_entry_from_the_list() {
         let home = tempfile::tempdir().unwrap();
         let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
         let id = crate::run_registry::allocate_run_id();
@@ -2061,7 +2061,7 @@ mod tests {
             Instant::now(),
         )
         .await;
-        let kept = handle_request(
+        let question = handle_request(
             &Request::RemoveApproval {
                 id: asked.id.clone(),
             },
@@ -2073,12 +2073,12 @@ mod tests {
         let removed = as_json(removed);
         assert_eq!(removed["type"], "ApprovalRemoved", "got {removed}");
         assert_eq!(removed["id"], notice.id);
-        let kept = as_json(kept);
-        assert_eq!(kept["type"], "ApprovalKept", "got {kept}");
+        let question = as_json(question);
         assert_eq!(
-            kept["reason"],
-            "only a notice is removed; a destination entry is answered instead"
+            question["type"], "ApprovalRemoved",
+            "a question is a line of the list like any other, got {question}"
         );
+        assert_eq!(question["id"], asked.id);
     }
 
     #[tokio::test]

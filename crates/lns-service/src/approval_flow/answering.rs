@@ -3,24 +3,11 @@ use std::sync::Arc;
 
 use lns_ipc::{ApprovalAnswer, ApprovalEntryKind, ApprovalInfo, Response};
 
-use crate::approval_flow::entries::{Entry, EntryKind, RemoveOutcome, Unremovable};
+use crate::approval_flow::entries::{Entry, EntryKind, RemoveOutcome};
 use crate::approval_flow::offline;
 use crate::approval_flow::session::{
     Answer, AnswerOutcome, ApprovalSession, ConnectionChoice, DecisionOutcome,
 };
-
-/// Why this entry stays, in the words that fit the kind the user named.
-pub fn not_removable(kind: Unremovable) -> String {
-    match kind {
-        Unremovable::Destination => {
-            "only a notice is removed; a destination entry is answered instead".to_string()
-        }
-        Unremovable::Connector => {
-            "only a notice is removed; a connector entry is decided through `lns connector`"
-                .to_string()
-        }
-    }
-}
 
 pub const DECIDED_ELSEWHERE: &str =
     "this entry is decided elsewhere: a connector through `lns connector`, and a notice not at all";
@@ -133,7 +120,6 @@ pub fn removal(root: &Path, runs: &[String], live: LiveSession, id: &str) -> Res
     match remove(root, runs, live, id) {
         RemoveOutcome::Removed => Response::ApprovalRemoved { id: id.to_string() },
         RemoveOutcome::UnknownId => Response::ApprovalUnknown { id: id.to_string() },
-        RemoveOutcome::NotRemovable(kind) => kept(not_removable(kind)),
         RemoveOutcome::NotCleared(reason) => kept(reason),
     }
 }
@@ -842,41 +828,33 @@ mod tests {
     }
 
     #[test]
-    fn a_destination_entry_is_kept_and_told_to_answer_instead() {
+    fn an_answered_destination_is_removed_and_what_it_decided_stays_decided() {
+        // The developer is clearing a notification, not an answer (cli-spec §3.7).
         let home = tempfile::TempDir::new().expect("tempdir");
-        let entry = seed(home.path(), destination(), EntryState::AlwaysAllowed);
+        let entry = seed(home.path(), destination(), EntryState::Undecided);
+        answer(
+            home.path(),
+            &runs(),
+            no_live_session,
+            &entry.id,
+            ApprovalAnswer::AlwaysAllow,
+        );
+        let decisions = crate::cache::decisions_path(home.path(), RUN);
+        let rule = std::fs::read_to_string(&decisions).expect("the rule was written");
 
-        let kept = removal(home.path(), &runs(), no_live_session, &entry.id);
+        let removed = removal(home.path(), &runs(), no_live_session, &entry.id);
 
         assert_eq!(
-            kept,
-            Response::ApprovalKept {
-                id: entry.id.clone(),
-                reason: "only a notice is removed; a destination entry is answered instead"
-                    .to_string(),
+            removed,
+            Response::ApprovalRemoved {
+                id: entry.id.clone()
             }
         );
+        assert!(entries(home.path(), &runs()).is_empty());
         assert_eq!(
-            entries(home.path(), &runs()).len(),
-            1,
-            "the record of what the run was asked must survive the refusal"
-        );
-    }
-
-    #[test]
-    fn a_connector_entry_is_kept_and_told_where_it_is_decided() {
-        // The refusal names the way out that fits the entry the user pointed at; a connector has no answer here to be told to use.
-        let home = tempfile::TempDir::new().expect("tempdir");
-        let entry = seed(home.path(), connector(), EntryState::Granted);
-
-        assert_eq!(
-            removal(home.path(), &runs(), no_live_session, &entry.id),
-            Response::ApprovalKept {
-                id: entry.id,
-                reason:
-                    "only a notice is removed; a connector entry is decided through `lns connector`"
-                        .to_string(),
-            }
+            std::fs::read_to_string(&decisions).expect("read back"),
+            rule,
+            "the run still decides that destination exactly as it did"
         );
     }
 

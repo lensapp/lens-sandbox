@@ -644,10 +644,9 @@ fn approval_row(
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if approvals::is_removable(entry)
-                        && icon_button(ui, icons::ICON_CLOSE)
-                            .on_hover_text("Remove")
-                            .clicked()
+                    if icon_button(ui, icons::ICON_CLOSE)
+                        .on_hover_text("Remove from the list")
+                        .clicked()
                     {
                         chosen = Some(RowAction::Remove);
                     }

@@ -127,6 +127,26 @@ mod tests {
     }
 
     #[test]
+    fn clearing_an_answered_entry_leaves_the_rule_it_wrote() {
+        // The list is what the run was asked; clearing a line of it clears the question, never the answer's effect (cli-spec §3.7).
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let entry = seed(home.path(), "aa01", EntryState::Undecided);
+        answer(home.path(), "aa01", &entry.id, Answer::AlwaysAllow);
+        let decisions = crate::cache::decisions_path(home.path(), "aa01");
+        let before = std::fs::read_to_string(&decisions).expect("the rule was written");
+
+        let outcome = remove(home.path(), "aa01", &entry.id);
+
+        assert_eq!(outcome, RemoveOutcome::Removed);
+        assert!(list(home.path(), "aa01").is_empty(), "the line is gone");
+        assert_eq!(
+            std::fs::read_to_string(&decisions).expect("read back"),
+            before,
+            "and the run still decides that destination exactly as it did"
+        );
+    }
+
+    #[test]
     fn an_entry_no_run_holds_is_not_answered() {
         let home = tempfile::TempDir::new().expect("tempdir");
 

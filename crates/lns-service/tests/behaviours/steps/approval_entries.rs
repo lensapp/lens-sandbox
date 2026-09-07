@@ -247,23 +247,47 @@ fn when_notice_removed(world: &mut BehaviourWorld) {
     );
 }
 
-#[when("the developer tries to remove that entry")]
-fn when_question_removal_tried(world: &mut BehaviourWorld) {
+#[when("the developer removes that entry")]
+fn when_entry_removed(world: &mut BehaviourWorld) {
     let rig = world.approval();
     let id = rig
         .entry_for("api.linear.app")
         .expect("the destination entry")
         .id;
-    let outcome = rig.session.remove_entry(&id);
-    world.approval().removal = Some(outcome);
+    assert_eq!(rig.session.remove_entry(&id), RemoveOutcome::Removed);
 }
 
-#[when("the developer tries to remove the connector entry")]
-fn when_connector_removal_tried(world: &mut BehaviourWorld) {
+#[when("the developer removes the connector entry")]
+fn when_connector_removed(world: &mut BehaviourWorld) {
     let rig = world.approval();
     let id = rig.entry_for("linear").expect("the connector entry").id;
-    let outcome = rig.session.remove_entry(&id);
-    world.approval().removal = Some(outcome);
+    assert_eq!(rig.session.remove_entry(&id), RemoveOutcome::Removed);
+}
+
+#[then(regex = r#"^the run's approvals hold nothing about "([^"]+)"$"#)]
+fn then_nothing_about(world: &mut BehaviourWorld, subject: String) {
+    let rig = world.approval();
+    assert!(
+        rig.entry_for(&subject).is_none(),
+        "the line must be gone, got {:?}",
+        rig.entries()
+    );
+}
+
+#[then(regex = r#"^the run still supplies what the connector "([^"]+)" granted$"#)]
+fn then_still_granted(world: &mut BehaviourWorld, name: String) {
+    let rig = world.approval();
+    let opened = format!("api.{name}.example");
+    assert!(
+        rig.session
+            .current_policy()
+            .network
+            .egress
+            .http
+            .iter()
+            .any(|rule| rule.match_pattern == opened),
+        "clearing the line must not retract what the grant opened"
+    );
 }
 
 #[then("the run's approvals hold no notice")]
@@ -273,29 +297,6 @@ fn then_no_notice(world: &mut BehaviourWorld) {
         notice_of(rig).is_none(),
         "the notice must be gone from the list"
     );
-}
-
-#[then("the entry stays listed")]
-fn then_entry_stays(world: &mut BehaviourWorld) {
-    let rig = world.approval();
-    assert!(
-        rig.entry_for("api.linear.app").is_some(),
-        "the record of what the run was asked must survive the refusal"
-    );
-}
-
-#[then(regex = r#"^the refusal says "([^"]+)"$"#)]
-fn then_refusal_says(world: &mut BehaviourWorld, needle: String) {
-    let outcome = world
-        .approval()
-        .removal
-        .clone()
-        .expect("a removal was tried");
-    let RemoveOutcome::NotRemovable(kind) = outcome else {
-        panic!("the entry must be kept, got {outcome:?}");
-    };
-    let said = lns_service::approval_flow::answering::not_removable(kind);
-    assert!(said.contains(&needle), "the refusal said {said:?}");
 }
 
 #[then(regex = r#"^the run's approvals list "([^"]+)" as (.+)$"#)]
@@ -376,6 +377,11 @@ fn then_no_once_verdict(world: &mut BehaviourWorld) {
         lns_service::approval_flow::session::DecisionOutcome::UnknownId,
         "a once verdict answers a held request, and this one has gone"
     );
+}
+
+#[then(regex = r#"^"([^"]+)" contains an allow rule for "([^"]+)"$"#)]
+fn then_file_holds_allow(world: &mut BehaviourWorld, _file: String, host: String) {
+    assert_file_verdict(world, &host, Some(Verdict::Allow));
 }
 
 #[then(regex = r#"^"([^"]+)" contains a deny rule for "([^"]+)"$"#)]

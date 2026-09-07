@@ -109,12 +109,12 @@ Feature: reading and answering approvals from the CLI
     And the service is asked to remove "n1"
     And the output contains "Removed n1"
 
-  Scenario: a question is kept, and the refusal names the answer to use
+  Scenario: an answered question is removed like any other line
     Given the service reports an approval "a2" for "api.github.com" raised by "reviewer" answered always allow
     When the user runs approval command "rm a2"
-    Then the exit code is 1
-    And the output contains "was not removed"
-    And the output contains "answered instead"
+    Then the exit code is 0
+    And the service is asked to remove "a2"
+    And the output contains "Removed a2"
 
   Scenario: removing an entry no run holds says so
     Given the service reports no approval "gone"

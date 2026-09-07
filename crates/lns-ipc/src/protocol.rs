@@ -96,7 +96,7 @@ pub enum Request {
         id: String,
         answer: ApprovalAnswer,
     },
-    /// Clears one notice from a run's list. Only a notice: a question is answered instead.
+    /// Clears one entry from a run's list. What it decided stays decided.
     RemoveApproval {
         id: String,
     },
@@ -285,7 +285,7 @@ pub enum Response {
     ApprovalRemoved {
         id: String,
     },
-    /// The entry stays, for the reason named: a question is answered, never removed.
+    /// The entry stays, because the list could not be written.
     ApprovalKept {
         id: String,
         reason: String,

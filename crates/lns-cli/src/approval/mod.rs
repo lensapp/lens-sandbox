@@ -22,7 +22,7 @@ pub enum ApprovalCommand {
     Ls(ApprovalLsArgs),
     #[command(about = "Answer one destination entry, or answer it again.")]
     Answer(ApprovalAnswerArgs),
-    #[command(about = "Remove one notice.")]
+    #[command(about = "Remove one entry from the list. What it decided stays decided.")]
     Rm(ApprovalRmArgs),
 }
 
@@ -49,7 +49,7 @@ pub struct ApprovalAnswerArgs {
 
 #[derive(clap::Args)]
 pub struct ApprovalRmArgs {
-    #[arg(help = "Entry id of a notice, as `lns approval ls` prints it.")]
+    #[arg(help = "Entry id, as `lns approval ls` prints it.")]
     pub id: String,
 }
 

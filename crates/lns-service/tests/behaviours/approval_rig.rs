@@ -95,9 +95,20 @@ impl ConnectorPort for GrantingPort {
         Ok(Vec::new())
     }
 
-    fn grant(&self, _: &str, _: &str, _: &str, _: Option<&str>) -> Result<GrantedPayload, String> {
+    fn grant(
+        &self,
+        name: &str,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<GrantedPayload, String> {
+        // Opens one destination named after the connector, so a scenario can see that a grant is still in force.
+        let mut egress = Policy::default();
+        egress.add_rule(lns_policy::RouteRule::allow_host(format!(
+            "api.{name}.example"
+        )));
         Ok(GrantedPayload {
-            egress: Policy::default(),
+            egress,
             credentials: Vec::new(),
             env: Default::default(),
             files: Vec::new(),
@@ -118,8 +129,6 @@ pub struct ApprovalRig {
     pub entries_path: PathBuf,
     pub timeout: Duration,
     pub ledger: Arc<RigRecorder>,
-    /// What a removal the developer tried came back with.
-    pub removal: Option<lns_service::approval_flow::entries::RemoveOutcome>,
     _tempdir: TempDir,
 }
 
@@ -233,7 +242,6 @@ impl ApprovalRig {
             entries_path,
             timeout,
             ledger,
-            removal: None,
             _tempdir: dir,
         }
     }

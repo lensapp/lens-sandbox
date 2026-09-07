@@ -75,16 +75,10 @@ impl FakeApprovalService {
                 reason: reason.clone(),
             };
         }
-        match self.approvals.iter().find(|held| held.id == id) {
-            Some(held) if held.kind == ApprovalEntryKind::Notice => {
-                Response::ApprovalRemoved { id: id.to_string() }
-            }
-            Some(_) => Response::ApprovalKept {
-                id: id.to_string(),
-                reason: "only a notice is removed; a destination entry is answered instead"
-                    .to_string(),
-            },
-            None => Response::ApprovalUnknown { id: id.to_string() },
+        if self.approvals.iter().any(|held| held.id == id) {
+            Response::ApprovalRemoved { id: id.to_string() }
+        } else {
+            Response::ApprovalUnknown { id: id.to_string() }
         }
     }
 

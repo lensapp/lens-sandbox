@@ -22,7 +22,7 @@ lns service stop     # ask it to shut down
 
 Its tray menu opens two views and quits the service. The **Audit** view shows the
 timeline of what the runs did. The **Approvals** view shows what they were asked. It
-answers an entry, and clears a notice, the way
+answers an entry, and clears one from the list, the way
 [`lns approval`](cli-reference.md#lns-approval) does. Choose a sandbox or an
 answer to narrow the list. An undecided connector row offers the grant its card
 offered, so a connector card you closed is answered there too. **Quit** stops the service.

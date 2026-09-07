@@ -118,19 +118,22 @@ Feature: the approvals a run keeps
     When the developer picks "always allow"
     And the developer removes that notice
     Then the run's approvals hold no notice
-    And the entry stays listed
+    And the run's approvals still list "api.linear.app" as always allowed
 
-  Scenario: A question is kept, and the refusal names the answer to use
-    Given the run's approvals list "api.linear.app" as always allowed
-    When the developer tries to remove that entry
-    Then the entry stays listed
-    And the refusal says "a destination entry is answered instead"
+  # Removing a line removes the record of the question. What it decided stays
+  # decided: the developer is clearing a notification, not an answer.
+  Scenario: An answered question is cleared, and stays decided
+    Given the run records what it decides in "decisions.yaml"
+    And the run's approvals list "api.linear.app" as always allowed
+    When the developer removes that entry
+    Then the run's approvals hold nothing about "api.linear.app"
+    And "decisions.yaml" contains an allow rule for "api.linear.app"
 
-  Scenario: A granted connector is kept, and the refusal names where it is decided
+  Scenario: A granted connector is cleared, and stays granted
     Given the developer grants the connector "linear" to the run
-    When the developer tries to remove the connector entry
-    Then the refusal says "decided through `lns connector`"
-    And the run's approvals list the connector "linear" as granted
+    When the developer removes the connector entry
+    Then the run's approvals hold nothing about "linear"
+    And the run still supplies what the connector "linear" granted
 
   # A connector card is a question like any other: closing it must leave the
   # offer listed, or the one card the developer cannot get back is this one.

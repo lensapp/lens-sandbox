@@ -409,8 +409,8 @@ reads the list and `lns approval answer` answers an entry, or answers it again:
   running sandbox takes the change at once.
 - **ask-again** takes the entry's rule back, so the destination raises a card the
   next time a workload reaches it.
-- **rm** clears a notice — a line that asked nothing. A question is kept, at both
-  surfaces.
+- **rm** clears one line of the list. What that line decided stays decided: the
+  rule, the grant, and the running sandbox are untouched.
 
 A once verdict is not offered at either surface. It applies to a request the guest
 is holding, so only the card that holds it offers one. Answering an entry never

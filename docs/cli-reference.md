@@ -461,7 +461,7 @@ lns approval ls                             # every run's entries, with the answ
 lns approval ls <sandbox>                   # scope to one sandbox: run id, name, or unique id prefix
 lns approval ls [--format <table|json>]
 lns approval answer <id> <always-allow|always-deny|ask-again>
-lns approval rm <id>                        # clear one notice
+lns approval rm <id>                        # clear one line of the list
 ```
 
 The list has a row for every question the run was asked: a **destination**, a
@@ -495,10 +495,11 @@ one.
 - `ask-again` takes that rule back, so the destination raises a card the next time
   a workload reaches it.
 
-`rm` clears one notice. A notice asked nothing, so nothing is lost. A destination
-or a connector entry is kept: it is the record of what the run was asked, and an
-answered one is the only handle `ask-again` has. `rm` on either says so and exits
-`1`.
+`rm` clears one line of the list, and nothing else. The rule an answered entry
+wrote stays in `decisions.yaml`, a grant stays granted, and no guest is told
+anything — you are removing the notification, not the answer. A question the run
+can still reach comes back as a fresh card. A rule whose entry you removed has no
+entry left for `ask-again`, so that rule is yours to edit in the file.
 
 Answering never replays the request that raised the entry. The call failed when
 nothing decided it; the answer decides the next one. An entry of a **stopped**

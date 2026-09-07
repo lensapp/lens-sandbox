@@ -93,11 +93,6 @@ pub fn granting_reported(granted: &Granting) -> Option<String> {
     }
 }
 
-/// Whether this row shows the control that clears it.
-pub fn is_removable(entry: &Entry) -> bool {
-    entry.is_removable()
-}
-
 /// The name the run is known by, or the handle itself when this machine knows no run by it — a sandbox removed since the entry was written still names itself.
 fn named<'a>(id: &'a str, sandboxes: &'a [Sandbox]) -> &'a str {
     sandboxes
@@ -173,9 +168,6 @@ pub fn removal_reported(outcome: &RemoveOutcome) -> Option<String> {
     match outcome {
         RemoveOutcome::Removed => None,
         RemoveOutcome::UnknownId => Some(ENTRY_IS_GONE.to_string()),
-        RemoveOutcome::NotRemovable(kind) => {
-            Some(crate::approval_flow::answering::not_removable(*kind))
-        }
         RemoveOutcome::NotCleared(reason) => Some(reason.clone()),
     }
 }
@@ -183,7 +175,6 @@ pub fn removal_reported(outcome: &RemoveOutcome) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval_flow::entries::Unremovable;
 
     fn destination(run: &str, host: &str, raw: bool, state: EntryState) -> Entry {
         Entry::new(
@@ -498,38 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn only_a_notice_can_be_cleared_from_the_list() {
-        // Removing an answered question would strand the rule it wrote, and removing an unanswered one would hide a question the run still fails closed on.
-        assert!(is_removable(&notice("dapper_thistle")));
-        for state in [
-            EntryState::Undecided,
-            EntryState::Withdrawn,
-            EntryState::AlwaysAllowed,
-            EntryState::AlwaysDenied,
-        ] {
-            assert!(
-                !is_removable(&destination(
-                    "dapper_thistle",
-                    "api.linear.app",
-                    false,
-                    state
-                )),
-                "{state:?}"
-            );
-        }
-        assert!(
-            !is_removable(&Entry::new(
-                Some("dapper_thistle".to_string()),
-                EntryKind::Connector {
-                    name: "linear".into()
-                },
-                EntryState::Granted,
-            )),
-            "a connector is forgotten through `lns connector`, not here"
-        );
-    }
-
-    #[test]
     fn an_unanswered_destination_offers_the_two_answers_that_write_a_rule() {
         // `ask again` takes a rule back, and an entry that never wrote one has nothing to take, so offering it would only ever refuse.
         for state in [EntryState::Undecided, EntryState::Withdrawn] {
@@ -640,11 +599,6 @@ mod tests {
         assert!(
             removal_reported(&RemoveOutcome::UnknownId)
                 .is_some_and(|said| said.contains("no longer")),
-        );
-        assert_eq!(
-            removal_reported(&RemoveOutcome::NotRemovable(Unremovable::Destination)).as_deref(),
-            Some("only a notice is removed; a destination entry is answered instead"),
-            "the view says what the terminal says, and names the way out that fits the row"
         );
         assert_eq!(
             removal_reported(&RemoveOutcome::NotCleared(

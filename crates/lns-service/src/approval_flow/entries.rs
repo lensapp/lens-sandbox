@@ -100,19 +100,6 @@ impl Entry {
     pub fn is_answerable(&self) -> bool {
         matches!(self.kind, EntryKind::Destination { .. })
     }
-
-    /// Whether this entry can be cleared from the list. A notice asked nothing, so nothing is lost; a question is answered, never removed (cli-spec §3.7).
-    pub fn removal(&self) -> Result<(), Unremovable> {
-        match self.kind {
-            EntryKind::Notice { .. } => Ok(()),
-            EntryKind::Destination { .. } => Err(Unremovable::Destination),
-            EntryKind::Connector { .. } => Err(Unremovable::Connector),
-        }
-    }
-
-    pub fn is_removable(&self) -> bool {
-        self.removal().is_ok()
-    }
 }
 
 /// The same question asked twice is one entry, so identity is a collision-resistant digest of what was asked — never the guest's request id, which no restart preserves and which a workload could aim at an answer already given.
@@ -139,30 +126,18 @@ pub trait EntryStore: Send + Sync {
     fn forget(&self, id: &str) -> Result<(), String>;
 }
 
-/// A kind of entry a removal cannot take, so the refusal it gets is chosen from the two that exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unremovable {
-    Destination,
-    Connector,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveOutcome {
     Removed,
     UnknownId,
-    /// A question: answered, never removed.
-    NotRemovable(Unremovable),
     /// The list is unchanged, for the reason named.
     NotCleared(String),
 }
 
-/// The one place the removal rule lives, so a live run and a stopped one cannot disagree about it.
+/// Clears one line of the list, and nothing else: what the entry decided stays decided (cli-spec §3.7).
 pub fn remove_from(store: &dyn EntryStore, id: &str) -> RemoveOutcome {
-    let Some(entry) = store.list().into_iter().find(|held| held.id == id) else {
+    if !store.list().iter().any(|held| held.id == id) {
         return RemoveOutcome::UnknownId;
-    };
-    if let Err(why) = entry.removal() {
-        return RemoveOutcome::NotRemovable(why);
     }
     match store.forget(id) {
         Ok(()) => RemoveOutcome::Removed,
@@ -454,8 +429,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_question_is_kept_and_the_list_is_untouched() {
-        // Removing an answered question would leave the file as the only way to take its rule back (cli-spec §3.7).
+    fn an_answered_question_is_cleared_like_any_other_line() {
         let (store, _fs) = fixture();
         let asked = Entry::new(
             Some("reviewer".into()),
@@ -464,11 +438,8 @@ pub(crate) mod tests {
         );
         store.record(asked.clone());
 
-        assert_eq!(
-            remove_from(&store, &asked.id),
-            RemoveOutcome::NotRemovable(Unremovable::Destination)
-        );
-        assert_eq!(store.list(), vec![asked]);
+        assert_eq!(remove_from(&store, &asked.id), RemoveOutcome::Removed);
+        assert!(store.list().is_empty());
     }
 
     #[test]
