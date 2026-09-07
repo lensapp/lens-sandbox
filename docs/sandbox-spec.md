@@ -1809,7 +1809,9 @@ and it is a person's. `refresh` is the one exception: it runs on a schedule
 **lns owns**. The component MUST NOT be able to request a wake-up, set its own
 interval, or shorten the interval lns chose; a reported expiry MAY inform the
 schedule but a floor lns sets bounds it, so a component reporting a one-second
-lifetime cannot produce a hot loop.
+lifetime cannot produce a hot loop. Where the two disagree the **floor wins**: an
+expiry below it is honoured as a lifetime, so the values count as run out at the
+moment it names ([§4.1](#41-the-credential-definition)), but never as a wake-up.
 
 **A connect is an exchange, not a call.** A mechanism that lns implements knows
 what to ask for before it runs, so the values can be collected first and handed
@@ -1817,7 +1819,8 @@ over at once. A component does not: which fields it needs, and how many rounds i
 takes, is the implementation's own decision — a device code shows a URL and then
 waits, a password grant asks twice, a token exchange asks once. So `connect`
 returns one of three answers — **ask**; **done**, with the values, scopes, and
-account it produced; or **failed**, with a reason — and where it asked, lns
+account it produced, and where it has one their expiry; or **failed**, with a
+reason — and where it asked, lns
 collects what it asked for and calls **`resume`** with the state verbatim and the
 answers. `resume` answers the same three, so a connect runs for as many rounds as
 the implementation needs.
@@ -1880,6 +1883,23 @@ the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
 renewal omits scopes or an account, lns carries forward the ones the connection
 already held. A renewal returns the same shape a successful connect does, so this
 is one rule in one place rather than two.
+
+**An expiry is the exception to that carry-forward, and deliberately so.** Scopes
+and an account describe who the connection is, which a renewal does not change; an
+expiry describes the values, which a renewal replaces. So a renewal's expiry
+replaces the recorded one whole, and a renewal that reports none leaves the
+connection with none. Carrying the old one forward would disarm the injection the
+moment a successful refresh landed, since the expiry being carried is by definition
+already past.
+
+**An expiry is what a component reports, and the only thing about the schedule it
+gets to say.** A component MAY report when the values it produced run out; the
+connection records it ([§7.1](#71-connectors)), and lns decides everything else —
+when to refresh, under the rule above, and what an expiry that passed unrefreshed
+means, which [§4.1](#41-the-credential-definition) decides for every credential and
+not only for this kind. A connection reporting no expiry is refreshed on no
+schedule at all: a value with no stated lifetime is one lns has no reason to
+believe has ended.
 
 **Host execution.** A method MAY declare `exec: true`, and then its component may
 run programs on the machine, composing the invocation itself.
@@ -2061,7 +2081,8 @@ silently taking no effect.
 alternatives ([§3.2.2](#322-methods)), so the source is the granted method, and
 the others are not in the list at all. A grant is what puts it here; whether the
 machine still holds that connection decides only whether its credentials are armed
-([§3.2.4](#324-installing-connecting-and-applying)).
+([§3.2.4](#324-installing-connecting-and-applying)), and it is not the only thing
+that does ([§4.1](#41-the-credential-definition)).
 
 Two properties fall out of the shape:
 
@@ -2239,13 +2260,14 @@ injection covered the request proceeds untouched by this rule.
 
 What survives is a real mismatch, and there are two:
 
-- The injection is **unarmed** — declared, with no value behind it. One state
-  produces this: a [connector](#32-kind-connector) connection a run granted, on
-  a machine that no longer holds it
-  ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
-  own credential still cannot reach it: a bound declaration is armed before boot,
-  and one left to a connector ([§3.1.7](#317-credentials)) declares nothing to the
-  boundary at all until the grant registers it armed.
+- The injection is **unarmed** — declared, with no value behind it. Two states
+  produce this. A [connector](#32-kind-connector) connection a run granted, on a
+  machine that no longer holds it
+  ([§3.2.4](#324-installing-connecting-and-applying)); or one the machine still
+  holds whose values have **run out**, which is the rule below. A sandbox's or a
+  mixin's own credential still cannot reach it: a bound declaration is armed before
+  boot, and one left to a connector ([§3.1.7](#317-credentials)) declares nothing to
+  the boundary at all until the grant registers it armed.
 - The placeholder is somewhere the declared kind does not reach. A
   `bearer_header` injection sets one header; the same placeholder in a request
   body is untouched by it, so it survives. Reaching a body takes a
@@ -2255,6 +2277,17 @@ Either way the request is held instead of carrying the marker onto the wire,
 because a marker on the wire tells a destination that a secret was meant to be
 here and was not — and the request it belongs to would fail anyway, less
 informatively.
+
+**A value whose lifetime lns knows disarms when that lifetime ends.** Where a
+credential's value carries an expiry — a connection's, from the mechanism that
+produced it ([§7.1](#71-connectors)) — and nothing has replaced it by then, lns
+disarms the injection through the same policy change a grant applies through
+([§3.2.4](#324-installing-connecting-and-applying)). The next request carrying
+that placeholder is then held by the rule above and raises the **connect** prompt,
+rather than carrying a value the destination will reject. The run keeps its grant:
+what ended is the authentication, not the decision. This is why an expiry is worth
+recording at all — a credential lns silently lets go stale fails at the
+destination, with no prompt and nothing to act on.
 
 Placeholder substitution is why a `placeholder` MUST be distinctive: it is the
 marker the proxy looks for. A value that could occur naturally in a stream would
@@ -2617,7 +2650,7 @@ Five things live per machine, none of them in any document:
 | What | Keyed by | Scope |
 |---|---|---|
 | The installed set — each connector's document **and the bytes of every file packed beside it**: every `component` and every `filesets[].path` directory, stored verbatim at the digest computed over all of them | name | The machine |
-| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then connection | The machine |
+| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, the values it returned, and the expiry the mechanism reported, where it reported one | name, then connection | The machine |
 | Which method a run granted, the connection behind it where the method authenticates, and the authority it consented to | run, then name, digest | The run |
 | Which connectors a run declined | run, then name | The run |
 | A grant **reserved** for a name no run holds yet | run name, then connector, digest | That name, until a run takes it |
