@@ -137,6 +137,13 @@ mod tests {
         (&target.host, target.port, target.is_tls())
     }
 
+    /// A `Target` that came back is reported as a refusal that says so, rather than through an arm that only runs when the test fails.
+    fn refused(url: &str) -> String {
+        Target::of(url)
+            .err()
+            .unwrap_or_else(|| format!("{url} was read as a target lns would reach"))
+    }
+
     #[test]
     fn a_url_is_read_as_the_host_and_port_it_reaches_and_never_as_its_userinfo() {
         let target = Target::of("https://user:pw@auth.example.com:8443/a?b#c").expect("a target");
@@ -164,9 +171,7 @@ mod tests {
             ("https://:443/token", "not a URL"),
             ("data:text/plain,x", "names no host"),
         ] {
-            let Err(refusal) = Target::of(url) else {
-                panic!("{url} names no bound lns could hold against it")
-            };
+            let refusal = refused(url);
             assert!(refusal.contains(said), "{url}: {refusal}");
         }
     }
@@ -174,9 +179,7 @@ mod tests {
     #[test]
     fn a_scheme_with_no_port_to_land_on_is_refused_rather_than_given_one() {
         // A bound holds against a host and a port, so a scheme lns cannot work a port out for is one it cannot hold a bound against — and the refusal says which half it could not read.
-        let Err(refusal) = Target::of("foo://auth.example.com/token") else {
-            panic!("there is no port for a bound to hold against")
-        };
+        let refusal = refused("foo://auth.example.com/token");
         assert!(refusal.contains("names no port"), "{refusal}");
         assert!(refusal.contains("foo://"), "{refusal}");
     }
