@@ -51,6 +51,9 @@ impl lns_service::connector::mechanism::traits::Recorder for ReachesNothing {
 
     // no-op: as above.
     fn ran(&self, _connector: &str, _program: &str, _refused: bool) {}
+
+    // no-op: as above.
+    fn renewed(&self, _connector: &str, _target: &str, _refused: bool) {}
 }
 
 /// Every scenario names a run by a short id, so the rig speaks the one holder kind it needs.
@@ -271,9 +274,26 @@ impl ConnectorRig {
         .map(|e| format!("{e:#}"));
     }
 
-    /// What the boundary is armed with for one variable, read through the same path a starting run reads (§7.1).
+    /// Marks the one connection this rig holds as running out at `at`, the way a mechanism reporting an expiry does.
+    pub fn the_connection_runs_out_at(&mut self, at: u64) {
+        let store = self.store();
+        let name = self.name.clone();
+        let held = store.connections_of(&name).expect("connections");
+        for (label, mut connection) in held {
+            connection.expires_at_millis = Some(at);
+            store
+                .record_authentication(&name, &label, connection)
+                .expect("record the expiry");
+        }
+    }
+
+    /// What the boundary is armed with for one variable, read through the same path a starting run reads (§7.1). `at` is the moment the run reads it, which decides whether a connection's values have run out (§4.1).
     pub fn supplied_to(&self, run: &str, variable: &str) -> Option<String> {
-        lns_service::connector::handler::granted_supply(&self.store(), &holder(run))
+        self.supplied_to_at(run, variable, 0)
+    }
+
+    pub fn supplied_to_at(&self, run: &str, variable: &str, at: u64) -> Option<String> {
+        lns_service::connector::handler::granted_supply(&self.store(), &holder(run), at)
             .expect("read what this run granted")
             .values()
             .flat_map(|payload| payload.credentials.clone())

@@ -171,7 +171,7 @@ impl Driver<'_> {
 }
 
 /// The component this method connects with, where it has one. Read by position among the `code` methods, which is the order an install kept them in (§7).
-fn prepare(
+pub(super) fn prepare(
     store: &ConnectorStore<'_>,
     mechanisms: &dyn Mechanisms,
     name: &str,
@@ -230,25 +230,27 @@ fn settle(
             })
         }
         Step::Done(outcome) => {
-            let invalidated = store.record_authentication(
+            let recorded = store.record_authentication(
                 name,
                 label,
                 Connection {
                     method: method.name.clone(),
                     authority: Authority::of(outcome.authority.iter().cloned()),
                     values: declared_values(method, &outcome),
+                    expires_at_millis: outcome.expires_at_millis,
                 },
             )?;
+            recorded.stored?;
             Ok(Connecting::Connected(super::handler::Connected {
                 connection: label.to_string(),
-                invalidated,
+                invalidated: recorded.invalidated,
             }))
         }
     }
 }
 
 /// Only what the method's `auth` says it produces. A mechanism returning more returned something its document never declared, and no credential could draw on it (§3.2.6).
-fn declared_values(
+pub(super) fn declared_values(
     method: &Method,
     outcome: &Outcome,
 ) -> std::collections::BTreeMap<String, String> {
@@ -295,4 +297,4 @@ const MAX_ROUNDS_WITHOUT_A_PERSON: usize = 8;
 const DEFAULT_SESSION_SECONDS: u32 = 900;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

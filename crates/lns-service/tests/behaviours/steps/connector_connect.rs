@@ -55,6 +55,20 @@ fn the_run_grants_through_that_connection(w: &mut BehaviourWorld, run: String, m
     rig(w).grant_through_the_connection(&run, &method);
 }
 
+#[when(regex = r#"^the values that connection holds run out$"#)]
+fn the_values_run_out(w: &mut BehaviourWorld) {
+    rig(w).the_connection_runs_out_at(1_000);
+}
+
+#[then(regex = r#"^"([^"]+)" is left unarmed$"#)]
+fn is_left_unarmed(w: &mut BehaviourWorld, variable: String) {
+    assert_eq!(
+        rig(w).supplied_to_at("1a2b3c4d", &variable, 2_000),
+        Some(String::new()),
+        "a connection whose values have run out puts no value behind the credential, which is the unarmed state a request is held on (§4.1)"
+    );
+}
+
 #[then(regex = r#"^the run is supplied "([^"]+)" for "([^"]+)"$"#)]
 fn the_run_is_supplied_for(w: &mut BehaviourWorld, expected: String, variable: String) {
     assert_eq!(

@@ -37,6 +37,9 @@ impl Recorder for Spy {
             .ran
             .push((program.to_string(), refused));
     }
+
+    // no-op: a renewal is the refresh pass's to record, and nothing here runs one.
+    fn renewed(&self, _connector: &str, _target: &str, _refused: bool) {}
 }
 
 #[derive(Default)]

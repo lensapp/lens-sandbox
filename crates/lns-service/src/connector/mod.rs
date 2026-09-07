@@ -11,6 +11,7 @@ pub mod mechanism;
 pub mod offer;
 pub mod payload;
 pub mod real;
+pub mod refresh;
 mod registry;
 pub mod session;
 pub mod source;

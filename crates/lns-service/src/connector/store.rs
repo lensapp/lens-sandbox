@@ -55,6 +55,12 @@ impl Authority {
     }
 }
 
+/// What one authentication did. The grants it dropped are durable the moment they are dropped, so they are reported whether or not the values behind them stored.
+pub struct Recorded {
+    pub invalidated: Vec<GrantHolder>,
+    pub stored: io::Result<()>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
     pub method: String,
@@ -62,6 +68,17 @@ pub struct Connection {
     pub authority: Authority,
     #[serde(default)]
     pub values: BTreeMap<String, String>,
+    /// When the mechanism said these values run out, where it said so (§7.1). `None` is a value lns has no reason to believe has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_millis: Option<u64>,
+}
+
+impl Connection {
+    /// Whether the values have run out. A connection that has is held rather than armed, so the next request raises the connect prompt instead of carrying a value the destination will reject (§4.1).
+    pub fn has_run_out(&self, now_millis: u64) -> bool {
+        self.expires_at_millis
+            .is_some_and(|expiry| expiry <= now_millis)
+    }
 }
 
 impl std::fmt::Debug for Connection {
@@ -71,6 +88,7 @@ impl std::fmt::Debug for Connection {
             .field("method", &self.method)
             .field("authority", &self.authority)
             .field("values", &format_args!("<{} redacted>", self.values.len()))
+            .field("expires_at_millis", &self.expires_at_millis)
             .finish()
     }
 }
@@ -381,7 +399,7 @@ impl<'a> ConnectorStore<'a> {
         name: &str,
         label: &str,
         connection: Connection,
-    ) -> io::Result<Vec<GrantHolder>> {
+    ) -> io::Result<Recorded> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
         let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
@@ -392,10 +410,15 @@ impl<'a> ConnectorStore<'a> {
             self.grants.save(&grants)?;
         }
 
-        let mut values = self.values.load()?;
-        values.insert(connection_key(name, label), connection);
-        self.values.save(&values)?;
-        Ok(invalidated)
+        // The grants are already dropped, so the caller is told which even where the values behind them will not store.
+        let stored = self.values.load().and_then(|mut values| {
+            values.insert(connection_key(name, label), connection);
+            self.values.save(&values)
+        });
+        Ok(Recorded {
+            invalidated,
+            stored,
+        })
     }
 
     /// Drops one connection, or every connection of a connector when `label` is absent. The connector stays installed and grants naming it stay (§3.3 `disconnect`).
@@ -1036,6 +1059,7 @@ mod tests {
             method: "token".to_string(),
             authority,
             values: [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
+            expires_at_millis: None,
         }
     }
 
@@ -1463,7 +1487,8 @@ mod tests {
             .unwrap();
         let invalidated = store
             .record_authentication("some-provider", "work", connection(authority))
-            .unwrap();
+            .unwrap()
+            .invalidated;
         assert!(invalidated.is_empty());
         assert!(store.decision(&a_run(), "some-provider").unwrap().is_some());
     }
@@ -1485,7 +1510,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["repo:read", "repo:write"])),
             )
-            .unwrap();
+            .unwrap()
+            .invalidated;
         assert_eq!(invalidated.len(), 1);
         assert_eq!(
             store.decision(&a_run(), "some-provider").unwrap(),
@@ -1517,6 +1543,7 @@ mod tests {
                     connection(Authority::of(["repo:read"]))
                 )
                 .unwrap()
+                .invalidated
                 .len(),
             1
         );
@@ -1554,7 +1581,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["admin"])),
             )
-            .unwrap();
+            .unwrap()
+            .invalidated;
 
         assert_eq!(invalidated.len(), 1);
         assert!(
@@ -1591,6 +1619,7 @@ mod tests {
                     connection(Authority::of(["admin"]))
                 )
                 .unwrap()
+                .invalidated
                 .is_empty()
         );
     }
@@ -1610,6 +1639,7 @@ mod tests {
                     connection(Authority::of(["admin"]))
                 )
                 .unwrap()
+                .invalidated
                 .is_empty()
         );
         assert_eq!(
@@ -1622,10 +1652,52 @@ mod tests {
     fn a_values_write_that_fails_surfaces_rather_than_reporting_a_stored_connection() {
         let rig = Rig::new();
         *rig.values.fail_save.lock().unwrap() = true;
+
+        let recorded = rig
+            .store()
+            .record_authentication("some-provider", "work", connection(Authority::default()))
+            .expect("the grants half is answerable either way");
+
+        assert!(recorded.stored.is_err());
         assert!(
             rig.store()
-                .record_authentication("some-provider", "work", connection(Authority::default()))
-                .is_err()
+                .connections_of("some-provider")
+                .unwrap()
+                .is_empty(),
+            "a connection that did not store is not one the machine holds"
+        );
+    }
+
+    #[test]
+    fn a_grant_this_dropped_is_reported_even_where_the_values_behind_it_will_not_store() {
+        // The grants file is written first, so those runs must decide again whether or not the values land — and nobody is watching a renewal.
+        let rig = Rig::new();
+        rig.store()
+            .decide(
+                &a_run(),
+                "some-provider",
+                granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+            )
+            .expect("a run that granted this connection");
+        *rig.values.fail_save.lock().unwrap() = true;
+
+        let recorded = rig
+            .store()
+            .record_authentication(
+                "some-provider",
+                "work",
+                connection(Authority::of(["admin"])),
+            )
+            .expect("the grants half is answerable either way");
+
+        assert!(recorded.stored.is_err());
+        assert_eq!(recorded.invalidated.len(), 1);
+        assert!(
+            rig.store()
+                .decision(&a_run(), "some-provider")
+                .unwrap()
+                .is_none(),
+            "and the grant really is gone, which is why it has to be reported"
         );
     }
 
@@ -1796,7 +1868,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["admin"])),
             )
-            .expect("store the connection");
+            .expect("store the connection")
+            .invalidated;
 
         assert!(invalidated.is_empty(), "nothing this build can name");
         for key in &stale {
