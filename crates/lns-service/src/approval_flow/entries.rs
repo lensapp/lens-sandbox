@@ -180,13 +180,27 @@ impl Fs for RealFs {
 static WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn write_lock_for(path: &Path) -> Arc<Mutex<()>> {
+    let mut locks = WRITE_LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("approvals locks poisoned");
+    // A lock only this map holds is one no store is ordering writes with, and the run it named may be long gone.
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    locks
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+#[cfg(test)]
+fn held_locks() -> Vec<PathBuf> {
     WRITE_LOCKS
         .get_or_init(Mutex::default)
         .lock()
         .expect("approvals locks poisoned")
-        .entry(path.to_path_buf())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+        .keys()
+        .cloned()
+        .collect()
 }
 
 pub struct FileEntryStore {
@@ -548,6 +562,28 @@ pub(crate) mod tests {
             !Arc::ptr_eq(&one.write_lock, &other.write_lock),
             "one run's writes must not wait on another run's"
         );
+    }
+
+    #[test]
+    fn a_lock_no_store_holds_any_more_is_not_kept_for_ever() {
+        // The map is process-wide and keyed by path, so every run the service ever answered for would leave its lock behind — `lns rm` takes the run's directory and nothing takes this.
+        let fs = Arc::new(FakeFs::default());
+        let removed = PathBuf::from("/run/removed-by-lns-rm/approvals.json");
+        let held = PathBuf::from("/run/still-here/approvals.json");
+        drop(FileEntryStore::with_fs(removed.clone(), fs.clone()));
+
+        let live = FileEntryStore::with_fs(held.clone(), fs);
+
+        let locks = held_locks();
+        assert!(
+            !locks.contains(&removed),
+            "the lock of a run nothing holds a store for is still in the map"
+        );
+        assert!(
+            locks.contains(&held),
+            "and the one a live store shares must stay, or two surfaces would order nothing"
+        );
+        drop(live);
     }
 
     #[test]
