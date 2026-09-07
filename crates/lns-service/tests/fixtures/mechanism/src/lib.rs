@@ -95,15 +95,6 @@ fn work(_now_millis: u64) -> Step {
     panic!("a component that gives up in the middle answers nothing")
 }
 
-#[cfg(feature = "binding")]
-fn work(_now_millis: u64) -> Step {
-    let bound = lns::connector::callback::bind().map(|binding| binding.url);
-    match lns::connector::callback::wait(0) {
-        Ok(query) => answered("access_token", &format!("{bound:?}?{query}")),
-        Err(error) => how_it_was_refused(&error),
-    }
-}
-
 #[cfg(feature = "hoarding")]
 fn work(_now_millis: u64) -> Step {
     Step::Ask(Ask {

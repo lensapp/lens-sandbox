@@ -82,21 +82,6 @@ interface entropy {
     bytes: func(count: u32) -> list<u8>;
 }
 
-interface callback {
-    use types.{call-error};
-
-    record binding {
-        url: string,
-        handle: u32,
-    }
-
-    /// A loopback listener for a redirect leg. The host owns the port.
-    bind: func() -> result<binding, call-error>;
-
-    /// The query string of the first request the binding received.
-    wait: func(handle: u32) -> result<string, call-error>;
-}
-
 /// What a mechanism implements. An interface rather than four bare functions, so
 /// a component's export symbols cannot collide with the names its own libc uses.
 interface adapter {
@@ -116,7 +101,6 @@ world mechanism {
     import http;
     import exec;
     import entropy;
-    import callback;
 
     export adapter;
 }
