@@ -381,7 +381,8 @@ async fn orchestrate(
     let ensured_tools = if tool_requests.is_empty() {
         None
     } else {
-        let surveyed = crate::tools::image_survey::survey_off_runtime(&image.digests, &image.bytes)?;
+        let surveyed =
+            crate::tools::image_survey::survey_off_runtime(&image.digests, &image.bytes)?;
         let target = crate::tools::ProvisionTarget {
             arch: crate::tools::host_arch(),
             libc: surveyed.libc,
@@ -409,10 +410,8 @@ async fn orchestrate(
             },
         )
         .await?;
-        login_shell_spec = crate::tools::login_shell::profile_spec(
-            &ensured.bin_paths,
-            surveyed.reads_etc_profile,
-        );
+        login_shell_spec =
+            crate::tools::login_shell::profile_spec(&ensured.bin_paths, surveyed.reads_etc_profile);
         Some(ensured)
     };
 

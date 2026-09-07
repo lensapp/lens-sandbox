@@ -74,8 +74,11 @@ mod tests {
     #[test]
     fn the_snippet_lands_where_etc_profile_sources_it_and_the_workload_can_read_it() {
         // /etc/profile assigns PATH and then sources this directory, so a file anywhere else is never read; a workload that is not root still has to be able to read it.
-        let spec = profile_spec(&dirs(&["/.lens/tools/jq/1.7.1/data/installs/jq/1.7.1"]), true)
-            .expect("a declared tool stages a snippet");
+        let spec = profile_spec(
+            &dirs(&["/.lens/tools/jq/1.7.1/data/installs/jq/1.7.1"]),
+            true,
+        )
+        .expect("a declared tool stages a snippet");
         assert_eq!(spec.guest_path, "/etc/profile.d/lens-tools.sh");
         assert_eq!(spec.mode, 0o644);
     }
