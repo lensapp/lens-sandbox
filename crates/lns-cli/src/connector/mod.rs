@@ -230,35 +230,56 @@ async fn connect(
             args.name
         );
     }
-    let (connector, method, asked_for) =
-        method_to_connect(svc, &args.name, args.method.as_deref()).await?;
+    let (connector, method) = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
     writeln!(prompt, "connecting {} with {}", args.name, method.label)?;
     let connection = match args.label.clone() {
         Some(named) => named,
         None => confirm_name(&connector, &method, terminal, prompt)?,
     };
-    let values = ask_for_each(&method, &asked_for, terminal, prompt)?;
-    let req = Request::ConnectConnector {
-        name: args.name.clone(),
-        method: method.name.clone(),
-        connection,
-        values: lns_ipc::SecretValues(values),
-    };
-    match send(svc, req).await? {
-        Response::ConnectorConnected {
-            name,
+    let mut turn = send(
+        svc,
+        Request::BeginConnect {
+            name: args.name.clone(),
+            method: method.name.clone(),
             connection,
-            invalidated,
-        } => {
-            writeln!(writer, "connected {name} as {connection}")?;
-            report_invalidated(&invalidated, writer)?;
-            writeln!(
-                writer,
-                "  this grants nothing: a run still decides whether to use it"
-            )?;
-            Ok(0)
+        },
+    )
+    .await?;
+    loop {
+        match turn {
+            Response::ConnectorAsks {
+                session,
+                message,
+                fields,
+            } => {
+                let values = ask_for_each(&args.name, &message, &fields, terminal, prompt)?;
+                turn = send(
+                    svc,
+                    Request::AnswerConnect {
+                        session,
+                        values: lns_ipc::SecretValues(values),
+                    },
+                )
+                .await?;
+            }
+            Response::ConnectorConnected {
+                name,
+                connection,
+                invalidated,
+            } => {
+                writeln!(writer, "connected {name} as {connection}")?;
+                report_invalidated(&invalidated, writer)?;
+                writeln!(
+                    writer,
+                    "  this grants nothing: a run still decides whether to use it"
+                )?;
+                return Ok(0);
+            }
+            Response::ConnectorConnectFailed { name, reason } => {
+                bail!("connecting {name} did not finish: {reason}");
+            }
+            other => bail!("unexpected response from daemon: {other:?}"),
         }
-        other => bail!("unexpected response from daemon: {other:?}"),
     }
 }
 
@@ -286,7 +307,7 @@ async fn method_to_connect(
     svc: &dyn ConnectorService,
     name: &str,
     named: Option<&str>,
-) -> Result<(ConnectorView, lns_ipc::ConnectorMethodView, String)> {
+) -> Result<(ConnectorView, lns_ipc::ConnectorMethodView)> {
     let connector = installed_view(svc, name).await?;
     let method = match named {
         Some(named) => connector
@@ -304,38 +325,54 @@ async fn method_to_connect(
             why_unofferable(&method)
         );
     }
-    let Some(asked_for) = method.auth_label.clone() else {
+    if method.auth_label.is_none() {
         bail!(
             "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
             method.name
         );
-    };
+    }
     if method.asks.is_empty() {
         bail!(
             "method {} declares no credential, so there is no value to ask for",
             method.name
         );
     }
-    Ok((connector, method, asked_for))
+    Ok((connector, method))
 }
 
-/// Ask once per value the method's `auth` produces, under the key the grant reads it back under, so the value the user types is the value the credential is armed with.
+/// Ask for each value the mechanism named, in the order it named them, under the key it will read them back under. What is asked for is the mechanism's decision, so nothing here reads it off the document (sandbox-spec §3.2.6).
 fn ask_for_each(
-    method: &lns_ipc::ConnectorMethodView,
-    label: &str,
+    connector: &str,
+    message: &str,
+    fields: &[lns_ipc::ConnectorFieldView],
     terminal: &mut dyn Terminal,
     prompt: &mut impl Write,
 ) -> Result<std::collections::BTreeMap<String, String>> {
+    if !message.is_empty() {
+        writeln!(prompt, "{connector} says: {message}")?;
+    }
     let mut values = std::collections::BTreeMap::new();
-    for ask in &method.asks {
-        write!(prompt, "{label} (not shown): ")?;
-        prompt.flush()?;
-        let value = terminal.read_secret()?.trim().to_string();
-        writeln!(prompt)?;
-        if value.is_empty() {
-            bail!("no value was given for {label}, so nothing was connected");
+    for field in fields {
+        if field.secret {
+            write!(prompt, "{} (not shown): ", field.label)?;
+        } else {
+            write!(prompt, "{}: ", field.label)?;
         }
-        values.insert(ask.clone(), value);
+        prompt.flush()?;
+        let typed = if field.secret {
+            terminal.read_secret()?
+        } else {
+            terminal.read_answer()?
+        };
+        if field.secret {
+            writeln!(prompt)?;
+        }
+        values.insert(field.name.clone(), typed.trim().to_string());
+    }
+    if fields.is_empty() {
+        write!(prompt, "press enter when you have done that: ")?;
+        prompt.flush()?;
+        terminal.read_answer()?;
     }
     Ok(values)
 }
@@ -504,6 +541,7 @@ fn disclose(
     disclose_list(prompt, "opens", &method.opens)?;
     disclose_list(prompt, "writes", &method.writes)?;
     disclose_list(prompt, "sets", &method.sets())?;
+    disclose_code(connector, method, prompt)?;
     // What is printed is what is granted, so a connection made for another method is not part of this disclosure.
     for connection in connector
         .connections
@@ -522,6 +560,30 @@ fn disclose(
         )?;
     }
     Ok(())
+}
+
+/// A method whose mechanism is code has no behaviour to show, so the card names what bounds it and then carries one of two sentences verbatim (cli-spec §3.3).
+fn disclose_code(
+    connector: &ConnectorView,
+    method: &lns_ipc::ConnectorMethodView,
+    prompt: &mut impl Write,
+) -> std::io::Result<()> {
+    if !method.carries_code {
+        return Ok(());
+    }
+    let reaches = if method.hosts.is_empty() {
+        lns_ipc::NO_HOSTS_DISCLOSURE.to_string()
+    } else {
+        method.hosts.join(", ")
+    };
+    labelled(prompt, "code may contact", &reaches)?;
+    labelled(prompt, "installed at", &connector.digest)?;
+    let disclosure = if method.runs_programs {
+        lns_ipc::UNBOUNDED_CODE_DISCLOSURE
+    } else {
+        lns_ipc::BOUNDED_CODE_DISCLOSURE
+    };
+    writeln!(prompt, "  {disclosure}")
 }
 
 /// Prints "nothing" rather than an empty line, so a payload the method does not carry is stated instead of looking omitted.
@@ -933,6 +995,9 @@ mod tests {
                 overrides: None,
                 credentials: Vec::new(),
                 asks: Vec::new(),
+                hosts: Vec::new(),
+                runs_programs: false,
+                carries_code: false,
             }],
             connections: Vec::new(),
         };
@@ -1037,6 +1102,9 @@ mod tests {
             overrides: None,
             credentials: vec!["SOME_TOKEN".into()],
             asks: vec!["token".into()],
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         }
     }
 
@@ -1636,6 +1704,9 @@ mod tests {
             overrides: None,
             credentials: Vec::new(),
             asks: Vec::new(),
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         };
         let svc = CannedService::with([Some(listing(vec![with_methods(vec![bare])]))]);
         // Driven through `run` rather than `drive`, because what the user was asked before the refusal is the point and `drive` drops the prompt on an error.
@@ -1761,7 +1832,7 @@ mod tests {
         );
         let sent = svc.sent();
         assert!(
-            matches!(&sent[1], Request::ConnectConnector { connection, .. } if connection == "token-2"),
+            matches!(&sent[1], Request::BeginConnect { connection, .. } if connection == "token-2"),
             "{sent:?}"
         );
     }
@@ -1800,14 +1871,14 @@ mod tests {
 
         let sent = svc.sent();
         assert!(
-            matches!(&sent[1], Request::ConnectConnector { connection, .. } if connection == "personal"),
+            matches!(&sent[1], Request::BeginConnect { connection, .. } if connection == "personal"),
             "{sent:?}"
         );
     }
 
     #[tokio::test]
-    async fn connecting_asks_once_per_value_the_auth_produces_and_not_once_per_variable() {
-        // A `kind: token` auth produces one value, so two credentials drawing on it are two variables holding one secret — asking twice would collect a second value nothing reads.
+    async fn connecting_asks_exactly_what_the_mechanism_asked_for_and_nothing_it_read_itself() {
+        // The mechanism decides the fields, so a method setting two variables from one value is one question — and it is the service that says so.
         let two = lns_ipc::ConnectorMethodView {
             name: "token".into(),
             label: "token".into(),
@@ -1820,9 +1891,21 @@ mod tests {
             overrides: None,
             credentials: vec!["SOME_TOKEN".into(), "SOME_SECRET".into()],
             asks: vec!["token".into()],
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         };
         let svc = CannedService::with([
             Some(listing(vec![with_methods(vec![two])])),
+            Some(Response::ConnectorAsks {
+                session: "some-provider/token/1".into(),
+                message: String::new(),
+                fields: vec![lns_ipc::ConnectorFieldView {
+                    name: "token".into(),
+                    label: "token".into(),
+                    secret: true,
+                }],
+            }),
             Some(Response::ConnectorConnected {
                 name: "some-provider".into(),
                 connection: "token".into(),
@@ -1852,7 +1935,7 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|req| match req {
-                Request::ConnectConnector { values, .. } => Some(values.0.clone()),
+                Request::AnswerConnect { values, .. } => Some(values.0.clone()),
                 _ => None,
             })
             .expect("a connect request must have been sent");

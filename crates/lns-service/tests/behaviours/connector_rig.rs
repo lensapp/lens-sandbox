@@ -6,6 +6,53 @@ use lns_service::connector::store::{
     Connection, ConnectorStore, GrantHolder, Installed, RunDecision,
 };
 
+/// Layer 2 forbids the network, a subprocess and a real clock — not only their use, so the rig does not hold the capability at all.
+struct ReachesNothing;
+
+impl lns_service::connector::mechanism::traits::Http for ReachesNothing {
+    fn fetch(
+        &self,
+        _request: &lns_service::connector::mechanism::HttpRequest,
+        _within: std::time::Duration,
+    ) -> Result<
+        lns_service::connector::mechanism::HttpResponse,
+        lns_service::connector::mechanism::CallError,
+    > {
+        Err(lns_service::connector::mechanism::CallError::Refused(
+            "this rig reaches nothing".to_string(),
+        ))
+    }
+}
+
+impl lns_service::connector::mechanism::traits::Exec for ReachesNothing {
+    fn run(
+        &self,
+        _argv: &[String],
+        _within: std::time::Duration,
+    ) -> Result<
+        lns_service::connector::mechanism::ExecOutput,
+        lns_service::connector::mechanism::CallError,
+    > {
+        Err(lns_service::connector::mechanism::CallError::Refused(
+            "this rig starts nothing".to_string(),
+        ))
+    }
+}
+
+impl lns_service::connector::mechanism::traits::Entropy for ReachesNothing {
+    fn bytes(&self, count: u32) -> Vec<u8> {
+        vec![0; count as usize]
+    }
+}
+
+impl lns_service::connector::mechanism::traits::Recorder for ReachesNothing {
+    // no-op: what a mechanism reached is a Layer 2 concern of the ledger feature, not of this rig.
+    fn reached(&self, _connector: &str, _host: &str, _refused: bool) {}
+
+    // no-op: as above.
+    fn ran(&self, _connector: &str, _program: &str, _refused: bool) {}
+}
+
 /// Every scenario names a run by a short id, so the rig speaks the one holder kind it needs.
 fn holder(run: &str) -> GrantHolder {
     GrantHolder::Run(run.to_string())
@@ -21,6 +68,9 @@ pub struct ConnectorRig {
     name: String,
     serves: Vec<String>,
     methods: Vec<serde_json::Value>,
+
+    mechanisms: lns_service::connector::mechanism::real::RealMechanisms,
+    sessions: lns_service::connector::session::InMemorySessions,
 
     pub error: Option<String>,
     pub listed: Vec<Installed>,
@@ -45,6 +95,14 @@ impl Default for ConnectorRig {
             values: JsonDecisionStore::new(tmp.path().join("connector-values.json")),
             grants: JsonDecisionStore::new(tmp.path().join("connector-grants.json")),
             _tmp: tmp,
+            mechanisms: lns_service::connector::mechanism::real::RealMechanisms::lending(
+                std::sync::Arc::new(ReachesNothing),
+                std::sync::Arc::new(ReachesNothing),
+                std::sync::Arc::new(ReachesNothing),
+                std::sync::Arc::new(ReachesNothing),
+            )
+            .expect("the component runtime starts"),
+            sessions: lns_service::connector::session::InMemorySessions::default(),
             name: String::new(),
             serves: Vec::new(),
             methods: Vec::new(),
@@ -165,7 +223,7 @@ impl ConnectorRig {
         }
     }
 
-    /// Connects through the keys the method's own view asks for, because a connect that guessed the key would prove nothing about the grant that reads it.
+    /// Connects through the real driver and the real mechanism, because a connect that stored a connection itself would prove nothing about what produces one.
     pub fn connect(&mut self, method: &str, value: &str) {
         let name = self.name.clone();
         let values = self
@@ -173,10 +231,17 @@ impl ConnectorRig {
             .into_iter()
             .map(|ask| (ask, value.to_string()))
             .collect();
-        self.error =
-            lns_service::connector::handler::connect(&self.store(), &name, method, "work", values)
-                .err()
-                .map(|e| format!("{e:#}"));
+        let driver = lns_service::connector::connect::Driver {
+            store: self.store(),
+            mechanisms: &self.mechanisms,
+            sessions: &self.sessions,
+            now_millis: 0,
+        };
+        self.error = match driver.with_values(&name, method, "work", values) {
+            Ok(lns_service::connector::connect::Connecting::Connected(_)) => None,
+            Ok(turn) => Some(format!("{turn:?}")),
+            Err(e) => Some(format!("{e:#}")),
+        };
     }
 
     fn asks_of(&self, name: &str, method: &str) -> Vec<String> {

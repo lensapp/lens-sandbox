@@ -2120,6 +2120,9 @@ pub(crate) mod tests {
                 asks: Vec::new(),
                 help: None,
                 overrides: None,
+                hosts: Vec::new(),
+                runs_programs: false,
+                carries_code: false,
             }],
             connections: connections
                 .iter()

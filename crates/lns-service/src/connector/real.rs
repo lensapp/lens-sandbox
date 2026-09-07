@@ -18,10 +18,13 @@ pub enum Call {
     Install(String),
     Uninstall(String),
     List,
-    Connect {
+    Begin {
         name: String,
         method: String,
         connection: String,
+    },
+    Answer {
+        session: String,
         values: std::collections::BTreeMap<String, String>,
     },
     Disconnect {
@@ -39,6 +42,37 @@ pub enum Call {
         name: String,
         run: String,
     },
+}
+
+/// One turn of a connect, as the caller sees it.
+fn one_turn(name: &str, turn: super::connect::Connecting) -> Response {
+    match turn {
+        super::connect::Connecting::Asks {
+            session,
+            message,
+            fields,
+        } => Response::ConnectorAsks {
+            session,
+            message,
+            fields: fields
+                .into_iter()
+                .map(|field| lns_ipc::ConnectorFieldView {
+                    name: field.name,
+                    label: field.label,
+                    secret: field.secret,
+                })
+                .collect(),
+        },
+        super::connect::Connecting::Connected(connected) => Response::ConnectorConnected {
+            name: name.to_string(),
+            connection: connected.connection,
+            invalidated: named_holders(connected.invalidated),
+        },
+        super::connect::Connecting::Failed(reason) => Response::ConnectorConnectFailed {
+            name: name.to_string(),
+            reason,
+        },
+    }
 }
 
 /// Who a `--run` handle names: the run it resolves to, or — where it is a name no run holds — the reservation waiting for it (§3.2.4). The service decides this because only the service holds the registry.
@@ -135,7 +169,12 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
     ) -> Result<Vec<String>, String> {
         self.with_store(|store| {
             Ok(named_holders(
-                handler::connect(store, name, method, label, values.0)?.invalidated,
+                super::mechanism::real::off_the_runtime_thread(|| {
+                    super::mechanism::real::driver(*store)?
+                        .with_values(name, method, label, values.0)
+                })?
+                .finished()?
+                .invalidated,
             ))
         })
     }
@@ -469,18 +508,22 @@ pub async fn answer(call: Call) -> Result<Response> {
         Call::List => Ok(Response::ConnectorList {
             connectors: handler::list(&store)?,
         }),
-        Call::Connect {
+        // A component's own compute runs synchronously and may spend its whole deadline, so it steps off the runtime thread rather than holding a worker.
+        Call::Begin {
             name,
             method,
             connection,
-            values,
         } => {
-            let connected = handler::connect(&store, &name, &method, &connection, values)?;
-            Ok(Response::ConnectorConnected {
-                name,
-                connection: connected.connection,
-                invalidated: named_holders(connected.invalidated),
-            })
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(store)?.begin(&name, &method, &connection)
+            })?;
+            Ok(one_turn(&name, turn))
+        }
+        Call::Answer { session, values } => {
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(store)?.answer(&session, values)
+            })?;
+            Ok(one_turn(&turn.connector, turn.connecting))
         }
         Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
             dropped: handler::disconnect(&store, &name, connection.as_deref())?,
@@ -561,6 +604,23 @@ mod tests {
 
     const RUN: &str = "1a2b3c4d0000000000000000000000aa";
     const OTHER_RUN: &str = "9f8e7d6c0000000000000000000000bb";
+
+    #[test]
+    fn a_connect_that_did_not_finish_answers_the_caller_rather_than_faulting() {
+        // A mechanism refusing is an answer: the offer stands and the caller is told whose refusal it is.
+        let answered = one_turn(
+            "some-provider",
+            super::super::connect::Connecting::Failed("the provider said no".to_string()),
+        );
+
+        assert_eq!(
+            answered,
+            Response::ConnectorConnectFailed {
+                name: "some-provider".to_string(),
+                reason: "the provider said no".to_string(),
+            }
+        );
+    }
 
     #[test]
     #[serial(env, global_runs)]

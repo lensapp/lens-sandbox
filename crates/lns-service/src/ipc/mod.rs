@@ -416,15 +416,17 @@ fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
         Request::InstallConnector { source } => Call::Install(source.clone()),
         Request::UninstallConnector { name } => Call::Uninstall(name.clone()),
         Request::ListConnectors => Call::List,
-        Request::ConnectConnector {
+        Request::BeginConnect {
             name,
             method,
             connection,
-            values,
-        } => Call::Connect {
+        } => Call::Begin {
             name: name.clone(),
             method: method.clone(),
             connection: connection.clone(),
+        },
+        Request::AnswerConnect { session, values } => Call::Answer {
+            session: session.clone(),
             values: values.0.clone(),
         },
         Request::DisconnectConnector { name, connection } => Call::Disconnect {
@@ -540,7 +542,8 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::InstallConnector { .. }
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
-        | Request::ConnectConnector { .. }
+        | Request::BeginConnect { .. }
+        | Request::AnswerConnect { .. }
         | Request::DisconnectConnector { .. }
         | Request::GrantConnector { .. }
         | Request::ForgetConnector { .. }
@@ -2369,14 +2372,26 @@ mod tests {
         )
         .await;
 
-        let connected = as_json(
+        let asked = as_json(
             handle_request(
-                &Request::ConnectConnector {
+                &Request::BeginConnect {
                     name: "some-provider".into(),
                     method: "token".into(),
                     connection: "work".into(),
+                },
+                now,
+            )
+            .await,
+        );
+        assert_eq!(asked["type"], "ConnectorAsks", "got {asked}");
+        let session = asked["session"].as_str().expect("a session handle");
+
+        let connected = as_json(
+            handle_request(
+                &Request::AnswerConnect {
+                    session: session.to_string(),
                     values: lns_ipc::SecretValues(
-                        [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
+                        [("token".to_string(), "real-secret".to_string())].into(),
                     ),
                 },
                 now,

@@ -167,7 +167,7 @@ impl Auth {
     }
 
     /// The values this kind produces, or `None` for a kind this version does not know and so decodes nothing of (§3.2.2).
-    fn outputs(&self) -> Option<Vec<String>> {
+    pub fn outputs(&self) -> Option<Vec<String>> {
         if let Some(code) = self.code() {
             return code.ok().map(|code| code.outputs);
         }
@@ -177,9 +177,9 @@ impl Auth {
             .map(|(_, outputs)| outputs.iter().map(|o| (*o).to_string()).collect())
     }
 
-    /// Whether this build can actually run this mechanism. `code` parses and validates here, but no component runtime exists yet, so offering it would ask the user to hand-type what a component is supposed to produce.
+    /// Whether this build can actually run this mechanism: one it implements, or a `code` method, whose implementation the connector carries (§3.2.2).
     fn is_implemented(&self) -> bool {
-        BUILT_IN_OUTPUTS.iter().any(|(kind, _)| *kind == self.kind)
+        self.kind == CODE || BUILT_IN_OUTPUTS.iter().any(|(kind, _)| *kind == self.kind)
     }
 
     /// Which `code`-only name this auth carries, for a kind that may not carry one.
@@ -951,26 +951,25 @@ mod tests {
     }
 
     #[test]
-    fn a_code_method_is_not_offered_until_this_build_can_run_one() {
-        // Offering it would ask the user to hand-type what a component is supposed to produce, and nothing here runs a component.
+    fn a_code_method_is_offered_because_the_connector_carries_what_runs_it() {
         let parsed = parse(&code_method(
             CODE_AUTH,
             &credential_drawing_on(Some("access_token")),
         ))
         .expect("a code method parses");
-        assert!(
-            !parsed.spec.methods[0].is_offerable(),
-            "a code method must read as needing a newer lns while its mechanism is unimplemented"
-        );
+        assert!(parsed.spec.methods[0].is_offerable());
     }
 
     #[test]
-    fn a_token_method_beside_an_unofferable_code_method_is_still_offered() {
+    fn a_kind_this_version_does_not_know_is_still_unofferable_beside_one_it_does() {
         let document = with_methods(
-            r#"[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["token"]}},{"name":"paste","auth":{"kind":"token"}}]"#,
+            r#"[{"name":"sign-in","auth":{"kind":"oauth_device"}},{"name":"paste","auth":{"kind":"token"}}]"#,
         );
         let parsed = parse(&document).expect("both methods parse");
-        assert!(!parsed.spec.methods[0].is_offerable());
+        assert!(
+            !parsed.spec.methods[0].is_offerable(),
+            "a kind whose mechanism this version has no implementation of reads as needing a newer lns"
+        );
         assert!(parsed.spec.methods[1].is_offerable());
     }
 

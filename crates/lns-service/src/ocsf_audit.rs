@@ -124,6 +124,23 @@ pub fn tool_event(
     ))
 }
 
+/// One thing a connector's own code did, for the machine-level chain.
+pub fn mechanism_event(
+    cx: &OcsfCtx,
+    connector: &str,
+    verb: &str,
+    target: &str,
+    refused: bool,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::mechanism(
+        &cx.ctx(),
+        connector,
+        verb,
+        target,
+        refused,
+    ))
+}
+
 pub fn sandbox_run_event(
     cx: &OcsfCtx,
     reference: &str,

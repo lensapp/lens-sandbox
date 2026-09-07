@@ -42,12 +42,19 @@ impl Recorder for Spy {
 #[derive(Default)]
 pub struct Reachable {
     pub seen: Mutex<Vec<String>>,
+    /// The deadline the call carried, because an epoch tick cannot interrupt a host call already in flight.
+    pub within: Mutex<std::time::Duration>,
     /// What the network did, rather than what the bound decided: a mechanism has to tell the two apart.
     pub unreachable: Mutex<bool>,
 }
 
 impl Http for Reachable {
-    fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, CallError> {
+    fn fetch(
+        &self,
+        request: &HttpRequest,
+        within: std::time::Duration,
+    ) -> Result<HttpResponse, CallError> {
+        *self.within.lock().expect("http lock") = within;
         self.seen
             .lock()
             .expect("http lock")
@@ -66,11 +73,13 @@ impl Http for Reachable {
 #[derive(Default)]
 pub struct Runnable {
     pub seen: Mutex<Vec<Vec<String>>>,
+    pub within: Mutex<std::time::Duration>,
     pub missing: Mutex<bool>,
 }
 
 impl Exec for Runnable {
-    fn run(&self, argv: &[String]) -> Result<ExecOutput, CallError> {
+    fn run(&self, argv: &[String], within: std::time::Duration) -> Result<ExecOutput, CallError> {
+        *self.within.lock().expect("exec lock") = within;
         self.seen.lock().expect("exec lock").push(argv.to_vec());
         if *self.missing.lock().expect("exec lock") {
             return Err(CallError::Failed("no such program".to_string()));
@@ -202,6 +211,32 @@ fn a_wildcard_bound_covers_the_hosts_below_it() {
 
     host.fetch(&get("https://auth.some-provider.example/token"))
         .expect("a wildcard bound covers what is below it");
+}
+
+#[test]
+fn every_call_carries_the_deadline_the_method_declared() {
+    // An epoch tick cannot interrupt a host call already in flight, so the call has to carry it (§3.2.6).
+    let parts = Parts::new();
+    let host = parts.host(Bounds {
+        hosts: vec!["auth.some-provider.example".to_string()],
+        exec: true,
+        call_seconds: 12,
+        session_seconds: 900,
+    });
+
+    host.fetch(&get("https://auth.some-provider.example/token"))
+        .expect("a declared host is reachable");
+    host.run(&["claude".to_string()])
+        .expect("host execution was declared");
+
+    assert_eq!(
+        *parts.http.within.lock().expect("http lock"),
+        std::time::Duration::from_secs(12)
+    );
+    assert_eq!(
+        *parts.exec.within.lock().expect("exec lock"),
+        std::time::Duration::from_secs(12)
+    );
 }
 
 #[test]
@@ -359,6 +394,45 @@ fn bounds_come_from_the_method_that_declared_the_mechanism() {
     );
     assert!(bounds.allows("auth.some-provider.example", "443"));
     assert!(!bounds.allows("other.some-provider.example", "443"));
+}
+
+#[test]
+fn a_debug_of_a_step_cannot_print_the_values_or_the_state_it_carries() {
+    // Anything on a connect path may be rendered by `log::debug!`, and both a produced value and a device code are secret material (§3.2.6).
+    let asked = Step::Ask {
+        message: "open the picker".to_string(),
+        fields: vec![Field {
+            name: "access_token".to_string(),
+            label: "access token".to_string(),
+            secret: true,
+        }],
+        state: b"a device code".to_vec(),
+    };
+    let rendered = format!("{asked:?}");
+    assert!(!rendered.contains("a device code"), "{rendered}");
+    assert!(rendered.contains("redacted"), "{rendered}");
+    assert!(
+        rendered.contains("open the picker") && rendered.contains("access token"),
+        "what the user is about to read is not a secret, and has to be diagnosable: {rendered}"
+    );
+
+    let done = Step::Done(Outcome {
+        values: Answers::from([("access_token".to_string(), "sk-live-real".to_string())]),
+        authority: std::collections::BTreeSet::from(["repo:read".to_string()]),
+        expires_at_millis: Some(1_000),
+    });
+    let rendered = format!("{done:?}");
+    assert!(!rendered.contains("sk-live-real"), "{rendered}");
+    assert!(rendered.contains("redacted"), "{rendered}");
+    assert!(
+        rendered.contains("repo:read") && rendered.contains("1000"),
+        "the authority and the expiry are what a connection records, not what it hides: {rendered}"
+    );
+
+    assert!(
+        format!("{:?}", Step::Failed("the provider said no".to_string()))
+            .contains("the provider said no")
+    );
 }
 
 #[test]
