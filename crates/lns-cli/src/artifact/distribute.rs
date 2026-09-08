@@ -295,6 +295,16 @@ fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
     })
 }
 
+/// A path-form `spec.image` publishes as the digest of an image lns built (§6), so a push that cannot build one refuses before it uploads anything.
+fn refuse_an_unbuilt_image(doc: &[u8]) -> Result<()> {
+    let image = serde_json::from_slice::<serde_json::Value>(doc)
+        .ok()
+        .and_then(|doc| doc["spec"]["image"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    super::image_build::refuse_an_unbuilt_image(&image)
+        .map_err(|e| anyhow::anyhow!("refusing to push a sandbox no consumer can start: {e:#}"))
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
     ports: PushPorts<'_, F, P, R>,
@@ -320,6 +330,7 @@ where
         terminal,
     } = confirm;
     refuse_unpushable_tools(doc)?;
+    refuse_an_unbuilt_image(doc)?;
     // Packing first reads the directories offline, so a broken document or fileset refuses the push before it consults the index or uploads a mixin.
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
@@ -371,6 +382,7 @@ where
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
+    refuse_an_unbuilt_image(doc)?;
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;

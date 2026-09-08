@@ -46,6 +46,7 @@ pub fn resolve<F: Fs>(
     }
     let json = load_definition_json_at(fs, &file)?;
     let def = lns_artifact::sandbox::parse(&json)?;
+    crate::artifact::image_build::refuse_an_unbuilt_image(&def.spec.image)?;
     let paths: Vec<&str> = lns_artifact::merge::path_filesets(&def.spec)
         .map(|(_, _, path)| path)
         .collect();

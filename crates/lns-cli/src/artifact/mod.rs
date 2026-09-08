@@ -10,6 +10,7 @@ use crate::service::client::SandboxService;
 pub mod author;
 pub mod distribute;
 pub mod fileset;
+pub mod image_build;
 pub mod mixin_offline;
 pub mod mixin_plan;
 pub mod real;

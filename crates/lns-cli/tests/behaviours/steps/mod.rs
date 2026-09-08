@@ -8,6 +8,7 @@ pub mod declared_tools;
 pub mod definition_selection;
 pub mod env_file;
 pub mod host_bind;
+pub mod image_containerfile;
 pub mod inspect_local_mixin;
 pub mod interactive_exec;
 pub mod local_decisions;

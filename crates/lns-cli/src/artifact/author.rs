@@ -169,6 +169,13 @@ pub fn validate<F: Fs, W: Write>(
             project_dir,
             def.mixins(),
         ));
+        if let lns_artifact::sandbox::Document::Sandbox(sandbox) = &def {
+            problems.extend(super::image_build::image_problems(
+                fs,
+                project_dir,
+                &sandbox.spec.image,
+            ));
+        }
     }
     if problems.is_empty() {
         writeln!(out, "{name} is valid.")?;
@@ -230,7 +237,9 @@ pub fn inspect_local<F: Fs, W: Write>(
         | lns_artifact::sandbox::Document::Mixin(def) => def,
     };
     let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
-    render_effective(as_mixin, &def.name, &composed, out)?;
+    let built_from =
+        super::image_build::built_from(fs, path.parent().unwrap_or(cwd), &def.spec.image)?;
+    render_effective(as_mixin, &def.name, &composed, built_from.as_deref(), out)?;
     Ok(0)
 }
 
@@ -316,6 +325,7 @@ fn render_effective<W: Write>(
     as_mixin: bool,
     name: &str,
     composed: &Composition,
+    built_from: Option<&str>,
     out: &mut W,
 ) -> Result<()> {
     let spec = &composed.spec;
@@ -323,7 +333,10 @@ fn render_effective<W: Write>(
         writeln!(out, "Mixin: {name}")?;
     } else {
         writeln!(out, "Sandbox: {name}")?;
-        writeln!(out, "  image:        {}", spec.image)?;
+        match built_from {
+            Some(containerfile) => writeln!(out, "  image:        built from {containerfile}")?,
+            None => writeln!(out, "  image:        {}", spec.image)?,
+        }
     }
     for mixin in &composed.mixins {
         writeln!(out, "  mixin: {mixin}")?;
