@@ -310,6 +310,7 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     if kind != spec::Kind::Sandbox {
         refuse_the_blocks_that_describe_one_launch(&doc.spec, kind)?;
     }
+    crate::image::validate(&doc.spec.image)?;
     lns_spec::credential::validate_all(
         &doc.spec.credentials,
         lns_spec::credential::Source::Document,
@@ -1435,6 +1436,20 @@ mod tests {
             format!("{err:#}").contains("must carry an image"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn a_containerfile_path_that_leaves_the_document_refuses_the_whole_document() {
+        // Every load path parses, so an author hears about it at `validate` rather than at the build.
+        let err = parse(&def_json(r#"{"image":"../elsewhere"}"#)).unwrap_err();
+        assert!(format!("{err:#}").contains("spec.image"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_containerfile_path_beside_the_document_parses() {
+        let def = parse(&def_json(r#"{"image":"./image"}"#))
+            .expect("a path beside the document is a form spec.image takes");
+        assert_eq!(def.spec.image, "./image");
     }
 
     #[test]
