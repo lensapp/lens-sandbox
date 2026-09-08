@@ -332,7 +332,8 @@ guest path, or port repeats.
 
 | Field | Required | Summary |
 |---|---|---|
-| [`image`](#311-image) | **REQUIRED** | The base OCI image the sandbox runs. |
+| [`image`](#311-image) | **REQUIRED** | The OCI image the sandbox runs, or the Containerfile lns builds it from. |
+| [`imageSource`](#6-publish-time-transforms) | published only | The Containerfile path the published image was built from. Written by `lns push`, never by an author. |
 | [`command`](#312-command-and-workdir) | optional | Replaces the image's default command; keeps its `ENTRYPOINT`. |
 | [`workdir`](#312-command-and-workdir) | optional | Absolute guest working directory. |
 | [`user`](#313-user) | optional | The user the workload runs as. |
@@ -355,11 +356,24 @@ image: ghcr.io/acme/base@sha256:<64 hex>
 
 | Field | Type | Rules |
 |---|---|---|
-| `image` | string | REQUIRED. MUST NOT be empty or whitespace. Any OCI reference form is accepted. |
+| `image` | string | REQUIRED. MUST NOT be empty or whitespace. Either an OCI reference or a path to a Containerfile, in the two forms below. |
 
 An author SHOULD pin the image by digest before publishing. A tag makes the
 published sandbox mutable underneath its consumers, which defeats the digest the
 consumer approved.
+
+**The two forms.**
+
+| Form | Written | Rules |
+|---|---|---|
+| OCI reference | `ghcr.io/acme/base@sha256:<64 hex>` | Any OCI reference form is accepted. Published as written; pin it by digest yourself. |
+| Containerfile path | `./image` | A value beginning `.`, `/` or `~` names a path rather than a reference. It MUST be relative and beside the document — no leading `/`, no leading `~`, no `..` segment, no control character — because the artifact ships what it names. A directory MUST hold a `Containerfile` or a `Dockerfile` and is the build context; when it holds both, `Containerfile` is the one built, as Podman does. A path naming a file is the Containerfile whatever it is called, and its parent directory is the context. |
+
+lns builds a Containerfile itself, in a build guest under the document's own
+[`egress`](#316-egress) and [`credentials`](#317-credentials): what a `RUN`
+reaches is decided by the same rules a run's traffic is, and no Docker on the
+host is involved. A published document never carries a path — see
+[§6](#6-publish-time-transforms).
 
 #### 3.1.2 `command` and `workdir`
 
@@ -2100,7 +2114,9 @@ Offline validation (`lns artifact validate`, and every load path including
   `name` matches the name pattern; no unrecognized field at any level, with the
   one exception [§1.2](#12-strict-decoding) states — the body of a connector
   method's `auth` whose `kind` this reader does not know.
-- **Sandbox**: `image` present and non-empty; `workdir` absolute with no `..`;
+- **Sandbox**: `image` present and non-empty, and, when it names a Containerfile
+  ([§3.1.1](#311-image)), relative and beside the document with no `..` segment;
+  `workdir` absolute with no `..`;
   `user` has at most one `:`, no empty segment, and no `=`, whitespace, control
   character, or quote.
 - **env**: every key is a legal environment-variable name; within one source, no
@@ -2191,12 +2207,13 @@ document: `lns artifact validate` cannot see it.
 
 ## 6. Publish-time transforms
 
-`lns push` publishes the document with three resolutions applied, so a consumer
+`lns push` publishes the document with every resolution below applied, so a consumer
 runs exactly what the author tested:
 
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
+| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact, and `image` is rewritten to that image's digest reference. `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer, so what the guest starts from is disclosed with the rest of the document. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 | `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
