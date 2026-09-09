@@ -18,6 +18,16 @@ spec:
   tools: []
 ";
 
+const CONNECTOR_SCAFFOLD: &str = "apiVersion: lns.run/v1
+kind: connector
+name: connector
+spec:
+  serves:
+    - api.example.com
+  methods:
+    - name: default
+";
+
 const SANDBOX_SCAFFOLD: &str = "apiVersion: lns.run/v1
 kind: sandbox
 name: sandbox
@@ -101,12 +111,17 @@ pub fn init<F: Fs, E: Write>(
             MIXIN_SCAFFOLD,
             "  1. name the capability it layers on — tools, filesets, egress\n  2. try it with `lns run --mixin .`\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-mixin:1.0.0`",
         ),
+        DocumentKind::Connector => (
+            CONNECTOR_SCAFFOLD,
+            "  1. set spec.serves to the destination that offers this connector\n  2. define the method payload\n  3. share it with `lns push`, e.g. `lns push ghcr.io/acme/my-connector:1.0.0`",
+        ),
     };
     fs.write(&path, scaffold)
         .with_context(|| format!("writing {}", path.display()))?;
     let noun = match kind {
         DocumentKind::Sandbox => "sandbox definition",
         DocumentKind::Mixin => "mixin",
+        DocumentKind::Connector => "connector",
     };
     writeln!(
         err,

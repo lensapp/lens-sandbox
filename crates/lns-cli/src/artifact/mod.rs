@@ -202,6 +202,7 @@ pub struct InitArgs {
 pub enum DocumentKind {
     Sandbox,
     Mixin,
+    Connector,
 }
 
 impl DocumentKind {
@@ -209,6 +210,7 @@ impl DocumentKind {
         match self {
             DocumentKind::Sandbox => lns_artifact::spec::Kind::Sandbox,
             DocumentKind::Mixin => lns_artifact::spec::Kind::Mixin,
+            DocumentKind::Connector => lns_artifact::spec::Kind::Connector,
         }
     }
 }
