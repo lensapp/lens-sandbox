@@ -850,11 +850,14 @@ async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
             );
         }
         let stopped = stopped_run_names(svc).await?;
-        if stopped.is_empty() {
+        let built = prunable_built_images(svc).await?;
+        if stopped.is_empty() && built.is_empty() {
             writeln!(out, "No stopped sandboxes.")?;
             return Ok(0);
         }
-        crate::output::announce_prune_candidates(&stopped, stderr).await?;
+        let mut candidates = stopped;
+        candidates.extend(built);
+        crate::output::announce_prune_candidates(&candidates, stderr).await?;
         if !confirm_prune(terminal, stderr).await? {
             return Ok(0);
         }
@@ -903,12 +906,23 @@ async fn stopped_run_names(svc: &impl SandboxService) -> Result<Vec<String>> {
     }
 }
 
+async fn prunable_built_images(svc: &impl SandboxService) -> Result<Vec<String>> {
+    match svc.one_shot(Request::ListPrunableBuiltImages).await? {
+        Response::PrunableBuiltImages { mut references } => {
+            references.sort_unstable();
+            Ok(references)
+        }
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
 async fn confirm_prune<E: AsyncWriteExt + Unpin>(
     terminal: &mut dyn crate::terminal::Terminal,
     err: &mut E,
 ) -> Result<bool> {
     err.write_all(
-        b"This removes every stopped sandbox, writable layers included. Continue? [y/N] ",
+        b"This removes every stopped sandbox, writable layers included, and every built image nothing names. Continue? [y/N] ",
     )
     .await?;
     err.flush().await?;

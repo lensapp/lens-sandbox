@@ -25,6 +25,7 @@ pub(crate) struct FakeSandboxService {
     remove_image_response: Option<Response>,
     cached_references: Vec<String>,
     prunable_references: Vec<String>,
+    prunable_built_images: Vec<String>,
     list_runs_response: Option<Response>,
     remove_run_response: Option<Response>,
     resolve_response: Option<Response>,
@@ -76,6 +77,9 @@ impl SandboxService for FakeSandboxService {
                     .iter()
                     .map(|reference| cached_entry(reference))
                     .collect(),
+            }),
+            Request::ListPrunableBuiltImages => Some(Response::PrunableBuiltImages {
+                references: self.prunable_built_images.clone(),
             }),
             Request::ListRuns => self
                 .list_runs_response
@@ -566,6 +570,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         remove_image_response: w.sandbox.remove_image_response.clone(),
         cached_references: w.sandbox.cached_references.clone(),
         prunable_references: w.sandbox.prunable_references.clone(),
+        prunable_built_images: w.sandbox.prunable_built_images.clone(),
         list_runs_response: w.sandbox.list_runs_response.clone(),
         remove_run_response: w.sandbox.remove_run_response.clone(),
         resolve_response: w.sandbox.resolve_response.clone(),

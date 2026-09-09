@@ -262,6 +262,26 @@ impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
         )
         .await
     }
+
+    async fn candidates(
+        &self,
+        cache_root: &Path,
+        surviving_runs: &[String],
+    ) -> Result<Vec<String>> {
+        let _shared = crate::image_store::cache_lock().read().await;
+        let named = super::cache::would_be_referenced(
+            &RealCacheFs,
+            cache_root,
+            surviving_runs,
+            &|reference| holds_the_image(cache_root, reference),
+        );
+        crate::image_store::unreferenced_builds_with(
+            &crate::image_store::RealFs,
+            &cache_root.join("images"),
+            &named,
+        )
+        .await
+    }
 }
 
 /// What a build guest wrote, read off its upper volume once the guest has stopped.

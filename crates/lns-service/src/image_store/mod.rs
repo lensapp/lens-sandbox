@@ -358,6 +358,20 @@ pub async fn remove_with<F: Fs, C: Caches>(
 /// Drop every image a Containerfile build produced that nothing names any more, and reclaim the
 /// layers no surviving record needs; a built image is `RecordKind::Built`, which no verb of the
 /// image namespace can see or remove, so this is the only sweep that reaches one.
+/// The built images `remove_unreferenced_builds_with` would drop right now, read without dropping one.
+pub async fn unreferenced_builds_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    named: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>> {
+    Ok(load_records(fs, images_root)
+        .await?
+        .into_iter()
+        .filter(|record| record.kind == RecordKind::Built && !named.contains(&record.reference))
+        .map(|record| record.reference)
+        .collect())
+}
+
 pub async fn remove_unreferenced_builds_with<F: Fs, C: Caches>(
     fs: &F,
     caches: &C,
@@ -1308,6 +1322,47 @@ mod tests {
             caches.swept_with.lock().unwrap().is_empty(),
             "nothing was dropped, so no layer of the pulled image may be reclaimed",
         );
+    }
+
+    /// A prune says what it would drop before it asks, so the same reading must be available without removing anything.
+    #[tokio::test]
+    async fn what_the_build_sweep_would_drop_is_readable_without_dropping_it() {
+        let built = "lns-build.local/scribe:latest";
+        let fs = FakeFs::with_records(&[
+            built_rec(built, &[("sha256:built-layer", 7)]),
+            base_rec(
+                "docker.io/library/alpine:3.20",
+                &[("sha256:alpine-layer", 11)],
+            ),
+        ]);
+
+        let candidates =
+            unreferenced_builds_with(&fs, Path::new(ROOT), &std::collections::BTreeSet::new())
+                .await
+                .unwrap();
+
+        assert_eq!(candidates, [built]);
+        assert!(
+            fs.has(&record_path(Path::new(ROOT), built)),
+            "reading what would go must leave every record where it is",
+        );
+    }
+
+    /// A built image a document or a run still names is not a candidate, so a prune never offers it.
+    #[tokio::test]
+    async fn a_named_built_image_is_not_a_candidate() {
+        let built = "lns-build.local/scribe:latest";
+        let fs = FakeFs::with_records(&[built_rec(built, &[("sha256:built-layer", 7)])]);
+
+        let candidates = unreferenced_builds_with(
+            &fs,
+            Path::new(ROOT),
+            &std::collections::BTreeSet::from([built.to_string()]),
+        )
+        .await
+        .unwrap();
+
+        assert!(candidates.is_empty());
     }
 
     /// A pulled image is not this sweep's business, however little names it; `lns artifact prune` owns that.

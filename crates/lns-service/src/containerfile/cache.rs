@@ -82,24 +82,37 @@ impl<'a, F: CacheFs> BuildCache<'a, F> {
 
     /// Every entry whose document has left this machine, or whose image has, goes; what the rest name stays.
     pub(crate) fn sweep(&self, holds: &dyn Fn(&str) -> bool) -> Swept {
-        let mut swept = Swept::default();
+        let (kept, doomed) = self.examine(holds);
+        let mut swept = Swept { kept, dropped: 0 };
+        for path in doomed {
+            if self.fs.remove(&path).is_ok() {
+                swept.dropped += 1;
+            }
+        }
+        swept
+    }
+
+    /// The same reading, taken without removing an entry, so a prune can say what it would drop.
+    pub(crate) fn survivors(&self, holds: &dyn Fn(&str) -> bool) -> BTreeSet<String> {
+        self.examine(holds).0
+    }
+
+    fn examine(&self, holds: &dyn Fn(&str) -> bool) -> (BTreeSet<String>, Vec<PathBuf>) {
+        let mut kept = BTreeSet::new();
+        let mut doomed = Vec::new();
         for kind in [Kind::Image, Kind::Step] {
             for path in self.fs.list(&self.root.join(kind.dir())) {
                 match self.entry_at(&path) {
                     Some(entry)
                         if self.fs.exists(Path::new(&entry.source)) && holds(&entry.reference) =>
                     {
-                        swept.kept.insert(entry.reference);
+                        kept.insert(entry.reference);
                     }
-                    _ => {
-                        if self.fs.remove(&path).is_ok() {
-                            swept.dropped += 1;
-                        }
-                    }
+                    _ => doomed.push(path),
                 }
             }
         }
-        swept
+        (kept, doomed)
     }
 
     fn entry_at(&self, path: &Path) -> Option<Entry> {
@@ -119,15 +132,36 @@ pub(crate) fn still_referenced<F: CacheFs>(
     holds: &dyn Fn(&str) -> bool,
 ) -> Swept {
     let mut swept = BuildCache::new(fs, cache_root).sweep(holds);
+    name_what_the_runs_booted(fs, cache_root, runs, &mut swept.kept);
+    swept
+}
+
+/// The same reading as `still_referenced`, taken without dropping an entry.
+pub(crate) fn would_be_referenced<F: CacheFs>(
+    fs: &F,
+    cache_root: &Path,
+    runs: &[String],
+    holds: &dyn Fn(&str) -> bool,
+) -> BTreeSet<String> {
+    let mut kept = BuildCache::new(fs, cache_root).survivors(holds);
+    name_what_the_runs_booted(fs, cache_root, runs, &mut kept);
+    kept
+}
+
+fn name_what_the_runs_booted<F: CacheFs>(
+    fs: &F,
+    cache_root: &Path,
+    runs: &[String],
+    kept: &mut BTreeSet<String>,
+) {
     for run in runs {
         let path = crate::cache::run_dir(cache_root, run).join(super::real::BUILT_REFERENCE_FILE);
         if let Some(bytes) = fs.read(&path)
             && let Ok(reference) = String::from_utf8(bytes)
         {
-            swept.kept.insert(reference.trim().to_string());
+            kept.insert(reference.trim().to_string());
         }
     }
-    swept
 }
 
 #[cfg(test)]
@@ -366,6 +400,21 @@ pub(crate) mod tests {
             swept.kept,
             BTreeSet::from(["built@sha256:booted".to_string()])
         );
+    }
+
+    /// A prune says what it would drop before it asks, and asking must not drop an entry.
+    #[test]
+    fn reading_what_is_referenced_drops_no_entry() {
+        let fs = populated();
+        let before = fs.paths();
+
+        let named = would_be_referenced(&fs, Path::new("/cache"), &["run-1".into()], &everything);
+
+        assert!(
+            named.contains("built@sha256:image"),
+            "a document that is still here still names what it built: {named:?}"
+        );
+        assert_eq!(fs.paths(), before, "a reading removes nothing");
     }
 
     #[test]

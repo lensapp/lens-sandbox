@@ -114,6 +114,8 @@ pub enum Request {
     PruneImages,
     /// The references `PruneImages` would remove right now, so a prune can list them and ask first.
     ListPrunableImages,
+    /// The built images `PruneRuns` would sweep right now, so a prune can list them beside the stopped sandboxes and ask first.
+    ListPrunableBuiltImages,
     /// Resolve a local definition's mixins, since only the service can pull a reference and read a directory the same way a run will.
     ResolveDefinition {
         definition: String,
@@ -296,6 +298,9 @@ pub enum Response {
     },
     ImageList {
         images: Vec<ImageInfo>,
+    },
+    PrunableBuiltImages {
+        references: Vec<String>,
     },
     ImageRemoved {
         reference: String,
@@ -1921,6 +1926,7 @@ mod tests {
             },
             Request::PruneImages,
             Request::ListPrunableImages,
+            Request::ListPrunableBuiltImages,
         ] {
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1946,6 +1952,9 @@ mod tests {
             },
             Response::ImageList {
                 images: vec![info.clone()],
+            },
+            Response::PrunableBuiltImages {
+                references: vec!["lns-build.local/built:latest".into()],
             },
             Response::ImageRemoved {
                 reference: info.reference.clone(),
