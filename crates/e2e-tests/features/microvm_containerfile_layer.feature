@@ -22,6 +22,7 @@ Feature: one guest's writes become one OCI layer a second guest boots from
     When the user runs a microVM command "/bin/sh -c 'echo built-by-lns > /spike-created; rm -f /etc/alpine-release'" as user "root"
     Then the exit code is 0
     And one OCI layer was captured from that run
+    And the capture reports the layer size and the time from the command's exit
     When the user runs a microVM command "/bin/sh -c 'cat /spike-created; test -e /etc/alpine-release || echo release-file-gone'" over the built image
     Then the exit code is 0
     And the output contains "built-by-lns"
