@@ -8,8 +8,8 @@ Feature: a build carries no credential the document did not declare
   This is the negative half, asserted from inside the build guest by a `RUN` that writes
   its whole environment into the image the run then boots. The positive half — a
   document that declares a credential a connector serves, and a build that starts with
-  that connector's placeholder in the variable — needs an installed connector, and the
-  @microvm harness has no step for one yet; it is pinned at Layer 2 in lns-service.
+  that connector's placeholder in the variable — needs an installed connector, which this
+  harness has no step for yet; it is pinned at Layer 2 in lns-service.
 
   Like every @microvm scenario this boots a real guest, so it runs only via
   `make e2e-microvm`, never in CI's PR gate.
