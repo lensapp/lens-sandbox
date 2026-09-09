@@ -1793,3 +1793,52 @@ fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(300));
     }
 }
+
+#[given("the LNS service is running in that home with the layer-capture hook")]
+fn service_with_the_layer_capture_hook(world: &mut E2eWorld) {
+    assert!(
+        world.home.is_some(),
+        "Given a clean lns cache home before starting the service in it"
+    );
+    crate::steps::service::start_service_with(
+        world,
+        &[(lns_service::containerfile::real::CAPTURE_HOOK_ENV, "1")],
+    );
+}
+
+#[then("one OCI layer was captured from that run")]
+fn one_layer_was_captured(world: &mut E2eWorld) {
+    let home = world
+        .home
+        .as_ref()
+        .expect("Given a clean lns cache home first")
+        .path();
+    let path = home
+        .join(".lns")
+        .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
+    let reference = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "the capture must name the image it built in {}: {e}",
+                path.display()
+            )
+        })
+        .trim()
+        .to_string();
+    assert!(
+        reference.contains("@sha256:"),
+        "the built image must be named by digest, got {reference:?}",
+    );
+    world.built_image = Some(reference);
+}
+
+#[when(regex = r#"^the user runs a microVM command "([^"]*)" over the built image$"#)]
+fn run_command_over_the_built_image(world: &mut E2eWorld, cmd_line: String) {
+    world.project_image = Some(
+        world
+            .built_image
+            .clone()
+            .expect("Then one OCI layer was captured from that run, before booting it"),
+    );
+    run_microvm(world, vec![], &cmd_line);
+}

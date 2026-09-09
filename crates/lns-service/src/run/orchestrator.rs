@@ -700,6 +700,14 @@ async fn orchestrate(
     )
     .await?;
 
+    // Slice 1 of lensapp/lens-sandbox#393: the guest is powered off, so its upper volume is final.
+    if crate::containerfile::real::capture_hook_enabled()
+        && let Some(parent) = image_ref.as_deref()
+        && let Err(e) = crate::containerfile::real::capture_after_run(&run_id, parent, &cmd).await
+    {
+        log::warn!("the built layer was not captured: {e:#}");
+    }
+
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)
 }
