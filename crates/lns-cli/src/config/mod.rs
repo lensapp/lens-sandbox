@@ -16,7 +16,7 @@ pub struct ConfigArgs {
 
 #[derive(clap::Subcommand)]
 pub enum ConfigCommand {
-    #[command(about = "Set a run gap-filler default (run.cpus, run.mem, run.registry).")]
+    #[command(about = "Set a default (run.cpus, run.mem, run.registry, push.imageLimit).")]
     Set(ConfigSetArgs),
     #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
     Get(ConfigKeyArgs),
@@ -26,7 +26,7 @@ pub enum ConfigCommand {
     List(crate::output::OutputArgs),
 }
 
-const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, or run.registry.";
+const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.registry, or push.imageLimit.";
 
 #[derive(clap::Args)]
 pub struct ConfigSetArgs {
@@ -58,16 +58,18 @@ pub enum ConfigKey {
     RunCpus,
     RunMem,
     RunRegistry,
+    PushImageLimit,
 }
 
 /// The `run.env` / `run.volume` / `run.publish` keys the sandbox definition now owns; a hand-edited file may still carry them, so `config list` warns and ignores them rather than erroring.
 pub const LEGACY_KEYS: [&str; 3] = ["run.env", "run.volume", "run.publish"];
 
 impl ConfigKey {
-    pub const ALL: [ConfigKey; 3] = [
+    pub const ALL: [ConfigKey; 4] = [
         ConfigKey::RunCpus,
         ConfigKey::RunMem,
         ConfigKey::RunRegistry,
+        ConfigKey::PushImageLimit,
     ];
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -75,8 +77,9 @@ impl ConfigKey {
             "run.cpus" => Ok(ConfigKey::RunCpus),
             "run.mem" => Ok(ConfigKey::RunMem),
             "run.registry" => Ok(ConfigKey::RunRegistry),
+            "push.imageLimit" => Ok(ConfigKey::PushImageLimit),
             other => Err(format!(
-                "unknown key {other:?}; the settable defaults are run.cpus, run.mem, run.registry (env, volumes, and ports now live in the sandbox definition)"
+                "unknown key {other:?}; the settable defaults are run.cpus, run.mem, run.registry, push.imageLimit (env, volumes, and ports now live in the sandbox definition)"
             )),
         }
     }
@@ -86,6 +89,7 @@ impl ConfigKey {
             ConfigKey::RunCpus => "run.cpus",
             ConfigKey::RunMem => "run.mem",
             ConfigKey::RunRegistry => "run.registry",
+            ConfigKey::PushImageLimit => "push.imageLimit",
         }
     }
 }
@@ -95,6 +99,23 @@ impl ConfigKey {
 pub struct ConfigFile {
     #[serde(default, skip_serializing_if = "RunSection::is_empty")]
     pub run: RunSection,
+    #[serde(default, skip_serializing_if = "PushSection::is_empty")]
+    pub push: PushSection,
+}
+
+/// What `lns push` reads off this machine rather than out of the document.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PushSection {
+    /// What a built image may weigh before a push refuses it, in MiB; unset means 4 GiB (`docs/sandbox-spec.md` §6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_limit: Option<usize>,
+}
+
+impl PushSection {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +293,9 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
                 .map_err(|e| anyhow!("invalid {} value {value:?}: {e}", key.name()))?;
             cfg.run.registry = Some(value.to_string());
         }
+        ConfigKey::PushImageLimit => {
+            cfg.push.image_limit = Some(parse_mem(key, single(key, values)?)?)
+        }
     }
     Ok(())
 }
@@ -309,6 +333,7 @@ fn value_of(cfg: &ConfigFile, key: ConfigKey) -> Option<String> {
         ConfigKey::RunCpus => cfg.run.cpus.map(|v| v.to_string()),
         ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()),
         ConfigKey::RunRegistry => cfg.run.registry.clone(),
+        ConfigKey::PushImageLimit => cfg.push.image_limit.map(|v| v.to_string()),
     }
 }
 
@@ -317,6 +342,7 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
         ConfigKey::RunCpus => cfg.run.cpus = None,
         ConfigKey::RunMem => cfg.run.mem = None,
         ConfigKey::RunRegistry => cfg.run.registry = None,
+        ConfigKey::PushImageLimit => cfg.push.image_limit = None,
     }
 }
 
@@ -357,6 +383,19 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
         cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
         mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
         registry: cfg.run.registry,
+    })
+}
+
+/// What a built image may weigh before this machine's `lns push` refuses it (`docs/sandbox-spec.md` §6).
+pub fn load_image_limit(path: &Path) -> Result<u64> {
+    let mib = nonzero_default(
+        ConfigKey::PushImageLimit,
+        load(path)?.push.image_limit,
+        path,
+    )?;
+    Ok(match mib {
+        Some(mib) => (mib as u64).saturating_mul(1024 * 1024),
+        None => lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
     })
 }
 
@@ -614,17 +653,23 @@ mod tests {
     fn every_key_survives_a_set_get_list_unset_lifecycle() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let seeds: [(ConfigKey, &[&str]); 3] = [
+        let seeds: [(ConfigKey, &[&str]); 4] = [
             (ConfigKey::RunCpus, &["4"]),
             (ConfigKey::RunMem, &["2048"]),
             (ConfigKey::RunRegistry, &["ghcr.io"]),
+            (ConfigKey::PushImageLimit, &["8192"]),
         ];
         for (key, values) in seeds {
             let (code, _) = run_ok(&set_cmd(key, values), &path);
             assert_eq!(code, 0, "set {} failed", key.name());
         }
         let (_, listing) = run_ok(&ConfigCommand::List(table_args()), &path);
-        for needle in ["run.cpus = 4", "run.mem = 2048", "run.registry = ghcr.io"] {
+        for needle in [
+            "run.cpus = 4",
+            "run.mem = 2048",
+            "run.registry = ghcr.io",
+            "push.imageLimit = 8192",
+        ] {
             assert!(
                 listing.lines().any(|l| l == needle),
                 "missing {needle}: {listing}"
@@ -646,6 +691,41 @@ mod tests {
         }
         let (_, listing) = run_ok(&ConfigCommand::List(table_args()), &path);
         assert!(listing.starts_with("No defaults set in "), "got: {listing}");
+    }
+
+    #[test]
+    fn a_machine_that_says_nothing_about_the_limit_gets_the_four_gibibytes_the_spec_names() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            load_image_limit(&dir.path().join("config.yaml")).unwrap(),
+            4 * 1024 * 1024 * 1024,
+        );
+    }
+
+    #[test]
+    fn a_configured_limit_is_read_in_mib_the_way_run_mem_is() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        run_ok(&set_cmd(ConfigKey::PushImageLimit, &["512"]), &path);
+        assert_eq!(load_image_limit(&path).unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_limit_of_zero_in_a_hand_edited_file_is_refused_rather_than_refusing_every_push() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "push:\n  imageLimit: 0\n").unwrap();
+        let err = load_image_limit(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("push.imageLimit"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_names_the_limit_among_the_ones_that_can_be_set() {
+        let err = ConfigKey::parse("push.limit").unwrap_err();
+        assert!(err.contains("push.imageLimit"), "got: {err}");
     }
 
     #[test]

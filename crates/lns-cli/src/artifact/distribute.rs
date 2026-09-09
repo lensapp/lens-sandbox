@@ -14,6 +14,47 @@ pub trait Producer {
         built: &'a BuiltArtifact,
         reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<()>>;
+
+    /// Upload a built image's config, layers and manifest into the artifact's own repository, and answer with the digest reference the published document names (§6).
+    fn push_image<'a>(
+        &'a self,
+        image: &'a lns_ipc::PushableImage,
+        repository: &'a str,
+    ) -> LocalBoxFuture<'a, Result<String>>;
+}
+
+/// Builds the image a path-form `spec.image` names. The service owns the executor and the layer store; the CLI owns the registry login, so the image is built there and uploaded here.
+pub trait ImageBuilder {
+    fn build<'a>(&'a self, request: &'a ImageRequest<'a>)
+    -> LocalBoxFuture<'a, Result<BuiltImage>>;
+}
+
+/// What one push asks the builder for.
+pub struct ImageRequest<'a> {
+    /// The document as canonical JSON, which carries the path `spec.image` names.
+    pub document: &'a [u8],
+    /// The document's directory, which roots that path.
+    pub project_dir: &'a Path,
+    /// Ignore every key this build would otherwise answer from (`--rebuild`).
+    pub rebuild: bool,
+    /// Answer with the key alone and build nothing (`--dry-run`).
+    pub plan_only: bool,
+}
+
+/// What the builder answered: the key that names the build, and the image itself when this machine has one.
+pub struct BuiltImage {
+    pub key: String,
+    pub label: String,
+    pub reused: bool,
+    /// Absent only from a plan whose key this machine cannot answer.
+    pub image: Option<lns_ipc::PushableImage>,
+}
+
+/// What a push published for a path-form `spec.image`: the digest the document now names, and the key that names the build behind it.
+pub struct PublishedImage {
+    pub key: String,
+    pub label: String,
+    pub reference: String,
 }
 
 /// Resolves a declared tool's (possibly fuzzy) version to the exact version the published artifact pins, by consulting the tool's public version index; a fake scripts it offline.
@@ -149,18 +190,38 @@ fn preflight_readmes<F: Fs + ?Sized>(
     Ok(())
 }
 
-/// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, and the README beside it.
+/// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, the README beside it, and — when `spec.image` named a Containerfile — that file with its context (§7.3).
 fn build<F: Fs + ?Sized>(
     fs: &F,
     cwd: &Path,
     doc: &[u8],
+    source: Option<&lns_artifact::build_source::ImageSourceLayer>,
 ) -> Result<(BuiltArtifact, Vec<PackedDirectory>)> {
     let packed = pack_path_filesets(fs, cwd, doc)?;
     let layers: Vec<Vec<lns_artifact::build::FileEntry>> =
         packed.iter().map(|dir| dir.files.clone()).collect();
     let readme = read_readme(fs, cwd)?;
-    let built = lns_artifact::build::build_artifact(doc, &layers, readme.as_deref())?;
+    let built = lns_artifact::build::build_artifact_with(doc, &layers, readme.as_deref(), source)?;
     Ok((built, packed))
+}
+
+/// What the publisher sees for the Containerfile that became a layer: the file they named, and the digest its content published under (§7.3).
+fn report_build_source<W: Write>(
+    out: &mut W,
+    verb: &str,
+    source: Option<&lns_artifact::build_source::ImageSourceLayer>,
+    built: &BuiltArtifact,
+) -> Result<()> {
+    if let (Some(source), Some(layer)) = (source, built.build_source_layer()) {
+        writeln!(
+            out,
+            "{verb} {} -> {} ({} bytes)",
+            source.containerfile,
+            layer.digest,
+            layer.data.len()
+        )?;
+    }
+    Ok(())
 }
 
 /// What the publisher sees for each directory that became a layer: the entry they wrote, and the digest its content published under.
@@ -190,12 +251,21 @@ fn report_packed<W: Write>(
     Ok(())
 }
 
-/// The four ports one push drives: the author's files, the directory that roots them, the registry, and the version index.
-pub struct PushPorts<'a, F: Fs + ?Sized, P: Producer + ?Sized, R: ToolResolver + ?Sized> {
+/// What one push drives: the author's files, the directory that roots them, the registry, the version index, the builder behind a path-form `spec.image`, and what this machine lets a built image weigh.
+pub struct PushPorts<
+    'a,
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    B: ImageBuilder + ?Sized,
+> {
     pub fs: &'a F,
     pub cwd: &'a Path,
     pub producer: &'a P,
     pub resolver: &'a R,
+    pub builder: &'a B,
+    pub image_limit: u64,
+    pub rebuild: bool,
 }
 
 /// How a push may accept publishing the local mixins a document names.
@@ -225,7 +295,7 @@ where
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
         let (doc, _) = pin_declared_tools(resolver, &doc).await?;
-        let (built, packed) = build(fs, &node.root, &doc)?;
+        let (built, packed) = build(fs, &node.root, &doc, None)?;
         report_packed(out, "packed", &built, &packed)?;
         let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
         producer
@@ -263,7 +333,7 @@ where
     let mut published: PublishedMixins = Vec::new();
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
-        let (built, packed) = build(fs, &node.root, &doc)?;
+        let (built, packed) = build(fs, &node.root, &doc, None)?;
         report_packed(out, "would pack", &built, &packed)?;
         writeln!(
             out,
@@ -295,19 +365,116 @@ fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
     })
 }
 
-/// A path-form `spec.image` publishes as the digest of an image lns built (§6), so a push that cannot build one refuses before it uploads anything.
-fn refuse_an_unbuilt_image(doc: &[u8]) -> Result<()> {
-    let image = serde_json::from_slice::<serde_json::Value>(doc)
+/// What `spec.image` names, read straight out of the document a push was handed.
+fn declared_image(doc: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(doc)
         .ok()
         .and_then(|doc| doc["spec"]["image"].as_str().map(str::to_string))
-        .unwrap_or_default();
-    super::image_build::refuse_an_unbuilt_image(&image)
-        .map_err(|e| anyhow::anyhow!("refusing to push a sandbox no consumer can start: {e:#}"))
+        .unwrap_or_default()
+}
+
+/// Whether this document's image is a Containerfile a push has to build before it can publish anything.
+fn names_a_containerfile(doc: &[u8]) -> bool {
+    matches!(
+        lns_artifact::image::source(&declared_image(doc)),
+        lns_artifact::image::ImageSource::Containerfile(_)
+    )
+}
+
+/// Build the image `spec.image` names and publish it into the artifact's own repository, before the document that will name its digest is uploaded — `lns push` never publishes a document whose image it does not have (§6).
+async fn publish_the_image<P, B, W>(
+    producer: &P,
+    builder: &B,
+    request: &ImageRequest<'_>,
+    reference: &str,
+    limit: u64,
+    out: &mut W,
+) -> Result<Option<PublishedImage>>
+where
+    P: Producer + ?Sized,
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    if !names_a_containerfile(request.document) {
+        return Ok(None);
+    }
+    let built = builder.build(request).await?;
+    writeln!(out, "key {}", built.key)?;
+    let image = built
+        .image
+        .context("the build answered with no image, so there is nothing to publish")?;
+    refuse_an_image_over(limit, &image)?;
+    let repository = super::mixin_plan::repository_of(reference);
+    let published = producer
+        .push_image(&image, repository)
+        .await
+        .with_context(|| format!("publishing the built image into {repository}"))?;
+    writeln!(
+        out,
+        "{} {} as {published} ({} layer{})",
+        if built.reused { "reused" } else { "built" },
+        built.label,
+        image.layers.len(),
+        if image.layers.len() == 1 { "" } else { "s" },
+    )?;
+    Ok(Some(PublishedImage {
+        key: built.key,
+        label: built.label,
+        reference: published,
+    }))
+}
+
+/// The size discipline (§6), read off the manifest the build produced.
+fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()> {
+    let layers: Vec<lns_artifact::image::ImageLayer> = image
+        .layers
+        .iter()
+        .map(|layer| lns_artifact::image::ImageLayer {
+            digest: layer.digest.clone(),
+            bytes: layer.size,
+        })
+        .collect();
+    lns_artifact::image::refuse_an_image_over(limit, &layers, &image.config)
+}
+
+/// What a dry run can say about the image without building it: the key always, and the digest only when this machine already answers that key.
+async fn preview_the_image<B, W>(
+    builder: &B,
+    request: &ImageRequest<'_>,
+    out: &mut W,
+) -> Result<Option<String>>
+where
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    if !names_a_containerfile(request.document) {
+        return Ok(None);
+    }
+    let planned = builder.build(request).await?;
+    writeln!(out, "key {}", planned.key)?;
+    match planned.image {
+        Some(image) => {
+            writeln!(
+                out,
+                "would publish the image {} builds to, {}",
+                planned.label, image.digest
+            )?;
+            Ok(Some(image.digest))
+        }
+        None => {
+            writeln!(
+                out,
+                "note: {} has not been built on this machine, so its image digest can only be known by building; the published digest will differ from this preview",
+                planned.label
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
-pub async fn push<F, P, R, W>(
-    ports: PushPorts<'_, F, P, R>,
+pub async fn push<F, P, R, B, W>(
+    ports: PushPorts<'_, F, P, R, B>,
     doc: &[u8],
     reference: &str,
     confirm: Confirm<'_>,
@@ -317,6 +484,7 @@ where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
     R: ToolResolver + ?Sized,
+    B: ImageBuilder + ?Sized,
     W: Write,
 {
     let PushPorts {
@@ -324,24 +492,46 @@ where
         cwd,
         producer,
         resolver,
+        builder,
+        image_limit,
+        rebuild,
     } = ports;
     let Confirm {
         assume_yes,
         terminal,
     } = confirm;
     refuse_unpushable_tools(doc)?;
-    refuse_an_unbuilt_image(doc)?;
     // Packing first reads the directories offline, so a broken document or fileset refuses the push before it consults the index or uploads a mixin.
     pack_path_filesets(fs, cwd, doc)?;
+    let source = super::image_build::source_layer(fs, cwd, &declared_image(doc))?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
     super::mixin_plan::confirm_mixin_publication(&plan, reference, assume_yes, terminal, out)?;
+    let image = publish_the_image(
+        producer,
+        builder,
+        &ImageRequest {
+            document: doc,
+            project_dir: cwd,
+            rebuild,
+            plan_only: false,
+        },
+        reference,
+        image_limit,
+        out,
+    )
+    .await?;
     let published = publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
     let doc = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
-    let (built, packed) = build(fs, cwd, &doc)?;
+    let doc = match &image {
+        Some(image) => lns_artifact::image::rewrite_to_built(&doc, &image.reference)?,
+        None => doc,
+    };
+    let (built, packed) = build(fs, cwd, &doc, source.as_ref())?;
     report_packed(out, "packed", &built, &packed)?;
+    report_build_source(out, "packed", source.as_ref(), &built)?;
     for tool in &pinned_tools {
         if tool.verification == Some(IndexVerification::Absent) {
             writeln!(
@@ -369,28 +559,50 @@ where
     Ok(0)
 }
 
-/// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — offline, printing the digests that would publish; nothing is uploaded.
-pub fn push_dry_run<F, W>(
+/// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — printing the digests that would publish; nothing is built and nothing is uploaded.
+pub async fn push_dry_run<F, B, W>(
     fs: &F,
     cwd: &Path,
+    builder: &B,
     doc: &[u8],
     reference: &str,
+    rebuild: bool,
     out: &mut W,
 ) -> Result<i32>
 where
     F: Fs + ?Sized,
+    B: ImageBuilder + ?Sized,
     W: Write,
 {
     refuse_unpushable_tools(doc)?;
-    refuse_an_unbuilt_image(doc)?;
     pack_path_filesets(fs, cwd, doc)?;
+    let source = super::image_build::source_layer(fs, cwd, &declared_image(doc))?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
+    let digest = preview_the_image(
+        builder,
+        &ImageRequest {
+            document: doc,
+            project_dir: cwd,
+            rebuild,
+            plan_only: true,
+        },
+        out,
+    )
+    .await?;
     let published = preview_planned_mixins(fs, &plan, out)?;
     let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
-    let (built, packed) = build(fs, cwd, &pinned)?;
+    let pinned = match &digest {
+        Some(digest) => lns_artifact::image::rewrite_to_built(
+            &pinned,
+            &format!("{}@{digest}", super::mixin_plan::repository_of(reference)),
+        )?,
+        None => pinned,
+    };
+    let (built, packed) = build(fs, cwd, &pinned, source.as_ref())?;
     report_packed(out, "would pack", &built, &packed)?;
+    report_build_source(out, "would pack", source.as_ref(), &built)?;
     let mut docs: Vec<&[u8]> = vec![&pinned];
     docs.extend(plan.nodes.iter().map(|node| node.bytes.as_slice()));
     let unresolved_tools = unresolved_tool_count(&docs);
@@ -448,12 +660,46 @@ mod tests {
         R: ToolResolver + ?Sized,
         W: Write,
     {
+        push_with_builder(
+            fs,
+            cwd,
+            producer,
+            resolver,
+            &FakeBuilder::unconsultable(),
+            doc,
+            reference,
+            out,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // the ports one push drives, spelled out for a test that names one of them
+    async fn push_with_builder<F, P, R, B, W>(
+        fs: &F,
+        cwd: &Path,
+        producer: &P,
+        resolver: &R,
+        builder: &B,
+        doc: &[u8],
+        reference: &str,
+        out: &mut W,
+    ) -> Result<i32>
+    where
+        F: Fs + ?Sized,
+        P: Producer + ?Sized,
+        R: ToolResolver + ?Sized,
+        B: ImageBuilder + ?Sized,
+        W: Write,
+    {
         push(
             PushPorts {
                 fs,
                 cwd,
                 producer,
                 resolver,
+                builder,
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
             },
             doc,
             reference,
@@ -466,6 +712,130 @@ mod tests {
         .await
     }
 
+    /// A dry run of a document whose image is a reference never reaches the builder.
+    async fn dry_run<F, W>(
+        fs: &F,
+        cwd: &Path,
+        doc: &[u8],
+        reference: &str,
+        out: &mut W,
+    ) -> Result<i32>
+    where
+        F: Fs + ?Sized,
+        W: Write,
+    {
+        push_dry_run(
+            fs,
+            cwd,
+            &FakeBuilder::unconsultable(),
+            doc,
+            reference,
+            false,
+            out,
+        )
+        .await
+    }
+
+    /// The service's half of a push, scripted: what the key answers, and whether this machine holds the image behind it.
+    struct FakeBuilder {
+        key: String,
+        label: String,
+        reused: bool,
+        image: Option<lns_ipc::PushableImage>,
+        failure: Option<String>,
+        asked: RefCell<Vec<bool>>,
+    }
+
+    impl FakeBuilder {
+        /// A builder no scenario may consult: a push that passes with it proves the document named no Containerfile.
+        fn unconsultable() -> Self {
+            Self::answering(None)
+        }
+
+        fn answering(image: Option<lns_ipc::PushableImage>) -> Self {
+            Self {
+                key: format!("sha256:{}", "5f".repeat(32)),
+                label: "./image/Containerfile".to_string(),
+                reused: false,
+                image,
+                failure: None,
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn built(layers: &[(&str, u64)]) -> Self {
+            Self::answering(Some(image_of(layers, IMAGE_CONFIG)))
+        }
+
+        fn reused(mut self) -> Self {
+            self.reused = true;
+            self
+        }
+
+        fn failing(message: &str) -> Self {
+            Self {
+                failure: Some(message.to_string()),
+                ..Self::answering(None)
+            }
+        }
+    }
+
+    const IMAGE_CONFIG: &str =
+        r#"{"history":[{"created_by":"FROM alpine"},{"created_by":"RUN npm install -g agent"}]}"#;
+
+    fn image_of(layers: &[(&str, u64)], config: &str) -> lns_ipc::PushableImage {
+        lns_ipc::PushableImage {
+            reference: format!("lns-build.local/built@sha256:{}", "cc".repeat(32)),
+            digest: format!("sha256:{}", "cc".repeat(32)),
+            manifest: "{}".into(),
+            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            config: config.to_string(),
+            config_digest: format!("sha256:{}", "dd".repeat(32)),
+            config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+            layers: layers
+                .iter()
+                .map(|(digest, size)| lns_ipc::PushableLayer {
+                    digest: (*digest).to_string(),
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    size: *size,
+                    path: format!("/layers/{digest}"),
+                })
+                .collect(),
+        }
+    }
+
+    impl ImageBuilder for FakeBuilder {
+        fn build<'a>(
+            &'a self,
+            request: &'a ImageRequest<'a>,
+        ) -> LocalBoxFuture<'a, Result<BuiltImage>> {
+            self.asked.borrow_mut().push(request.plan_only);
+            let failure = self.failure.clone();
+            let built = BuiltImage {
+                key: self.key.clone(),
+                label: self.label.clone(),
+                reused: self.reused,
+                image: self.image.clone(),
+            };
+            Box::pin(async move {
+                match failure {
+                    Some(message) => Err(anyhow::anyhow!(message)),
+                    None => Ok(built),
+                }
+            })
+        }
+    }
+
+    /// The document a push builds an image for, and the context beside it.
+    const WITH_A_CONTAINERFILE: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"./image"}}"#;
+
+    fn fs_with_a_context() -> MapFs {
+        MapFs::with(&[
+            ("/work/image/Containerfile", "FROM alpine\nRUN true\n"),
+            ("/work/image/app/main.js", "console.log(1)\n"),
+        ])
+    }
+
     use super::*;
     use std::cell::RefCell;
 
@@ -473,6 +843,8 @@ mod tests {
     struct FakeProducer {
         failure: Option<String>,
         uploaded: RefCell<Vec<BuiltArtifact>>,
+        images: RefCell<Vec<(lns_ipc::PushableImage, String)>>,
+        image_failure: Option<String>,
     }
 
     impl FakeProducer {
@@ -520,6 +892,24 @@ mod tests {
                 match failure {
                     Some(message) => Err(anyhow::anyhow!(message)),
                     None => Ok(()),
+                }
+            })
+        }
+
+        fn push_image<'a>(
+            &'a self,
+            image: &'a lns_ipc::PushableImage,
+            repository: &'a str,
+        ) -> LocalBoxFuture<'a, Result<String>> {
+            self.images
+                .borrow_mut()
+                .push((image.clone(), repository.to_string()));
+            let failure = self.image_failure.clone();
+            let published = format!("{repository}@{}", image.digest);
+            Box::pin(async move {
+                match failure {
+                    Some(message) => Err(anyhow::anyhow!(message)),
+                    None => Ok(published),
                 }
             })
         }
@@ -651,12 +1041,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_dry_run_refuses_a_mixin_declaring_a_tool_no_consumer_could_provision() {
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_mixin_declaring_a_tool_no_consumer_could_provision() {
         let (fs, doc) = fs_with_unprovisionable_mixin();
         let mut out = Vec::new();
-        let err =
-            push_dry_run(&fs, cwd(), &doc, "ghcr.io/team/hermes:1.4.0", &mut out).unwrap_err();
+        let err = dry_run(&fs, cwd(), &doc, "ghcr.io/team/hermes:1.4.0", &mut out)
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("no consumer can start"),
             "a preview that reports a graph the real push would refuse is worse than no preview; got: {err:#}"
@@ -954,17 +1345,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn push_dry_run_refuses_a_tool_no_consumer_could_provision() {
+    #[tokio::test]
+    async fn push_dry_run_refuses_a_tool_no_consumer_could_provision() {
         let (unsupported, doc) = unsupported_backend_doc(true);
         let mut out = Vec::new();
-        let err = push_dry_run(
+        let err = dry_run(
             &fs_with_skills(),
             cwd(),
             &doc,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
+        .await
         .unwrap_err();
 
         let message = format!("{err:#}");
@@ -1130,16 +1522,17 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn push_dry_run_notes_that_tool_versions_resolve_at_push_time() {
+    #[tokio::test]
+    async fn push_dry_run_notes_that_tool_versions_resolve_at_push_time() {
         let mut out = Vec::new();
-        push_dry_run(
+        dry_run(
             &fs_with_skills(),
             cwd(),
             WITH_TOOLS,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
+        .await
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
@@ -1147,43 +1540,46 @@ mod tests {
             "got: {text}"
         );
         let mut quiet = Vec::new();
-        push_dry_run(
+        dry_run(
             &fs_with_skills(),
             cwd(),
             VALID,
             "ghcr.io/team/hermes:1.4.0",
             &mut quiet,
         )
+        .await
         .unwrap();
         let text = String::from_utf8(quiet).unwrap();
         assert!(!text.contains("note:"), "got: {text}");
     }
 
-    #[test]
-    fn a_dry_run_of_already_pinned_tools_promises_the_digest_it_previewed() {
+    #[tokio::test]
+    async fn a_dry_run_of_already_pinned_tools_promises_the_digest_it_previewed() {
         // push short-circuits exact pins without consulting the index, so the real push produces the same bytes — warning otherwise defeats the point of an offline preview.
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","python@3.12.6","java@temurin-21.0.5+11.0.LTS"]}}"#;
         let mut out = Vec::new();
-        push_dry_run(
+        dry_run(
             &fs_with_skills(),
             cwd(),
             doc,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
+        .await
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("may differ"), "got: {text}");
 
         let mixed = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0","jq@latest"]}}"#;
         let mut mixed_out = Vec::new();
-        push_dry_run(
+        dry_run(
             &fs_with_skills(),
             cwd(),
             mixed,
             "ghcr.io/team/hermes:1.4.0",
             &mut mixed_out,
         )
+        .await
         .unwrap();
         let text = String::from_utf8(mixed_out).unwrap();
         assert!(
@@ -1233,16 +1629,128 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_dry_run_previews_the_layer_digest_each_directory_would_publish_under() {
+    #[tokio::test]
+    async fn a_build_that_answers_with_no_image_stops_the_push_before_it_publishes_anything() {
+        // The invariant of §6: a push never publishes a document whose image it does not have.
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::answering(None),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no image"), "got: {err:#}");
+        assert!(
+            producer.uploaded.borrow().is_empty(),
+            "the document must not reach the registry without the image it names"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_build_the_service_refuses_stops_the_push_with_what_it_said() {
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::failing("line 2: RUN npm install: the build guest exited 1"),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("exited 1"), "got: {err:#}");
+        assert!(producer.uploaded.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_registry_that_refuses_the_image_names_the_repository_it_was_publishing_into() {
+        let producer = FakeProducer {
+            image_failure: Some("credential for ghcr.io lacks push scope".into()),
+            ..FakeProducer::ok()
+        };
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("ghcr.io/team/hermes"), "{message}");
+        assert!(message.contains("push scope"), "{message}");
+        assert!(producer.uploaded.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_image_of_one_layer_is_reported_in_the_singular() {
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:only", 10)]).reused(),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("(1 layer)"), "got: {text}");
+        assert!(text.contains("reused ./image/Containerfile"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_that_knows_the_digest_previews_the_document_a_push_would_publish() {
         let mut out = Vec::new();
         push_dry_run(
+            &fs_with_a_context(),
+            cwd(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            false,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("would pack ./image/Containerfile -> sha256:"),
+            "the Containerfile is a layer of the artifact, so a preview names its digest too: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_previews_the_layer_digest_each_directory_would_publish_under() {
+        let mut out = Vec::new();
+        dry_run(
             &fs_with_skills(),
             cwd(),
             WITH_PATH_FILESET,
             "ghcr.io/team/hermes:1.4.0",
             &mut out,
         )
+        .await
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(

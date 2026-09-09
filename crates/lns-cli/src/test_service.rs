@@ -94,6 +94,7 @@ pub(crate) fn sandbox_inspection(tools: Vec<String>) -> Response {
 pub(crate) fn sandbox_inspection_with_digest(tools: Vec<String>, digest: String) -> Response {
     Response::ImageInspected {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

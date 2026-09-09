@@ -137,6 +137,7 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
+                    image_source: None,
                     mixins: resolution.mixins.clone(),
                     pinned_mixins: resolution.pinned_extra.clone(),
                     contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
@@ -347,6 +348,7 @@ mod tests {
         disk_bytes: Option<u64>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),
@@ -372,6 +374,7 @@ mod tests {
     /// The bare projection with declared credentials, so a test compares a whole value rather than reaching into the enum.
     fn sandbox_view_with_credentials(credentials: Vec<lns_spec::Credential>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_source: None,
             credentials,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
@@ -396,6 +399,7 @@ mod tests {
 
     fn sandbox_view_with_mixins(mixins: Vec<String>, pinned: Vec<String>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_source: None,
             mixins,
             pinned_mixins: pinned,
             contributions: Vec::new(),
@@ -420,6 +424,7 @@ mod tests {
 
     fn sandbox_view_with_filesets(filesets: Vec<SandboxFileset>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),
@@ -759,6 +764,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
                 contributions: Vec::new(),
@@ -838,6 +844,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
                 contributions: Vec::new(),
@@ -870,6 +877,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
                 contributions: Vec::new(),

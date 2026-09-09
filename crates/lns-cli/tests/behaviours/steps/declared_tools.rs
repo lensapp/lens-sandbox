@@ -65,6 +65,7 @@ fn validation_fails_naming_shape(w: &mut BehaviourWorld) -> Result<(), String> {
 #[given("a published sandbox declaring tools")]
 fn published_sandbox_declaring_tools(w: &mut BehaviourWorld) {
     let view = SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),

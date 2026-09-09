@@ -83,6 +83,17 @@ pub enum Request {
         /// Ignore every key this build would otherwise answer from, and write the ones it produces.
         rebuild: bool,
     },
+    /// The build a push needs: the image and every blob of it, so the caller — which holds the registry login — uploads it beside the artifact.
+    BuildImageForPush {
+        /// The document as canonical JSON, the same shape a local run sends.
+        definition: String,
+        /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
+        definition_dir: String,
+        /// Ignore every key this build would otherwise answer from, and write the ones it produces.
+        rebuild: bool,
+        /// Answer with the key alone and build nothing, which is what `lns push --dry-run` asks for.
+        plan_only: bool,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -255,6 +266,17 @@ pub enum Response {
         layers: usize,
         /// True when the key answered outright, so the build ran nothing.
         reused: bool,
+    },
+    /// What a push needs to publish an image beside its artifact: the key that names the build, and the image itself when this machine has one.
+    ImageBuiltForPush {
+        /// The build cache key: the `FROM` digest, the Containerfile text, the context's content hash and the architecture.
+        key: String,
+        /// What `spec.image` named, as every line about this build spells it.
+        label: String,
+        /// True when the key answered outright, so nothing was built.
+        reused: bool,
+        /// Absent only from a plan whose key this machine cannot answer, where the digest can be known only by building.
+        image: Option<Box<PushableImage>>,
     },
     RegistryLoginStored,
     RegistryLoggedOut,
@@ -556,6 +578,45 @@ pub enum ContributionBlock {
     Credential,
 }
 
+/// An image lns built, with every blob the caller must upload before the manifest that references them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushableImage {
+    /// The digest-pinned reference the local store holds it under.
+    pub reference: String,
+    pub digest: String,
+    pub manifest: String,
+    pub manifest_media_type: String,
+    pub config: String,
+    pub config_digest: String,
+    pub config_media_type: String,
+    pub layers: Vec<PushableLayer>,
+}
+
+/// One layer of a built image, and the file this machine holds it in — the bytes stay on disk, because an image is gigabytes and a socket is not the place for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushableLayer {
+    pub digest: String,
+    pub media_type: String,
+    pub size: u64,
+    pub path: String,
+}
+
+/// What a pulled artifact discloses about the image it was built from: the Containerfile, and the context it was built in (`docs/sandbox-spec.md` §7.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSourceView {
+    /// The Containerfile as `spec.imageSource` and the summary spell it, such as `./image/Containerfile`.
+    pub containerfile: String,
+    pub text: String,
+    pub context: Vec<BuildContextFile>,
+}
+
+/// One file of the packed build context, as an approver reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildContextFile {
+    pub path: String,
+    pub bytes: u64,
+}
+
 /// One `pre-start` script of a resolved sandbox, carried whole because a consumer approving a script has to be able to read it (`docs/sandbox-spec.md` §1.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxScript {
@@ -591,6 +652,9 @@ pub struct SandboxView {
     #[serde(default)]
     pub digest: String,
     pub image: String,
+    /// What the image was built from, when the artifact carries a build source layer (§7.3).
+    #[serde(default)]
+    pub image_source: Option<BuildSourceView>,
     /// The mixins this sandbox resolved into, since the merged document declares none of its own.
     #[serde(default)]
     pub mixins: Vec<String>,
@@ -1875,6 +1939,58 @@ mod tests {
         assert_eq!(decoded, resp);
     }
 
+    /// A push asks for the image and gets every blob's whereabouts back; a dry run asks for the key alone.
+    #[test]
+    fn a_build_for_a_push_survives_a_request_and_response_round_trip() {
+        let req = Request::BuildImageForPush {
+            definition: r#"{"spec":{"image":"./image"}}"#.into(),
+            definition_dir: "/work".into(),
+            rebuild: false,
+            plan_only: false,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::ImageBuiltForPush {
+            key: format!("sha256:{}", "b".repeat(64)),
+            label: "./image/Containerfile".into(),
+            reused: true,
+            image: Some(Box::new(PushableImage {
+                reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                manifest: "{}".into(),
+                manifest_media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+                config: "{}".into(),
+                config_digest: format!("sha256:{}", "d".repeat(64)),
+                config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+                layers: vec![PushableLayer {
+                    digest: format!("sha256:{}", "e".repeat(64)),
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    size: 4096,
+                    path: "/home/dev/.lns/layers/sha256/ee".into(),
+                }],
+            })),
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// A dry run whose key this machine cannot answer has no digest to name, and says so by carrying none.
+    #[test]
+    fn a_plan_with_no_image_behind_it_survives_a_round_trip() {
+        let resp = Response::ImageBuiltForPush {
+            key: format!("sha256:{}", "b".repeat(64)),
+            label: "./image/Containerfile".into(),
+            reused: false,
+            image: None,
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
     #[test]
     fn primary_session_detach_request_survives_a_round_trip() {
         let req = Request::SessionDetach {
@@ -2057,6 +2173,7 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
+            image_source: None,
             mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

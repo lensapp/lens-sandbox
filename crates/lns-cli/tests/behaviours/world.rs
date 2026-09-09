@@ -58,6 +58,16 @@ pub struct BehaviourWorld {
     pub pulled_view: Option<lns_ipc::SandboxView>,
     /// The config blob the push uploaded, which is the document a consumer reads.
     pub pushed_doc: Option<Vec<u8>>,
+    /// What the scripted service answers a push's build request with; `None` means the builder must never be consulted.
+    pub built_image: Option<StagedBuild>,
+    /// What this machine lets a built image weigh, in bytes.
+    pub image_limit: Option<u64>,
+    /// Every image the push uploaded, and the repository it landed in.
+    pub pushed_images: Vec<(String, lns_ipc::PushableImage)>,
+    /// The build source layer the push packed into the artifact, if it packed one.
+    pub pushed_build_source: Option<Vec<u8>>,
+    /// Whether each build request the push made asked for a plan only.
+    pub build_requests: Vec<StagedRequest>,
     pub tool_index: std::collections::HashMap<String, String>,
     /// Exact pins the scripted index answers "not listed" for at push verification.
     pub unlisted_pins: std::collections::HashSet<String>,
@@ -329,4 +339,20 @@ impl lns_cli::terminal::Terminal for ScriptedTerminal {
     fn read_secret(&mut self) -> std::io::Result<String> {
         self.read_answer()
     }
+}
+
+/// What a scenario stages the service's build answer as.
+#[derive(Debug, Clone, Default)]
+pub struct StagedBuild {
+    pub key: String,
+    pub label: String,
+    pub reused: bool,
+    pub image: Option<lns_ipc::PushableImage>,
+}
+
+/// What one push asked the builder for, so a scenario can assert that `--rebuild` and `--dry-run` travelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedRequest {
+    pub plan_only: bool,
+    pub rebuild: bool,
 }

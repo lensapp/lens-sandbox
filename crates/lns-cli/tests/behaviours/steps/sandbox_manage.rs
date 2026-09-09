@@ -50,6 +50,7 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

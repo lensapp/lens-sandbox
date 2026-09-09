@@ -33,6 +33,7 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
 fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -80,6 +81,7 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
 )]
 fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -152,6 +154,7 @@ fn inspects_sandbox_with_a_pinned_flag_mixin(
     pinned: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: vec![pinned.clone()],
         pinned_mixins: vec![pinned],
         contributions: Vec::new(),
@@ -184,6 +187,7 @@ fn inspects_sandbox_resolved_from_a_mixin(
     mixin: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: vec![mixin],
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -212,6 +216,7 @@ fn inspects_sandbox_resolved_from_a_mixin(
 )]
 fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, mount: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -245,6 +250,7 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring user "([^"]+)"$"#)]
 fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -273,6 +279,7 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
 )]
 fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -301,6 +308,7 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox setting env "([^"]+)"$"#)]
 fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),

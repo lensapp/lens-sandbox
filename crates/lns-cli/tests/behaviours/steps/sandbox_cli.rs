@@ -459,6 +459,8 @@ struct StepProducer {
     uploaded: RefCell<Vec<(String, lns_artifact::build::BuiltArtifact)>>,
     /// A mixin push that must succeed even while the sandbox push is scripted to fail, so a partial-publish scenario can assert what landed.
     fail_after: Option<usize>,
+    /// Every built image the push uploaded, with the repository it landed in.
+    images: RefCell<Vec<(lns_ipc::PushableImage, String)>>,
 }
 
 impl distribute::Producer for StepProducer {
@@ -480,6 +482,54 @@ impl distribute::Producer for StepProducer {
                 .map(|_| ()),
         };
         Box::pin(async move { outcome })
+    }
+
+    fn push_image<'a>(
+        &'a self,
+        image: &'a lns_ipc::PushableImage,
+        repository: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
+        self.images
+            .borrow_mut()
+            .push((image.clone(), repository.to_string()));
+        let published = format!("{repository}@{}", image.digest);
+        let refused = self.outcome.clone().err();
+        Box::pin(async move {
+            match refused {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => Ok(published),
+            }
+        })
+    }
+}
+
+/// The service's half of a push, as a scenario stages it: the key it answers, and the image behind that key when this machine has one.
+struct StepImageBuilder<'a> {
+    staged: Option<&'a crate::world::StagedBuild>,
+    asked: RefCell<Vec<crate::world::StagedRequest>>,
+}
+
+impl distribute::ImageBuilder for StepImageBuilder<'_> {
+    fn build<'a>(
+        &'a self,
+        request: &'a distribute::ImageRequest<'a>,
+    ) -> LocalBoxFuture<'a, anyhow::Result<distribute::BuiltImage>> {
+        self.asked.borrow_mut().push(crate::world::StagedRequest {
+            plan_only: request.plan_only,
+            rebuild: request.rebuild,
+        });
+        let answer = self.staged.cloned();
+        Box::pin(async move {
+            let staged = answer.ok_or_else(|| {
+                anyhow::anyhow!("this scenario stages no build, so nothing may ask for one")
+            })?;
+            Ok(distribute::BuiltImage {
+                key: staged.key,
+                label: staged.label,
+                reused: staged.reused,
+                image: staged.image,
+            })
+        })
     }
 }
 
@@ -726,13 +776,27 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         )),
         uploaded: RefCell::new(Vec::new()),
         fail_after: w.push_fails_after,
+        images: RefCell::new(Vec::new()),
     };
     let mut out: Vec<u8> = Vec::new();
     let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
     let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
+    let builder = StepImageBuilder {
+        staged: w.built_image.as_ref(),
+        asked: RefCell::new(Vec::new()),
+    };
     let result = match author::load_definition_json_at(&fs, &path) {
         Ok(doc) if push_args.dry_run => {
-            distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
+            distribute::push_dry_run(
+                &fs,
+                &project_dir,
+                &builder,
+                &doc,
+                &push_args.reference,
+                push_args.rebuild,
+                &mut out,
+            )
+            .await
         }
         Ok(doc) => {
             let resolver = StepResolver {
@@ -747,6 +811,11 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                     cwd: &project_dir,
                     producer: &producer,
                     resolver: &resolver,
+                    builder: &builder,
+                    image_limit: w
+                        .image_limit
+                        .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
+                    rebuild: push_args.rebuild,
                 },
                 &doc,
                 &push_args.reference,
@@ -760,6 +829,13 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         }
         Err(e) => Err(e),
     };
+    w.build_requests = builder.asked.into_inner();
+    w.pushed_images = producer
+        .images
+        .into_inner()
+        .into_iter()
+        .map(|(image, repository)| (repository, image))
+        .collect();
     let uploaded = producer.uploaded.into_inner();
     w.pushed_refs = uploaded
         .iter()
@@ -780,6 +856,9 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
             )
         })
         .collect();
+    w.pushed_build_source = uploaded
+        .last()
+        .and_then(|(_, built)| built.build_source_layer().map(|layer| layer.data.clone()));
     w.pushed_doc = uploaded.last().and_then(|(_, built)| {
         built
             .blobs

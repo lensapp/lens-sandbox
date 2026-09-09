@@ -79,6 +79,7 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

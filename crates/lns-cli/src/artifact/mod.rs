@@ -246,6 +246,11 @@ pub struct PushArgs {
     )]
     pub dry_run: bool,
     #[arg(
+        long = "rebuild",
+        help = "Ignore the build cache for this push, when spec.image names a Containerfile."
+    )]
+    pub rebuild: bool,
+    #[arg(
         long = "yes",
         help = "Publish the local mixins this document names without prompting."
     )]
@@ -915,6 +920,7 @@ mod tests {
         let cmd = ArtifactCommand::Push(PushArgs {
             reference: "ghcr.io/team/hermes:1.4.0".into(),
             dry_run: false,
+            rebuild: false,
             assume_yes: false,
             file: None,
         });
@@ -1284,6 +1290,7 @@ mod tests {
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    image_source: None,
                     mixins: Vec::new(),
                     pinned_mixins: Vec::new(),
                     contributions: Vec::new(),
@@ -1361,6 +1368,7 @@ mod tests {
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    image_source: None,
                     mixins: vec!["ghcr.io/acme/obs:2".into()],
                     pinned_mixins: Vec::new(),
                     contributions: vec![

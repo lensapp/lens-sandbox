@@ -184,14 +184,23 @@ fn collect_context<F: Fs + ?Sized>(
     Ok(())
 }
 
-/// A path-form `spec.image` publishes as the digest of an image lns built ([§6](docs/sandbox-spec.md)), and lns has no builder yet, so the verbs that would need one refuse rather than hand a path to a registry.
-pub fn refuse_an_unbuilt_image(image: &str) -> Result<()> {
-    if let ImageSource::Containerfile(path) = source(image) {
-        bail!(
-            "spec.image {path:?} names a Containerfile, and building one is not yet supported; publish the image yourself and name it by reference"
-        );
-    }
-    Ok(())
+/// The Containerfile and its context, read ready to pack as a layer of the artifact the document publishes as (§7.3); `None` for an image that is pulled rather than built.
+pub fn source_layer<F: Fs + ?Sized>(
+    fs: &F,
+    project_dir: &Path,
+    image: &str,
+) -> Result<Option<lns_artifact::build_source::ImageSourceLayer>> {
+    let ImageSource::Containerfile(path) = source(image) else {
+        return Ok(None);
+    };
+    let (containerfile, at) = resolve(fs, project_dir, path)?;
+    let context = at.parent().unwrap_or(project_dir);
+    let files = lns_artifact::walk::walk_context(fs, context)
+        .with_context(|| format!("reading the build context {}", context.display()))?;
+    Ok(Some(lns_artifact::build_source::ImageSourceLayer {
+        containerfile,
+        files,
+    }))
 }
 
 #[cfg(test)]

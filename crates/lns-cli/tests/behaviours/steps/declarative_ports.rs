@@ -37,6 +37,7 @@ fn definition(world: &BehaviourWorld) -> lns_artifact::sandbox::Definition {
 
 fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxView {
     lns_ipc::SandboxView {
+        image_source: None,
         mixins: def.spec.mixins.clone(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),

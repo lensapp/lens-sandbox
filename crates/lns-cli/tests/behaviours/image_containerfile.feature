@@ -97,23 +97,6 @@ Feature: an image built from a Containerfile beside the document
     Then the exit code is 0
     And the output contains "valid"
 
-  Scenario: a run of such a document says building is not yet supported
-    Given an lns.yaml whose image is "./image"
-    And the directory "image" holds a "Containerfile"
-    When the user runs "lns run"
-    Then the command fails with an exit code other than 0
-    And the output contains "not yet supported"
-    And the output contains "./image"
-
-  Scenario: a push of such a document refuses before it publishes anything
-    Given an lns.yaml whose image is "./image"
-    And the directory "image" holds a "Containerfile"
-    And the registry accepts the push
-    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
-    Then the command fails with an exit code other than 0
-    And the output contains "not yet supported"
-    And the published sandbox was not uploaded
-
   Scenario: an image path naming nothing is refused where a fileset's typo is
     Given an lns.yaml whose image is "./image"
     When the user runs artifact command "validate"
