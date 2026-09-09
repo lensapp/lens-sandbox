@@ -441,6 +441,7 @@ async fn handle_connector_request(call: crate::connector::real::Call) -> Respons
     }
 }
 
+#[allow(clippy::cognitive_complexity)] // one arm per request is the wire contract; splitting the dispatcher hides which verb the service answers
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
     if let Some(verb) = VolumeVerb::of(request) {
         return handle_volume_request(verb).await;
@@ -607,6 +608,20 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             rebuild,
         } => image_response(
             crate::containerfile::real::build_sandbox(definition, definition_dir, *rebuild).await,
+        ),
+        Request::BuildImageForPush {
+            definition,
+            definition_dir,
+            rebuild,
+            plan_only,
+        } => image_response(
+            crate::containerfile::real::build_image_for_push(
+                definition,
+                definition_dir,
+                *rebuild,
+                *plan_only,
+            )
+            .await,
         ),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
         Request::Unknown { method } => Response::Error {

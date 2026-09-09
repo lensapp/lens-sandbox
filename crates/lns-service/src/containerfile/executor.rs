@@ -141,15 +141,28 @@ struct Build {
     reused_steps: usize,
 }
 
-pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Built> {
+/// Everything the `FROM` decided: the base the build stands on, the key that names it, the image this machine already answers that key with, and the `ARG`s declared before the stage.
+pub(crate) struct Opening {
+    pub key: String,
+    pub base: Base,
+    /// What this machine built for the key and still holds; a `--rebuild` never reads one.
+    pub cached: Option<String>,
+    global_args: Vec<(String, String)>,
+    /// How far into the file the `FROM` sat, so the loop resumes after it.
+    after_from: usize,
+}
+
+/// Read the file up to and including its `FROM`, resolve that base, and ask the key — everything a build and a plan agree on before they part.
+pub(crate) async fn open<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Opening> {
     let mut global_args = Vec::new();
-    let mut instructions = plan.file.instructions.iter();
+    let mut after_from = 0;
     let from = loop {
-        let Some(instruction) = instructions.next() else {
+        let Some(instruction) = plan.file.instructions.get(after_from) else {
             bail!(
                 "a Containerfile must name what it builds on with FROM, and this one names nothing"
             );
         };
+        after_from += 1;
         match &instruction.kind {
             InstructionKind::From { image } => break (instruction.line, image),
             InstructionKind::Arg { name, default } => {
@@ -171,11 +184,46 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         .resolve_base(&image)
         .await
         .with_context(|| format!("line {line}: FROM {image}"))?;
-
     let key = key::image_key(&base.reference, plan.text, plan.context_hash, plan.arch);
-    if !plan.rebuild
-        && let Some(reference) = host.cached(Kind::Image, &key).await
-    {
+    let cached = match plan.rebuild {
+        true => None,
+        false => host.cached(Kind::Image, &key).await,
+    };
+    Ok(Opening {
+        key,
+        base,
+        cached,
+        global_args,
+        after_from,
+    })
+}
+
+/// The key a build is remembered under, and the image behind it when this machine has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Planned {
+    pub key: String,
+    pub reference: Option<String>,
+}
+
+/// What `lns push --dry-run` asks for: the key, and the digest only where the key already answers. Nothing is built.
+pub(crate) async fn plan<H: BuildHost>(host: &H, request: &BuildPlan<'_>) -> Result<Planned> {
+    let opening = open(host, request).await?;
+    Ok(Planned {
+        key: opening.key,
+        reference: opening.cached,
+    })
+}
+
+pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Built> {
+    let Opening {
+        key,
+        base,
+        cached,
+        global_args,
+        after_from,
+    } = open(host, plan).await?;
+    let instructions = plan.file.instructions[after_from..].iter();
+    if let Some(reference) = cached {
         return Ok(Built {
             reference,
             layers: 0,
@@ -863,7 +911,7 @@ mod tests {
         parse(text).expect("the subset accepts this file")
     }
 
-    fn plan<'a>(file: &'a Containerfile, text: &'a str) -> BuildPlan<'a> {
+    fn build_plan<'a>(file: &'a Containerfile, text: &'a str) -> BuildPlan<'a> {
         BuildPlan {
             file,
             label: "./image/Containerfile",
@@ -876,7 +924,7 @@ mod tests {
 
     async fn built(host: &FakeHost, text: &str) -> Built {
         let file = containerfile(text);
-        build(host, &plan(&file, text))
+        build(host, &build_plan(&file, text))
             .await
             .expect("this Containerfile builds")
     }
@@ -885,7 +933,7 @@ mod tests {
         let file = containerfile(text);
         format!(
             "{:#}",
-            build(host, &plan(&file, text))
+            build(host, &build_plan(&file, text))
                 .await
                 .expect_err("this Containerfile must stop the build")
         )
@@ -1591,7 +1639,10 @@ mod tests {
             ],
         };
 
-        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
+        let refusal = format!(
+            "{:#}",
+            build(&host, &build_plan(&file, "")).await.unwrap_err()
+        );
         assert!(refusal.contains("line 1"), "{refusal}");
         assert!(refusal.contains("RUN echo hi"), "{refusal}");
         assert!(refusal.contains("FROM"), "{refusal}");
@@ -1618,7 +1669,10 @@ mod tests {
             }],
         };
 
-        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
+        let refusal = format!(
+            "{:#}",
+            build(&host, &build_plan(&file, "")).await.unwrap_err()
+        );
         assert!(refusal.contains("FROM"), "{refusal}");
         assert!(parse("# nothing but a comment\n").is_err());
     }
@@ -1643,7 +1697,10 @@ mod tests {
             ],
         };
 
-        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
+        let refusal = format!(
+            "{:#}",
+            build(&host, &build_plan(&file, "")).await.unwrap_err()
+        );
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("a second FROM"), "{refusal}");
         assert!(
@@ -1719,6 +1776,87 @@ mod tests {
         assert_eq!(host.commits().len(), 2, "the second build commits nothing");
     }
 
+    async fn planned(host: &FakeHost, text: &str) -> Planned {
+        let file = containerfile(text);
+        plan(host, &build_plan(&file, text))
+            .await
+            .expect("a plan reads the key of a Containerfile the subset accepts")
+    }
+
+    /// What `lns push --dry-run` answers with: a key always, and a digest only where the key already answers.
+    #[tokio::test]
+    async fn a_plan_answers_with_the_key_and_builds_nothing() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+
+        let planned = planned(&host, text).await;
+
+        assert!(planned.key.starts_with("sha256:"), "{}", planned.key);
+        assert_eq!(
+            planned.reference, None,
+            "a digest this machine has never built can only be known by building"
+        );
+        assert!(host.runs().is_empty(), "a plan boots no guest");
+        assert!(host.commits().is_empty(), "a plan commits nothing");
+    }
+
+    #[tokio::test]
+    async fn a_plan_of_a_build_this_machine_already_made_names_its_image() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        let built = built(&host, text).await;
+
+        let planned = planned(&host, text).await;
+
+        assert_eq!(planned.key, built.key);
+        assert_eq!(planned.reference, Some(built.reference));
+        assert_eq!(host.runs().len(), 1, "the plan boots no second guest");
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_ignores_the_cache_names_no_image_although_one_is_held() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        built(&host, text).await;
+        let file = containerfile(text);
+
+        let planned = plan(
+            &host,
+            &BuildPlan {
+                rebuild: true,
+                ..build_plan(&file, text)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            planned.reference, None,
+            "a --rebuild reads no key, so a preview must not promise the digest it would drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_of_a_file_with_no_from_is_refused_the_way_a_build_is() {
+        let host = FakeHost::new();
+        let file = Containerfile {
+            instructions: vec![crate::containerfile::parse::Instruction {
+                line: 1,
+                kind: InstructionKind::Arg {
+                    name: "VERSION".into(),
+                    default: Some("1".into()),
+                },
+            }],
+        };
+        let refusal = format!(
+            "{:#}",
+            plan(&host, &build_plan(&file, ""))
+                .await
+                .expect_err("a file that names nothing to build on cannot be planned either")
+        );
+        assert!(refusal.contains("FROM"), "{refusal}");
+    }
+
     #[tokio::test]
     async fn a_build_reuses_every_leading_step_and_rebuilds_from_the_first_that_differs() {
         let host = FakeHost::new();
@@ -1780,7 +1918,7 @@ mod tests {
         let host = FakeHost::new();
         let text = "FROM alpine\nCOPY app /srv/app\nRUN echo after\n";
         let file = containerfile(text);
-        build(&host, &plan(&file, text)).await.unwrap();
+        build(&host, &build_plan(&file, text)).await.unwrap();
         let before = host.commits().len();
         *host.copied_bytes.lock().unwrap() = b"edited\n".to_vec();
 
@@ -1788,7 +1926,7 @@ mod tests {
             &host,
             &BuildPlan {
                 context_hash: "sha256:edited",
-                ..plan(&file, text)
+                ..build_plan(&file, text)
             },
         )
         .await
@@ -1812,13 +1950,13 @@ mod tests {
         let host = FakeHost::new();
         let text = "FROM alpine\nRUN echo one\nCOPY app /srv/app\nUSER node\n";
         let file = containerfile(text);
-        build(&host, &plan(&file, text)).await.unwrap();
+        build(&host, &build_plan(&file, text)).await.unwrap();
         let runs = host.runs().len();
         let commits = host.commits().len();
 
         let again = build(
             &host,
-            &plan(&file, "# what this image is for\nFROM alpine\nRUN echo one\nCOPY app /srv/app\nUSER node\n"),
+            &build_plan(&file, "# what this image is for\nFROM alpine\nRUN echo one\nCOPY app /srv/app\nUSER node\n"),
         )
         .await
         .unwrap();
@@ -1858,7 +1996,7 @@ mod tests {
             &host,
             &BuildPlan {
                 rebuild: true,
-                ..plan(&file, text)
+                ..build_plan(&file, text)
             },
         )
         .await
@@ -1878,13 +2016,13 @@ mod tests {
         let host = FakeHost::new();
         let text = "FROM alpine\nRUN echo one\n";
         let file = containerfile(text);
-        let first = build(&host, &plan(&file, text)).await.unwrap();
+        let first = build(&host, &build_plan(&file, text)).await.unwrap();
 
         let second = build(
             &host,
             &BuildPlan {
                 context_hash: "sha256:edited",
-                ..plan(&file, text)
+                ..build_plan(&file, text)
             },
         )
         .await

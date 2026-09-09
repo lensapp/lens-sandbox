@@ -40,6 +40,19 @@ pub(crate) fn declared_env(config: &str) -> Result<Vec<(String, String)>> {
 /// A step's `created` is fixed, because the wall clock would make an unchanged instruction on an unchanged parent a new digest on every build and nothing could ever be reused.
 pub(crate) const STEP_CREATED: &str = "1970-01-01T00:00:00Z";
 
+/// The exact manifest bytes a push uploads: what this machine holds is the parsed manifest, and a
+/// registry addresses the bytes, so the re-serialization is held to the digest the build recorded.
+pub(crate) fn manifest_bytes(manifest: &OciImageManifest, digest: &str) -> Result<String> {
+    let bytes = serde_json::to_string(manifest).context("serializing the built manifest")?;
+    let arrived = format!("sha256:{}", hex::encode(Sha256::digest(bytes.as_bytes())));
+    if arrived != digest {
+        bail!(
+            "the built manifest no longer hashes to {digest} but to {arrived};              a push must upload the bytes its digest names"
+        );
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn assemble(
     parent: &ParentImage,
     layer: Option<&LayerBlob>,
@@ -436,6 +449,30 @@ pub(crate) mod tests {
         assert_eq!(
             built.manifest.config.media_type, "application/vnd.oci.image.config.v1+json",
             "the parent's config media type decides how the config is read back",
+        );
+    }
+
+    #[test]
+    fn the_bytes_a_push_uploads_are_the_bytes_the_built_digest_names() {
+        let built = built();
+        let bytes = manifest_bytes(&built.manifest, &built.manifest_digest).expect(
+            "the manifest this machine holds re-serializes to the bytes it was hashed over",
+        );
+        assert_eq!(
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes.as_bytes()))),
+            built.manifest_digest,
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_no_longer_hashes_to_its_digest_is_refused_rather_than_uploaded() {
+        let mut built = built();
+        built.manifest.layers.pop();
+        let err = manifest_bytes(&built.manifest, &built.manifest_digest).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("no longer hashes to"),
+            "a registry addresses bytes, so a mismatch must stop the push: {message}"
         );
     }
 

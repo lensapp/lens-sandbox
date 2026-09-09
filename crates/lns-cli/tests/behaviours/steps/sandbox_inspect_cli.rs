@@ -30,6 +30,46 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
     cached_artifact(world, &reference, inspection);
 }
 
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox built from "([^"]+)"$"#)]
+fn inspects_sandbox_built_from(world: &mut BehaviourWorld, reference: String, from: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_source: Some(lns_ipc::BuildSourceView {
+            containerfile: from,
+            text: "FROM docker.io/library/node:24-bookworm\nRUN npm install -g @anthropic-ai/claude-code\n".into(),
+            context: vec![
+                lns_ipc::BuildContextFile {
+                    path: "Containerfile".into(),
+                    bytes: 87,
+                },
+                lns_ipc::BuildContextFile {
+                    path: "app/main.js".into(),
+                    bytes: 15,
+                },
+            ],
+        }),
+        mixins: Vec::new(),
+        pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: format!("ghcr.io/team/hermes@{}", full_digest()),
+        workdir: None,
+        user: None,
+        mounts: Vec::new(),
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        credentials: Vec::new(),
+        env: Vec::new(),
+        tools: Vec::new(),
+        scripts: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+        disk_bytes: None,
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
 fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {

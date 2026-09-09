@@ -77,11 +77,30 @@ pub(crate) async fn build_for_run(
     Ok(built)
 }
 
-/// The build itself, with no run around it: `lns sandbox build` needs one, and a run is a caller.
-pub(crate) async fn build(
-    request: &BuildRequest<'_>,
-    frame_tx: Sender<WireFrame>,
-) -> Result<BuiltForRun> {
+/// What one build reads off this machine before the loop starts: the file, its text, its context and where this host holds its caches.
+struct Prepared {
+    located: locate::Located,
+    text: String,
+    file: super::parse::Containerfile,
+    context_hash: String,
+    arch: String,
+    cache_dir: PathBuf,
+}
+
+impl Prepared {
+    fn plan(&self, rebuild: bool) -> executor::BuildPlan<'_> {
+        executor::BuildPlan {
+            file: &self.file,
+            label: &self.located.label,
+            text: &self.text,
+            context_hash: &self.context_hash,
+            arch: &self.arch,
+            rebuild,
+        }
+    }
+}
+
+fn prepare(request: &BuildRequest<'_>) -> Result<Prepared> {
     let image = request.image;
     let definition_dir = request.args.definition_dir.as_deref().with_context(|| {
         format!(
@@ -99,28 +118,42 @@ pub(crate) async fn build(
         )
     })?;
     let context_hash = key::context_hash(&RealContextFs, &located.context)?;
+    Ok(Prepared {
+        context_hash,
+        arch: crate::image::want_arch().to_string(),
+        cache_dir: crate::cache::root()?,
+        located,
+        text,
+        file,
+    })
+}
 
-    let cache_dir = crate::cache::root()?;
-    let arch = crate::image::want_arch().to_string();
-    let started = std::time::Instant::now();
-    let host = RealBuildHost {
-        context: located.context.clone(),
-        source: located.containerfile.display().to_string(),
+fn build_host(
+    request: &BuildRequest<'_>,
+    prepared: &Prepared,
+    frame_tx: Sender<WireFrame>,
+) -> RealBuildHost {
+    RealBuildHost {
+        context: prepared.located.context.clone(),
+        source: prepared.located.containerfile.display().to_string(),
         args: request.args.clone(),
         definition: request.definition.to_string(),
-        cache_dir: cache_dir.clone(),
+        cache_dir: prepared.cache_dir.clone(),
         frame_tx,
         steps: AtomicUsize::new(0),
-    };
-    let plan = executor::BuildPlan {
-        file: &file,
-        label: &located.label,
-        text: &text,
-        context_hash: &context_hash,
-        arch: &arch,
-        rebuild: request.rebuild,
-    };
-    let built = executor::build(&host, &plan)
+    }
+}
+
+/// The build itself, with no run around it: `lns sandbox build` needs one, and a run is a caller.
+pub(crate) async fn build(
+    request: &BuildRequest<'_>,
+    frame_tx: Sender<WireFrame>,
+) -> Result<BuiltForRun> {
+    let prepared = prepare(request)?;
+    let located = prepared.located.clone();
+    let started = std::time::Instant::now();
+    let host = build_host(request, &prepared, frame_tx);
+    let built = executor::build(&host, &prepared.plan(request.rebuild))
         .await
         .with_context(|| format!("building {}", located.label))?;
     if !built.reused {
@@ -172,6 +205,109 @@ pub async fn build_sandbox(
         layers: built.layers,
         reused: built.reused,
     })
+}
+
+/// `lns push`: build what `spec.image` names, or answer with the key alone, and hand the caller
+/// every blob of the image so the side that holds the registry login uploads it (§6).
+pub async fn build_image_for_push(
+    definition: &str,
+    definition_dir: &str,
+    rebuild: bool,
+    plan_only: bool,
+) -> Result<lns_ipc::Response> {
+    let image = image_of(definition)?;
+    let (frame_tx, mut frames) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move { while frames.recv().await.is_some() {} });
+    let mut args = args_for_a_build(definition, definition_dir);
+    args.image = Some(image.clone());
+    let request = BuildRequest {
+        args: &args,
+        definition,
+        image: &image,
+        rebuild,
+    };
+    let (key, label, reused, reference) = match plan_only {
+        true => {
+            let (planned, label) = plan(&request, frame_tx).await?;
+            (
+                planned.key,
+                label,
+                planned.reference.is_some(),
+                planned.reference,
+            )
+        }
+        false => {
+            let built = build(&request, frame_tx).await?;
+            (built.key, built.label, built.reused, Some(built.reference))
+        }
+    };
+    let image = match reference {
+        Some(reference) => Some(Box::new(pushable(&reference)?)),
+        None => None,
+    };
+    Ok(lns_ipc::Response::ImageBuiltForPush {
+        key,
+        label,
+        reused,
+        image,
+    })
+}
+
+/// The image as an uploader needs it: the exact manifest bytes its digest was taken over, its
+/// config, and the file this machine holds each layer in.
+fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
+    let cache_dir = crate::cache::root()?;
+    let manifests = cache_dir.join("manifests");
+    let normalized = crate::image_store::normalize_reference(reference)?;
+    let cached = ManifestCache::new(&manifests)
+        .get(&normalized)
+        .with_context(|| {
+            format!("the built image {normalized} is not in this machine's manifest cache")
+        })?;
+    let layers = LayerCache::new(cache_dir.join("layers"));
+    Ok(lns_ipc::PushableImage {
+        reference: normalized,
+        digest: cached.manifest_digest.clone(),
+        manifest: super::image::manifest_bytes(&cached.manifest, &cached.manifest_digest)?,
+        manifest_media_type: cached
+            .manifest
+            .media_type
+            .clone()
+            .unwrap_or_else(|| oci_client::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
+        config_digest: cached.manifest.config.digest.clone(),
+        config_media_type: cached.manifest.config.media_type.clone(),
+        config: cached.config.clone(),
+        layers: cached
+            .manifest
+            .layers
+            .iter()
+            .map(|layer| {
+                Ok(lns_ipc::PushableLayer {
+                    digest: layer.digest.clone(),
+                    media_type: layer.media_type.clone(),
+                    size: layer.size.max(0) as u64,
+                    path: layers
+                        .path_for(&layer.digest)?
+                        .to_string_lossy()
+                        .into_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+/// The key a build would be remembered under, read without building: the `FROM` still resolves,
+/// because the key stands on the digest it resolves to.
+async fn plan(
+    request: &BuildRequest<'_>,
+    frame_tx: Sender<WireFrame>,
+) -> Result<(executor::Planned, String)> {
+    let prepared = prepare(request)?;
+    let host = build_host(request, &prepared, frame_tx);
+    let planned = executor::plan(&host, &prepared.plan(request.rebuild))
+        .await
+        .with_context(|| format!("reading the key of {}", prepared.located.label))?;
+    Ok((planned, prepared.located.label))
 }
 
 /// What `spec.image` names, refused here when it names an image rather than a file to build.

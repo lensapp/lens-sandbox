@@ -424,6 +424,7 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;
+    let build_source = fetch_build_source(&registry, &reference, &manifest).await?;
     crate::artifact::inspect::project_inspection(
         image_ref,
         digest,
@@ -431,7 +432,24 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         &manifest.config.media_type,
         &resolution,
         lns_artifact::resources::host::probe(),
+        build_source,
     )
+}
+
+/// The Containerfile a published image was built from, fetched off the artifact so an approver reads what a build ran rather than only its digest (§7.3).
+async fn fetch_build_source<R: crate::image::Registry>(
+    registry: &R,
+    reference: &Reference,
+    manifest: &oci_client::manifest::OciImageManifest,
+) -> Result<Option<lns_ipc::BuildSourceView>> {
+    let Some((title, descriptor)) = crate::artifact::inspect::build_source_layer(manifest) else {
+        return Ok(None);
+    };
+    let bytes = registry
+        .pull_blob(reference, &descriptor, &|_| {})
+        .await
+        .with_context(|| format!("fetching the build source layer {}", descriptor.digest))?;
+    crate::artifact::inspect::read_build_source(&title, &bytes).map(Some)
 }
 
 #[cfg(test)]

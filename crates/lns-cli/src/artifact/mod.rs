@@ -644,6 +644,37 @@ pub(crate) async fn inspect_cached<W: std::io::Write>(
     }
 }
 
+/// What a pulled artifact discloses about the image it was built from: the file, the context it sent, and the instructions themselves — an approver decides on what a build ran (§7.3).
+fn render_build_source<W: std::io::Write>(
+    out: &mut W,
+    source: Option<&lns_ipc::BuildSourceView>,
+) -> Result<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    writeln!(
+        out,
+        "imageSource: built from {} ({} lines, context {} files)",
+        source.containerfile,
+        source.text.lines().count(),
+        source.context.len()
+    )?;
+    for file in &source.context {
+        writeln!(
+            out,
+            "context: {} ({})",
+            file.path,
+            crate::output::format_bytes(file.bytes)
+        )?;
+    }
+    writeln!(out)?;
+    writeln!(out, "{}:", source.containerfile)?;
+    for line in source.text.lines() {
+        writeln!(out, "  {line}")?;
+    }
+    Ok(())
+}
+
 fn render_cached_inspect<W: std::io::Write>(
     inspection: &lns_ipc::ArtifactInspection,
     typed: &[String],
@@ -657,6 +688,7 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
+            render_build_source(out, view.image_source.as_ref())?;
             for mixin in
                 crate::run::summary::mixin_display(&view.mixins, typed, &view.pinned_mixins)
             {

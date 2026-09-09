@@ -88,6 +88,43 @@ fn declared_policy_flags(policy: &lns_policy::Policy) -> Vec<String> {
         .collect()
 }
 
+/// The layer a published artifact carries its Containerfile and context in, and the name to read it back under (`docs/sandbox-spec.md` §7.3).
+pub(crate) fn build_source_layer(
+    manifest: &oci_client::manifest::OciImageManifest,
+) -> Option<(String, oci_client::manifest::OciDescriptor)> {
+    manifest
+        .layers
+        .iter()
+        .find(|layer| layer.media_type == lns_artifact::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE)
+        .map(|layer| {
+            let title = layer
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get("org.opencontainers.image.title"))
+                .cloned()
+                .unwrap_or_else(|| "Containerfile".to_string());
+            (title, layer.clone())
+        })
+}
+
+/// The packed build source as an approver reads it: the instructions themselves, and every context file with its size.
+pub(crate) fn read_build_source(title: &str, layer: &[u8]) -> Result<lns_ipc::BuildSourceView> {
+    let read = lns_artifact::build_source::read(title, layer)
+        .with_context(|| format!("reading the build source layer of {title}"))?;
+    Ok(lns_ipc::BuildSourceView {
+        containerfile: read.containerfile,
+        text: read.text,
+        context: read
+            .files
+            .into_iter()
+            .map(|file| lns_ipc::BuildContextFile {
+                path: file.path,
+                bytes: file.bytes,
+            })
+            .collect(),
+    })
+}
+
 /// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared connectors, and any over-broad-policy flags.
 pub(crate) fn project_inspection(
     image_ref: &str,
@@ -96,6 +133,7 @@ pub(crate) fn project_inspection(
     config_media_type: &str,
     resolution: &crate::artifact::mixin::Resolution,
     host: Option<lns_artifact::resources::HostCapacity>,
+    build_source: Option<lns_ipc::BuildSourceView>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
         None => Ok(ArtifactInspection::Image(ImageView {
@@ -137,7 +175,7 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
-                    image_source: None,
+                    image_source: build_source,
                     mixins: resolution.mixins.clone(),
                     pinned_mixins: resolution.pinned_extra.clone(),
                     contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
@@ -266,7 +304,132 @@ mod tests {
             &config_media_type,
             &resolution(config, mixins),
             host,
+            None,
         )
+    }
+
+    fn packed_source() -> lns_artifact::build::Blob {
+        lns_artifact::build_source::pack(&lns_artifact::build_source::ImageSourceLayer {
+            containerfile: "./image/Containerfile".into(),
+            files: vec![
+                lns_artifact::build::FileEntry {
+                    path: "Containerfile".into(),
+                    data: b"FROM alpine\nRUN true\n".to_vec(),
+                    mode: 0o644,
+                },
+                lns_artifact::build::FileEntry {
+                    path: "app/main.js".into(),
+                    data: b"console.log(1)\n".to_vec(),
+                    mode: 0o644,
+                },
+            ],
+        })
+        .expect("packing")
+    }
+
+    fn manifest_carrying(
+        layers: Vec<oci_client::manifest::OciDescriptor>,
+    ) -> oci_client::manifest::OciImageManifest {
+        oci_client::manifest::OciImageManifest {
+            layers,
+            ..Default::default()
+        }
+    }
+
+    fn source_descriptor(title: Option<&str>) -> oci_client::manifest::OciDescriptor {
+        oci_client::manifest::OciDescriptor {
+            media_type: lns_artifact::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE.to_string(),
+            digest: packed_source().digest,
+            size: packed_source().data.len() as i64,
+            annotations: title.map(|title| {
+                std::collections::BTreeMap::from([(
+                    "org.opencontainers.image.title".to_string(),
+                    title.to_string(),
+                )])
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_artifact_carrying_no_build_source_layer_has_none_to_read() {
+        let manifest = manifest_carrying(vec![oci_client::manifest::OciDescriptor {
+            media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
+            ..Default::default()
+        }]);
+        assert!(build_source_layer(&manifest).is_none());
+    }
+
+    #[test]
+    fn the_build_source_layer_is_found_by_its_media_type_and_named_by_its_title() {
+        let manifest = manifest_carrying(vec![source_descriptor(Some("./image/Dockerfile"))]);
+        let (title, descriptor) =
+            build_source_layer(&manifest).expect("§7.3: the artifact carries one");
+        assert_eq!(title, "./image/Dockerfile");
+        assert_eq!(descriptor.digest, packed_source().digest);
+    }
+
+    #[test]
+    fn a_build_source_layer_with_no_title_is_read_under_the_name_podman_would_use() {
+        let manifest = manifest_carrying(vec![source_descriptor(None)]);
+        let (title, _) = build_source_layer(&manifest).expect("the layer is still the layer");
+        assert_eq!(title, "Containerfile");
+    }
+
+    #[test]
+    fn a_read_build_source_carries_the_instructions_and_every_context_file_with_its_size() {
+        let view = read_build_source("./image/Containerfile", &packed_source().data)
+            .expect("the layer this repo packs is the layer this repo reads");
+        assert_eq!(view.containerfile, "./image/Containerfile");
+        assert_eq!(view.text, "FROM alpine\nRUN true\n");
+        assert_eq!(
+            view.context,
+            vec![
+                lns_ipc::BuildContextFile {
+                    path: "Containerfile".into(),
+                    bytes: 21,
+                },
+                lns_ipc::BuildContextFile {
+                    path: "app/main.js".into(),
+                    bytes: 15,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_build_source_layer_that_does_not_decode_names_the_file_it_was_reading_for() {
+        let err = read_build_source("./image/Containerfile", b"not a layer").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("./image/Containerfile"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_built_from_a_containerfile_discloses_it_beside_the_digest_it_runs() {
+        let inspection = project_inspection(
+            "ghcr.io/team/hermes:1.4.0",
+            digest(),
+            Some(&lns_artifact::spec::Kind::Sandbox.artifact_type()),
+            &lns_artifact::spec::Kind::Sandbox.config_media_type(),
+            &resolution(
+                r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/hermes@sha256:abc","imageSource":"./image"}}"#,
+                &[],
+            ),
+            None,
+            Some(read_build_source("./image/Containerfile", &packed_source().data).unwrap()),
+        )
+        .unwrap();
+        let ArtifactInspection::Sandbox(view) = inspection else {
+            panic!("a published sandbox projects as one");
+        };
+        assert_eq!(view.image, "ghcr.io/team/hermes@sha256:abc");
+        let source = view
+            .image_source
+            .expect("an approver decides on what a build ran, not only on its digest");
+        assert_eq!(source.containerfile, "./image/Containerfile");
+        assert_eq!(source.context.len(), 2);
     }
 
     #[test]
@@ -277,6 +440,7 @@ mod tests {
             None,
             "application/vnd.oci.image.config.v1+json",
             &resolution("{}", &[]),
+            None,
             None,
         )
         .unwrap();
@@ -298,6 +462,7 @@ mod tests {
             Some("application/vnd.acme.thing"),
             "application/vnd.oci.image.config.v1+json",
             &resolution("{}", &[]),
+            None,
             None,
         )
         .unwrap_err();
@@ -461,6 +626,7 @@ mod tests {
                     &[],
                 ),
                 None,
+                None,
             )
             .unwrap(),
             sandbox_view_with_credentials(vec![lns_spec::Credential {
@@ -488,6 +654,7 @@ mod tests {
             Some(&lns_artifact::spec::Kind::Mixin.artifact_type()),
             &lns_artifact::spec::Kind::Mixin.config_media_type(),
             &resolution(&document, &[]),
+            None,
             None,
         )
         .unwrap();
@@ -532,6 +699,7 @@ mod tests {
                 &[],
             ),
             None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -551,6 +719,7 @@ mod tests {
                 r#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{}}"#,
                 &[],
             ),
+            None,
             None,
         )
         .unwrap_err();
@@ -577,6 +746,7 @@ mod tests {
                         &[declared.clone(), pinned.clone()],
                     )
                 },
+                None,
                 None,
             )
             .unwrap(),
