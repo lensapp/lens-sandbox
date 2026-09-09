@@ -27,7 +27,7 @@ summary, then push it under every tag given.
 | --- | --- | --- |
 | `file` | — | Document to publish. Its directory roots the document's relative filesets and supplies the `README.md` layer. Required. |
 | `tags` | — | References to publish, one per line (commas also separate). Required. |
-| `push` | `true` | `false` stops after the dry run — what a pull request wants. |
+| `push` | `true` | `false` stops after the dry run — what a pull request wants. `true` or `false`; any other value fails the step. |
 | `kind` | _(empty)_ | `sandbox` or `mixin`, the kind the document must be. Empty accepts either. |
 | `require-exact-tool-versions` | `true` | Fail when the dry run reports tool versions that resolve at push time. `true` or `false`; any other value fails the step. |
 

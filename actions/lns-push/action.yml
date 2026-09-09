@@ -15,7 +15,7 @@ inputs:
       `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`.
     required: true
   push:
-    description: Publish, or stop after the dry run.
+    description: Publish, or stop after the dry run. `true` or `false`.
     required: false
     default: "true"
   kind:
@@ -51,6 +51,7 @@ runs:
       env:
         INPUT_TAGS: ${{ inputs.tags }}
         INPUT_EXACT_TOOLS: ${{ inputs.require-exact-tool-versions }}
+        INPUT_PUSH: ${{ inputs.push }}
       run: bash "$GITHUB_ACTION_PATH/../lib/push-inputs.sh"
 
     - name: Validate the document
@@ -99,7 +100,7 @@ runs:
 
     - name: Push
       id: push
-      if: inputs.push == 'true'
+      if: steps.tags.outputs.push == 'true'
       shell: bash
       env:
         INPUT_FILE: ${{ inputs.file }}
