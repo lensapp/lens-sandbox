@@ -59,6 +59,9 @@ impl Fs for MapFs {
     fn is_symlink(&self, path: &Path) -> bool {
         self.symlinks.contains(path)
     }
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        self.read_to_string(path).map(|held| held.len() as u64)
+    }
 }
 
 impl lns_artifact::walk::SnapshotFs for MapFs {

@@ -416,6 +416,9 @@ impl author::Fs for StepFs {
     fn is_symlink(&self, path: &Path) -> bool {
         self.symlinks.contains(path)
     }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        author::Fs::read_to_string(self, path).map(|held| held.len() as u64)
+    }
 }
 
 impl lns_artifact::walk::SnapshotFs for StepFs {

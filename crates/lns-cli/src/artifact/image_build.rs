@@ -66,18 +66,34 @@ fn resolve<F: Fs + ?Sized>(fs: &F, project_dir: &Path, path: &str) -> Result<(St
 
 /// The offline validate/inspect guard: a path-form image must name a Containerfile this machine can read and lns can build, so a typo and an unbuildable instruction are both found before a push.
 pub fn image_problems<F: Fs + ?Sized>(fs: &F, project_dir: &Path, image: &str) -> Vec<String> {
-    let built = match built_from(fs, project_dir, image) {
+    let (containerfile, _, text) = match containerfile_text(fs, project_dir, image) {
         Ok(None) => return Vec::new(),
-        Ok(Some(built)) => built,
+        Ok(Some(read)) => read,
         Err(e) => return vec![format!("{e:#}")],
     };
-    match lns_artifact::containerfile::parse(&built.text) {
+    match lns_artifact::containerfile::parse(&text) {
         Ok(_) => Vec::new(),
         Err(refusals) => refusals
             .iter()
-            .map(|refusal| format!("{} {refusal}", built.containerfile))
+            .map(|refusal| format!("{containerfile} {refusal}"))
             .collect(),
     }
+}
+
+/// The Containerfile a path-form `spec.image` names, as written and as read; the subset gate needs no more than this, and the context walk is `inspect`'s alone.
+fn containerfile_text<F: Fs + ?Sized>(
+    fs: &F,
+    project_dir: &Path,
+    image: &str,
+) -> Result<Option<(String, PathBuf, String)>> {
+    let ImageSource::Containerfile(path) = source(image) else {
+        return Ok(None);
+    };
+    let (containerfile, at) = resolve(fs, project_dir, path)?;
+    let text = fs
+        .read_to_string(&at)
+        .with_context(|| format!("reading {containerfile}"))?;
+    Ok(Some((containerfile, at, text)))
 }
 
 /// What a render discloses about the image, and `None` for one that is pulled rather than built.
@@ -86,13 +102,9 @@ pub fn built_from<F: Fs + ?Sized>(
     project_dir: &Path,
     image: &str,
 ) -> Result<Option<BuiltImage>> {
-    let ImageSource::Containerfile(path) = source(image) else {
+    let Some((containerfile, at, text)) = containerfile_text(fs, project_dir, image)? else {
         return Ok(None);
     };
-    let (containerfile, at) = resolve(fs, project_dir, path)?;
-    let text = fs
-        .read_to_string(&at)
-        .with_context(|| format!("reading {containerfile}"))?;
     let context = context_files(fs, at.parent().unwrap_or(project_dir))?;
     Ok(Some(BuiltImage {
         containerfile,
@@ -133,12 +145,8 @@ fn collect_context<F: Fs + ?Sized>(
             continue;
         }
         let bytes = fs
-            .read_limited(
-                &dir.join(&entry.name),
-                lns_artifact::build::MAX_FILESET_BYTES,
-            )
-            .with_context(|| format!("reading the build context file {}", entry_rel.display()))?
-            .len() as u64;
+            .size(&dir.join(&entry.name))
+            .with_context(|| format!("sizing the build context file {}", entry_rel.display()))?;
         out.push(ContextFile {
             path: entry_rel.display().to_string(),
             bytes,
@@ -175,6 +183,102 @@ mod tests {
         fs.symlinks
             .insert(PathBuf::from("/p/image/node_modules/.bin/tsc"));
         fs
+    }
+
+    struct BigContext;
+
+    impl Fs for BigContext {
+        fn is_dir(&self, path: &Path) -> bool {
+            path == Path::new("/p/image")
+        }
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            assert_eq!(path, Path::new("/p/image/Containerfile"));
+            Ok("FROM alpine\n".to_string())
+        }
+        fn write(&self, _path: &Path, _contents: &str) -> std::io::Result<()> {
+            unreachable!("an offline render writes nothing")
+        }
+        fn exists(&self, path: &Path) -> bool {
+            path == Path::new("/p/image/Containerfile")
+        }
+        fn is_symlink(&self, _path: &Path) -> bool {
+            false
+        }
+        fn size(&self, path: &Path) -> std::io::Result<u64> {
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("big.bin") => Ok(500 * 1024 * 1024),
+                _ => Ok(12),
+            }
+        }
+    }
+
+    impl lns_artifact::walk::SnapshotFs for BigContext {
+        fn read_limited(&self, path: &Path, _max_bytes: u64) -> std::io::Result<Vec<u8>> {
+            panic!("a context file is disclosed by its size, never read: {path:?}")
+        }
+        fn dir_entries(&self, _dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
+            Ok(["Containerfile", "big.bin"]
+                .into_iter()
+                .map(|name| lns_artifact::walk::DirEntry {
+                    name: name.to_string(),
+                    dir: false,
+                    mode: 0o644,
+                    symlink: false,
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_context_file_is_sized_rather_than_read_so_a_big_one_reads_true_and_costs_nothing() {
+        let built = built_from(&BigContext, Path::new("/p"), "./image")
+            .expect("reading")
+            .expect("a path-form image is built");
+        assert_eq!(
+            built.context[1].disclosure(),
+            "500.0 MiB",
+            "the size is the file's, not what a capped read returned"
+        );
+    }
+
+    #[test]
+    fn validate_does_not_walk_the_context_because_it_reads_only_the_containerfile() {
+        struct NoContext;
+        impl Fs for NoContext {
+            fn is_dir(&self, path: &Path) -> bool {
+                path == Path::new("/p/image")
+            }
+            fn read_to_string(&self, _path: &Path) -> std::io::Result<String> {
+                Ok("FROM alpine\n".to_string())
+            }
+            fn write(&self, _path: &Path, _contents: &str) -> std::io::Result<()> {
+                unreachable!("an offline check writes nothing")
+            }
+            fn exists(&self, path: &Path) -> bool {
+                path == Path::new("/p/image/Containerfile")
+            }
+            fn is_symlink(&self, _path: &Path) -> bool {
+                false
+            }
+            fn size(&self, _path: &Path) -> std::io::Result<u64> {
+                unreachable!("the subset gate sizes nothing")
+            }
+        }
+        impl lns_artifact::walk::SnapshotFs for NoContext {
+            fn read_limited(&self, _path: &Path, _max: u64) -> std::io::Result<Vec<u8>> {
+                unreachable!("the subset gate reads only the Containerfile")
+            }
+            fn dir_entries(
+                &self,
+                _dir: &Path,
+            ) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
+                panic!("the subset gate does not list the context")
+            }
+        }
+        assert_eq!(
+            image_problems(&NoContext, Path::new("/p"), "./image"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

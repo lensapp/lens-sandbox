@@ -48,6 +48,7 @@ pub trait Fs: lns_artifact::walk::SnapshotFs {
     fn exists(&self, path: &Path) -> bool;
     fn is_symlink(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
+    fn size(&self, path: &Path) -> io::Result<u64>;
 }
 
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
