@@ -7,7 +7,7 @@ use super::{CommandOutcome, CommandRunner, FsWriter};
 use super::{DHCP_DNS_PATH, configure_dns_with, parse_dhcp_dns};
 
 #[derive(Default)]
-struct RealCommandRunner;
+pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutcome> {
@@ -19,7 +19,7 @@ impl CommandRunner for RealCommandRunner {
 }
 
 #[derive(Default)]
-struct RealFsWriter;
+pub struct RealFsWriter;
 
 impl FsWriter for RealFsWriter {
     fn write(&self, path: &str, contents: &[u8], mode: u32) -> std::io::Result<()> {
@@ -27,11 +27,17 @@ impl FsWriter for RealFsWriter {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
         Ok(())
     }
+
+    fn exists(&self, path: &str) -> bool {
+        std::path::Path::new(path).exists()
+    }
 }
 
 #[cfg(target_os = "linux")]
-pub fn bring_up_eth0() -> Result<(), String> {
-    super::bring_up_eth0_with(&RealCommandRunner, &RealFsWriter)
+pub fn set_up() -> super::NetworkResult {
+    super::set_up_with_env(&RealCommandRunner, &RealFsWriter, |key| {
+        std::env::var(key).ok()
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -85,6 +91,16 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "executable mode bits applied");
+    }
+
+    #[test]
+    fn real_fs_writer_sees_a_path_that_exists_and_one_that_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("present");
+        std::fs::write(&path, b"x").expect("write");
+        let fs = RealFsWriter;
+        assert!(fs.exists(path.to_str().expect("utf-8 path")));
+        assert!(!fs.exists(dir.path().join("absent").to_str().expect("utf-8 path")));
     }
 
     #[test]
