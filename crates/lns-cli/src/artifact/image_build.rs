@@ -193,12 +193,12 @@ pub fn source_layer<F: Fs + ?Sized>(
     let ImageSource::Containerfile(path) = source(image) else {
         return Ok(None);
     };
-    let (containerfile, at) = resolve(fs, project_dir, path)?;
+    let (_, at) = resolve(fs, project_dir, path)?;
     let context = at.parent().unwrap_or(project_dir);
     let files = lns_artifact::walk::walk_context(fs, context)
         .with_context(|| format!("reading the build context {}", context.display()))?;
     Ok(Some(lns_artifact::build_source::ImageSourceLayer {
-        containerfile,
+        image_source: path.to_string(),
         files,
     }))
 }

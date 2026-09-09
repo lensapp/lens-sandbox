@@ -208,3 +208,23 @@ fn no_build_was_asked_for(w: &mut BehaviourWorld) {
         w.build_requests
     );
 }
+
+#[given("a document that was published from a Containerfile")]
+fn a_document_published_from_a_containerfile(w: &mut BehaviourWorld) {
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: hermes\nspec:\n  image: ghcr.io/team/hermes@sha256:{}\n  imageSource: ./image\n",
+            "ab".repeat(32)
+        ),
+    );
+}
+
+#[then(regex = r#"^the published document carries no "([^"]+)"$"#)]
+fn the_published_document_carries_no(w: &mut BehaviourWorld, field: String) {
+    let key = field.rsplit('.').next().unwrap_or(&field);
+    assert!(
+        published_document(w)["spec"].get(key).is_none(),
+        "§7.3: the record goes with the layer it describes, and this push ships none"
+    );
+}

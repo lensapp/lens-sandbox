@@ -154,7 +154,7 @@ pub fn build_artifact_with(
             "mediaType": blob.media_type,
             "digest": blob.digest,
             "size": blob.data.len(),
-            "annotations": { "org.opencontainers.image.title": source.containerfile },
+            "annotations": { "org.opencontainers.image.title": source.image_source },
         }));
         blobs.push(blob);
     }
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn a_built_image_s_containerfile_and_context_become_a_layer_of_the_same_artifact() {
         let source = crate::build_source::ImageSourceLayer {
-            containerfile: "./image/Containerfile".into(),
+            image_source: "./image".into(),
             files: vec![FileEntry {
                 path: "Containerfile".into(),
                 data: b"FROM alpine\n".to_vec(),
@@ -338,11 +338,11 @@ mod tests {
             .expect("the manifest addresses the build source layer");
         assert_eq!(descriptor["digest"], layer.digest);
         assert_eq!(
-            descriptor["annotations"]["org.opencontainers.image.title"], "./image/Containerfile",
-            "the title is how a consumer knows which name to read the instructions back under"
+            descriptor["annotations"]["org.opencontainers.image.title"], "./image",
+            "§7.3: the title is exactly the path spec.imageSource records"
         );
         assert_eq!(
-            crate::build_source::read("./image/Containerfile", &layer.data)
+            crate::build_source::read("./image", &layer.data)
                 .unwrap()
                 .text,
             "FROM alpine\n"

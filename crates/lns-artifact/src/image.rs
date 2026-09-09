@@ -82,6 +82,19 @@ pub fn rewrite_to_built(doc: &[u8], built: &str) -> Result<Vec<u8>> {
     serde_json::to_vec(&value).context("serializing the image-pinned definition")
 }
 
+/// `imageSource` is the record of the build source layer beside it, so a push that ships no such layer publishes no such record — a pulled document re-pushed as it stands must not name a path this artifact does not carry (§7.3).
+pub fn forget_source(doc: &[u8]) -> Result<Vec<u8>> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(doc).context("re-reading the definition for the image rewrite")?;
+    let Some(spec) = value["spec"].as_object_mut() else {
+        return Ok(doc.to_vec());
+    };
+    if spec.remove("imageSource").is_none() {
+        return Ok(doc.to_vec());
+    }
+    serde_json::to_vec(&value).context("serializing the image-pinned definition")
+}
+
 /// One layer of a built image, as its manifest addresses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageLayer {
@@ -245,6 +258,29 @@ mod tests {
             published["spec"].get("imageSource").is_none(),
             "an image nobody built has no source to record: {published}"
         );
+    }
+
+    /// A pulled document already carries the path its first push recorded, and re-pushing it ships no build source layer — so the record has to go with the layer it describes.
+    #[test]
+    fn a_republished_document_that_ships_no_build_source_records_none() {
+        let pulled = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/hermes@sha256:abc","imageSource":"./image"}}"#;
+        let published: serde_json::Value =
+            serde_json::from_slice(&forget_source(pulled).expect("forgetting"))
+                .expect("the republished document is json");
+        assert!(
+            published["spec"].get("imageSource").is_none(),
+            "a document that discloses no build must claim none: {published}"
+        );
+        assert_eq!(published["spec"]["image"], "ghcr.io/team/hermes@sha256:abc");
+    }
+
+    #[test]
+    fn a_document_that_never_recorded_a_source_is_published_as_it_stands() {
+        let published: serde_json::Value = serde_json::from_slice(
+            &forget_source(&doc("ghcr.io/team/base:1")).expect("forgetting"),
+        )
+        .expect("json");
+        assert_eq!(published["spec"]["image"], "ghcr.io/team/base:1");
     }
 
     #[test]

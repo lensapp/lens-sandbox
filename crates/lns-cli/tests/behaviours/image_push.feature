@@ -109,6 +109,13 @@ Feature: publishing the image a Containerfile builds beside the document
     Then the exit code is 0
     And the builder was not asked to resolve the document
 
+  Scenario: a pulled document re-pushed as it stands records no source it does not carry
+    Given a document that was published from a Containerfile
+    And the registry accepts the push
+    When the user runs artifact command "push ghcr.io/team/hermes:1.5.0"
+    Then the exit code is 0
+    And the published document carries no "spec.imageSource"
+
   Scenario: a document whose image is a reference never asks for a build
     Given a valid lns.yaml in the current directory
     And the registry accepts the push

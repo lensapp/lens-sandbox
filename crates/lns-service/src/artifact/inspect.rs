@@ -317,7 +317,7 @@ mod tests {
 
     fn packed_source() -> lns_artifact::build::Blob {
         lns_artifact::build_source::pack(&lns_artifact::build_source::ImageSourceLayer {
-            containerfile: "./image/Containerfile".into(),
+            image_source: "./image".into(),
             files: vec![
                 lns_artifact::build::FileEntry {
                     path: "Containerfile".into(),
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn a_read_build_source_carries_the_instructions_and_every_context_file_with_its_size() {
-        let view = read_build_source("./image/Containerfile", &packed_source().data)
+        let view = read_build_source("./image", &packed_source().data)
             .expect("the layer this repo packs is the layer this repo reads");
         assert_eq!(view.containerfile, "./image/Containerfile");
         assert_eq!(view.text, "FROM alpine\nRUN true\n");
@@ -471,7 +471,7 @@ mod tests {
                 &[],
             ),
             None,
-            Some(read_build_source("./image/Containerfile", &packed_source().data).unwrap()),
+            Some(read_build_source("./image", &packed_source().data).unwrap()),
         )
         .unwrap();
 

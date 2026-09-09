@@ -234,7 +234,7 @@ fn report_build_source<W: Write>(
         writeln!(
             out,
             "{verb} {} -> {} ({} bytes)",
-            source.containerfile,
+            source.containerfile(),
             layer.digest,
             layer.data.len()
         )?;
@@ -577,7 +577,7 @@ where
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     let doc = match &image {
         Some(image) => lns_artifact::image::rewrite_to_built(&doc, &image.reference)?,
-        None => doc,
+        None => lns_artifact::image::forget_source(&doc)?,
     };
     let (built, packed) = build(fs, cwd, &doc, source.as_ref())?;
     report_packed(out, "packed", &built, &packed)?;
@@ -655,7 +655,7 @@ where
             &pinned,
             &format!("{}@{digest}", super::mixin_plan::repository_of(reference)),
         )?,
-        None => pinned,
+        None => lns_artifact::image::forget_source(&pinned)?,
     };
     let (built, packed) = build(fs, cwd, &pinned, source.as_ref())?;
     report_packed(out, "would pack", &built, &packed)?;
