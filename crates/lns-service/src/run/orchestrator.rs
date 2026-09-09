@@ -711,7 +711,7 @@ async fn orchestrate(
 
     // One read of the hook decides both the guest's mount options and this capture, so a captured upper never holds a metacopy stub.
     if capture_hook_armed
-        && let Some(parent) = image_ref.as_deref()
+        && let Some(parent) = image.manifest_reference.as_deref()
         && let Err(e) = crate::containerfile::real::capture_after_run(
             &run_id,
             parent,

@@ -11,6 +11,8 @@ pub struct IngestedImage {
     pub config: Option<oci_client::config::ConfigFile>,
     pub artifact_type: Option<String>,
     pub config_media_type: Option<String>,
+    /// The digest-pinned spelling of what the pull resolved, which is how the manifest cache keys it.
+    pub manifest_reference: Option<String>,
 }
 
 pub async fn run(
@@ -29,12 +31,14 @@ pub async fn run(
                 .into_iter()
                 .map(|layer| layer.data.to_vec())
                 .collect();
+            let manifest_reference = pulled.reference.clone_with_digest(pulled.digest).whole();
             Ok(IngestedImage {
                 digests: pulled.layer_digests,
                 bytes,
                 config: Some(pulled.config),
                 artifact_type: pulled.artifact_type,
                 config_media_type: Some(pulled.config_media_type),
+                manifest_reference: Some(manifest_reference),
             })
         }
         None => {
@@ -49,6 +53,7 @@ pub async fn run(
                 config: None,
                 artifact_type: None,
                 config_media_type: None,
+                manifest_reference: None,
             })
         }
     }
@@ -146,6 +151,10 @@ mod tests {
             ingested.artifact_type.is_none() && ingested.config_media_type.is_none(),
             "imageless has no pulled manifest, so no artifact type to dispatch on"
         );
+        assert!(
+            ingested.manifest_reference.is_none(),
+            "imageless resolved no manifest, so there is nothing a build could stand on"
+        );
     }
 
     #[tokio::test]
@@ -220,6 +229,29 @@ mod tests {
         assert!(
             ingested.config.is_some(),
             "OCI path carries the parsed image config through"
+        );
+    }
+
+    /// The manifest cache keys a tag pull under the digest the registry resolved, so a build over a
+    /// tag-referenced base can only find its parent by that spelling.
+    #[tokio::test]
+    async fn a_tag_pull_reports_the_digest_pinned_reference_the_manifest_cache_holds() {
+        let (_dir, cache) = empty_cache();
+        let pulled_cell: Mutex<Option<PulledImage>> = Mutex::new(Some(sample_pulled()));
+        let ingested = run(
+            Some("alpine:3.20"),
+            &[],
+            &Arch::ARM64,
+            &cache,
+            async |_img: &str, _c: &LayerCache| Ok(pulled_cell.lock().unwrap().take().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ingested.manifest_reference.as_deref(),
+            Some("docker.io/library/alpine@sha256:deadbeef"),
+            "the same spelling `CachingRegistry` writes the cache entry under",
         );
     }
 

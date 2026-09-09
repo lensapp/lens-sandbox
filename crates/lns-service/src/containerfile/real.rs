@@ -22,10 +22,11 @@ pub fn capture_hook_enabled() -> bool {
 }
 
 /// Reads what one stopped run wrote, imports it as one layer over the image it booted, and reports
-/// the cost from `command_exited`, when the workload's own session ended.
+/// the cost from `command_exited`, when the workload's own session ended. `resolved_parent` is the
+/// digest-pinned reference the run's own pull resolved, which is how the manifest cache keys it.
 pub async fn capture_after_run(
     run_id: &str,
-    parent_reference: &str,
+    resolved_parent: &str,
     command: &[String],
     fileset_paths: &[String],
     guest_stop: crate::run::GuestStop,
@@ -37,7 +38,7 @@ pub async fn capture_after_run(
     let run_dir = crate::cache::run_dir(&cache_dir, run_id);
     let upper_image = run_dir.join("upper.img");
     let manifests = cache_dir.join("manifests");
-    let parent = parent_image(&manifests, parent_reference)?;
+    let parent = parent_image(&manifests, resolved_parent)?;
 
     let changes = tokio::task::spawn_blocking(move || {
         let tree = Ext4Upper::open_run_upper(&upper_image)?;
@@ -92,7 +93,7 @@ fn parent_image(manifests: &PathBuf, reference: &str) -> Result<ParentImage> {
         .with_context(|| {
             format!(
                 "the base image {normalized} is not in the local manifest cache; \
-             slice 1 builds only on a digest-pinned base a run has already booted"
+             a build stands on the manifest the run's own pull resolved"
             )
         })?;
     Ok(ParentImage {
