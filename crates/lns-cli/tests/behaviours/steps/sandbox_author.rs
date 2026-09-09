@@ -59,6 +59,14 @@ fn lns_yaml_holding_a_mixin(w: &mut BehaviourWorld) {
     );
 }
 
+#[given("an lns.yaml holding a connector document")]
+fn lns_yaml_holding_a_connector_document(w: &mut BehaviourWorld) {
+    seed(
+        w,
+        "apiVersion: lns.run/v1\nkind: connector\nname: some-provider\nspec:\n  serves:\n    - api.some-provider.example\n  methods:\n    - name: default\n",
+    );
+}
+
 #[given("an lns.yaml holding a mixin document that declares an image")]
 fn lns_yaml_holding_a_mixin_with_an_image(w: &mut BehaviourWorld) {
     seed(

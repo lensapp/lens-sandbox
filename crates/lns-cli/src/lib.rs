@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod artifact;
 pub mod audit;
 pub mod build;

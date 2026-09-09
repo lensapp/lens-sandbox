@@ -54,10 +54,11 @@ artifact and produces a sandbox.
 The rest of the surface manages neither a document nor a guest:
 [`lns connector`](#33-lns-connector) decides what this machine offers;
 [`lns volume`](#34-lns-volume) holds data;
-[`lns config`](#35-lns-config) holds your defaults; and
-[`lns audit`](#36-lns-audit), [`lns service`](#37-lns-service),
-[`lns login`](#38-lns-login--lns-logout), and
-[`lns update`](#39-lns-update--lns-uninstall) act on this machine.
+[`lns config`](#35-lns-config) holds your defaults;
+[`lns audit`](#36-lns-audit) reads what happened;
+[`lns approval`](#37-lns-approval) answers what a run asked; and
+[`lns service`](#38-lns-service), [`lns login`](#39-lns-login--lns-logout),
+and [`lns update`](#310-lns-update--lns-uninstall) act on this machine.
 
 ### 1.2 The kind is in the document
 
@@ -313,7 +314,10 @@ connected can overrule it.
 
 - **The run writes it.** A destination no rule decides is asked about at first
   use, and your answer is appended as an `egress` entry. There is no command to
-  run: answering the prompt is what records the decision.
+  run: answering the prompt is what records the decision. The card leaves an entry
+  behind, and you answer that entry later ([§3.7](#37-lns-approval)): it is how you
+  answer a card you closed, and how you change an answer you gave. You answer it at
+  either surface ([§7.1](#71-the-four-questions)).
 - **It belongs to that run.** A second `lns run` is a second run and starts with
   an empty file, so it asks for itself. `lns start` and `lns exec` rejoin the
   same run and keep what it decided.
@@ -505,7 +509,97 @@ did.
   separate verify step.
 - A sandbox with no events prints that and exits `0`.
 
-### 3.7 `lns service`
+### 3.7 `lns approval`
+
+What every run has been asked, and how you answered it — or scoped to one run.
+
+```bash
+lns approval ls [SANDBOX] [--format <table|json>]
+lns approval answer <ID> <always-allow|always-deny|ask-again>
+lns approval rm <ID>
+```
+
+`SANDBOX` is a `RUN`, and scopes the list to it. `ID` names one entry, as `ls`
+prints it.
+
+A card that asks about a destination becomes an **entry** in that run's own
+directory, and is listed until you remove it or the run goes. One you close, one
+that times out, and one a workload withdrew by exiting are all still listed. The
+request failed closed at the boundary; the question did not go with it. A
+headless service raises no card at all ([service.md](service.md)), so there the
+list is the only place a question is read.
+
+A connector card becomes an entry when the service raises it. The entry reads
+`undecided` until you answer. It reads `granted` or `declined` after you answer.
+A card you closed leaves the question listed, as every other card does.
+
+The list also shows lines that ask nothing — a rule the run could not write, a
+destination it could not express. Each is listed as a **notice**. A notice
+carries no verdict and nothing answers it.
+
+| Verb | What it does |
+|---|---|
+| `ls` | Lists the run's entries: the sandbox, whether the question is a destination or a connector, what it asks about, and the answer it has — `undecided`, `withdrawn`, `always allow`, or `always deny` for a destination; `undecided`, `granted`, or `declined` for a connector. A notice asks nothing, so it names no question and its answer reads `notice`. A run nothing has asked about prints that, and exits `0`. |
+| `answer` | Answers one destination entry, or answers it again. The newest answer replaces the one before it. |
+| `rm` | Removes one entry from the list. What that entry decided stays decided. |
+
+**`answer` decides egress, and nothing else.** Only a destination entry takes an
+answer. A connector entry is listed with the answer it has, and is not answerable
+here: at a terminal you grant a connector through
+[`lns connector`](#33-lns-connector), and in the **Approvals** view you grant it
+on the row ([§7.1](#71-the-four-questions)). A notice is listed and answers
+nothing. Answering a connector entry or a notice is a refusal: it says why that
+entry is not answered here, and exits `1`.
+
+An entry records the question and the answer it got. What the answer *does* lives
+where it always did — an egress rule in the run's `decisions.yaml`
+([§3.2.3](#323-the-runs-decisions-and-saving-them)), a grant in
+`~/.lns/connector-grants.json` ([§9](#9-environment-and-files)). The entry points
+at the decision. It does not hold it.
+
+No once verdict is offered. A once decision answers a request the guest is
+holding, so only the card that holds it offers one.
+
+- `always-allow` and `always-deny` write the entry's rule, or rewrite the one it
+  wrote before. A running sandbox takes the change at once.
+- `ask-again` takes the entry's rule back, so the destination is undecided again
+  and raises a card the next time a workload reaches it — unless the run has
+  since been closed, which asks about nothing ([policy.md](policy.md)).
+
+An answer reaches only what this entry wrote. Where **another** rule the gate
+reaches first already decides the destination, nothing is written: the command
+names that rule and exits `1`, as an answered card reports the same case
+([policy.md](policy.md)). `ask-again` on an entry that holds no rule of its own — one
+still undecided, or one whose rule you have since edited by hand — leaves the
+file alone, says so, and exits `1`.
+
+Answering an entry never replays the request that raised it. The call failed when
+nothing decided it. The answer decides what happens next time.
+
+An entry of a **stopped** sandbox is answerable, and edits that run's
+`decisions.yaml` without starting it.
+
+**`rm` removes the record, and nothing else.** It takes any entry. The rule an
+answered entry wrote stays in `decisions.yaml`, and a grant stays granted. No
+guest is told anything. The list is what the run was asked, so clearing a line of
+it clears the question, not the answer's effect.
+
+Two things follow. A question the run can still reach comes back: a destination
+nothing decides raises a fresh card, and a fresh entry, the next time a workload
+reaches it. And a rule whose entry you removed has no entry left to take it back.
+`ask-again` needs one, so that rule is yours to edit in the file. It still says
+`approved during a run`, so it still reads as a rule an answer wrote.
+
+A notice the run raises again is listed again.
+
+Entries also go with the run, at `lns rm` and `lns sandbox prune`.
+
+A request an existing rule decides raises no card, so it leaves no entry. That
+includes everything a closed directory refuses ([policy.md](policy.md)). You
+widen a closed directory by editing the file, never from this list. `lns audit`
+is where a rule-decided request is recorded.
+
+### 3.8 `lns service`
 
 ```bash
 lns service start | stop | status [--format <table|json>] | enable | disable
@@ -522,7 +616,7 @@ lns service start | stop | status [--format <table|json>] | enable | disable
 Nothing here installs a system-wide daemon. `lns start` is a sandbox; the service
 is always named.
 
-### 3.8 `lns login` / `lns logout`
+### 3.9 `lns login` / `lns logout`
 
 Credentials for a private OCI registry, so `lns pull` and `lns run` can fetch from
 it. Several registries can be logged in at once.
@@ -542,7 +636,7 @@ lns logout [REGISTRY]
 A registry is matched by host: a fully-qualified reference uses that host's stored
 login if there is one.
 
-### 3.9 `lns update` / `lns uninstall`
+### 3.10 `lns update` / `lns uninstall`
 
 ```bash
 lns update [--force] [--dry-run]
@@ -667,6 +761,34 @@ asked in the approval window the background service owns, because it has to be
 answerable while a sandbox is already running. The connector question is the one
 you may also answer early, at your terminal, with the same disclosure.
 
+**A question outlives the card that asked it.** A card that asks about a
+destination becomes an entry in the run's own directory
+([§3.7](#37-lns-approval)); a connector card does so when the service raises it,
+and the credential card never does. Only a card answers a held request. Only a card has a
+call waiting on the answer.
+
+Two surfaces read the entries back. The service's tray menu opens an
+**Approvals** view that lists them. `lns approval`
+([§3.7](#37-lns-approval)) lists the same entries at your terminal, and is the
+only surface left when the service runs headless ([service.md](service.md)). Both give an
+**egress** answer late, or change one. Both offer the same three answers, and
+neither offers a once verdict. Both remove any entry, and a removal changes no
+rule.
+
+You answer a connector entry where you answer any connector. In the **Approvals**
+view that is the row: it offers the same grant the card offered — a method, and a
+connection where that method authenticates — for this run. It discloses what the
+card discloses before it asks: the destinations the method opens, the variables it
+sets, the files it writes, the authority of each connection, and any `deny` the
+grant overrides ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
+The row holds no request, so it grants for the next attempt rather than a call
+that is waiting. It is the card's own surface, so the audit chain records that
+answer's source as `card` ([§3.3](#33-lns-connector)).
+At your terminal you grant with `lns connector grant`, and `lns approval` lists
+the entry without deciding it. A grant you gave
+early at your terminal raised no card, so neither surface lists it — `lns audit`
+records it.
+
 ### 7.2 Answering
 
 - A prompt is written to stderr and read from your terminal. It never consumes
@@ -748,6 +870,7 @@ A run keeps its own decisions with the run, in `~/.lns/`, and not in your projec
 | Path | Holds |
 |---|---|
 | `~/.lns/runs/<RUN>/decisions.yaml` | What that run decided: the egress rules you approved at its prompts. It goes when the run does; `lns sandbox save --kind mixin` writes it somewhere you keep. |
+| `~/.lns/runs/<RUN>/approvals.json` | What that run was asked: one entry per question — a destination, a connector, or a notice — and the answer each has ([§3.7](#37-lns-approval)). It records the question and points at the decision; `decisions.yaml` and the grant file hold the decision itself. Service state, not a document you keep, and it goes when the run does. |
 
 **`lns` writes no file you did not point it at.** Two commands write into your
 project: `lns artifact init`, to `./lns.yaml` or the `-f` you give it, and

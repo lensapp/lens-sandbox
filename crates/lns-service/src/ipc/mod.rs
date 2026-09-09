@@ -340,6 +340,26 @@ enum VolumeVerb<'a> {
     Prune { dry_run: bool },
 }
 
+/// Owned, because the store behind every one of these verbs is blocking file I/O and answers off the runtime thread.
+enum ApprovalVerb {
+    List(Option<String>),
+    Answer(String, lns_ipc::ApprovalAnswer),
+    Remove(String),
+}
+
+impl ApprovalVerb {
+    fn of(request: &Request) -> Option<Self> {
+        match request {
+            Request::ListApprovals { sandbox } => Some(ApprovalVerb::List(sandbox.clone())),
+            Request::AnswerApproval { id, answer } => {
+                Some(ApprovalVerb::Answer(id.clone(), *answer))
+            }
+            Request::RemoveApproval { id } => Some(ApprovalVerb::Remove(id.clone())),
+            _ => None,
+        }
+    }
+}
+
 impl<'a> VolumeVerb<'a> {
     fn of(request: &'a Request) -> Option<Self> {
         match request {
@@ -441,21 +461,82 @@ async fn handle_connector_request(call: crate::connector::real::Call) -> Respons
     }
 }
 
-#[allow(clippy::cognitive_complexity)] // one arm per request is the wire contract; splitting the dispatcher hides which verb the service answers
-pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+/// Reads and writes each run's own files, so it answers off the runtime thread.
+async fn handle_approval_request(verb: ApprovalVerb) -> Response {
+    joined(tokio::task::spawn_blocking(move || answer_approval(verb)).await)
+}
+
+/// A task that ended in a panic says nothing about what it did, so the caller is told only that, and the operator is told why.
+fn joined(finished: Result<Response, tokio::task::JoinError>) -> Response {
+    finished.unwrap_or_else(|e| {
+        crate::log::error!("the approvals task did not finish: {e}");
+        Response::Error {
+            message: "the approvals task did not finish".to_string(),
+        }
+    })
+}
+
+fn answer_approval(verb: ApprovalVerb) -> Response {
+    let root = match crate::cache::root() {
+        Ok(root) => root,
+        Err(e) => {
+            return Response::Error {
+                message: format!("{e:#}"),
+            };
+        }
+    };
+    match verb {
+        ApprovalVerb::List(None) => crate::approval_flow::answering::list(&root),
+        ApprovalVerb::List(Some(handle)) => {
+            match crate::approval_flow::answering::resolve_run(&root, &handle) {
+                Ok(id) => crate::approval_flow::answering::list_in(&root, &[id]),
+                Err(crate::run_registry::ResolveError::Unknown { handle }) => {
+                    Response::RunUnknown { run: handle }
+                }
+                Err(ambiguous) => Response::Error {
+                    message: ambiguous.to_string(),
+                },
+            }
+        }
+        ApprovalVerb::Answer(id, answer) => crate::approval_flow::answering::answer(
+            &root,
+            crate::run_registry::approvals,
+            &id,
+            answer,
+        ),
+        ApprovalVerb::Remove(id) => {
+            crate::approval_flow::answering::removal(&root, crate::run_registry::approvals, &id)
+        }
+    }
+}
+
+/// The verbs a handler of their own answers whole; every other request opens a stream the caller drives.
+async fn answered_whole(request: &Request) -> Option<Response> {
     if let Some(verb) = VolumeVerb::of(request) {
-        return handle_volume_request(verb).await;
+        return Some(handle_volume_request(verb).await);
     }
     if let Some(call) = connector_call(request) {
-        return handle_connector_request(call).await;
+        return Some(handle_connector_request(call).await);
+    }
+    if let Some(verb) = ApprovalVerb::of(request) {
+        return Some(handle_approval_request(verb).await);
+    }
+    None
+}
+
+pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+    if let Some(answered) = answered_whole(request).await {
+        return answered;
     }
     match request {
-        // A volume or connector verb was answered above; each of the rest opens a stream the caller drives.
         Request::ListVolumes
         | Request::CreateVolume { .. }
         | Request::InspectVolume { .. }
         | Request::RemoveVolume { .. }
         | Request::PruneVolumes { .. }
+        | Request::ListApprovals { .. }
+        | Request::AnswerApproval { .. }
+        | Request::RemoveApproval { .. }
         | Request::InstallConnector { .. }
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
@@ -1847,6 +1928,7 @@ mod tests {
                 input_tx: Some(input_tx),
                 exec_sessions: Default::default(),
                 connector: None,
+                approvals: None,
                 name: String::new(),
                 image: String::new(),
                 command: String::new(),
@@ -1905,6 +1987,363 @@ mod tests {
 
     fn as_json(resp: Response) -> serde_json::Value {
         serde_json::to_value(&resp).expect("responses serialize")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_lists_what_every_run_was_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        seed_approval(home.path(), &id);
+
+        let listed =
+            handle_request(&Request::ListApprovals { sandbox: None }, Instant::now()).await;
+
+        crate::run_registry::deregister(&id);
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "ApprovalList", "got {listed}");
+        assert_eq!(listed["approvals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed["approvals"][0]["subject"], "api.linear.app");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_scopes_the_list_to_one_sandbox() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let asked = crate::run_registry::allocate_run_id();
+        let quiet = crate::run_registry::allocate_run_id();
+        for id in [&asked, &quiet] {
+            let (handle, _rx) = crate::run_registry::test_handle();
+            crate::run_registry::register(id.clone(), handle);
+        }
+        seed_approval(home.path(), &asked);
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some(quiet.clone()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(&asked);
+        crate::run_registry::deregister(&quiet);
+        assert_eq!(
+            listed,
+            Response::ApprovalList {
+                approvals: Vec::new()
+            },
+            "a sandbox nothing asked about lists nothing, not another run's questions"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_says_which_sandbox_it_could_not_find() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("never-was".to_string()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(
+            listed,
+            Response::RunUnknown {
+                run: "never-was".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_keeps_an_ambiguous_sandbox_prefix_an_error() {
+        // Two runs answer to the prefix, so saying "no such sandbox" would send the developer looking for a run that is there twice.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let first = "5417ab0000000000000000000000000a";
+        let second = "5417ab0000000000000000000000000b";
+        register_running(first);
+        register_running(second);
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("5417ab".into()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(first);
+        crate::run_registry::deregister(second);
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(
+            listed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ambiguous run id prefix: 5417ab")),
+            "got {listed}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_answers_one_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let entry = seed_approval(home.path(), &id);
+
+        let answered = handle_request(
+            &Request::AnswerApproval {
+                id: entry.id.clone(),
+                answer: lns_ipc::ApprovalAnswer::AlwaysAllow,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(&id);
+        let answered = as_json(answered);
+        assert_eq!(answered["type"], "ApprovalAnswered", "got {answered}");
+        assert_eq!(answered["approval"]["answer"], "always allow");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_removes_any_entry_from_the_list() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let id = crate::run_registry::allocate_run_id();
+        let (handle, _rx) = crate::run_registry::test_handle();
+        crate::run_registry::register(id.clone(), handle);
+        let asked = seed_approval(home.path(), &id);
+        let notice = seed_notice(home.path(), &id);
+
+        let removed = handle_request(
+            &Request::RemoveApproval {
+                id: notice.id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+        let question = handle_request(
+            &Request::RemoveApproval {
+                id: asked.id.clone(),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(&id);
+        let removed = as_json(removed);
+        assert_eq!(removed["type"], "ApprovalRemoved", "got {removed}");
+        assert_eq!(removed["id"], notice.id);
+        let question = as_json(question);
+        assert_eq!(
+            question["type"], "ApprovalRemoved",
+            "a question is a line of the list like any other, got {question}"
+        );
+        assert_eq!(question["id"], asked.id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_lists_a_run_this_service_did_not_start() {
+        // The registry holds what this process started, and the entries outlive the process. A service restarted under an unanswered question must still show it.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        seed_approval(home.path(), forgotten);
+
+        let listed =
+            handle_request(&Request::ListApprovals { sandbox: None }, Instant::now()).await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "ApprovalList", "got {listed}");
+        assert_eq!(listed["approvals"][0]["subject"], "api.linear.app");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_scopes_the_list_to_a_run_this_service_did_not_start() {
+        // A run the registry forgot has no name left to be called by, so its id — whole or as a prefix — is what names it.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        seed_approval(home.path(), forgotten);
+        seed_approval(home.path(), "bb02bb02bb02bb02bb02bb02bb02bb02");
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("aa01aa".to_string()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["approvals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed["approvals"][0]["sandbox"], forgotten);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_answers_an_entry_of_a_run_this_service_did_not_start() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let forgotten = "aa01aa01aa01aa01aa01aa01aa01aa01";
+        let entry = seed_approval(home.path(), forgotten);
+
+        let answered = handle_request(
+            &Request::AnswerApproval {
+                id: entry.id.clone(),
+                answer: lns_ipc::ApprovalAnswer::AlwaysAllow,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let answered = as_json(answered);
+        assert_eq!(answered["type"], "ApprovalAnswered", "got {answered}");
+        assert!(
+            crate::cache::decisions_path(home.path(), forgotten).exists(),
+            "the answer writes that run's own decisions"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_keeps_an_ambiguous_forgotten_prefix_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        seed_approval(home.path(), "5417ab000000000000000000000000aa");
+        seed_approval(home.path(), "5417ab000000000000000000000000bb");
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("5417ab".into()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(
+            listed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ambiguous run id prefix: 5417ab")),
+            "got {listed}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_will_not_answer_a_prefix_a_forgotten_run_also_holds() {
+        // The list spans every run on disk, so a prefix judged against the registry alone would hand back the live run's entries and leave the other run's hidden.
+        let home = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let live = "aa01000000000000000000000000000a";
+        let forgotten = "aa9f000000000000000000000000000b";
+        register_running(live);
+        seed_approval(home.path(), live);
+        seed_approval(home.path(), forgotten);
+
+        let listed = handle_request(
+            &Request::ListApprovals {
+                sandbox: Some("aa".to_string()),
+            },
+            Instant::now(),
+        )
+        .await;
+
+        crate::run_registry::deregister(live);
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(
+            listed["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("ambiguous run id prefix: aa")),
+            "got {listed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_panicked_says_only_that_and_names_it_in_the_log() {
+        // The store holds locks it expects, so the blocking task can die. Saying "could not be read" would tell someone who ran `answer` that nothing was written, which a panic cannot promise.
+        let died = tokio::task::spawn_blocking(|| panic!("approvals locks poisoned"))
+            .await
+            .expect_err("the task must have died");
+
+        let mut answered = None;
+        let said = crate::test_env::captured_messages(|| answered = Some(joined(Err(died))));
+
+        assert_eq!(
+            answered,
+            Some(Response::Error {
+                message: "the approvals task did not finish".to_string()
+            })
+        );
+        assert!(
+            said.iter().any(|m| m.contains("approvals locks poisoned")),
+            "the operator has to be told what the task died of, got {said:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_surfaces_a_home_it_cannot_resolve() {
+        // With no home there is no run directory to read, and the caller has to hear that rather than an empty list.
+        let _lns = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/not/absolute");
+
+        let listed =
+            handle_request(&Request::ListApprovals { sandbox: None }, Instant::now()).await;
+
+        let listed = as_json(listed);
+        assert_eq!(listed["type"], "Error", "got {listed}");
+        assert!(listed["message"].is_string());
+    }
+
+    fn seed_notice(home: &std::path::Path, run: &str) -> crate::approval_flow::entries::Entry {
+        use crate::approval_flow::entries::{Entry, EntryKind, EntryState, EntryStore};
+        let entry = Entry::new(
+            Some(run.to_string()),
+            EntryKind::Notice {
+                message: "the rule could not be persisted".into(),
+            },
+            EntryState::Noted,
+        );
+        let path = crate::cache::approvals_path(home, run);
+        crate::approval_flow::entries::FileEntryStore::new(path).record(entry.clone());
+        entry
+    }
+
+    fn seed_approval(home: &std::path::Path, run: &str) -> crate::approval_flow::entries::Entry {
+        use crate::approval_flow::entries::{Entry, EntryKind, EntryState, EntryStore};
+        let entry = Entry::new(
+            Some(run.to_string()),
+            EntryKind::Destination {
+                destination: "api.linear.app".into(),
+                action: "CONNECT api.linear.app:443".into(),
+                raw: false,
+            },
+            EntryState::Undecided,
+        );
+        let path = crate::cache::approvals_path(home, run);
+        std::fs::create_dir_all(path.parent().expect("run dir")).expect("run dir");
+        crate::approval_flow::entries::FileEntryStore::new(path).record(entry.clone());
+        entry
     }
 
     #[tokio::test]
@@ -2796,6 +3235,7 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
             connector: None,
+            approvals: None,
             cancel_tx,
             detach_tx: std::sync::Mutex::new(None),
             task,
@@ -2834,6 +3274,7 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
             connector: None,
+            approvals: None,
             cancel_tx,
             detach_tx: Mutex::new(Some(detach_tx)),
             task,
@@ -2893,6 +3334,7 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = crate::run_registry::RunHandle {
             connector: None,
+            approvals: None,
             cancel_tx,
             detach_tx: std::sync::Mutex::new(None),
             task,
@@ -2989,6 +3431,7 @@ mod tests {
                 input_tx: None,
                 exec_sessions: Default::default(),
                 connector: None,
+                approvals: None,
                 name: "reviewer".into(),
                 image: "stop-test".into(),
                 command: String::new(),
@@ -4087,6 +4530,7 @@ mod tests {
                 input_tx: Some(input_tx),
                 exec_sessions: Default::default(),
                 connector: None,
+                approvals: None,
                 name: String::new(),
                 image: String::new(),
                 command: String::new(),

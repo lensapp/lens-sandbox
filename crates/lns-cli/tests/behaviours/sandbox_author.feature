@@ -62,6 +62,23 @@ Feature: authoring a document
     Then the exit code is 0
     And the output contains "valid"
 
+  Scenario: init scaffolds a valid connector when asked for one
+    Given the current directory has no lns.yaml
+    When the user runs artifact command "init --kind connector"
+    Then the exit code is 0
+    And a file "lns.yaml" is created
+    And the file "lns.yaml" contains "kind: connector"
+    And the file "lns.yaml" contains "serves:"
+    And the file "lns.yaml" contains "methods:"
+    When the user runs artifact command "validate --kind connector"
+    Then the exit code is 0
+    And the output contains "valid"
+
+  Scenario: init help lists every document kind
+    When I run "lns artifact init --help"
+    Then the exit code is 0
+    And the output contains "sandbox, mixin, connector"
+
   Scenario: init writes the file -f names
     Given the current directory has no lns.yaml
     When the user runs artifact command "init -f lns.dev.yaml"
@@ -118,6 +135,27 @@ Feature: authoring a document
     When the user runs artifact command "validate --kind mixin"
     Then the exit code is 0
     And the output contains "valid"
+    And the service received no request
+
+  Scenario: validate --kind passes a connector document
+    Given an lns.yaml holding a connector document
+    When the user runs artifact command "validate --kind connector"
+    Then the exit code is 0
+    And the output contains "valid"
+    And the service received no request
+
+  Scenario: validate --kind connector refuses a sandbox document
+    Given a valid lns.yaml in the current directory
+    When the user runs artifact command "validate --kind connector"
+    Then the command fails with an exit code other than 0
+    And the output contains "expected a connector, but this is a sandbox"
+    And the service received no request
+
+  Scenario: validate --kind connector refuses a mixin document
+    Given an lns.yaml holding a mixin document
+    When the user runs artifact command "validate --kind connector"
+    Then the command fails with an exit code other than 0
+    And the output contains "expected a connector, but this is a mixin"
     And the service received no request
 
   Scenario: validate refuses a mixin that claims a block the sandbox owns
