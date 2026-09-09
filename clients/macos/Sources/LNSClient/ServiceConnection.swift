@@ -12,15 +12,13 @@ public struct ServiceConnection: ServiceClient {
         let connection = NWConnection(to: .unix(path: path), using: .tcp)
         let queue = DispatchQueue(label: "run.lns.client.connection")
         return AsyncThrowingStream(bufferingPolicy: latestOnly ? .bufferingNewest(1) : .unbounded) { continuation in
-            var decoder = FrameDecoder()
-            var started = false
-            var finished = false
+            var reader = ReplyRead()
+            var lifecycle = ReplyLifecycle()
             var deadline = ReplyDeadline(streaming: !once && latestOnly, now: ProcessInfo.processInfo.systemUptime)
             let timer = DispatchSource.makeTimerSource(queue: queue)
 
             func finish(_ error: Error? = nil) {
-                guard !finished else { return }
-                finished = true
+                guard lifecycle.finish() else { return }
                 timer.cancel()
                 connection.stateUpdateHandler = nil
                 if let error { continuation.finish(throwing: error) }
@@ -30,19 +28,15 @@ public struct ServiceConnection: ServiceClient {
 
             func receive() {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, complete, error in
-                    if let error { finish(error); return }
-                    guard !finished else { return }
+                    guard !lifecycle.finished else { return }
                     do {
-                        for payload in try decoder.append(data ?? Data()) {
+                        let ended = try reader.receive(data, complete: complete, error: error, once: once) { payload in
                             deadline.received(now: ProcessInfo.processInfo.systemUptime)
                             if !once && latestOnly { timer.cancel() }
                             continuation.yield(payload)
-                            if once { finish(); return }
                         }
-                        if complete {
-                            try decoder.finish()
-                            finish()
-                        } else { receive() }
+                        if ended { finish() }
+                        else { receive() }
                     } catch { finish(error) }
                 }
             }
@@ -50,14 +44,13 @@ public struct ServiceConnection: ServiceClient {
             continuation.onTermination = { _ in queue.async { finish() } }
             connection.stateUpdateHandler = { state in
                 switch state {
-                case .ready where !started:
-                    started = true
+                case .ready where lifecycle.start():
                     connection.send(content: frame, completion: .contentProcessed { error in
                         if let error { finish(error) }
                         else { receive() }
                     })
                 case let .failed(error), let .waiting(error):
-                    finish(ServiceError(message: "Local service connection failed: \(error). Path: \(String(describing: connection.currentPath))."))
+                    if lifecycle.acceptsConnectionFailure { finish(error) }
                 case .cancelled: finish()
                 default: break
                 }

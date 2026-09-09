@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import socket
@@ -11,12 +12,15 @@ import threading
 def reply(listener, errors):
     try:
         responses = [
+            ("WatchDashboard", [{"type": "DashboardChanged"}]),
             ("InspectApprovalOffer", [{"type": "ApprovalOffer", "offer": None}]),
+        ] + [
             ("ReadDashboard", [{"type": "DashboardBegin"}, {"type": "DashboardWarning", "message": "local transport fixture"}, {"type": "DashboardEnd"}]),
-        ]
-        for expected, messages in responses:
-            connection, _ = listener.accept()
-            with connection:
+        ] * 20
+        with ExitStack() as clients:
+            for expected, messages in responses:
+                connection, _ = listener.accept()
+                clients.enter_context(connection)
                 connection.settimeout(10)
                 header = connection.recv(8, socket.MSG_WAITALL)
                 assert header[:4] == b"LNS2", "invalid wire magic"
@@ -29,6 +33,8 @@ def reply(listener, errors):
                 for message in messages:
                     payload = b"\x01" + json.dumps(message).encode()
                     connection.sendall(b"LNS2" + struct.pack(">I", len(payload)) + payload)
+                if expected != "WatchDashboard":
+                    connection.close()
     except Exception as error:
         errors.append(error)
 
@@ -44,8 +50,8 @@ with tempfile.TemporaryDirectory(prefix="lns-wire-", dir="/tmp") as directory:
         worker.start()
         result = subprocess.run([sys.argv[1], "--probe", address], capture_output=True, text=True, timeout=12)
         if result.returncode != 0:
-            errors = [line for line in result.stderr.splitlines() if "Fatal error" in line or "Error raised" in line]
-            raise RuntimeError("local socket probe: " + " | ".join(errors or result.stderr.splitlines()[:8]))
+            diagnostics = [line for line in result.stderr.splitlines() if "Fatal error" in line or "Error raised" in line]
+            raise RuntimeError("local socket probe: " + " | ".join(diagnostics or result.stderr.splitlines()[:8]))
         worker.join(timeout=1)
         assert not worker.is_alive(), "local server did not complete the exchange"
         assert not errors, errors
