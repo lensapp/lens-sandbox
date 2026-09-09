@@ -121,7 +121,7 @@ impl ExecSpec {
     pub fn with_guest_net(mut self, net: Option<&lns_session::GuestNet>) -> Self {
         if let Some(net) = net {
             self.kernel_env
-                .push((lns_session::GUEST_NET_ENV.into(), net.to_cmdline()));
+                .push((lns_session::GUEST_NET_ENV.into(), net.to_cmdline_value()));
         }
         self
     }

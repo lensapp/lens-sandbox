@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lns_ipc::{RunImageArgs, WireFrame};
 use tokio::sync::mpsc::Sender;
 use tracing::Instrument;
