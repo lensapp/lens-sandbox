@@ -11,6 +11,8 @@ use crate::service::client::{BoxFuture, SandboxService};
 
 pub(crate) struct CannedService {
     response: Response,
+    /// The document this machine holds, for a verb that reads one before it asks the service.
+    document: Option<String>,
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
@@ -24,6 +26,7 @@ impl CannedService {
     pub fn new(response: Response) -> Self {
         Self {
             response,
+            document: None,
             stats_response: None,
             inspect_image_response: None,
             remove_image_response: None,
@@ -31,6 +34,13 @@ impl CannedService {
             list_images_response: None,
             frames: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn holding_a_document(response: Response, document: &str) -> Self {
+        Self {
+            document: Some(document.to_string()),
+            ..Self::new(response)
         }
     }
 
@@ -183,8 +193,13 @@ impl SandboxService for CannedService {
         Ok(())
     }
 
-    fn document(&self, _file: Option<&std::path::Path>) -> anyhow::Result<(PathBuf, String)> {
-        anyhow::bail!("this test service holds no documents")
+    fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)> {
+        let path =
+            crate::artifact::author::selected_definition_path(file, std::path::Path::new("/work"));
+        match &self.document {
+            Some(yaml) => Ok((path, yaml.clone())),
+            None => bail!("reading {}; run `lns init` to scaffold one", path.display()),
+        }
     }
 }
 

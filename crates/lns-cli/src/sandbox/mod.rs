@@ -1514,6 +1514,61 @@ mod tests {
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
+    const A_DOCUMENT: &str =
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: agent\nspec:\n  image: ./image\n";
+
+    #[tokio::test]
+    async fn build_surfaces_the_services_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::holding_a_document(
+            Response::Error {
+                message: "there is nothing to build".into(),
+            },
+            A_DOCUMENT,
+        );
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("there is nothing to build"));
+
+        let svc = CannedService::holding_a_document(Response::Pong, A_DOCUMENT);
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    /// A document nobody wrote is named, and no build reaches the service.
+    #[tokio::test]
+    async fn build_names_the_document_it_could_not_read() {
+        let svc = CannedService::new(Response::Pong);
+
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lns.yaml"), "{err:#}");
+        assert!(svc.requests.lock().unwrap().is_empty());
+    }
+
+    /// A document that is not a document at all is named where it is, not where it went wrong later.
+    #[tokio::test]
+    async fn build_names_the_document_it_could_not_parse() {
+        let svc = CannedService::holding_a_document(Response::Pong, "spec: [unterminated\n");
+
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("/work/lns.yaml"), "{err:#}");
+    }
+
+    fn build_args() -> SandboxBuildArgs {
+        SandboxBuildArgs {
+            file: None,
+            rebuild: false,
+        }
+    }
+
     #[tokio::test]
     async fn stopped_run_names_skip_the_running_and_fall_back_to_the_short_id() {
         let svc = CannedService::new(Response::RunList {

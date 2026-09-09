@@ -185,15 +185,15 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         });
     }
 
+    let ignoring = match plan.rebuild {
+        true => ", ignoring the cache",
+        false => "",
+    };
+    let count = plan.file.instructions.len();
     crate::log::info!(
         "Building",
-        "{} ({} instructions){}",
-        plan.label,
-        plan.file.instructions.len(),
-        match plan.rebuild {
-            true => ", ignoring the cache",
-            false => "",
-        },
+        "{} ({count} instructions){ignoring}",
+        plan.label
     );
     let mut build = Build {
         parent: base.reference,
@@ -1802,6 +1802,48 @@ mod tests {
             host.commits().len(),
             before + 2,
             "the copy and the instruction after it are both committed again",
+        );
+    }
+
+    /// A comment above the instructions is a different file and so a different image, and every
+    /// instruction is still the instruction it was: the build commits a new image and runs nothing.
+    #[tokio::test]
+    async fn a_containerfile_whose_instructions_are_unchanged_reuses_every_step_of_them() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\nCOPY app /srv/app\nUSER node\n";
+        let file = containerfile(text);
+        build(&host, &plan(&file, text)).await.unwrap();
+        let runs = host.runs().len();
+        let commits = host.commits().len();
+
+        let again = build(
+            &host,
+            &plan(&file, "# what this image is for\nFROM alpine\nRUN echo one\nCOPY app /srv/app\nUSER node\n"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            again.reused_steps, 3,
+            "every instruction stands where it stood"
+        );
+        assert_eq!(
+            again.layers, 2,
+            "the two reused steps still put their layers in the image"
+        );
+        assert!(
+            !again.reused,
+            "the image key is a new one, so the image is remembered again"
+        );
+        assert_eq!(
+            host.runs().len(),
+            runs,
+            "no guest boots for a step a key answers"
+        );
+        assert_eq!(
+            host.commits().len(),
+            commits,
+            "and nothing is committed twice"
         );
     }
 

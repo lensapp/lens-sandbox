@@ -368,6 +368,46 @@ mod tests {
         assert!(refusal.contains("/ctx/app.js"), "{refusal}");
     }
 
+    /// A file the directory lists and nothing answers for left between the two reads; the context
+    /// it describes is the one that is there, and the hash is of that.
+    #[test]
+    fn a_file_that_left_the_context_between_the_listing_and_the_read_is_not_in_the_hash() {
+        let mut context = one_file(b"one\n", 0o644);
+        context.dir("skills", 0o755).ghost("skills", "vanished.js");
+
+        let mut without = one_file(b"one\n", 0o644);
+        without.dir("skills", 0o755);
+        assert_eq!(hashed(&context), hashed(&without));
+    }
+
+    #[test]
+    fn a_context_file_whose_bytes_will_not_read_stops_the_build_naming_it() {
+        let mut context = one_file(b"one\n", 0o644);
+        context.unreadable_bytes("app.js");
+
+        let refusal = format!(
+            "{:#}",
+            context_hash(&context, Path::new("/ctx")).expect_err("an unreadable file is refused")
+        );
+
+        assert!(refusal.contains("/ctx/app.js"), "{refusal}");
+    }
+
+    #[test]
+    fn a_context_symlink_whose_target_will_not_read_stops_the_build_naming_it() {
+        let mut context = FakeContext::new();
+        context.symlink("main", "app.js");
+        context.unreadable_link("main");
+
+        let refusal = format!(
+            "{:#}",
+            context_hash(&context, Path::new("/ctx"))
+                .expect_err("an unreadable symlink is refused")
+        );
+
+        assert!(refusal.contains("/ctx/main"), "{refusal}");
+    }
+
     #[test]
     fn a_context_directory_that_will_not_list_stops_the_build_naming_it() {
         let mut context = one_file(b"one\n", 0o644);

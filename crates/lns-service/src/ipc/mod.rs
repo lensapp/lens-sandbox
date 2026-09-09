@@ -3241,16 +3241,10 @@ mod tests {
                 Ok(vec!["lns-build.local/built@sha256:gone".into()])
             }
         }
-        let fs = ScriptedRunsDir(Vec::new());
+        let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweptOne);
+        let root = std::path::Path::new("/cache");
 
-        let resp = prune_runs_with(
-            &fs,
-            &NoopRemover,
-            std::path::Path::new("/cache"),
-            &SweptOne,
-            |_| {},
-        )
-        .await;
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
 
         match resp {
             Response::RunsPruned { built_images, .. } => {
@@ -3274,7 +3268,8 @@ mod tests {
                 anyhow::bail!("the image index is not readable")
             }
         }
-        let fs = ScriptedRunsDir(Vec::new());
+        let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweepFails);
+        let root = std::path::Path::new("/cache");
         let warnings = Warnings::default();
         let guard =
             tracing::subscriber::set_default(tracing_subscriber::layer::SubscriberExt::with(
@@ -3282,20 +3277,13 @@ mod tests {
                 warnings.clone(),
             ));
 
-        let resp = prune_runs_with(
-            &fs,
-            &NoopRemover,
-            std::path::Path::new("/cache"),
-            &SweepFails,
-            |_| {},
-        )
-        .await;
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
         drop(guard);
 
+        let recorded = warnings.recorded();
         assert!(
-            warnings.recorded().contains("built images were not swept"),
-            "{}",
-            warnings.recorded(),
+            recorded.contains("built images were not swept"),
+            "{recorded}"
         );
         match resp {
             Response::RunsPruned { built_images, .. } => assert!(built_images.is_empty()),
@@ -3744,14 +3732,9 @@ mod tests {
         assert!(probe.write(std::path::Path::new("/x"), b"").await.is_ok());
         assert!(probe.remove_file(std::path::Path::new("/x")).await.is_ok());
         let fs = ScriptedRunsDir(vec![std::path::PathBuf::from("/")]);
-        let resp = prune_runs_with(
-            &fs,
-            &NoopRemover,
-            std::path::Path::new("/cache"),
-            &SweepsNothing,
-            |_| {},
-        )
-        .await;
+        let sweep = SweepsNothing;
+        let root = std::path::Path::new("/cache");
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
         assert!(
             matches!(&resp, Response::RunsPruned { removed, .. } if removed.is_empty()),
             "an unreadable entry is skipped, never swept blind: {resp:?}"

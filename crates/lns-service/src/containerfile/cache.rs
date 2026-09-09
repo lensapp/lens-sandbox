@@ -347,12 +347,12 @@ pub(crate) mod tests {
             ]),
             "the intermediates of a document that is still here are still named by it",
         );
+        let left = fs.paths();
         assert!(
-            !fs.paths()
+            !left
                 .iter()
                 .any(|path| path.ends_with("images/sha256-orphan")),
-            "{:?}",
-            fs.paths(),
+            "{left:?}"
         );
     }
 
