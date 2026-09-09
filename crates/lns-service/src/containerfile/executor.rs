@@ -127,7 +127,7 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
             InstructionKind::From { image } => break (instruction.line, image),
             InstructionKind::Arg { name, default } => {
                 if let Some(value) = default {
-                    let value = expand(value, &global_args);
+                    let value = expand(value, &global_args)?;
                     set(&mut global_args, name, &value);
                 }
             }
@@ -139,7 +139,7 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
         }
     };
     let (line, image) = from;
-    let image = expand(image, &global_args);
+    let image = expand(image, &global_args)?;
     let base = host
         .resolve_base(&image)
         .await
@@ -179,7 +179,7 @@ async fn step<H: BuildHost>(
             bail!("a second FROM ({image}) is not supported; lns builds one stage")
         }
         InstructionKind::Arg { name, default } => {
-            declare_arg(build, name, default.as_deref());
+            declare_arg(build, name, default.as_deref())?;
             return Ok(());
         }
         InstructionKind::Run { command, here_docs } => {
@@ -202,22 +202,22 @@ async fn step<H: BuildHost>(
         }
         InstructionKind::Env(pairs) => {
             for (key, value) in pairs {
-                let value = expand(value, &scope(build));
+                let value = expand(value, &scope(build))?;
                 set(&mut build.config.env, key, &value);
             }
         }
         InstructionKind::Label(pairs) => {
             for (key, value) in pairs {
-                let value = expand(value, &scope(build));
+                let value = expand(value, &scope(build))?;
                 set(&mut build.config.labels, key, &value);
             }
         }
         InstructionKind::User(user) => {
-            build.user = expand(user, &scope(build));
+            build.user = expand(user, &scope(build))?;
             build.config.user = Some(build.user.clone());
         }
         InstructionKind::Workdir(dir) => {
-            build.workdir = join_workdir(&build.workdir, &expand(dir, &scope(build)));
+            build.workdir = join_workdir(&build.workdir, &expand(dir, &scope(build))?);
             build.config.workdir = Some(build.workdir.clone());
         }
         InstructionKind::Entrypoint(command) => {
@@ -232,7 +232,7 @@ async fn step<H: BuildHost>(
         }
         InstructionKind::Expose(ports) => {
             for port in ports {
-                let port = expand(port, &scope(build));
+                let port = expand(port, &scope(build))?;
                 if !build.config.exposed_ports.contains(&port) {
                     build.config.exposed_ports.push(port);
                 }
@@ -240,7 +240,7 @@ async fn step<H: BuildHost>(
         }
         InstructionKind::Volume(targets) => {
             for target in targets {
-                let target = expand(target, &scope(build));
+                let target = expand(target, &scope(build))?;
                 if !build.config.volumes.contains(&target) {
                     build.config.volumes.push(target);
                 }
@@ -358,8 +358,8 @@ async fn copy_step<H: BuildHost>(
         .sources
         .iter()
         .map(|source| expand(source, &scope))
-        .collect();
-    let destination = join_workdir(&build.workdir, &expand(&transfer.destination, &scope));
+        .collect::<Result<_>>()?;
+    let destination = join_workdir(&build.workdir, &expand(&transfer.destination, &scope)?);
     let into_directory = destination.ends_with('/')
         || sources.len() > 1
         || host
@@ -376,14 +376,15 @@ async fn copy_step<H: BuildHost>(
 }
 
 /// A stage inherits a global `ARG` only where it declares the name again, which is Docker's rule.
-fn declare_arg(build: &mut Build, name: &str, default: Option<&str>) {
+fn declare_arg(build: &mut Build, name: &str, default: Option<&str>) -> Result<()> {
     let value = match default {
-        Some(default) => Some(expand(default, &scope(build))),
+        Some(default) => Some(expand(default, &scope(build))?),
         None => value_of(&build.global_args, name).map(str::to_string),
     };
     if let Some(value) = value {
         set(&mut build.args, name, &value);
     }
+    Ok(())
 }
 
 /// What a `RUN` and every expansion see: the base image's environment, the build arguments over it, and this file's own environment over both.
@@ -412,38 +413,76 @@ fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// `$NAME` and `${NAME}`, the two spellings Docker expands in an instruction's arguments; a name nothing declared expands to nothing.
-fn expand(value: &str, scope: &[(String, String)]) -> String {
+/// `$NAME`, `${NAME}`, `${NAME:-default}` and `${NAME:+alt}`, the spellings Docker expands in an instruction's arguments; a name nothing declared expands to nothing.
+fn expand(value: &str, scope: &[(String, String)]) -> Result<String> {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(dollar) = rest.find('$') {
         out.push_str(&rest[..dollar]);
         let after = &rest[dollar + 1..];
-        let (name, tail) = match after.strip_prefix('{') {
+        rest = match after.strip_prefix('{') {
             Some(braced) => match braced.split_once('}') {
-                Some((name, tail)) => (name, tail),
+                Some((inside, tail)) => {
+                    out.push_str(&braced_value(inside, scope)?);
+                    tail
+                }
                 None => {
                     out.push('$');
-                    rest = after;
-                    continue;
+                    after
                 }
             },
             None => {
                 let end = after
                     .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                     .unwrap_or(after.len());
-                (&after[..end], &after[end..])
+                match &after[..end] {
+                    "" => out.push('$'),
+                    name => out.push_str(value_of(scope, name).unwrap_or_default()),
+                }
+                &after[end..]
             }
         };
-        if name.is_empty() {
-            out.push('$');
-        } else {
-            out.push_str(value_of(scope, name).unwrap_or_default());
-        }
-        rest = tail;
     }
     out.push_str(rest);
-    out
+    Ok(out)
+}
+
+/// What `${…}` holds: a name, and at most one of the two modifiers that decide what an unset or a set name expands to.
+fn braced_value(inside: &str, scope: &[(String, String)]) -> Result<String> {
+    let end = inside
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(inside.len());
+    let (name, modifier) = inside.split_at(end);
+    if !names_a_variable(name) {
+        bail!(
+            "${{{inside}}} does not name a variable; a name is a letter or _ followed by letters, digits or _"
+        );
+    }
+    let held = value_of(scope, name);
+    match modifier {
+        "" => Ok(held.unwrap_or_default().to_string()),
+        _ => match modifier.split_at(2) {
+            (":-", default) => match held {
+                Some(value) if !value.is_empty() => Ok(value.to_string()),
+                _ => expand(default, scope),
+            },
+            (":+", alternative) => match held {
+                Some(value) if !value.is_empty() => expand(alternative, scope),
+                _ => Ok(String::new()),
+            },
+            _ => bail!(
+                "${{{inside}}} is not a variable lns expands; the forms are ${{NAME}}, ${{NAME:-default}} and ${{NAME:+alternative}}"
+            ),
+        },
+    }
+}
+
+fn names_a_variable(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A relative `WORKDIR` or `COPY` destination joins the directory in force, as Docker defines it.
@@ -1268,6 +1307,64 @@ mod tests {
                 ("UNCLOSED".to_string(), "${V".to_string()),
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn a_default_stands_in_for_a_name_that_holds_nothing() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nARG SET=1.2.3\nARG EMPTY=\nENV HELD=${SET:-fallback} MISSING=${NOTHING:-fallback} BLANK=${EMPTY:-fallback} NESTED=${NOTHING:-$SET}\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.final_config().env,
+            vec![
+                ("HELD".to_string(), "1.2.3".to_string()),
+                ("MISSING".to_string(), "fallback".to_string()),
+                ("BLANK".to_string(), "fallback".to_string()),
+                ("NESTED".to_string(), "1.2.3".to_string()),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alternative_stands_in_only_where_the_name_holds_something() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nARG SET=1.2.3\nENV HELD=${SET:+--version=$SET} MISSING=${NOTHING:+--version}\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.final_config().env,
+            vec![
+                ("HELD".to_string(), "--version=1.2.3".to_string()),
+                ("MISSING".to_string(), String::new()),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_braced_expansion_that_names_no_variable_stops_the_build() {
+        let host = FakeHost::new();
+
+        let refusal = refused(&host, "FROM alpine\nENV OUT=${8ball}\n").await;
+
+        assert!(refusal.contains("${8ball}"), "{refusal}");
+        assert!(refusal.contains("does not name a variable"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_braced_modifier_lns_does_not_expand_stops_the_build_naming_the_ones_it_does() {
+        let host = FakeHost::new();
+
+        let refusal = refused(&host, "FROM alpine\nARG V=1\nENV OUT=${V#prefix}\n").await;
+
+        assert!(refusal.contains("${V#prefix}"), "{refusal}");
+        assert!(refusal.contains("${NAME:-default}"), "{refusal}");
     }
 
     #[tokio::test]
