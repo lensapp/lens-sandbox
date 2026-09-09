@@ -245,6 +245,7 @@ pub struct RealBuiltImageSweep;
 
 impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
     async fn sweep(&self, cache_root: &Path, surviving_runs: &[String]) -> Result<Vec<String>> {
+        let _exclusive = crate::image_store::cache_lock().write().await;
         let named = super::cache::still_referenced(
             &RealCacheFs,
             cache_root,
@@ -256,7 +257,7 @@ impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
             &crate::image_store::RealFs,
             &crate::image_store::real::RealCaches::new(cache_root),
             &cache_root.join("images"),
-            &std::collections::HashSet::new(),
+            &crate::image_store::recorded_run_pins().await?,
             &named,
         )
         .await

@@ -556,7 +556,8 @@ fn images_root() -> Result<PathBuf> {
     Ok(crate::cache::root()?.join("images"))
 }
 
-fn cache_lock() -> &'static tokio::sync::RwLock<()> {
+/// The one lock every writer of the image index takes: a sweep and an install must not see each other half-done.
+pub(crate) fn cache_lock() -> &'static tokio::sync::RwLock<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::RwLock<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
@@ -820,7 +821,8 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
     .await
 }
 
-async fn recorded_run_pins() -> Result<HashSet<String>> {
+/// Every layer digest a recorded run still stands on, which no sweep may reclaim.
+pub(crate) async fn recorded_run_pins() -> Result<HashSet<String>> {
     let scan = crate::run_record::load_all_with(&real::RealFs, &crate::cache::root()?).await?;
     Ok(crate::run_record::pinned_digests(&scan.records))
 }
