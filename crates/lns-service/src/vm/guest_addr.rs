@@ -57,6 +57,7 @@ pub struct Conflict {
 pub enum AllocError {
     Exhausted { network: HostNetwork },
     Leases(std::io::Error),
+    Neighbors(std::io::Error),
 }
 
 impl std::fmt::Display for AllocError {
@@ -70,6 +71,10 @@ impl std::fmt::Display for AllocError {
             Self::Leases(e) => write!(
                 f,
                 "the host lease file could not be read, so no address is known to be free: {e}"
+            ),
+            Self::Neighbors(e) => write!(
+                f,
+                "the host neighbor table could not be observed, so no address is known to be free: {e}"
             ),
         }
     }
@@ -157,7 +162,7 @@ impl Allocator {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(AllocError::Leases(e)),
         };
-        let neighbours = self.neighbors.observed();
+        let neighbours = self.neighbors.observed().map_err(AllocError::Neighbors)?;
         let mut held = self.held.lock().expect("reservation table poisoned");
 
         let mut taken: HashSet<Ipv4Addr> = HashSet::new();
@@ -309,8 +314,8 @@ mod tests {
 
     struct FakeNeighbors(Vec<Ipv4Addr>);
     impl Neighbors for FakeNeighbors {
-        fn observed(&self) -> Vec<Ipv4Addr> {
-            self.0.clone()
+        fn observed(&self) -> std::io::Result<Vec<Ipv4Addr>> {
+            Ok(self.0.clone())
         }
     }
 

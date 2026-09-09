@@ -14,7 +14,24 @@ pub trait HostNetworkSource: Send + Sync {
 
 /// Who answered ARP on the shared network recently; an address in use with no lease is still in use.
 pub trait Neighbors: Send + Sync {
-    fn observed(&self) -> Vec<Ipv4Addr>;
+    fn observed(&self) -> std::io::Result<Vec<Ipv4Addr>>;
+}
+
+pub trait CommandOutput: Send + Sync {
+    fn output(&self, program: &str, args: &[&str]) -> std::io::Result<std::process::Output>;
+}
+
+pub fn observe_neighbors(commands: &dyn CommandOutput) -> std::io::Result<Vec<Ipv4Addr>> {
+    let output = commands.output("/usr/sbin/arp", &["-an"])?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "arp -an exited with {}",
+            output.status
+        )));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    parse_arp_neighbors(&text)
 }
 
 /// Read, never written: lns assigns addresses beside Apple's DHCP server, it does not configure it.
@@ -207,18 +224,21 @@ fn prefix_len_of(mask: Ipv4Addr) -> Option<u8> {
 }
 
 /// `arp -an` prints `? (192.168.64.7) at 52:54:0:ab:cd:ef on bridge100 ...`; only the address matters here.
-pub fn parse_arp_neighbors(text: &str) -> Vec<Ipv4Addr> {
+pub fn parse_arp_neighbors(text: &str) -> std::io::Result<Vec<Ipv4Addr>> {
     let mut seen = BTreeSet::new();
     for line in text.lines() {
         let Some(open) = line.find('(') else { continue };
-        let Some(close) = line[open..].find(')') else {
-            continue;
-        };
-        if let Ok(addr) = line[open + 1..open + close].parse::<Ipv4Addr>() {
-            seen.insert(addr);
-        }
+        let close = line[open..].find(')').ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed arp output")
+        })?;
+        let addr = line[open + 1..open + close]
+            .parse::<Ipv4Addr>()
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed arp address")
+            })?;
+        seen.insert(addr);
     }
-    seen.into_iter().collect()
+    Ok(seen.into_iter().collect())
 }
 
 pub async fn observe_host_network(
@@ -529,15 +549,65 @@ pub(crate) mod tests {
         let text = "? (192.168.64.1) at 5a:df:1:2:3:4 on bridge100 ifscope [ethernet]\n\
                     ? (192.168.64.7) at 52:54:0:ab:cd:ef on bridge100 ifscope [ethernet]\n\
                     ? (192.168.64.7) at 52:54:0:ab:cd:ef on bridge100 ifscope permanent [ethernet]\n\
-                    nothing useful here\n\
-                    ? (not-an-address) at incomplete on bridge100\n\
-                    ? (10.0.0.1 at broken\n";
+                    nothing useful here\n";
         assert_eq!(
-            parse_arp_neighbors(text),
+            parse_arp_neighbors(text).expect("valid arp output"),
             vec![
                 Ipv4Addr::new(192, 168, 64, 1),
                 Ipv4Addr::new(192, 168, 64, 7)
             ]
+        );
+        for malformed in [
+            "? (not-an-address) at incomplete on bridge100\n",
+            "? (10.0.0.1 at broken\n",
+        ] {
+            assert!(parse_arp_neighbors(malformed).is_err(), "{malformed}");
+        }
+    }
+
+    struct FakeCommand(std::io::Result<std::process::Output>);
+    impl CommandOutput for FakeCommand {
+        fn output(&self, _program: &str, _args: &[&str]) -> std::io::Result<std::process::Output> {
+            match &self.0 {
+                Ok(output) => Ok(std::process::Output {
+                    status: output.status,
+                    stdout: output.stdout.clone(),
+                    stderr: output.stderr.clone(),
+                }),
+                Err(error) => Err(std::io::Error::new(error.kind(), error.to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_observation_propagates_spawn_exit_and_parse_failures() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let spawn = FakeCommand(Err(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert_eq!(
+            observe_neighbors(&spawn).expect_err("spawn failure").kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let exited = FakeCommand(Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"arp failed".to_vec(),
+        }));
+        assert!(observe_neighbors(&exited).is_err());
+
+        let malformed = FakeCommand(Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"? (not-an-address) at incomplete\n".to_vec(),
+            stderr: Vec::new(),
+        }));
+        assert_eq!(
+            observe_neighbors(&malformed)
+                .expect_err("parse failure")
+                .kind(),
+            std::io::ErrorKind::InvalidData
         );
     }
 }

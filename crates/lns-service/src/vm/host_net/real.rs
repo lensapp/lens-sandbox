@@ -2,7 +2,7 @@
 
 use std::net::Ipv4Addr;
 
-use super::{HostFiles, HostNetworkSource, Neighbors, parse_arp_neighbors};
+use super::{CommandOutput, HostFiles, HostNetworkSource, Neighbors, observe_neighbors};
 
 pub struct RealHostFiles;
 
@@ -30,16 +30,19 @@ impl HostNetworkSource for RealHostNetwork {
     }
 }
 
+pub struct RealCommandOutput;
+
+impl CommandOutput for RealCommandOutput {
+    fn output(&self, program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+        std::process::Command::new(program).args(args).output()
+    }
+}
+
 pub struct RealNeighbors;
 
 impl Neighbors for RealNeighbors {
-    fn observed(&self) -> Vec<Ipv4Addr> {
-        std::process::Command::new("/usr/sbin/arp")
-            .arg("-an")
-            .output()
-            .ok()
-            .map(|out| parse_arp_neighbors(&String::from_utf8_lossy(&out.stdout)))
-            .unwrap_or_default()
+    fn observed(&self) -> std::io::Result<Vec<Ipv4Addr>> {
+        observe_neighbors(&RealCommandOutput)
     }
 }
 
