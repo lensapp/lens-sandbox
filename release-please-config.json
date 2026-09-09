@@ -32,6 +32,7 @@
         ".vscode",
         "docs",
         "scripts/lns-install",
+        "actions",
         "crates/e2e-tests",
         "crates/bump-kernel",
         "crates/coverage-strip-ast"
@@ -57,6 +58,18 @@
       "bump-minor-pre-major": true,
       "skip-github-release": true,
       "skip-changelog": true
+    },
+    "actions": {
+      "release-type": "simple",
+      "component": "lns-actions",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "setup-lns/action.yml"
+        }
+      ]
     },
     "scripts/lns-install": {
       "release-type": "simple",

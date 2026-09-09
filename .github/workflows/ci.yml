@@ -31,6 +31,7 @@ jobs:
       check-release-build: ${{ steps.filter.outputs['check-release-build'] }}
       static-nft: ${{ steps.filter.outputs['static-nft'] }}
       shell: ${{ steps.filter.outputs.shell }}
+      actions: ${{ steps.filter.outputs.actions }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -68,6 +69,10 @@ jobs:
               - 'scripts/*.sh'
               - 'scripts/hooks/**'
               - 'Makefile'
+              - '.github/workflows/ci.yml'
+            actions:
+              - 'actions/**'
+              - 'crates/lns-cli/**'
               - '.github/workflows/ci.yml'
             static-nft:
               - 'vendor/static-nft/**'
@@ -414,6 +419,93 @@ jobs:
 
       - run: scripts/verify-static-nft.sh ${{ matrix.platform }}
 
+  # The composite actions under actions/, run from the checkout on both
+  # runner families. Each install is the real thing: a release tarball from
+  # this repository, its .sha256 verified, `lns` on PATH.
+  actions:
+    needs: changes
+    if: needs.changes.outputs.actions == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: setup-lns (newest release)
+        id: latest
+        uses: ./actions/setup-lns
+        with:
+          version: latest
+
+      - name: The newest release runs and validates a document
+        env:
+          REPORTED: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          lns --version
+          if [ -z "$REPORTED" ]; then
+            echo "::error::setup-lns reported no version."
+            exit 1
+          fi
+          if [ "$(lns --version | awk '{print $NF}')" != "$REPORTED" ]; then
+            echo "::error::lns on PATH is not the version setup-lns reported ($REPORTED)."
+            exit 1
+          fi
+          lns artifact validate -f docs/examples/claude-code/lns.yaml
+
+      - name: setup-lns (pinned release)
+        id: pinned
+        uses: ./actions/setup-lns
+        with:
+          version: 0.25.0
+
+      - name: The pinned release runs, validates a document, and brings no service
+        env:
+          REPORTED: ${{ steps.pinned.outputs.version }}
+        run: |
+          set -euo pipefail
+          lns --version
+          if [ "$REPORTED" != "0.25.0" ] || [ "$(lns --version | awk '{print $NF}')" != "0.25.0" ]; then
+            echo "::error::pinned install is not 0.25.0 (reported '$REPORTED')."
+            exit 1
+          fi
+          lns artifact validate -f docs/examples/claude-code/lns.yaml
+          if [ -e "$(dirname "$(command -v lns)")/lns-service" ]; then
+            echo "::error::setup-lns installed lns-service; it must extract lns only."
+            exit 1
+          fi
+
+      # ci.yml publishes no lns build artifact, so the `binary` input is
+      # exercised against a stand-in executable: what it pins is that the
+      # input skips the download entirely and still puts the named binary
+      # on PATH.
+      - name: Write a stand-in lns
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          printf '#!/usr/bin/env bash\necho "lns 9.9.9-ci-stub"\n' > .ci-stub-lns
+          chmod +x .ci-stub-lns
+
+      - name: setup-lns (prebuilt binary, no download)
+        if: matrix.runner == 'ubuntu-latest'
+        id: prebuilt
+        uses: ./actions/setup-lns
+        with:
+          binary: ${{ github.workspace }}/.ci-stub-lns
+
+      - name: The prebuilt binary is the one on PATH
+        if: matrix.runner == 'ubuntu-latest'
+        env:
+          REPORTED: ${{ steps.prebuilt.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$REPORTED" != "9.9.9-ci-stub" ] || [ "$(lns --version | awk '{print $NF}')" != "9.9.9-ci-stub" ]; then
+            echo "::error::the binary input did not put the named binary on PATH (reported '$REPORTED')."
+            exit 1
+          fi
+
   # Aggregate gate — single required status check on `main` branch
   # protection. Lets us split/rename the underlying jobs without
   # touching branch protection. Treats `skipped` as OK so docs-only PRs
@@ -422,7 +514,7 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft]
+    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft, actions]
     if: always()
     steps:
       - name: Verify all gates passed
@@ -439,8 +531,9 @@ jobs:
             || ! ok "${{ needs['coverage-as-root'].result }}" \
             || ! ok "${{ needs.audit.result }}" \
             || ! ok "${{ needs.check-release-build.result }}" \
-            || ! ok "${{ needs.verify-static-nft.result }}"; then
-            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }}"
+            || ! ok "${{ needs.verify-static-nft.result }}" \
+            || ! ok "${{ needs.actions.result }}"; then
+            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.
@@ -451,4 +544,4 @@ jobs:
             echo "Changes detector failed: changes=${{ needs.changes.result }}"
             exit 1
           fi
-          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }})."
+          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }})."
