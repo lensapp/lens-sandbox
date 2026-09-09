@@ -601,6 +601,13 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::InspectRun { run } => inspect_run_request(run),
         Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
         Request::PruneRuns => image_response(prune_runs_request().await),
+        Request::BuildSandbox {
+            definition,
+            definition_dir,
+            rebuild,
+        } => image_response(
+            crate::containerfile::real::build_sandbox(definition, definition_dir, *rebuild).await,
+        ),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
         Request::Unknown { method } => Response::Error {
             message: format!("unknown method: {method}"),
@@ -720,6 +727,7 @@ async fn prune_runs_request() -> anyhow::Result<Response> {
         &crate::image_store::RealFs,
         &crate::run::RealRemoveDir,
         &root,
+        &crate::containerfile::real::RealBuiltImageSweep,
         |removed| {
             for id in removed {
                 crate::connector::real::forget_what_a_run_decided(id);
@@ -830,17 +838,29 @@ where
     }
 }
 
+/// What a prune does about the images a Containerfile build left behind, given the runs that survive it.
+pub trait BuiltImageSweep {
+    /// Drop every built image no document on this machine and no surviving run names, and answer with what went.
+    fn sweep(
+        &self,
+        cache_root: &std::path::Path,
+        surviving_runs: &[String],
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<String>>> + Send;
+}
+
 /// Sweep every stopped run and every orphan run dir — the one command that takes a machine back to clean.
-pub async fn prune_runs_with<F, R, N>(
+pub async fn prune_runs_with<F, R, N, B>(
     fs: &F,
     remover: &R,
     cache_root: &std::path::Path,
+    builds: &B,
     note_pruned: N,
 ) -> Response
 where
     F: crate::image_store::Fs,
     R: crate::run::RemoveDir,
     N: Fn(&[String]),
+    B: BuiltImageSweep,
 {
     let mut removed = crate::run_registry::prune_exited();
     for id in &removed {
@@ -881,7 +901,28 @@ where
     if !removed.is_empty() {
         note_pruned(&removed);
     }
-    Response::RunsPruned { removed }
+    Response::RunsPruned {
+        built_images: swept_built_images(cache_root, builds).await,
+        removed,
+    }
+}
+
+/// A sweep that fails takes no run prune down with it: the runs are already gone by the time it runs.
+async fn swept_built_images<B: BuiltImageSweep>(
+    cache_root: &std::path::Path,
+    builds: &B,
+) -> Vec<String> {
+    let surviving: Vec<String> = crate::run_registry::snapshot()
+        .into_iter()
+        .map(|run| run.id)
+        .collect();
+    match builds.sweep(cache_root, &surviving).await {
+        Ok(built_images) => built_images,
+        Err(e) => {
+            crate::log::warn!("built images were not swept: {e:#}");
+            Vec::new()
+        }
+    }
 }
 
 fn volume_response(result: anyhow::Result<Response>) -> Response {
@@ -3164,6 +3205,126 @@ mod tests {
         }
     }
 
+    /// A document whose `spec.image` names an image to pull has nothing for `lns sandbox build` to do.
+    #[tokio::test]
+    async fn handle_request_build_sandbox_refuses_a_document_that_names_no_containerfile() {
+        let resp = handle_request(
+            &Request::BuildSandbox {
+                definition: serde_json::json!({"spec": {"image": "alpine:3.20"}}).to_string(),
+                definition_dir: "/work".into(),
+                rebuild: false,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        match resp {
+            Response::Error { message } => assert!(
+                message.contains("names an image to pull, not a Containerfile"),
+                "{message}"
+            ),
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// What a Containerfile build left behind is swept with the runs, and named in the same answer.
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_prune_answers_with_the_built_images_it_dropped() {
+        struct SweptOne;
+        impl BuiltImageSweep for SweptOne {
+            async fn sweep(
+                &self,
+                _cache_root: &std::path::Path,
+                _surviving_runs: &[String],
+            ) -> anyhow::Result<Vec<String>> {
+                Ok(vec!["lns-build.local/built@sha256:gone".into()])
+            }
+        }
+        let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweptOne);
+        let root = std::path::Path::new("/cache");
+
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
+
+        match resp {
+            Response::RunsPruned { built_images, .. } => {
+                assert_eq!(built_images, ["lns-build.local/built@sha256:gone"]);
+            }
+            other => unreachable!("expected RunsPruned, got {other:?}"),
+        }
+    }
+
+    /// A sweep that fails takes no run prune down with it; the runs are already gone by then.
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_prune_whose_built_image_sweep_fails_still_answers_for_the_runs() {
+        struct SweepFails;
+        impl BuiltImageSweep for SweepFails {
+            async fn sweep(
+                &self,
+                _cache_root: &std::path::Path,
+                _surviving_runs: &[String],
+            ) -> anyhow::Result<Vec<String>> {
+                anyhow::bail!("the image index is not readable")
+            }
+        }
+        let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweepFails);
+        let root = std::path::Path::new("/cache");
+        let warnings = Warnings::default();
+        let guard =
+            tracing::subscriber::set_default(tracing_subscriber::layer::SubscriberExt::with(
+                tracing_subscriber::registry(),
+                warnings.clone(),
+            ));
+
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
+        drop(guard);
+
+        let recorded = warnings.recorded();
+        assert!(
+            recorded.contains("built images were not swept"),
+            "{recorded}"
+        );
+        match resp {
+            Response::RunsPruned { built_images, .. } => assert!(built_images.is_empty()),
+            other => unreachable!("expected RunsPruned, got {other:?}"),
+        }
+    }
+
+    /// The events a test reads back, so a warning nobody would otherwise see can be asserted.
+    #[derive(Clone, Default)]
+    struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Warnings {
+        fn recorded(&self) -> String {
+            self.0.lock().unwrap().join("\n")
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
     async fn handle_request_inspect_run_returns_details_for_a_registered_run() {
@@ -3201,7 +3362,7 @@ mod tests {
         let resp = handle_request(&Request::PruneRuns, Instant::now()).await;
 
         match resp {
-            Response::RunsPruned { removed } => {
+            Response::RunsPruned { removed, .. } => {
                 assert!(
                     removed.contains(&id),
                     "{id} should be pruned, got {removed:?}"
@@ -3245,6 +3406,18 @@ mod tests {
             matches!(&resp, Response::Error { message } if message.contains("no active run with id")),
             "got {resp:?}"
         );
+    }
+
+    /// A machine where no Containerfile build ever ran, which is what most prune scenarios are about.
+    struct SweepsNothing;
+    impl BuiltImageSweep for SweepsNothing {
+        async fn sweep(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
     }
 
     struct NoopRemover;
@@ -3486,11 +3659,11 @@ mod tests {
         crate::run_registry::register(id.clone(), handle);
         let root = std::path::Path::new("/cache");
         let fs = ScriptedRunsDir(vec![crate::cache::run_dir(root, &id)]);
-        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &SweepsNothing, |_| {}).await;
         let still_registered = crate::run_registry::status(&id).is_some();
         crate::run_registry::deregister(&id);
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if !removed.contains(&id)),
+            matches!(&resp, Response::RunsPruned { removed, .. } if !removed.contains(&id)),
             "a registered run's dir is not an orphan: {resp:?}"
         );
         assert!(still_registered);
@@ -3509,10 +3682,10 @@ mod tests {
         };
         assert!(fs.write(std::path::Path::new("/x"), b"").await.is_ok());
         assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
-        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &SweepsNothing, |_| {}).await;
         crate::run_registry::deregister(&id);
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if !removed.contains(&id)),
+            matches!(&resp, Response::RunsPruned { removed, .. } if !removed.contains(&id)),
             "a run that registered after the snapshot must not be swept from under its boot: {resp:?}"
         );
     }
@@ -3534,9 +3707,9 @@ mod tests {
         };
         assert!(fs.write(std::path::Path::new("/x"), b"").await.is_ok());
         assert!(fs.remove_file(std::path::Path::new("/x")).await.is_ok());
-        let resp = prune_runs_with(&fs, &NoopRemover, root, |_| {}).await;
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &SweepsNothing, |_| {}).await;
         match resp {
-            Response::RunsPruned { removed } => {
+            Response::RunsPruned { removed, .. } => {
                 assert!(
                     !removed.contains(&"damaged1".to_string()),
                     "a dir whose record cannot be read is damage to surface, not an orphan to sweep: {removed:?}"
@@ -3559,9 +3732,11 @@ mod tests {
         assert!(probe.write(std::path::Path::new("/x"), b"").await.is_ok());
         assert!(probe.remove_file(std::path::Path::new("/x")).await.is_ok());
         let fs = ScriptedRunsDir(vec![std::path::PathBuf::from("/")]);
-        let resp = prune_runs_with(&fs, &NoopRemover, std::path::Path::new("/cache"), |_| {}).await;
+        let sweep = SweepsNothing;
+        let root = std::path::Path::new("/cache");
+        let resp = prune_runs_with(&fs, &NoopRemover, root, &sweep, |_| {}).await;
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if removed.is_empty()),
+            matches!(&resp, Response::RunsPruned { removed, .. } if removed.is_empty()),
             "an unreadable entry is skipped, never swept blind: {resp:?}"
         );
     }
@@ -3617,7 +3792,7 @@ mod tests {
         crate::run_registry::set_exit_code(&id2, 0);
         let resp = image_response(prune_runs_request().await);
         assert!(
-            matches!(&resp, Response::RunsPruned { removed } if removed.contains(&id2)),
+            matches!(&resp, Response::RunsPruned { removed, .. } if removed.contains(&id2)),
             "got {resp:?}"
         );
         let content = std::fs::read_to_string(crate::audit::audit_path(&id2).unwrap()).unwrap();

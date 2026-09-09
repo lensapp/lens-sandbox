@@ -280,17 +280,17 @@ pub(crate) mod tests {
             self
         }
 
-        fn unreadable_bytes(&mut self, path: &str) -> &mut Self {
+        pub(crate) fn unreadable_bytes(&mut self, path: &str) -> &mut Self {
             self.unreadable_bytes = Some(format!("/ctx/{path}"));
             self
         }
 
-        fn unreadable_link(&mut self, path: &str) -> &mut Self {
+        pub(crate) fn unreadable_link(&mut self, path: &str) -> &mut Self {
             self.unreadable_link = Some(format!("/ctx/{path}"));
             self
         }
 
-        fn ghost(&mut self, dir: &str, name: &str) -> &mut Self {
+        pub(crate) fn ghost(&mut self, dir: &str, name: &str) -> &mut Self {
             self.ghost = Some((format!("/ctx/{dir}"), name.to_string()));
             self
         }

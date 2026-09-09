@@ -35,6 +35,8 @@ pub(crate) struct FakeSandboxService {
     existing_documents: Vec<PathBuf>,
     unwritable_documents: Vec<PathBuf>,
     written_documents: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    /// The documents this machine holds, so a verb that reads one before it asks the service can.
+    documents: std::collections::HashMap<PathBuf, String>,
 }
 
 impl SandboxService for FakeSandboxService {
@@ -88,6 +90,7 @@ impl SandboxService for FakeSandboxService {
                 .filter(|r| matches!(r, Response::RunsPruned { .. }))
                 .or(Some(Response::RunsPruned {
                     removed: Vec::new(),
+                    built_images: Vec::new(),
                 })),
             _ => self.response.clone(),
         };
@@ -124,6 +127,14 @@ impl SandboxService for FakeSandboxService {
 
     fn load_policy(&self, _path: &str) -> Option<serde_json::Value> {
         self.policy.clone()
+    }
+
+    fn document(&self, file: Option<&Path>) -> anyhow::Result<(PathBuf, String)> {
+        let path = lns_cli::artifact::author::selected_definition_path(file, Path::new("/work"));
+        let yaml = self.documents.get(&path).ok_or_else(|| {
+            anyhow::anyhow!("reading {}; run `lns init` to scaffold one", path.display())
+        })?;
+        Ok((path, yaml.clone()))
     }
 
     fn write_document(&self, path: &Path, contents: &str) -> std::io::Result<()> {
@@ -559,6 +570,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         existing_documents: w.sandbox.existing_documents.clone(),
         unwritable_documents: w.sandbox.unwritable_documents.clone(),
         written_documents: w.sandbox.written_documents.clone(),
+        documents: w.author_files.clone(),
     }
 }
 

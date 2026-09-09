@@ -1883,3 +1883,96 @@ fn built_reference_of_last_run(world: &mut E2eWorld) -> Result<String, String> {
             )
         })
 }
+
+/// Slice 4 of lensapp/lens-sandbox#393: `lns sandbox build` builds and publishes nothing, so what
+/// it did is read off its own two lines and off the instructions the service booted a guest for.
+#[when("the user builds the sandbox definition")]
+fn build_definition(world: &mut E2eWorld) {
+    world.instructions_before_build = instructions_run(world);
+    run_lns_microvm_as(world, &["sandbox", "build"], Vec::new());
+    if let Some(key) = printed_key(world) {
+        world.build_keys.push(key);
+    }
+}
+
+#[when(regex = r#"^the build context file "([^"]+)" is changed to "([^"]*)"$"#)]
+fn context_file_is_changed(world: &mut E2eWorld, path: String, content: String) {
+    let content = format!("{content}\n");
+    match world
+        .project_context_files
+        .iter_mut()
+        .find(|(existing, _)| *existing == path)
+    {
+        Some(entry) => entry.1 = content,
+        None => world.project_context_files.push((path, content)),
+    }
+}
+
+#[then("the build reports the key it is remembered under")]
+fn the_build_reports_a_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.last() {
+        Some(key) if key.len() == "sha256:".len() + 64 => Ok(()),
+        other => Err(format!("the build printed no usable key: {other:?}")),
+    }
+}
+
+#[then(regex = r#"^the build reports the image it produced from "([^"]+)"$"#)]
+fn the_build_reports_the_image(world: &mut E2eWorld, label: String) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with(&format!("built {label} as ")))
+        .ok_or_else(|| format!("the build must name what it built:\n{}", run.stdout))?;
+    match line.contains("@sha256:") {
+        true => Ok(()),
+        false => Err(format!("the built image must be named by digest: {line}")),
+    }
+}
+
+#[then("the build reports the same key as the build before it")]
+fn the_same_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.as_slice() {
+        [.., before, now] if before == now => Ok(()),
+        keys => Err(format!("expected the last two keys to agree, got {keys:?}")),
+    }
+}
+
+#[then("the build reports a different key from the build before it")]
+fn a_different_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.as_slice() {
+        [.., before, now] if before != now => Ok(()),
+        keys => Err(format!(
+            "expected the last two keys to differ, got {keys:?}"
+        )),
+    }
+}
+
+#[then(regex = r"^the service booted a guest for (\d+) instructions? of that build$")]
+fn instructions_of_that_build(world: &mut E2eWorld, expected: usize) -> Result<(), String> {
+    let ran = instructions_run(world) - world.instructions_before_build;
+    match ran == expected {
+        true => Ok(()),
+        false => Err(format!(
+            "expected {expected} instruction(s) to run, {ran} did\n--- service.log ---\n{}",
+            crate::steps::service::read_service_log(world),
+        )),
+    }
+}
+
+/// Every `RUN` the service reaches a guest for says so once, so counting the lines counts the steps no key answered.
+fn instructions_run(world: &E2eWorld) -> usize {
+    crate::steps::service::read_service_log(world)
+        .lines()
+        .filter(|line| line.contains("Running") && line.contains("instruction"))
+        .count()
+}
+
+fn printed_key(world: &E2eWorld) -> Option<String> {
+    world
+        .result
+        .as_ref()?
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("key ").map(|key| key.trim().to_string()))
+}

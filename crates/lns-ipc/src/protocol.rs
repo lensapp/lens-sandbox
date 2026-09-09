@@ -74,6 +74,15 @@ pub enum Request {
         name: String,
     },
     PruneRuns,
+    /// Build what a local document's `spec.image` names, fill the build cache and publish nothing.
+    BuildSandbox {
+        /// The document as canonical JSON, the same shape a local run sends.
+        definition: String,
+        /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
+        definition_dir: String,
+        /// Ignore every key this build would otherwise answer from, and write the ones it produces.
+        rebuild: bool,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -232,6 +241,20 @@ pub enum Response {
     },
     RunsPruned {
         removed: Vec<String>,
+        /// The built images the sweep dropped: the ones no document on this machine and no run named any more.
+        #[serde(default)]
+        built_images: Vec<String>,
+    },
+    /// What one `lns sandbox build` decided: the key, the image, and whether it had to build it.
+    SandboxBuilt {
+        /// The build cache key: the `FROM` digest, the Containerfile text, the context's content hash and the architecture.
+        key: String,
+        reference: String,
+        /// What `spec.image` named, as the summary prints it.
+        label: String,
+        layers: usize,
+        /// True when the key answered outright, so the build ran nothing.
+        reused: bool,
     },
     RegistryLoginStored,
     RegistryLoggedOut,
@@ -1821,6 +1844,31 @@ mod tests {
                 "1a2b3c4d0000000000000000000000aa".into(),
                 "5e6f7a8b0000000000000000000000bb".into(),
             ],
+            built_images: vec![format!("lns-build.local/built@sha256:{}", "a".repeat(64))],
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// The verb and its answer are one exchange: the key, the image, and whether anything was built.
+    #[test]
+    fn a_sandbox_build_survives_a_request_and_response_round_trip() {
+        let req = Request::BuildSandbox {
+            definition: r#"{"spec":{"image":"./image"}}"#.into(),
+            definition_dir: "/work".into(),
+            rebuild: true,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::SandboxBuilt {
+            key: format!("sha256:{}", "b".repeat(64)),
+            reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
+            label: "./image/Containerfile".into(),
+            layers: 3,
+            reused: false,
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();

@@ -230,6 +230,7 @@ lns sandbox attach <RUN> [--detach-keys <CHORD>]
 lns sandbox ls [-a] [--format <table|json>]
 lns sandbox inspect <RUN> [--format <table|json>]
 lns sandbox save <RUN> -f <FILE> [--kind <sandbox|mixin>]
+lns sandbox build [-f <FILE>] [--rebuild]
 lns sandbox rm <RUN> [-f]
 lns sandbox prune [-f]
 ```
@@ -296,8 +297,9 @@ contributed it. That summary is the one thing you approve.
 | `ls` | `lns ps` | Lists running sandboxes with their state, when each was created, when it last booted, CPU, and memory. A sandbox is created once and boots as often as you start it, so the two times differ on anything restarted. `-a` includes stopped ones. |
 | `inspect` | `lns inspect` | Prints one sandbox's live state and launch configuration, with its resolved mixin embedded. It reports the same two times `ls` does, under the same names. The vCPU and memory it reports are the size the sandbox booted with, for a running and for a stopped one. |
 | `save` | | Writes one sandbox out as a document you keep ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--file` names the file and is required; `--kind mixin` writes what the run decided instead of the run as it resolved. Works on a running or a stopped sandbox. |
+| `build` | | Builds the Containerfile `spec.image` names, fills the build cache, and publishes nothing — the CI build stage, or a "does this even build" check before a push. `-f`/`--file` selects the document, defaulting to `./lns.yaml`. It prints the build cache key ([sandbox-spec §3.1.1](sandbox-spec.md#311-image)) and the image the build produced; a build whose key this machine already answers builds nothing and says so. `--rebuild` ignores the cache for this build and writes what it produces. A document whose `spec.image` names an image to pull is refused: there is nothing to build. |
 | `rm` | `lns rm` | Removes a stopped sandbox: its record and its writable layer, the name freed and the artifact released. What it granted, declined, and decided goes with it, so save anything worth keeping first ([§3.2.3](#323-the-runs-decisions-and-saving-them)). `-f`/`--force` stops a running one first. |
-| `prune` | | Removes every stopped sandbox, writable layers included, and what each granted, declined, and decided. Lists them and asks, unless `-f`/`--force`. |
+| `prune` | | Removes every stopped sandbox, writable layers included, and what each granted, declined, and decided. It also drops every image a Containerfile build produced that nothing names any more — no document on this machine, and no sandbox — and names each one it dropped. Lists the sandboxes and asks, unless `-f`/`--force`. |
 
 Interrupting `lns` at the terminal (`Ctrl-C`) stops the sandbox. The detach chord
 does not: it returns your terminal, exits `0`, and leaves the workload running.
