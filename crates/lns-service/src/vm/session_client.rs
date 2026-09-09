@@ -403,6 +403,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reported_address_narrows_the_host_reservation_and_an_unheld_one_fails_the_session() {
+        use crate::vm::guest_addr::real::AddressSelection;
+        use crate::vm::guest_addr::tests::empty_host;
+
+        let allocator = std::sync::Arc::new(empty_host());
+        let plan = allocator
+            .reserve("run-a", "52:54:00:00:00:01")
+            .expect("free host");
+        let taken = plan.candidates[1];
+        let (tx, _rx) = mpsc::channel(2);
+        let mut bytes = framed(&ServerFrame::NetworkApplied {
+            address: taken.to_string(),
+        });
+        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
+        read_server_frames(
+            io::Cursor::new(bytes),
+            tx,
+            Some(plan.candidates.clone()),
+            Some(AddressSelection::new(allocator.clone(), "run-a")),
+        )
+        .await
+        .expect("the guest took an offered address");
+        assert_eq!(
+            allocator.reserved()[0].candidates,
+            vec![taken],
+            "the spares the guest did not take go back to the host"
+        );
+
+        let (tx, _rx) = mpsc::channel(1);
+        let error = read_server_frames(
+            io::Cursor::new(framed(&ServerFrame::NetworkApplied {
+                address: taken.to_string(),
+            })),
+            tx,
+            Some(plan.candidates.clone()),
+            Some(AddressSelection::new(allocator.clone(), "run-gone")),
+        )
+        .await
+        .expect_err("a run whose reservation is gone cannot confirm an address");
+        assert!(
+            error.to_string().contains("no address reservation"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
         let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
         let (tx, _rx) = mpsc::channel(1);

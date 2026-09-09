@@ -39,12 +39,20 @@ impl Drop for Lease {
 
 #[derive(Clone)]
 pub struct AddressSelection {
+    allocator: Arc<Allocator>,
     owner: String,
 }
 
 impl AddressSelection {
+    pub fn new(allocator: Arc<Allocator>, owner: impl Into<String>) -> Self {
+        Self {
+            allocator,
+            owner: owner.into(),
+        }
+    }
+
     pub fn confirm(&self, address: std::net::Ipv4Addr) -> Result<()> {
-        allocator().select(&self.owner, address)?;
+        self.allocator.select(&self.owner, address)?;
         Ok(())
     }
 }
@@ -63,9 +71,7 @@ impl Drop for ConflictMonitor {
 
 impl Lease {
     pub fn selection(&self) -> AddressSelection {
-        AddressSelection {
-            owner: self.owner.clone(),
-        }
+        AddressSelection::new(allocator().clone(), self.owner.clone())
     }
 
     pub fn monitor(&self) -> ConflictMonitor {
