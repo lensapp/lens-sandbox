@@ -80,7 +80,18 @@ pub(crate) fn stage<F: ContextFs>(fs: &F, context: &Path, step: &CopyStep) -> Re
             }
         }
     }
+    if let Some(mode) = step.mode {
+        changes.iter_mut().for_each(|change| wear(change, mode));
+    }
     Ok(ChangeSet { changes })
+}
+
+/// `--chmod` decides the mode of everything the transfer writes, and a symlink has none of its own.
+fn wear(change: &mut Change, chmod: u32) {
+    match change {
+        Change::Directory { mode, .. } | Change::Regular { mode, .. } => *mode = chmod,
+        Change::Symlink { .. } | Change::Removed { .. } => {}
+    }
 }
 
 fn walk<F: ContextFs>(
@@ -387,6 +398,7 @@ pub(crate) mod tests {
             sources: sources.iter().map(|s| s.to_string()).collect(),
             destination: destination.to_string(),
             owner: None,
+            mode: None,
             line: 4,
         }
     }
@@ -566,6 +578,37 @@ pub(crate) mod tests {
             .collect();
 
         assert_eq!(paths, vec!["motd".to_string()]);
+    }
+
+    #[test]
+    fn a_chmod_decides_the_mode_of_everything_the_copy_writes() {
+        let mut context = FakeContext::new();
+        context
+            .dir("bin", 0o755)
+            .file("bin/entrypoint.sh", 0o644, b"#!/bin/sh\n")
+            .symlink("bin/entry", "entrypoint.sh");
+        let mut step = step(&["bin"], "/usr/local/bin/");
+        step.mode = Some(0o755);
+
+        for change in staged(&context, &step) {
+            match change {
+                Change::Regular { path, mode, .. } | Change::Directory { path, mode, .. } => {
+                    assert_eq!(mode, 0o755, "{path}")
+                }
+                other => assert!(matches!(other, Change::Symlink { .. }), "{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_copy_with_no_chmod_keeps_the_mode_the_context_holds() {
+        let mut context = FakeContext::new();
+        context.file("entrypoint.sh", 0o644, b"#!/bin/sh\n");
+
+        assert!(matches!(
+            staged(&context, &step(&["entrypoint.sh"], "/entrypoint.sh")).as_slice(),
+            [Change::Regular { mode: 0o644, .. }]
+        ));
     }
 
     #[test]

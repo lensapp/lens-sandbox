@@ -42,6 +42,8 @@ pub(crate) struct CopyStep {
     /// Whether the destination names a directory the sources land in, rather than the path one source is written at.
     pub into_directory: bool,
     pub owner: Option<String>,
+    /// The octal mode `--chmod` gives every entry the copy writes.
+    pub mode: Option<u32>,
     pub line: usize,
 }
 
@@ -368,6 +370,7 @@ async fn copy_step<H: BuildHost>(
         destination,
         into_directory,
         owner: transfer.owner.clone(),
+        mode: transfer.mode,
         line,
     })
 }

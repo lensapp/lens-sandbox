@@ -67,6 +67,8 @@ pub(crate) struct Transfer {
     pub sources: Vec<String>,
     pub destination: String,
     pub owner: Option<String>,
+    /// The octal mode `--chmod` gives every entry the transfer writes.
+    pub mode: Option<u32>,
 }
 
 /// The issue that decides what the subset grows to hold, named by every refusal that has no alternative today.
@@ -252,6 +254,14 @@ fn accept_run(
     run: &parse_dockerfile::RunInstruction<'_>,
     line: usize,
 ) -> Result<InstructionKind, String> {
+    for name in ["network", "security"] {
+        if let Some(flag) = run.options.iter().find(|flag| flag.name.value == name) {
+            let value = flag.value.as_ref().map(|v| v.value.as_ref()).unwrap_or("");
+            return Err(format!(
+                "line {line}: RUN --{name}={value} is not supported; a build step runs under the document's own network and confinement, so there is nothing to widen it to"
+            ));
+        }
+    }
     if let Some(mount) = run.options.iter().find(|flag| flag.name.value == "mount") {
         let target = mount.value.as_ref().map(|v| v.value.as_ref()).unwrap_or("");
         return Err(format!(
@@ -281,6 +291,11 @@ fn accept_copy(
             "line {line}: COPY --from={stage} is not supported; lns builds one stage, so build the earlier stage as its own image and name it in FROM"
         ));
     }
+    if copy.options.iter().any(|flag| flag.name.value == "link") {
+        return Err(format!(
+            "line {line}: COPY --link is not supported; lns commits every step as its own layer already, so drop the flag"
+        ));
+    }
     Ok(InstructionKind::Copy(transfer(
         "COPY",
         &copy.src,
@@ -294,6 +309,11 @@ fn accept_add(
     add: &parse_dockerfile::AddInstruction<'_>,
     line: usize,
 ) -> Result<InstructionKind, String> {
+    if add.options.iter().any(|flag| flag.name.value == "link") {
+        return Err(format!(
+            "line {line}: ADD --link is not supported; lns commits every step as its own layer already, so drop the flag"
+        ));
+    }
     let moved = transfer("ADD", &add.src, &add.dest, &add.options, line)?;
     for source in &moved.sources {
         if source.contains("://") {
@@ -334,12 +354,24 @@ fn transfer(
     Ok(Transfer {
         sources: paths,
         destination: destination.value.to_string(),
-        owner: options
-            .iter()
-            .find(|flag| flag.name.value == "chown")
-            .and_then(|flag| flag.value.as_ref())
-            .map(|value| value.value.to_string()),
+        owner: flag_value(options, "chown"),
+        mode: match flag_value(options, "chmod") {
+            None => None,
+            Some(written) => Some(u32::from_str_radix(&written, 8).map_err(|_| {
+                format!(
+                    "line {line}: {keyword} --chmod={written} is not an octal mode; write it as --chmod=755"
+                )
+            })?),
+        },
     })
+}
+
+fn flag_value(options: &[parse_dockerfile::Flag<'_>], name: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|flag| flag.name.value == name)
+        .and_then(|flag| flag.value.as_ref())
+        .map(|value| value.value.to_string())
 }
 
 /// `KEY=VALUE` pairs, or the one-key form Docker keeps for `ENV KEY the rest of the line`.
@@ -450,11 +482,13 @@ mod tests {
                     sources: vec!["app".into()],
                     destination: "/srv/app".into(),
                     owner: Some("node:node".into()),
+                    mode: None,
                 }),
                 InstructionKind::Add(Transfer {
                     sources: vec!["extra".into()],
                     destination: "/srv/extra".into(),
                     owner: None,
+                    mode: None,
                 }),
                 InstructionKind::Entrypoint(Command::Exec(vec!["/bin/agent".into()])),
                 InstructionKind::Cmd(Command::Exec(vec!["--serve".into()])),
@@ -627,6 +661,56 @@ mod tests {
             refusal.contains("COPY the file into the image"),
             "{refusal}"
         );
+    }
+
+    #[test]
+    fn a_copy_chmod_is_read_as_the_octal_mode_it_names() {
+        assert_eq!(
+            kinds("FROM alpine\nCOPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh\n")[1],
+            InstructionKind::Copy(Transfer {
+                sources: vec!["entrypoint.sh".into()],
+                destination: "/usr/local/bin/entrypoint.sh".into(),
+                owner: None,
+                mode: Some(0o755),
+            })
+        );
+    }
+
+    #[test]
+    fn a_chmod_that_is_not_an_octal_mode_is_refused_with_the_line_it_was_written_on() {
+        let refusal = refusal("FROM alpine\nCOPY --chmod=rwx entrypoint.sh /srv/entrypoint.sh\n");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("COPY --chmod=rwx"), "{refusal}");
+        assert!(refusal.contains("--chmod=755"), "{refusal}");
+    }
+
+    #[test]
+    fn a_copy_link_is_refused_by_name_with_the_line_it_was_written_on() {
+        let refusal = refusal("FROM alpine\nCOPY --link app /srv/app\n");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("COPY --link"), "{refusal}");
+    }
+
+    #[test]
+    fn an_add_link_is_refused_by_name_with_the_line_it_was_written_on() {
+        let refusal = refusal("FROM alpine\nADD --link extra /srv/extra\n");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("ADD --link"), "{refusal}");
+    }
+
+    #[test]
+    fn a_run_network_is_refused_by_name_with_the_line_it_was_written_on() {
+        let refusal = refusal("FROM alpine\nRUN --network=none npm ci\n");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("RUN --network=none"), "{refusal}");
+        assert!(refusal.contains("the document's own network"), "{refusal}");
+    }
+
+    #[test]
+    fn a_run_security_is_refused_by_name_with_the_line_it_was_written_on() {
+        let refusal = refusal("FROM alpine\nRUN --security=insecure make\n");
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("RUN --security=insecure"), "{refusal}");
     }
 
     #[test]
