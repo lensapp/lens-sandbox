@@ -1987,8 +1987,42 @@ fn push_the_definition(world: &mut E2eWorld) {
         .expect("Given a local registry before pushing to one")
         .host();
     let reference = format!("{host}/e2e-built-sandbox:1");
-    run_lns_microvm_as(world, &["push"], vec![reference.clone()]);
+    let project = microvm_project(world);
+    let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
+    copy_tree(
+        &project.join(CONTAINERFILE_IMAGE_PATH),
+        &publisher.path().join(CONTAINERFILE_IMAGE_PATH),
+    );
+    std::fs::write(
+        publisher.path().join("lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  image: {CONTAINERFILE_IMAGE_PATH}\n"
+        ),
+    )
+    .expect("write the publisher lns.yaml");
+    let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
+    let result = run_cli_with_timeout_in_dir(
+        publisher.path(),
+        vec!["push".to_string(), "--yes".to_string(), reference.clone()],
+        socket_env(world),
+        budget,
+    );
+    world.result = Some(result);
     world.pushed_ref = Some(reference);
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create the publisher context directory");
+    for entry in std::fs::read_dir(from).expect("read the build context") {
+        let entry = entry.expect("a build context entry");
+        let target = to.join(entry.file_name());
+        match entry.file_type().expect("the entry's type").is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => {
+                std::fs::copy(entry.path(), target).expect("copy a build context file");
+            }
+        }
+    }
 }
 
 /// The repository the artifact was pushed to, which §6 says the image publishes into as well.
