@@ -6,7 +6,9 @@
 
 use anyhow::{Context, Result, bail};
 
+use super::cache::Kind;
 use super::exclude::only_the_workloads_writes;
+use super::key;
 use super::parse::{Command, Containerfile, HereDoc, InstructionKind, Transfer};
 use super::upper::ChangeSet;
 
@@ -82,7 +84,8 @@ pub(crate) struct Base {
     pub env: Vec<(String, String)>,
 }
 
-/// What the loop needs of the world: a registry, a build guest, the build context, and the local store.
+/// What the loop needs of the world: a registry, a build guest, the build context, the local store,
+/// and what this machine built for a key it has seen before.
 pub(crate) trait BuildHost {
     /// The digest-pinned reference the `FROM` resolved to, pulled so the build can stand on its config.
     async fn resolve_base(&self, image: &str) -> Result<Base>;
@@ -91,12 +94,31 @@ pub(crate) trait BuildHost {
     async fn holds_a_directory_at(&self, parent: &str, path: &str) -> Result<bool>;
     async fn copy(&self, step: &CopyStep) -> Result<ChangeSet>;
     async fn commit(&self, commit: &Commit<'_>) -> Result<String>;
+    /// The image this machine built for the key and still holds, if it built one.
+    async fn cached(&self, kind: Kind, key: &str) -> Option<String>;
+    async fn remember(&self, kind: Kind, key: &str, reference: &str);
+}
+
+/// What one build is asked for: the file, the bytes behind it, and whether the cache may answer.
+pub(crate) struct BuildPlan<'a> {
+    pub file: &'a Containerfile,
+    /// The Containerfile as it was written, comments and all — the key measures the file, not the parse.
+    pub text: &'a str,
+    pub context_hash: &'a str,
+    pub arch: &'a str,
+    pub rebuild: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Built {
     pub reference: String,
     pub layers: usize,
+    /// The image key, which names this build wherever it is reported.
+    pub key: String,
+    /// True when the key answered outright, so nothing was run and nothing was committed.
+    pub reused: bool,
+    /// How many leading instructions stood on an image this machine already had.
+    pub reused_steps: usize,
 }
 
 /// What the instructions have decided so far: the image to stand on, the scopes a `RUN` is given, and the config the next commit writes.
@@ -112,11 +134,14 @@ struct Build {
     workdir: String,
     shell: Vec<String>,
     layers: usize,
+    /// A build the user asked to rebuild reads no key, and still writes every one it produces.
+    rebuild: bool,
+    reused_steps: usize,
 }
 
-pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Result<Built> {
+pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Built> {
     let mut global_args = Vec::new();
-    let mut instructions = file.instructions.iter();
+    let mut instructions = plan.file.instructions.iter();
     let from = loop {
         let Some(instruction) = instructions.next() else {
             bail!(
@@ -145,6 +170,19 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
         .await
         .with_context(|| format!("line {line}: FROM {image}"))?;
 
+    let key = key::image_key(&base.reference, plan.text, plan.context_hash, plan.arch);
+    if !plan.rebuild
+        && let Some(reference) = host.cached(Kind::Image, &key).await
+    {
+        return Ok(Built {
+            reference,
+            layers: 0,
+            key,
+            reused: true,
+            reused_steps: plan.file.instructions.len(),
+        });
+    }
+
     let mut build = Build {
         parent: base.reference,
         base_env: base.env,
@@ -155,6 +193,8 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
         workdir: DEFAULT_WORKDIR.to_string(),
         shell: DEFAULT_SHELL.map(str::to_string).to_vec(),
         layers: 0,
+        rebuild: plan.rebuild,
+        reused_steps: 0,
     };
     for instruction in instructions {
         let created_by = label(&instruction.kind);
@@ -162,9 +202,13 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
             .await
             .with_context(|| format!("line {}: {created_by}", instruction.line))?;
     }
+    host.remember(Kind::Image, &key, &build.parent).await;
     Ok(Built {
         reference: build.parent,
         layers: build.layers,
+        key,
+        reused: false,
+        reused_steps: build.reused_steps,
     })
 }
 
@@ -183,7 +227,12 @@ async fn step<H: BuildHost>(
             return Ok(());
         }
         InstructionKind::Run { command, here_docs } => {
-            let outcome = host.run(&run_step(build, line, command, here_docs)).await?;
+            let step = run_step(build, line, command, here_docs);
+            let key = key::run_key(&build.parent, &step);
+            if reuse(host, build, &key, true).await {
+                return Ok(());
+            }
+            let outcome = host.run(&step).await?;
             let (changes, dropped) =
                 only_the_workloads_writes(outcome.changes, &outcome.fileset_paths);
             if dropped.total() > 0 {
@@ -193,12 +242,18 @@ async fn step<H: BuildHost>(
                     "the captured layer drops what this boot wrote for the guest",
                 );
             }
-            return commit(host, build, Some(&changes), kind).await;
+            return commit(host, build, Some(&changes), kind, &key).await;
         }
+        // The copied bytes are half of this instruction's key, so the context is read before the
+        // cache is asked; reading it costs no guest.
         InstructionKind::Copy(transfer) | InstructionKind::Add(transfer) => {
             let step = copy_step(host, build, line, transfer).await?;
             let changes = host.copy(&step).await?;
-            return commit(host, build, Some(&changes), kind).await;
+            let key = key::transfer_key(&build.parent, &label(kind), &changes);
+            if reuse(host, build, &key, true).await {
+                return Ok(());
+            }
+            return commit(host, build, Some(&changes), kind, &key).await;
         }
         InstructionKind::Env(pairs) => {
             for (key, value) in pairs {
@@ -247,7 +302,27 @@ async fn step<H: BuildHost>(
             }
         }
     }
-    commit(host, build, None, kind).await
+    let key = key::config_key(&build.parent, &label(kind), &build.config);
+    if reuse(host, build, &key, false).await {
+        return Ok(());
+    }
+    commit(host, build, None, kind, &key).await
+}
+
+/// A step this machine already has stands where the build was going to run one, and the build goes on from it.
+async fn reuse<H: BuildHost>(host: &H, build: &mut Build, key: &str, layer: bool) -> bool {
+    if build.rebuild {
+        return false;
+    }
+    let Some(reference) = host.cached(Kind::Step, key).await else {
+        return false;
+    };
+    build.parent = reference;
+    build.reused_steps += 1;
+    if layer {
+        build.layers += 1;
+    }
+    true
 }
 
 async fn commit<H: BuildHost>(
@@ -255,6 +330,7 @@ async fn commit<H: BuildHost>(
     build: &mut Build,
     layer: Option<&ChangeSet>,
     kind: &InstructionKind,
+    key: &str,
 ) -> Result<()> {
     build.parent = host
         .commit(&Commit {
@@ -264,6 +340,7 @@ async fn commit<H: BuildHost>(
             created_by: &label(kind),
         })
         .await?;
+    host.remember(Kind::Step, key, &build.parent).await;
     if layer.is_some() {
         build.layers += 1;
     }
@@ -579,6 +656,10 @@ mod tests {
     struct FakeHost {
         calls: Mutex<Vec<Call>>,
         commits: Mutex<usize>,
+        /// What this machine remembers, which survives from one build to the next of the same host.
+        remembered: Mutex<std::collections::BTreeMap<(String, String), String>>,
+        /// What the context answers a COPY with, so a test can edit a file between two builds.
+        copied_bytes: Mutex<Vec<u8>>,
         wrote: Mutex<Option<ChangeSet>>,
         fileset_paths: Vec<String>,
         base_env: Vec<(String, String)>,
@@ -593,7 +674,10 @@ mod tests {
 
     impl FakeHost {
         fn new() -> Self {
-            Self::default()
+            Self {
+                copied_bytes: Mutex::new(b"context\n".to_vec()),
+                ..Self::default()
+            }
         }
 
         /// What every RUN's guest leaves in its upper, so one build can be read as one change set.
@@ -727,7 +811,7 @@ mod tests {
                     mode: 0o644,
                     uid: 0,
                     gid: 0,
-                    bytes: b"context\n".to_vec(),
+                    bytes: self.copied_bytes.lock().unwrap().clone(),
                 }],
             })
         }
@@ -746,22 +830,49 @@ mod tests {
             });
             Ok(format!("lns-build.local/built@sha256:step{committed}"))
         }
+
+        async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+            self.remembered
+                .lock()
+                .unwrap()
+                .get(&(format!("{kind:?}"), key.to_string()))
+                .cloned()
+        }
+
+        async fn remember(&self, kind: Kind, key: &str, reference: &str) {
+            self.remembered.lock().unwrap().insert(
+                (format!("{kind:?}"), key.to_string()),
+                reference.to_string(),
+            );
+        }
     }
 
     fn containerfile(text: &str) -> crate::containerfile::parse::Containerfile {
         parse(text).expect("the subset accepts this file")
     }
 
+    fn plan<'a>(file: &'a Containerfile, text: &'a str) -> BuildPlan<'a> {
+        BuildPlan {
+            file,
+            text,
+            context_hash: "sha256:context",
+            arch: "arm64",
+            rebuild: false,
+        }
+    }
+
     async fn built(host: &FakeHost, text: &str) -> Built {
-        build(host, &containerfile(text))
+        let file = containerfile(text);
+        build(host, &plan(&file, text))
             .await
             .expect("this Containerfile builds")
     }
 
     async fn refused(host: &FakeHost, text: &str) -> String {
+        let file = containerfile(text);
         format!(
             "{:#}",
-            build(host, &containerfile(text))
+            build(host, &plan(&file, text))
                 .await
                 .expect_err("this Containerfile must stop the build")
         )
@@ -1467,7 +1578,7 @@ mod tests {
             ],
         };
 
-        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
+        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
         assert!(refusal.contains("line 1"), "{refusal}");
         assert!(refusal.contains("RUN echo hi"), "{refusal}");
         assert!(refusal.contains("FROM"), "{refusal}");
@@ -1494,7 +1605,7 @@ mod tests {
             }],
         };
 
-        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
+        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
         assert!(refusal.contains("FROM"), "{refusal}");
         assert!(parse("# nothing but a comment\n").is_err());
     }
@@ -1519,7 +1630,7 @@ mod tests {
             ],
         };
 
-        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
+        let refusal = format!("{:#}", build(&host, &plan(&file, "")).await.unwrap_err());
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("a second FROM"), "{refusal}");
         assert!(
@@ -1576,5 +1687,168 @@ mod tests {
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("ENV MODE=research"), "{refusal}");
         assert!(refusal.contains("layer cache"), "{refusal}");
+    }
+
+    /// The whole image answers for the key, so a second build of an untouched document boots no
+    /// guest, commits nothing and says it did neither.
+    #[tokio::test]
+    async fn a_second_build_of_an_unchanged_containerfile_runs_nothing_at_all() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\nUSER node\n";
+        let first = built(&host, text).await;
+
+        let second = built(&host, text).await;
+
+        assert_eq!(second.reference, first.reference);
+        assert_eq!(second.key, first.key);
+        assert!(second.reused, "an unchanged build is a no-op");
+        assert_eq!(host.runs().len(), 1, "the second build boots no guest");
+        assert_eq!(host.commits().len(), 2, "the second build commits nothing");
+    }
+
+    #[tokio::test]
+    async fn a_build_reuses_every_leading_step_and_rebuilds_from_the_first_that_differs() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nRUN echo one\nRUN echo two\nRUN echo three\n",
+        )
+        .await;
+
+        let again = built(
+            &host,
+            "FROM alpine\nRUN echo one\nRUN echo changed\nRUN echo three\n",
+        )
+        .await;
+
+        let commands: Vec<String> = host
+            .runs()
+            .into_iter()
+            .map(|step| step.argv.join(" "))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "/bin/sh -c echo one",
+                "/bin/sh -c echo two",
+                "/bin/sh -c echo three",
+                "/bin/sh -c echo changed",
+                "/bin/sh -c echo three",
+            ],
+            "only the first RUN is reused; the one that changed and the one after it run again",
+        );
+        assert_eq!(again.reused_steps, 1);
+        assert_eq!(
+            again.layers, 3,
+            "a reused step still put a layer in the image"
+        );
+        assert!(!again.reused);
+    }
+
+    /// An `ARG` commits nothing, so the image the next `RUN` stands on is the same one, and the
+    /// line is the same line; only the environment the command resolves against tells them apart.
+    #[tokio::test]
+    async fn an_arg_the_run_reads_makes_it_a_different_step_although_the_line_is_unchanged() {
+        let host = FakeHost::new();
+        built(&host, "FROM alpine\nARG V=1\nRUN install agent@$V\n").await;
+
+        let again = built(&host, "FROM alpine\nARG V=2\nRUN install agent@$V\n").await;
+
+        let envs: Vec<Vec<String>> = host.runs().into_iter().map(|step| step.env).collect();
+        assert_eq!(envs, [[String::from("V=1")], [String::from("V=2")]]);
+        assert_eq!(
+            again.reused_steps, 0,
+            "the second RUN reaches the guest, because the value it reads is not the first one",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_whose_file_changed_is_a_different_step_although_the_instruction_is_the_same() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nCOPY app /srv/app\nRUN echo after\n";
+        let file = containerfile(text);
+        build(&host, &plan(&file, text)).await.unwrap();
+        let before = host.commits().len();
+        *host.copied_bytes.lock().unwrap() = b"edited\n".to_vec();
+
+        let again = build(
+            &host,
+            &BuildPlan {
+                context_hash: "sha256:edited",
+                ..plan(&file, text)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            again.reused_steps, 0,
+            "the copy's own bytes are half of its key, so it is not the step it was",
+        );
+        assert_eq!(
+            host.commits().len(),
+            before + 2,
+            "the copy and the instruction after it are both committed again",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_reads_no_key_and_still_writes_every_one_it_produces() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        built(&host, text).await;
+
+        let file = containerfile(text);
+        let forced = build(
+            &host,
+            &BuildPlan {
+                rebuild: true,
+                ..plan(&file, text)
+            },
+        )
+        .await
+        .expect("a forced build builds");
+
+        assert!(!forced.reused);
+        assert_eq!(host.runs().len(), 2, "--rebuild boots the guest again");
+        assert_eq!(
+            built(&host, text).await.reference,
+            forced.reference,
+            "the build it forced is the one the next build finds",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_build_whose_context_changed_is_a_different_image_although_the_file_is_the_same() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        let file = containerfile(text);
+        let first = build(&host, &plan(&file, text)).await.unwrap();
+
+        let second = build(
+            &host,
+            &BuildPlan {
+                context_hash: "sha256:edited",
+                ..plan(&file, text)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(second.key, first.key);
+        assert!(!second.reused);
+    }
+
+    #[tokio::test]
+    async fn the_key_a_build_reports_is_the_one_the_next_build_of_it_answers() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nUSER node\n";
+        let key = built(&host, text).await.key;
+
+        assert!(key.starts_with("sha256:"), "{key}");
+        assert_eq!(
+            host.cached(Kind::Image, &key).await.as_deref(),
+            Some("lns-build.local/built@sha256:step1"),
+        );
     }
 }

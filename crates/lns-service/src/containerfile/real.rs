@@ -12,30 +12,38 @@ use crate::image::manifest_cache::ManifestCache;
 use crate::log;
 use crate::oci_layer_cache::LayerCache;
 
+use super::cache::{BuildCache, CacheFs, Entry, Kind};
 use super::context::{ContextFs, EntryKind, Meta};
 use super::executor::{self, Base, BuildHost, Commit, CopyStep, RunOutcome, RunStep};
 use super::ext4_upper::Ext4Upper;
 use super::image::ParentImage;
 use super::import::LocalStore;
-use super::locate::{self, Located};
+use super::key;
+use super::locate;
 use super::step;
 use super::upper::{self, ChangeSet};
 
 /// Where the reference of the image a run built lands, in the run's own directory: two runs ending together would overwrite one pointer, and removing the run removes what it built from.
 pub const BUILT_REFERENCE_FILE: &str = "built-image";
 
-/// Where "already built for this document on this machine" is remembered, which is this cache's own
-/// directory and not `lns_ipc::build_cache_root()`, whose sweeper owns everything under it. Slice 4
-/// of lensapp/lens-sandbox#393 replaces this with the real key — the `FROM` digest, the context's
-/// content hash and the architecture — and with `lns sandbox build`.
-const BUILT_POINTER_DIR: &str = "containerfile-builds";
+/// What a build was asked to do, and what a run and `lns sandbox build` both hand the executor.
+pub(crate) struct BuildRequest<'a> {
+    pub args: &'a RunImageArgs,
+    pub definition: &'a str,
+    pub image: &'a str,
+    pub rebuild: bool,
+}
 
-/// What a run boots from when its `spec.image` named a Containerfile.
+/// What one build produced: the image, the file it came from, and the key it is remembered under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BuiltForRun {
     pub reference: String,
     pub label: String,
     pub layers: usize,
+    pub key: String,
+    /// True when the key answered outright, so this build ran nothing.
+    pub reused: bool,
+    pub reused_steps: usize,
 }
 
 pub(crate) fn names_a_containerfile(image: &str) -> bool {
@@ -50,7 +58,32 @@ pub(crate) async fn build_for_run(
     image: &str,
     frame_tx: Sender<WireFrame>,
 ) -> Result<BuiltForRun> {
-    let definition_dir = args.definition_dir.as_deref().with_context(|| {
+    let built = build(
+        &BuildRequest {
+            args,
+            definition,
+            image,
+            rebuild: false,
+        },
+        frame_tx,
+    )
+    .await?;
+    publish(&crate::cache::root()?, run_id, &built.reference);
+    log::info!(
+        "Image",
+        "{}",
+        step::built_line(&built.label, &built.reference)
+    );
+    Ok(built)
+}
+
+/// The build itself, with no run around it: `lns sandbox build` needs one, and a run is a caller.
+pub(crate) async fn build(
+    request: &BuildRequest<'_>,
+    frame_tx: Sender<WireFrame>,
+) -> Result<BuiltForRun> {
+    let image = request.image;
+    let definition_dir = request.args.definition_dir.as_deref().with_context(|| {
         format!(
             "spec.image {image:?} names a Containerfile beside the document, and this run carries no document directory to look in"
         )
@@ -65,86 +98,63 @@ pub(crate) async fn build_for_run(
             refusals.join("\n  ")
         )
     })?;
+    let context_hash = key::context_hash(&RealContextFs, &located.context)?;
 
     let cache_dir = crate::cache::root()?;
-    let pointer = pointer_path(&cache_dir, &located, &text);
-    let reusable = locate::holds_only_its_containerfile(&RealContextFs, &located);
-    let built = match reusable
-        .then(|| already_built(&cache_dir, &pointer))
-        .flatten()
-    {
-        Some(reference) => BuiltForRun {
-            reference,
-            label: located.label.clone(),
-            layers: 0,
-        },
-        None => {
-            let built =
-                run_the_instructions(args, definition, &located, &file, &cache_dir, frame_tx)
-                    .await?;
-            if reusable {
-                remember(&cache_dir, &pointer, &built.reference);
-            }
-            built
-        }
-    };
-    publish(&cache_dir, run_id, &built.reference);
-    log::info!(
-        "Image",
-        "{}",
-        step::built_line(&built.label, &built.reference)
-    );
-    Ok(built)
-}
-
-async fn run_the_instructions(
-    args: &RunImageArgs,
-    definition: &str,
-    located: &Located,
-    file: &super::parse::Containerfile,
-    cache_dir: &Path,
-    frame_tx: Sender<WireFrame>,
-) -> Result<BuiltForRun> {
+    let arch = crate::image::want_arch().to_string();
     let started = std::time::Instant::now();
-    log::info!(
-        "Building",
-        "{} ({} instructions)",
-        located.label,
-        file.instructions.len()
-    );
     let host = RealBuildHost {
         context: located.context.clone(),
-        args: args.clone(),
-        definition: definition.to_string(),
-        cache_dir: cache_dir.to_path_buf(),
+        source: located.containerfile.display().to_string(),
+        args: request.args.clone(),
+        definition: request.definition.to_string(),
+        cache_dir: cache_dir.clone(),
         frame_tx,
         steps: AtomicUsize::new(0),
     };
-    let built = executor::build(&host, file)
+    let plan = executor::BuildPlan {
+        file: &file,
+        text: &text,
+        context_hash: &context_hash,
+        arch: &arch,
+        rebuild: request.rebuild,
+    };
+    if !plan.rebuild {
+        log::info!(
+            "Building",
+            "{} ({} instructions)",
+            located.label,
+            file.instructions.len()
+        );
+    } else {
+        log::info!(
+            "Building",
+            "{} ({} instructions), ignoring the cache",
+            located.label,
+            file.instructions.len()
+        );
+    }
+    let built = executor::build(&host, &plan)
         .await
         .with_context(|| format!("building {}", located.label))?;
-    log::info!(
-        "Built",
-        "{} in {:.2?} ({} layer{})",
-        built.reference,
-        started.elapsed(),
-        built.layers,
-        if built.layers == 1 { "" } else { "s" },
-    );
+    if !built.reused {
+        log::info!(
+            "Built",
+            "{} in {:.2?} ({} layer{})",
+            built.reference,
+            started.elapsed(),
+            built.layers,
+            if built.layers == 1 { "" } else { "s" },
+        );
+    }
     Ok(BuiltForRun {
         reference: built.reference,
-        label: located.label.clone(),
+        label: located.label,
         layers: built.layers,
+        key: built.key,
+        reused: built.reused,
+        reused_steps: built.reused_steps,
     })
-}
-
-/// "Already built for this document on this machine", which is all the cache slice 3 keeps.
-fn remember(cache_dir: &Path, pointer: &Path, reference: &str) {
-    if let Err(e) = std::fs::create_dir_all(pointer.parent().unwrap_or(cache_dir))
-        .and_then(|()| std::fs::write(pointer, format!("{reference}\n")))
-    {
-        log::warn!("this build will not be reused; its pointer was not written: {e}");
-    }
 }
 
 /// What a build guest wrote, read off its upper volume once the guest has stopped.
@@ -156,26 +166,6 @@ pub(crate) fn capture_change_set(
     let upper_image = crate::cache::run_dir(&crate::cache::root()?, run_id).join("upper.img");
     let tree = Ext4Upper::open_run_upper(&upper_image)?;
     upper::capture(&tree)
-}
-
-fn already_built(cache_dir: &Path, pointer: &Path) -> Option<String> {
-    let reference = std::fs::read_to_string(pointer).ok()?.trim().to_string();
-    ManifestCache::new(cache_dir.join("manifests"))
-        .get(&reference)
-        .map(|_| reference)
-}
-
-/// One document built on one machine: the file's own text and where it sits, plus the architecture a guest boots.
-fn pointer_path(cache_dir: &Path, located: &Located, text: &str) -> PathBuf {
-    let key = <sha2::Sha256 as sha2::Digest>::digest(
-        format!(
-            "{}\0{}\0{text}",
-            located.containerfile.display(),
-            crate::image::want_arch(),
-        )
-        .as_bytes(),
-    );
-    cache_dir.join(BUILT_POINTER_DIR).join(hex::encode(key))
 }
 
 fn publish(cache_dir: &Path, run_id: &str, reference: &str) {
@@ -196,6 +186,8 @@ fn publish(cache_dir: &Path, run_id: &str, reference: &str) {
 
 struct RealBuildHost {
     context: PathBuf,
+    /// The Containerfile this build reads, which every entry records so a sweep can ask whether the document is still here.
+    source: String,
     args: RunImageArgs,
     definition: String,
     cache_dir: PathBuf,
@@ -264,6 +256,25 @@ impl BuildHost for RealBuildHost {
         super::context::stage(&RealContextFs, &self.context, step)
     }
 
+    async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+        BuildCache::new(&RealCacheFs, &self.cache_dir)
+            .get(kind, key, &|reference| self.holds(reference))
+            .map(|entry| entry.reference)
+    }
+
+    async fn remember(&self, kind: Kind, key: &str, reference: &str) {
+        if let Err(e) = BuildCache::new(&RealCacheFs, &self.cache_dir).remember(
+            kind,
+            key,
+            &Entry {
+                reference: reference.to_string(),
+                source: self.source.clone(),
+            },
+        ) {
+            log::warn!("this build will not be reused; its key was not written: {e:#}");
+        }
+    }
+
     async fn commit(&self, commit: &Commit<'_>) -> Result<String> {
         let manifests = self.cache_dir.join("manifests");
         let parent = parent_image(&manifests, commit.parent)?;
@@ -293,6 +304,54 @@ impl BuildHost for RealBuildHost {
             );
         }
         Ok(built.reference)
+    }
+}
+
+impl RealBuildHost {
+    /// A key answers only while the image it names is still in this machine's manifest cache.
+    fn holds(&self, reference: &str) -> bool {
+        holds_the_image(&self.cache_dir, reference)
+    }
+}
+
+/// Whether this machine still has the built image a key names.
+pub(crate) fn holds_the_image(cache_dir: &Path, reference: &str) -> bool {
+    ManifestCache::new(cache_dir.join("manifests"))
+        .get(reference)
+        .is_some()
+}
+
+/// The build cache directory as the host holds it.
+pub(crate) struct RealCacheFs;
+
+impl CacheFs for RealCacheFs {
+    fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        std::fs::read(path).ok()
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+    }
+
+    fn remove(&self, path: &Path) -> Result<()> {
+        std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
+    }
+
+    fn list(&self, dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .collect()
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
     }
 }
 

@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::context::{ContextFs, EntryKind};
+use super::executor::{ConfigDraft, RunStep};
 use super::upper::{Change, ChangeSet};
 
 /// The whole image: what a second `lns sandbox build` of an untouched document finds and does not run again.
@@ -35,6 +36,47 @@ pub(crate) fn step_key(parent: &str, instruction: &str, copied: Option<&str>) ->
         }
         None => fields.field(b"nothing copied"),
     }
+    fields.finish()
+}
+
+/// A `RUN` as the guest is actually asked to run it: `ARG` reaches a command and its environment
+/// without committing anything of its own, so the written text alone does not tell two runs apart.
+pub(crate) fn run_key(parent: &str, step: &RunStep) -> String {
+    let mut fields = Fields::over("lns.build.step.v1");
+    fields.field(parent.as_bytes());
+    fields.field(b"RUN");
+    fields.each(&step.argv);
+    fields.field(b"env");
+    fields.each(&step.env);
+    fields.field(step.user.as_bytes());
+    fields.field(step.workdir.as_bytes());
+    fields.finish()
+}
+
+/// A `COPY` or an `ADD` by what it puts in its layer, which is where its sources, its destination and its `--chown` all end up.
+pub(crate) fn transfer_key(parent: &str, instruction: &str, copied: &ChangeSet) -> String {
+    step_key(parent, instruction, Some(&changes_hash(copied)))
+}
+
+/// An instruction that writes only config, by the config the image then carries — the same reason a `RUN` is keyed by its resolved command.
+pub(crate) fn config_key(parent: &str, instruction: &str, config: &ConfigDraft) -> String {
+    let mut fields = Fields::over("lns.build.step.v1");
+    fields.field(parent.as_bytes());
+    fields.field(instruction.as_bytes());
+    fields.field(b"config");
+    fields.pairs(&config.env);
+    fields.pairs(&config.labels);
+    for optional in [&config.user, &config.workdir] {
+        fields.field(optional.as_deref().unwrap_or_default().as_bytes());
+    }
+    for argv in [&config.entrypoint, &config.cmd, &config.shell] {
+        match argv {
+            Some(argv) => fields.each(argv),
+            None => fields.field(b"unset"),
+        }
+    }
+    fields.each(&config.exposed_ports);
+    fields.each(&config.volumes);
     fields.finish()
 }
 
@@ -150,6 +192,21 @@ impl Fields {
     fn field(&mut self, bytes: &[u8]) {
         self.0.update((bytes.len() as u64).to_be_bytes());
         self.0.update(bytes);
+    }
+
+    fn each(&mut self, values: &[String]) {
+        self.field(&(values.len() as u64).to_be_bytes());
+        for value in values {
+            self.field(value.as_bytes());
+        }
+    }
+
+    fn pairs(&mut self, values: &[(String, String)]) {
+        self.field(&(values.len() as u64).to_be_bytes());
+        for (key, value) in values {
+            self.field(key.as_bytes());
+            self.field(value.as_bytes());
+        }
     }
 
     fn entry(&mut self, path: &str, mode: u32, uid: u32, gid: u32) {
@@ -392,6 +449,175 @@ mod tests {
         assert_ne!(copied("srv/app", 0o644, b"two\n"), before);
         assert_ne!(copied("srv/other", 0o644, b"one\n"), before);
         assert_ne!(copied("srv/app", 0o755, b"one\n"), before);
+    }
+
+    fn run_step() -> RunStep {
+        RunStep {
+            parent: "built@sha256:parent".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "npm i -g agent@1".into()],
+            env: vec!["VERSION=1".into()],
+            user: "root".into(),
+            workdir: "/".into(),
+            line: 4,
+        }
+    }
+
+    /// `ARG` commits nothing, so two builds can reach one parent with one written `RUN` line and
+    /// still run two different commands; the key is over what the guest is asked to run.
+    #[test]
+    fn a_run_is_keyed_by_the_command_the_env_the_user_and_the_workdir_it_resolved_to() {
+        let key = run_key("built@sha256:parent", &run_step());
+
+        assert_eq!(key, run_key("built@sha256:parent", &run_step()));
+        for changed in [
+            RunStep {
+                argv: vec!["/bin/sh".into(), "-c".into(), "npm i -g agent@2".into()],
+                ..run_step()
+            },
+            RunStep {
+                env: vec!["VERSION=2".into()],
+                ..run_step()
+            },
+            RunStep {
+                user: "node".into(),
+                ..run_step()
+            },
+            RunStep {
+                workdir: "/srv".into(),
+                ..run_step()
+            },
+        ] {
+            assert_ne!(key, run_key("built@sha256:parent", &changed));
+        }
+        assert_ne!(key, run_key("built@sha256:other", &run_step()));
+    }
+
+    /// The line a `RUN` was written on moves when a comment above it does, and moving a line
+    /// rebuilds nothing: the guest runs the same command in the same guest.
+    #[test]
+    fn the_line_a_run_was_written_on_is_not_part_of_its_key() {
+        assert_eq!(
+            run_key("built@sha256:parent", &run_step()),
+            run_key(
+                "built@sha256:parent",
+                &RunStep {
+                    line: 9,
+                    ..run_step()
+                }
+            ),
+        );
+    }
+
+    #[test]
+    fn a_transfer_is_keyed_by_the_instruction_and_by_what_it_copies() {
+        let copied = |bytes: &[u8]| ChangeSet {
+            changes: vec![Change::Regular {
+                path: "srv/app".into(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                bytes: bytes.to_vec(),
+            }],
+        };
+        let key = transfer_key(
+            "built@sha256:parent",
+            "COPY app /srv/app",
+            &copied(b"one\n"),
+        );
+
+        assert_eq!(
+            key,
+            transfer_key(
+                "built@sha256:parent",
+                "COPY app /srv/app",
+                &copied(b"one\n")
+            ),
+        );
+        assert_ne!(
+            key,
+            transfer_key(
+                "built@sha256:parent",
+                "COPY app /srv/app",
+                &copied(b"two\n")
+            ),
+            "an edited context file is a different step, whatever the instruction says",
+        );
+        assert_ne!(
+            key,
+            transfer_key("built@sha256:parent", "ADD app /srv/app", &copied(b"one\n")),
+        );
+    }
+
+    #[test]
+    fn a_config_instruction_is_keyed_by_the_config_the_image_then_carries() {
+        let draft = ConfigDraft {
+            env: vec![("MODE".into(), "research".into())],
+            labels: vec![("org.opencontainers.image.title".into(), "agent".into())],
+            user: Some("node".into()),
+            workdir: Some("/srv".into()),
+            entrypoint: Some(vec!["/entry".into()]),
+            cmd: Some(vec!["--help".into()]),
+            shell: Some(vec!["/bin/bash".into(), "-c".into()]),
+            exposed_ports: vec!["8080".into()],
+            volumes: vec!["/data".into()],
+        };
+        let key = config_key("built@sha256:parent", "ENV MODE=research", &draft);
+
+        assert_eq!(
+            key,
+            config_key("built@sha256:parent", "ENV MODE=research", &draft)
+        );
+        assert_ne!(
+            key,
+            config_key("built@sha256:other", "ENV MODE=research", &draft)
+        );
+        assert_ne!(
+            key,
+            config_key("built@sha256:parent", "ENV MODE=review", &draft)
+        );
+        for changed in [
+            ConfigDraft {
+                env: vec![("MODE".into(), "review".into())],
+                ..draft.clone()
+            },
+            ConfigDraft {
+                labels: Vec::new(),
+                ..draft.clone()
+            },
+            ConfigDraft {
+                user: None,
+                ..draft.clone()
+            },
+            ConfigDraft {
+                workdir: Some("/opt".into()),
+                ..draft.clone()
+            },
+            ConfigDraft {
+                entrypoint: None,
+                ..draft.clone()
+            },
+            ConfigDraft {
+                cmd: Some(vec!["--serve".into()]),
+                ..draft.clone()
+            },
+            ConfigDraft {
+                shell: None,
+                ..draft.clone()
+            },
+            ConfigDraft {
+                exposed_ports: vec!["9090".into()],
+                ..draft.clone()
+            },
+            ConfigDraft {
+                volumes: Vec::new(),
+                ..draft.clone()
+            },
+        ] {
+            assert_ne!(
+                key,
+                config_key("built@sha256:parent", "ENV MODE=research", &changed)
+            );
+        }
     }
 
     #[test]
