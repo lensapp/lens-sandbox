@@ -901,20 +901,27 @@ where
     if !removed.is_empty() {
         note_pruned(&removed);
     }
+    Response::RunsPruned {
+        built_images: swept_built_images(cache_root, builds).await,
+        removed,
+    }
+}
+
+/// A sweep that fails takes no run prune down with it: the runs are already gone by the time it runs.
+async fn swept_built_images<B: BuiltImageSweep>(
+    cache_root: &std::path::Path,
+    builds: &B,
+) -> Vec<String> {
     let surviving: Vec<String> = crate::run_registry::snapshot()
         .into_iter()
         .map(|run| run.id)
         .collect();
-    let built_images = match builds.sweep(cache_root, &surviving).await {
+    match builds.sweep(cache_root, &surviving).await {
         Ok(built_images) => built_images,
         Err(e) => {
             crate::log::warn!("built images were not swept: {e:#}");
             Vec::new()
         }
-    };
-    Response::RunsPruned {
-        removed,
-        built_images,
     }
 }
 

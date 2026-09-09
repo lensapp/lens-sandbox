@@ -1844,6 +1844,31 @@ mod tests {
                 "1a2b3c4d0000000000000000000000aa".into(),
                 "5e6f7a8b0000000000000000000000bb".into(),
             ],
+            built_images: vec![format!("lns-build.local/built@sha256:{}", "a".repeat(64))],
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// The verb and its answer are one exchange: the key, the image, and whether anything was built.
+    #[test]
+    fn a_sandbox_build_survives_a_request_and_response_round_trip() {
+        let req = Request::BuildSandbox {
+            definition: r#"{"spec":{"image":"./image"}}"#.into(),
+            definition_dir: "/work".into(),
+            rebuild: true,
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::SandboxBuilt {
+            key: format!("sha256:{}", "b".repeat(64)),
+            reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
+            label: "./image/Containerfile".into(),
+            layers: 3,
+            reused: false,
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();

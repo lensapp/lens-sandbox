@@ -1256,7 +1256,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(removed, [orphan.to_string()]);
+        assert_eq!(removed, vec![orphan.clone()]);
         assert!(fs.has(&record_path(Path::new(ROOT), named)));
         assert!(!fs.has(&record_path(Path::new(ROOT), orphan)));
         assert_eq!(
