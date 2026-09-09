@@ -2,6 +2,7 @@
 //! captured as one OCI layer over its base image and imported where the boot path finds it.
 
 pub(crate) mod exclude;
+pub(crate) mod executor;
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
 pub(crate) mod import;
