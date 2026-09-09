@@ -997,20 +997,8 @@ mod tests {
         )
         .await;
 
-        let order: Vec<String> = host
-            .calls()
-            .into_iter()
-            .map(|call| match call {
-                Call::Base(image) => format!("base {image}"),
-                Call::Peek(image) => format!("peek {image}"),
-                Call::Run(step) => format!("run {}", step.argv.join(" ")),
-                Call::Copy(step) => format!("copy {}", step.destination),
-                Call::Commit { parent, .. } => format!("commit over {parent}"),
-            })
-            .collect();
-
         assert_eq!(
-            order,
+            order(&host),
             vec![
                 "base alpine:3.20".to_string(),
                 "run /bin/sh -c echo one".to_string(),
@@ -1827,6 +1815,20 @@ mod tests {
         assert_eq!(host.commits().len(), 2, "the second build commits nothing");
     }
 
+    /// What the host was asked for, in the order it was asked, as one readable line each.
+    fn order(host: &FakeHost) -> Vec<String> {
+        host.calls()
+            .into_iter()
+            .map(|call| match call {
+                Call::Base(image) => format!("base {image}"),
+                Call::Peek(image) => format!("peek {image}"),
+                Call::Run(step) => format!("run {}", step.argv.join(" ")),
+                Call::Copy(step) => format!("copy {}", step.destination),
+                Call::Commit { parent, .. } => format!("commit over {parent}"),
+            })
+            .collect()
+    }
+
     async fn planned(host: &FakeHost, text: &str) -> Planned {
         let file = containerfile(text);
         plan(host, &build_plan(&file, text))
@@ -1860,10 +1862,25 @@ mod tests {
 
         assert!(planned.key.starts_with("sha256:"));
         assert_eq!(
-            host.calls(),
-            vec![Call::Peek("alpine".to_string())],
+            order(&host),
+            vec!["peek alpine".to_string()],
             "a plan peeks the base; only a build pulls it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_plan_of_a_base_no_registry_answers_for_is_refused_where_a_build_would_be() {
+        let host = FakeHost::new().with_no_base();
+        let file = containerfile("FROM alpine\nRUN echo one\n");
+
+        let refusal = format!(
+            "{:#}",
+            plan(&host, &build_plan(&file, "FROM alpine\nRUN echo one\n"))
+                .await
+                .expect_err("a plan whose FROM resolves to nothing has no key to answer with")
+        );
+        assert!(refusal.contains("line 1: FROM alpine"), "{refusal}");
+        assert!(refusal.contains("no such image"), "{refusal}");
     }
 
     #[tokio::test]
