@@ -13,6 +13,7 @@ Feature: what a pulled artifact discloses about the image it was built from
     And the output contains "imageSource: built from ./image/Containerfile (2 lines, context 2 files)"
     And the output contains "context: app/main.js (15 B)"
     And the output contains "RUN npm install -g @anthropic-ai/claude-code"
+    And the output prints "RUN npm install -g @anthropic-ai/claude-code" after "mount: bind . -> /workspace"
 
   Scenario: a sandbox whose image was pulled rather than built discloses no source
     Given the service inspects "ghcr.io/team/hermes:1.4.0" as a sandbox with launch settings

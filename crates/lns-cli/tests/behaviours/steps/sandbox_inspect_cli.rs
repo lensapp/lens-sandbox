@@ -1,5 +1,5 @@
 use crate::world::BehaviourWorld;
-use cucumber::given;
+use cucumber::{given, then};
 use lns_ipc::{
     ArtifactInspection, ImageView, Response, SandboxMount, SandboxMountKind, SandboxPort,
     SandboxView,
@@ -55,7 +55,15 @@ fn inspects_sandbox_built_from(world: &mut BehaviourWorld, reference: String, fr
         image: format!("ghcr.io/team/hermes@{}", full_digest()),
         workdir: None,
         user: None,
-        mounts: Vec::new(),
+        mounts: vec![lns_ipc::SandboxMount {
+            kind: lns_ipc::SandboxMountKind::Bind,
+            source: ".".into(),
+            target: "/workspace".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+            size_bytes: None,
+        }],
         ports: Vec::new(),
         filesets: Vec::new(),
         credentials: Vec::new(),
@@ -378,4 +386,19 @@ fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
     world.sandbox.inspect_image_response = Some(Response::Error {
         message: format!("inspecting the sandbox needs a login for {host}: run `lns login {host}`"),
     });
+}
+
+/// §7.3 renders the instructions as the last thing an approver reads, locally and off a pulled artifact alike.
+#[then(regex = r#"^the output prints "([^"]+)" after "([^"]+)"$"#)]
+fn the_output_prints_after(world: &mut BehaviourWorld, last: String, first: String) {
+    let output = &world.result.as_ref().expect("no CLI run captured").output;
+    let at = |needle: &str| {
+        output
+            .find(needle)
+            .unwrap_or_else(|| panic!("the output does not carry {needle:?}:\n{output}"))
+    };
+    assert!(
+        at(&last) > at(&first),
+        "{last:?} must come after {first:?}:\n{output}"
+    );
 }

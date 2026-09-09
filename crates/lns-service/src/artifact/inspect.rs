@@ -114,6 +114,20 @@ pub(crate) fn build_source_layer(
     Ok(Some((title, layer.clone())))
 }
 
+/// A layer that does not read back is a disclosure this artifact does not carry, not a reason an approver cannot read the rest of it: the verb says what was lost and answers with everything else.
+pub(crate) fn build_source_or_warning(
+    title: &str,
+    bytes: &[u8],
+) -> Option<lns_ipc::BuildSourceView> {
+    match read_build_source(title, bytes) {
+        Ok(view) => Some(view),
+        Err(error) => {
+            crate::log::warn!("this artifact discloses no build source: {error:#}");
+            None
+        }
+    }
+}
+
 /// The packed build source as an approver reads it: the instructions themselves, and every context file with its size.
 pub(crate) fn read_build_source(title: &str, layer: &[u8]) -> Result<lns_ipc::BuildSourceView> {
     let read = lns_artifact::build_source::read(title, layer)
@@ -415,6 +429,62 @@ mod tests {
             .expect("a layer within the ceiling reads")
             .expect("the layer is still the layer");
         assert_eq!(title, "Containerfile");
+    }
+
+    fn warnings_from(body: impl FnOnce()) -> String {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0.lock().unwrap().push(message.0);
+            }
+        }
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, body);
+        capture.0.lock().unwrap().join("\n")
+    }
+
+    /// An approver has to be able to read the mounts, the credentials and the scripts of an artifact whose one undecodable layer is the build source.
+    #[test]
+    fn a_build_source_layer_that_does_not_decode_is_named_rather_than_failing_the_verb() {
+        let mut read = None;
+        let warned =
+            warnings_from(|| read = Some(build_source_or_warning("./image", b"not a tar")));
+        assert!(read.expect("the call answered").is_none());
+        assert!(
+            warned.contains("discloses no build source"),
+            "the verb says what was lost: {warned}"
+        );
+    }
+
+    #[test]
+    fn a_build_source_layer_that_decodes_is_read_with_no_warning() {
+        let mut read = None;
+        let warned = warnings_from(|| {
+            read = Some(build_source_or_warning("./image", &packed_source().data))
+        });
+        assert!(read.expect("the call answered").is_some());
+        assert_eq!(warned, "");
     }
 
     #[test]

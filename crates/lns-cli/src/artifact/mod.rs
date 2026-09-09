@@ -688,7 +688,6 @@ fn render_cached_inspect<W: std::io::Write>(
                 writeln!(out, "digest: {}", view.digest)?;
             }
             writeln!(out, "image: {}", view.image)?;
-            render_build_source(out, view.image_source.as_ref())?;
             for mixin in
                 crate::run::summary::mixin_display(&view.mixins, typed, &view.pinned_mixins)
             {
@@ -738,6 +737,7 @@ fn render_cached_inspect<W: std::io::Write>(
             }
             render_scripts(out, &view.scripts)?;
             render_policy_flags(out, &view.policy_flags)?;
+            render_build_source(out, view.image_source.as_ref())?;
         }
         lns_ipc::ArtifactInspection::Mixin(view) => {
             writeln!(out, "kind: mixin")?;

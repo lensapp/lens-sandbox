@@ -449,7 +449,9 @@ async fn fetch_build_source<R: crate::image::Registry>(
         .pull_blob(reference, &descriptor, &|_| {})
         .await
         .with_context(|| format!("fetching the build source layer {}", descriptor.digest))?;
-    crate::artifact::inspect::read_build_source(&title, &bytes).map(Some)
+    Ok(crate::artifact::inspect::build_source_or_warning(
+        &title, &bytes,
+    ))
 }
 
 #[cfg(test)]
