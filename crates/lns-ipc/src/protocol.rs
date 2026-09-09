@@ -9,6 +9,20 @@ pub enum Request {
     Status,
     Shutdown,
     WatchApprovals,
+    DismissApprovalNotices {
+        notices: Vec<String>,
+    },
+    ReadDashboard,
+    WatchDashboard,
+    InspectApprovalOffer {
+        id: String,
+    },
+    GrantApproval {
+        id: String,
+        digest: String,
+        method: String,
+        connection: crate::ApprovalConnection,
+    },
     RespondToApproval {
         token: String,
         action: crate::LiveApprovalAction,
@@ -211,6 +225,24 @@ pub enum Response {
     /// The answer was queued; snapshots report subsequent state and persistence failures.
     LiveApprovalSubmitted,
     LiveApprovalStale,
+    DashboardChanged,
+    DashboardBegin,
+    DashboardSandbox {
+        sandbox: crate::DashboardSandbox,
+    },
+    DashboardEvent {
+        event: crate::DashboardEvent,
+    },
+    DashboardApproval {
+        approval: crate::DashboardApproval,
+    },
+    DashboardWarning {
+        message: String,
+    },
+    DashboardEnd,
+    ApprovalOffer {
+        offer: Option<ConnectorView>,
+    },
     Error {
         message: String,
     },

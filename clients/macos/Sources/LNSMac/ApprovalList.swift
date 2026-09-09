@@ -1,12 +1,23 @@
 import SwiftUI
 import LNSClient
 
+@MainActor
 struct ApprovalList: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if model.connected {
+                    HStack {
+                        if !model.snapshot.approvals.isEmpty {
+                            Button("Dismiss visible requests", action: model.dismissVisibleRequests)
+                        }
+                        if !model.snapshot.notices.isEmpty {
+                            Button("Clear notices", action: model.dismissNotices)
+                        }
+                    }
+                }
                 if let error = model.connectionNotice {
                     Label(error, systemImage: "wifi.exclamationmark")
                         .foregroundStyle(.secondary)
@@ -76,6 +87,7 @@ struct ApprovalCard: View {
 
 struct ConnectorGrant: View {
     let offer: ConnectorOffer
+    var showsDecline = true
     let respond: (ApprovalAction) -> Void
     @State private var methodName = ""
     @State private var account = ""
@@ -103,7 +115,7 @@ struct ConnectorGrant: View {
                 Button("Grant Access") { grant(method) }
                     .disabled(!canGrant(method))
             }
-            Button("Decline Connector") { respond(.decline) }
+            if showsDecline { Button("Decline Connector") { respond(.decline) } }
         }
     }
 

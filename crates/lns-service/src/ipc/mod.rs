@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod adapter;
+pub mod dashboard;
 pub use adapter::run_server;
 
 fn reply_to_live_approval(
@@ -103,8 +104,20 @@ mod approval_stream_tests {
 
 pub async fn stream_approvals<S>(
     stream: &mut S,
-    mut updates: tokio::sync::watch::Receiver<lns_ipc::LiveApprovalSnapshot>,
+    updates: tokio::sync::watch::Receiver<lns_ipc::LiveApprovalSnapshot>,
     shutdown: &crate::shutdown::Shutdown,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    stream_responses(stream, updates, shutdown, Response::LiveApprovals).await
+}
+
+pub(super) async fn stream_responses<S, T: Clone>(
+    stream: &mut S,
+    mut updates: tokio::sync::watch::Receiver<T>,
+    shutdown: &crate::shutdown::Shutdown,
+    response: impl Fn(T) -> Response,
 ) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -112,7 +125,7 @@ where
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let snapshot = updates.borrow_and_update().clone();
-        let frame = lns_ipc::encode_frame(&Response::LiveApprovals(snapshot))?;
+        let frame = lns_ipc::encode_frame(&response(snapshot))?;
         tokio::select! {
             result = stream.write_all(&frame) => result?,
             _ = shutdown.wait_async() => return Ok(()),
@@ -121,7 +134,7 @@ where
         tokio::select! {
             result = updates.changed() => if result.is_err() { return Ok(()); },
             result = stream.read(&mut incoming) => {
-                if result? != 0 { anyhow::bail!("approval subscriptions are receive-only"); }
+                if result? != 0 { anyhow::bail!("IPC subscriptions are receive-only"); }
                 return Ok(());
             }
             _ = shutdown.wait_async() => return Ok(()),
@@ -672,8 +685,13 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             unreachable!("{request:?} has a handler of its own, not this match")
         }
         Request::Ping => Response::Pong,
-        Request::WatchApprovals => Response::Error {
-            message: "approval watching requires a streaming connection".into(),
+        Request::WatchApprovals
+        | Request::DismissApprovalNotices { .. }
+        | Request::ReadDashboard
+        | Request::WatchDashboard
+        | Request::InspectApprovalOffer { .. }
+        | Request::GrantApproval { .. } => Response::Error {
+            message: "this request requires its dedicated streaming connection handler".into(),
         },
         Request::RespondToApproval { token, action } => {
             reply_to_live_approval(crate::approval_flow::inbox::get(), token, action.clone())

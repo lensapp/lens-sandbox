@@ -7,11 +7,11 @@ public struct ServiceConnection {
 
     public init(path: String) { self.path = path }
 
-    public func replies(to request: ServiceRequest, once: Bool = false) throws -> AsyncThrowingStream<Data, Error> {
+    public func replies(to request: ServiceRequest, once: Bool = false, latestOnly: Bool = true) throws -> AsyncThrowingStream<Data, Error> {
         let frame = try FrameDecoder.encode(JSONEncoder().encode(request))
         let connection = NWConnection(to: .unix(path: path), using: .tcp)
         let queue = DispatchQueue(label: "run.lns.client.connection")
-        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        return AsyncThrowingStream(bufferingPolicy: latestOnly ? .bufferingNewest(1) : .unbounded) { continuation in
             var decoder = FrameDecoder()
             var started = false
             var received = false
@@ -65,6 +65,19 @@ public struct ServiceConnection {
             return try ServiceReply.decode(data)
         }
         throw ServiceError(message: "The service disconnected before confirming the request. Check its state before trying again.")
+    }
+
+    public func dashboard() async throws -> DashboardData {
+        var reader = DashboardRead()
+        var snapshot: DashboardData?
+        for try await data in try replies(to: .readDashboard, latestOnly: false) {
+            try Task.checkCancellation()
+            let message = try JSONDecoder().decode(DashboardMessage.self, from: data)
+            if let complete = try reader.receive(message) { snapshot = complete }
+        }
+        try reader.finish()
+        guard let snapshot else { throw ServiceError(message: "The service returned no dashboard snapshot.") }
+        return snapshot
     }
 }
 #endif

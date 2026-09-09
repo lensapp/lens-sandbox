@@ -5,6 +5,24 @@ use crate::{ConnectorView, SecretValues};
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_dashboard_requests_are_language_neutral() {
+        for value in [
+            serde_json::json!({"type": "ReadDashboard"}),
+            serde_json::json!({"type": "WatchDashboard"}),
+            serde_json::json!({"type": "DismissApprovalNotices", "notices": ["old warning"]}),
+            serde_json::json!({"type": "InspectApprovalOffer", "id": "entry-1"}),
+            serde_json::json!({"type": "GrantApproval", "id": "entry-1", "digest": "sha256:test", "method": "token", "connection": {"kind": "held", "label": "work"}}),
+        ] {
+            let decoded = serde_json::from_value::<crate::Request>(value.clone());
+            assert!(
+                decoded.is_ok(),
+                "dashboard requests must cross IPC: {decoded:?}"
+            );
+            assert_eq!(serde_json::to_value(decoded.unwrap()).unwrap(), value);
+        }
+    }
+
+    #[test]
     fn swift_fixture_is_the_service_snapshot_wire_format() {
         let snapshot = crate::Response::LiveApprovals(super::LiveApprovalSnapshot {
             approvals: vec![super::LiveApproval {

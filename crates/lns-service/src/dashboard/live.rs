@@ -7,6 +7,12 @@ use super::View;
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static OPEN_REQUESTED: AtomicU8 = AtomicU8::new(NOTHING);
+static CHANGES: std::sync::LazyLock<tokio::sync::watch::Sender<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(()).0);
+
+pub fn subscribe() -> tokio::sync::watch::Receiver<()> {
+    CHANGES.subscribe()
+}
 
 const NOTHING: u8 = 0;
 const TIMELINE: u8 = 1;
@@ -18,6 +24,7 @@ pub fn viewport_id() -> ViewportId {
 
 pub fn note_write() {
     GENERATION.fetch_add(1, Ordering::Release);
+    CHANGES.send_replace(());
     if WATCHING.load(Ordering::Acquire)
         && let Some(ctx) = crate::approval_flow::window::ctx()
     {
@@ -56,6 +63,17 @@ pub fn take_open_request() -> Option<View> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn external_clients_are_woken_when_dashboard_data_changes() {
+        let mut receiver = subscribe();
+        receiver.borrow_and_update();
+        note_write();
+        assert!(
+            receiver.has_changed().unwrap(),
+            "a native dashboard must learn about writes without polling files"
+        );
+    }
 
     #[test]
     fn viewport_id_is_stable_and_not_the_root() {

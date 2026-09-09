@@ -84,6 +84,12 @@ struct InformEntry {
 }
 
 impl ApprovalInbox {
+    pub fn dismiss_notices(&self, notices: &[String]) -> Response {
+        self.lock()
+            .informs
+            .retain(|entry| !notices.contains(&entry.msg));
+        Response::Acknowledged
+    }
     pub fn watch(&self) -> watch::Receiver<LiveApprovalSnapshot> {
         self.updates.subscribe()
     }
@@ -371,6 +377,15 @@ fn grant_action(
         .offer
         .as_ref()
         .ok_or("this approval offers no connector")?;
+    let connection = approval_connection(offer, &method, connection)?;
+    Ok(RequestAction::Grant { method, connection })
+}
+
+pub(crate) fn approval_connection(
+    offer: &lns_ipc::ConnectorView,
+    method: &str,
+    connection: ApprovalConnection,
+) -> Result<ConnectionChoice, String> {
     let selected = offer
         .methods
         .iter()
@@ -393,10 +408,7 @@ fn grant_action(
         }
         _ => return Err("choose a connection for the offered method".into()),
     };
-    Ok(RequestAction::Grant {
-        method,
-        connection: choice,
-    })
+    Ok(choice)
 }
 
 fn valid_new_connection(
@@ -441,6 +453,22 @@ pub fn get() -> Option<Arc<ApprovalInbox>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clearing_observed_notices_preserves_notices_that_arrived_later() {
+        let inbox = super::ApprovalInbox::new();
+        inbox.push_inform("old warning".into());
+        let observed = inbox.watch().borrow().notices.clone();
+        inbox.push_inform("new warning".into());
+        assert_eq!(
+            inbox.dismiss_notices(&observed),
+            lns_ipc::Response::Acknowledged
+        );
+        assert_eq!(
+            inbox.watch().borrow().notices,
+            ["new warning"],
+            "a client dismisses only the notices it saw"
+        );
+    }
     use super::*;
 
     fn connector_prompt() -> PendingPrompt {

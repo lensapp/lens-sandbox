@@ -74,6 +74,7 @@ jobs:
               - 'clients/macos/**'
               - 'crates/lns-ipc/**'
               - 'crates/lns-service/src/approval_flow/**'
+              - 'crates/lns-service/src/dashboard/**'
               - 'crates/lns-service/src/ipc/**'
               - '.github/workflows/ci.yml'
             static-nft:

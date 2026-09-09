@@ -101,9 +101,43 @@ public struct ServiceRequest: Encodable {
     public let type: String
     public let token: String?
     public let action: ApprovalAction?
+    public let id: String?
+    public let answer: HistoryAnswer?
+    public let method: String?
+    public let digest: String?
+    public let notices: [String]?
+    public let connection: ConnectionChoice?
+
+    private init(type: String, token: String? = nil, action: ApprovalAction? = nil,
+                 id: String? = nil, answer: HistoryAnswer? = nil, method: String? = nil, digest: String? = nil, connection: ConnectionChoice? = nil, notices: [String]? = nil) {
+        self.type = type; self.token = token; self.action = action
+        self.id = id; self.answer = answer; self.method = method; self.digest = digest; self.connection = connection
+        self.notices = notices
+    }
 
     public static let watchApprovals = ServiceRequest(type: "WatchApprovals", token: nil, action: nil)
     public static let shutdown = ServiceRequest(type: "Shutdown", token: nil, action: nil)
+    public static let readDashboard = ServiceRequest(type: "ReadDashboard", token: nil, action: nil)
+    public static let watchDashboard = ServiceRequest(type: "WatchDashboard", token: nil, action: nil)
+    public static func dismissNotices(_ notices: [String]) -> Self {
+        Self(type: "DismissApprovalNotices", notices: notices)
+    }
+
+    public static func answerHistory(id: String, answer: HistoryAnswer) -> Self {
+        Self(type: "AnswerApproval", id: id, answer: answer)
+    }
+
+    public static func removeHistory(id: String) -> Self {
+        Self(type: "RemoveApproval", id: id)
+    }
+
+    public static func inspectOffer(id: String) -> Self {
+        Self(type: "InspectApprovalOffer", id: id)
+    }
+
+    public static func grantHistory(id: String, method: String, digest: String, connection: ConnectionChoice) -> Self {
+        Self(type: "GrantApproval", id: id, method: method, digest: digest, connection: connection)
+    }
 
     public static func respond(token: String, action: ApprovalAction) -> Self {
         Self(type: "RespondToApproval", token: token, action: action)
@@ -112,6 +146,7 @@ public struct ServiceRequest: Encodable {
 
 public enum ServiceReply {
     case snapshot(ApprovalSnapshot), submitted, stale, shuttingDown
+    case acknowledged, offer(ConnectorOffer?)
 
     public static func decode(_ data: Data) throws -> Self {
         struct Envelope: Decodable { let type: String; let message: String? }
@@ -122,6 +157,14 @@ public enum ServiceReply {
         case "LiveApprovalSubmitted": return .submitted
         case "LiveApprovalStale": return .stale
         case "ShuttingDown": return .shuttingDown
+        case "Acknowledged", "ApprovalAnswered", "ApprovalRemoved": return .acknowledged
+        case "ApprovalOffer":
+            struct Offered: Decodable { let offer: ConnectorOffer? }
+            return .offer(try decoder.decode(Offered.self, from: data).offer)
+        case "ApprovalNotWritten", "ApprovalKept":
+            struct Refused: Decodable { let reason: String }
+            throw ServiceError(message: try decoder.decode(Refused.self, from: data).reason)
+        case "ApprovalUnknown": throw ServiceError(message: "That approval is no longer listed. Refresh to see the current state.")
         case "Error": throw ServiceError(message: envelope.message ?? "The service could not complete the request.")
         default: throw ServiceError(message: "This app and service use different protocols. Update them together.")
         }
