@@ -1813,28 +1813,23 @@ fn one_layer_was_captured(world: &mut E2eWorld) {
         .as_ref()
         .expect("Given a clean lns cache home first")
         .path();
-    let runs = home.join(".lns").join("runs");
-    let pointers = built_image_pointers(&runs);
-    assert_eq!(
-        pointers.len(),
-        1,
-        "exactly one run must have written {} under {}: found {pointers:?}\n--- run stderr ---\n{}\n--- run stdout ---\n{}\n--- service.log ---\n{}",
-        lns_service::containerfile::real::BUILT_REFERENCE_FILE,
-        runs.display(),
-        world
-            .result
-            .as_ref()
-            .map(|r| r.stderr.as_str())
-            .unwrap_or("(no run)"),
-        world
-            .result
-            .as_ref()
-            .map(|r| r.stdout.as_str())
-            .unwrap_or("(no run)"),
-        crate::steps::service::read_service_log(world),
-    );
-    let reference = std::fs::read_to_string(&pointers[0])
-        .expect("the pointer the capture just wrote must read")
+    let run_id = last_run(world).expect("the run must have reported its id");
+    let path = home
+        .join(".lns")
+        .join("runs")
+        .join(&run_id)
+        .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
+    let reference = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            let run = world.result.as_ref();
+            panic!(
+                "the capture must name the image it built in {}: {e}\n--- run stderr ---\n{}\n--- run stdout ---\n{}\n--- service.log ---\n{}",
+                path.display(),
+                run.map(|r| r.stderr.as_str()).unwrap_or("(no run)"),
+                run.map(|r| r.stdout.as_str()).unwrap_or("(no run)"),
+                crate::steps::service::read_service_log(world),
+            )
+        })
         .trim()
         .to_string();
     assert!(
@@ -1842,23 +1837,6 @@ fn one_layer_was_captured(world: &mut E2eWorld) {
         "the built image must be named by digest, got {reference:?}",
     );
     world.built_image = Some(reference);
-}
-
-/// The capture writes its pointer in the run's own directory, so the scenario looks for it there.
-fn built_image_pointers(runs: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut found = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(runs) {
-        for entry in entries.flatten() {
-            let pointer = entry
-                .path()
-                .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
-            if pointer.is_file() {
-                found.push(pointer);
-            }
-        }
-    }
-    found.sort();
-    found
 }
 
 #[when(regex = r#"^the user runs a microVM command "([^"]*)" over the built image$"#)]
