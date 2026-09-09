@@ -84,6 +84,17 @@ fn service_is_running_in_home(world: &mut E2eWorld) {
     start_service(world);
 }
 
+#[given(
+    regex = r#"^the LNS service is running in that home carrying "([^"=]+)=([^"]+)" in its own environment$"#
+)]
+fn service_is_running_in_home_carrying(world: &mut E2eWorld, name: String, value: String) {
+    assert!(
+        world.home.is_some(),
+        "Given a clean lns cache home before starting the service in it"
+    );
+    start_service_with(world, &[(name.as_str(), value.as_str())]);
+}
+
 #[given("the LNS service is running headless in that home")]
 fn service_is_running_headless_in_home(world: &mut E2eWorld) {
     assert!(
