@@ -33,15 +33,38 @@ pub fn walk<F: SnapshotFs + ?Sized>(fs: &F, root: &Path, kind: Kind) -> Result<V
             kind,
             max_bytes: crate::build::MAX_FILESET_BYTES,
             max_entries: crate::build::MAX_FILESET_ENTRIES,
+            symlinks: Symlinks::Refuse,
         },
     )
 }
 
-/// What one walk enforces on the tree it reads: which kind is walking, and the two limits a packed layer may not exceed.
+/// Snapshot a build context into pack-ready entries. A context is a fileset in every way but one: §3.1.1 says a symlink inside it is listed and not sent, because an ordinary dependency install writes one into a directory an author then names as a context.
+pub fn walk_context<F: SnapshotFs + ?Sized>(fs: &F, root: &Path) -> Result<Vec<FileEntry>> {
+    walk_under(
+        fs,
+        root,
+        &WalkRules {
+            kind: Kind::Sandbox,
+            max_bytes: crate::build::MAX_FILESET_BYTES,
+            max_entries: crate::build::MAX_FILESET_ENTRIES,
+            symlinks: Symlinks::Skip,
+        },
+    )
+}
+
+/// What a walk does with a symlink: a fileset carries only regular files, and a build context leaves one behind rather than failing (§3.1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Symlinks {
+    Refuse,
+    Skip,
+}
+
+/// What one walk enforces on the tree it reads: which kind is walking, what a symlink means, and the two limits a packed layer may not exceed.
 struct WalkRules {
     kind: Kind,
     max_bytes: u64,
     max_entries: usize,
+    symlinks: Symlinks,
 }
 
 fn walk_under<F: SnapshotFs + ?Sized>(
@@ -82,6 +105,9 @@ fn walk_into<F: SnapshotFs + ?Sized>(
             );
         }
         if entry.symlink {
+            if rules.symlinks == Symlinks::Skip {
+                continue;
+            }
             bail!(
                 "fileset contains a symlink: {} — filesets carry only regular files",
                 entry_rel.display()
@@ -364,6 +390,7 @@ mod tests {
             kind: Kind::Sandbox,
             max_bytes: 1024,
             max_entries: 1,
+            symlinks: Symlinks::Refuse,
         };
         let fs = MapFs::with(&[("/f/a.txt", b"a"), ("/f/b.txt", b"b")]);
         let err = walk_under(&fs, Path::new("/f"), &rules)
@@ -378,6 +405,7 @@ mod tests {
             kind: Kind::Sandbox,
             max_bytes: 4,
             max_entries: 100,
+            symlinks: Symlinks::Refuse,
         };
         let fs = MapFs::with(&[("/f/a.txt", b"aaaaaaaa")]);
         let err = walk_under(&fs, Path::new("/f"), &rules)
@@ -509,6 +537,55 @@ mod tests {
             err.contains("symlink: link") && err.contains("only regular files"),
             "{err}"
         );
+    }
+
+    /// A directory an `npm install` wrote: one real file, and the symlink the install left beside it.
+    struct Context;
+
+    impl SnapshotFs for Context {
+        fn read_limited(&self, _: &Path, _: u64) -> io::Result<Vec<u8>> {
+            Ok(b"FROM alpine\n".to_vec())
+        }
+        fn dir_entries(&self, _: &Path) -> io::Result<Vec<DirEntry>> {
+            Ok(vec![
+                DirEntry {
+                    name: "Containerfile".to_string(),
+                    dir: false,
+                    mode: 0o644,
+                    symlink: false,
+                },
+                DirEntry {
+                    name: "tsc".to_string(),
+                    dir: false,
+                    mode: 0o777,
+                    symlink: true,
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn a_symlink_in_a_build_context_is_left_behind_rather_than_refusing_the_push() {
+        let entries = walk_context(&Context, Path::new("/work/image"))
+            .expect("a context an npm install wrote is still packable");
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["Containerfile"],
+            "§3.1.1: a symlink is not sent, and a context that holds one still publishes"
+        );
+    }
+
+    #[test]
+    fn a_build_context_still_refuses_a_secret_shaped_file() {
+        let fs = MapFs::with(&[
+            ("/work/image/Containerfile", b"FROM alpine\n"),
+            ("/work/image/credentials.json", b"{}"),
+        ]);
+        let err = walk_context(&fs, Path::new("/work/image"))
+            .expect_err("a context ships inside the artifact, so a secret in it would publish")
+            .to_string();
+        assert!(err.contains("secret-shaped file"), "{err}");
     }
 
     #[test]
