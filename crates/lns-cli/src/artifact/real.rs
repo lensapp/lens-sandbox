@@ -21,6 +21,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
                 &push.reference.clone(),
                 push.dry_run,
                 push.assume_yes,
+                push.output.format,
                 push.file.clone().as_deref(),
                 cwd,
             )
@@ -62,6 +63,7 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
             &qualified_reference(&args.reference)?,
             args.dry_run,
             args.assume_yes,
+            args.output.format,
             args.file.as_deref(),
             ctx.cwd()?,
         )
@@ -110,6 +112,7 @@ async fn push_local(
     reference: &str,
     dry_run: bool,
     assume_yes: bool,
+    format: crate::output::Format,
     file: Option<&std::path::Path>,
     cwd: PathBuf,
 ) -> Result<i32> {
@@ -118,9 +121,16 @@ async fn push_local(
     let doc = super::author::load_definition_json_at(&RealFs, &path)?;
     let mut out = std::io::stdout();
     if dry_run {
-        return super::distribute::push_dry_run(&RealFs, &project_dir, &doc, reference, &mut out);
+        return super::distribute::push_dry_run_formatted(
+            &RealFs,
+            &project_dir,
+            &doc,
+            reference,
+            format,
+            &mut out,
+        );
     }
-    super::distribute::push(
+    super::distribute::push_formatted(
         super::distribute::PushPorts {
             fs: &RealFs,
             cwd: &project_dir,
@@ -133,6 +143,7 @@ async fn push_local(
             assume_yes,
             terminal: &mut crate::terminal::RealTerminal::open(),
         },
+        format,
         &mut out,
     )
     .await

@@ -258,6 +258,8 @@ pub struct PushArgs {
         help = "Definition file to publish instead of ./lns.yaml; its directory roots the definition's relative filesets."
     )]
     pub file: Option<PathBuf>,
+    #[command(flatten)]
+    pub output: crate::output::OutputArgs,
 }
 
 #[derive(clap::Args)]
@@ -918,6 +920,9 @@ mod tests {
             dry_run: false,
             assume_yes: false,
             file: None,
+            output: crate::output::OutputArgs {
+                format: crate::output::Format::Table,
+            },
         });
         let mut out = Vec::new();
         let mut stderr = Vec::new();
