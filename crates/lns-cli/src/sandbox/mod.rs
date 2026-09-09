@@ -817,6 +817,9 @@ async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
             if removed.is_empty() {
                 writeln!(out, "No stopped sandboxes.")?;
             }
+            for reference in &built_images {
+                writeln!(out, "removed built image {reference}")?;
+            }
             Ok(0)
         }
         Response::Error { message } => Err(crate::service::reply::failure(&message)),
