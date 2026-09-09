@@ -561,11 +561,9 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     }),
             )
         }
-        Request::ListPrunableImages => image_response(
-            crate::image_store::list_prunable()
-                .await
-                .map(|images| Response::ImageList { images }),
-        ),
+        Request::ListPrunableImages | Request::ListPrunableBuiltImages => {
+            image_response(prunable_listing(request).await)
+        }
         Request::ResolveDefinition {
             definition,
             project_dir,
@@ -606,8 +604,17 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition,
             definition_dir,
             rebuild,
+            authored_egress,
+            packed_filesets,
         } => image_response(
-            crate::containerfile::real::build_sandbox(definition, definition_dir, *rebuild).await,
+            crate::containerfile::real::build_sandbox(&crate::containerfile::real::SandboxBuild {
+                definition,
+                definition_dir,
+                rebuild: *rebuild,
+                authored_egress: authored_egress.as_deref(),
+                packed_filesets,
+            })
+            .await,
         ),
         Request::BuildImageForPush {
             definition,
@@ -736,6 +743,21 @@ async fn remove_run_request(run: &str, force: bool) -> anyhow::Result<Response> 
     .await)
 }
 
+/// What a prune would remove right now: the artifacts of the image namespace, or the images a build left behind.
+async fn prunable_listing(request: &Request) -> anyhow::Result<Response> {
+    match request {
+        Request::ListPrunableBuiltImages => prunable_built_images_request().await,
+        _ => crate::image_store::list_prunable()
+            .await
+            .map(|images| Response::ImageList { images }),
+    }
+}
+
+async fn prunable_built_images_request() -> anyhow::Result<Response> {
+    let root = crate::cache::root()?;
+    Ok(prunable_built_images_with(&root, &crate::containerfile::real::RealBuiltImageSweep).await)
+}
+
 async fn prune_runs_request() -> anyhow::Result<Response> {
     let root = crate::cache::root()?;
     Ok(prune_runs_with(
@@ -861,6 +883,31 @@ pub trait BuiltImageSweep {
         cache_root: &std::path::Path,
         surviving_runs: &[String],
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<String>>> + Send;
+
+    /// The same reading, taken without removing anything, so a prune can list it before it asks.
+    fn candidates(
+        &self,
+        cache_root: &std::path::Path,
+        surviving_runs: &[String],
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<String>>> + Send;
+}
+
+/// What a run prune would sweep if it ran now: the runs that survive it are the ones still running.
+pub async fn prunable_built_images_with<B: BuiltImageSweep>(
+    cache_root: &std::path::Path,
+    builds: &B,
+) -> Response {
+    let surviving: Vec<String> = crate::run_registry::snapshot()
+        .into_iter()
+        .filter(|run| matches!(run.status, lns_ipc::RunStatus::Running))
+        .map(|run| run.id)
+        .collect();
+    match builds.candidates(cache_root, &surviving).await {
+        Ok(references) => Response::PrunableBuiltImages { references },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
+    }
 }
 
 /// Sweep every stopped run and every orphan run dir — the one command that takes a machine back to clean.
@@ -3228,6 +3275,8 @@ mod tests {
                 definition: serde_json::json!({"spec": {"image": "alpine:3.20"}}).to_string(),
                 definition_dir: "/work".into(),
                 rebuild: false,
+                authored_egress: None,
+                packed_filesets: Vec::new(),
             },
             Instant::now(),
         )
@@ -3269,16 +3318,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
     async fn a_prune_answers_with_the_built_images_it_dropped() {
-        struct SweptOne;
-        impl BuiltImageSweep for SweptOne {
-            async fn sweep(
-                &self,
-                _cache_root: &std::path::Path,
-                _surviving_runs: &[String],
-            ) -> anyhow::Result<Vec<String>> {
-                Ok(vec!["lns-build.local/built@sha256:gone".into()])
-            }
-        }
         let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweptOne);
         let root = std::path::Path::new("/cache");
 
@@ -3296,16 +3335,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]
     async fn a_prune_whose_built_image_sweep_fails_still_answers_for_the_runs() {
-        struct SweepFails;
-        impl BuiltImageSweep for SweepFails {
-            async fn sweep(
-                &self,
-                _cache_root: &std::path::Path,
-                _surviving_runs: &[String],
-            ) -> anyhow::Result<Vec<String>> {
-                anyhow::bail!("the image index is not readable")
-            }
-        }
         let (fs, sweep) = (ScriptedRunsDir(Vec::new()), SweepFails);
         let root = std::path::Path::new("/cache");
         let warnings = Warnings::default();
@@ -3446,10 +3475,58 @@ mod tests {
         );
     }
 
+    /// One built image nothing names, both when a prune sweeps and when it is asked what it would sweep.
+    struct SweptOne;
+    impl BuiltImageSweep for SweptOne {
+        async fn sweep(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["lns-build.local/built@sha256:gone".into()])
+        }
+
+        async fn candidates(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["lns-build.local/built@sha256:gone".into()])
+        }
+    }
+
+    /// An image index neither the sweep nor the listing can read.
+    struct SweepFails;
+    impl BuiltImageSweep for SweepFails {
+        async fn sweep(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("the image index is not readable")
+        }
+
+        async fn candidates(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("the image index is not readable")
+        }
+    }
+
     /// A machine where no Containerfile build ever ran, which is what most prune scenarios are about.
     struct SweepsNothing;
     impl BuiltImageSweep for SweepsNothing {
         async fn sweep(
+            &self,
+            _cache_root: &std::path::Path,
+            _surviving_runs: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn candidates(
             &self,
             _cache_root: &std::path::Path,
             _surviving_runs: &[String],
@@ -3869,6 +3946,52 @@ mod tests {
             matches!(resp, Response::Error { .. } | Response::RunsPruned { .. }),
             "got {resp:?}"
         );
+        let resp = image_response(prunable_built_images_request().await);
+        assert!(
+            matches!(
+                resp,
+                Response::Error { .. } | Response::PrunableBuiltImages { .. }
+            ),
+            "got {resp:?}"
+        );
+    }
+
+    /// A prune lists what it would drop before it asks, and the listing removes nothing.
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_prune_asked_what_it_would_drop_names_the_built_images() {
+        let resp = prunable_built_images_with(std::path::Path::new("/cache"), &SweptOne).await;
+
+        match resp {
+            Response::PrunableBuiltImages { references } => {
+                assert_eq!(references, ["lns-build.local/built@sha256:gone"]);
+            }
+            other => unreachable!("expected PrunableBuiltImages, got {other:?}"),
+        }
+    }
+
+    /// An index a listing cannot read is said so, rather than reported as nothing to drop.
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_listing_that_cannot_read_the_index_says_so() {
+        let resp = prunable_built_images_with(std::path::Path::new("/cache"), &SweepFails).await;
+
+        match resp {
+            Response::Error { message } => assert!(message.contains("not readable"), "{message}"),
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// A machine where no build ever ran offers nothing to drop.
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn a_machine_that_never_built_offers_no_built_image_to_drop() {
+        let resp = prunable_built_images_with(std::path::Path::new("/cache"), &SweepsNothing).await;
+
+        match resp {
+            Response::PrunableBuiltImages { references } => assert!(references.is_empty()),
+            other => unreachable!("expected PrunableBuiltImages, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -4773,6 +4896,18 @@ mod tests {
         assert_eq!(resp["type"], "Error", "got {resp}");
         let message = resp["message"].as_str().expect("an error message");
         assert!(message.contains("no such image"), "got: {message}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env, global_runs)]
+    async fn handle_request_prunable_built_images_of_a_machine_that_never_built_is_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+
+        let resp = as_json(handle_request(&Request::ListPrunableBuiltImages, Instant::now()).await);
+
+        assert_eq!(resp["type"], "PrunableBuiltImages", "got {resp}");
+        assert_eq!(resp["references"], serde_json::json!([]));
     }
 
     #[tokio::test]

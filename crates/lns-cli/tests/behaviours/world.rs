@@ -248,10 +248,14 @@ pub struct SandboxCliRig {
     pub cached_references: Vec<String>,
     /// What a prune would remove right now, served for a `ListPrunableImages` request.
     pub prunable_references: Vec<String>,
+    /// What a run prune's sweep would drop right now, served for a `ListPrunableBuiltImages` request.
+    pub prunable_built_images: Vec<String>,
     /// Response the fake returns for a `ListRuns` request specifically, so prune can canned-serve both the stopped listing and the sweep.
     pub list_runs_response: Option<lns_ipc::Response>,
     /// Response the fake returns for a `RemoveRun` request, so a scenario can pin the service's own refusal of a running sandbox.
     pub remove_run_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `ResolveDefinition` request, so a build can resolve a document's mixins before it builds it.
+    pub resolve_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,

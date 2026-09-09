@@ -47,7 +47,7 @@ pub(crate) async fn import<F: Fs>(
     let record = ImageRecord {
         reference: pinned.clone(),
         digest: built.manifest_digest.clone(),
-        kind: RecordKind::Image,
+        kind: RecordKind::Built,
         dependencies: Vec::new(),
         layers: built
             .manifest
@@ -168,7 +168,7 @@ pub(crate) mod tests {
         let f = fixture();
         let pinned = imported(&f).await;
         let record = recorded(&f, &pinned);
-        assert_eq!(record.kind, RecordKind::Image);
+        assert_eq!(record.kind, RecordKind::Built);
         assert_eq!(record.pulled_unix_secs, 1_757_000_000);
         assert_eq!(
             record.layers,

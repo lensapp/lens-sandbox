@@ -24,60 +24,90 @@ pub(crate) fn image_key(base: &str, text: &str, context: &str, arch: &str) -> St
     fields.finish()
 }
 
-/// One instruction over the image before it, which is what makes a build reuse its leading steps.
-pub(crate) fn step_key(parent: &str, instruction: &str, copied: Option<&str>) -> String {
-    let mut fields = Fields::over("lns.build.step.v1");
-    fields.field(parent.as_bytes());
-    fields.field(instruction.as_bytes());
-    match copied {
-        Some(copied) => {
-            fields.field(b"copied");
-            fields.field(copied.as_bytes());
+/// What every step of one build is keyed under: the document's own policy decides what an
+/// instruction may reach, so a step another document's rules produced is not this document's step.
+pub(crate) struct Steps<'a> {
+    policy: &'a str,
+}
+
+/// The policy a build step boots under, as the document declares it: what it may reach, and which credentials it carries.
+pub(crate) fn policy_fingerprint(definition: &str) -> Result<String> {
+    let document: serde_json::Value =
+        serde_json::from_str(definition).context("reading the document this build is held to")?;
+    let mut fields = Fields::over("lns.build.policy.v1");
+    for declared in ["egress", "credentials"] {
+        fields.field(declared.as_bytes());
+        fields.field(document["spec"][declared].to_string().as_bytes());
+    }
+    Ok(fields.finish())
+}
+
+impl<'a> Steps<'a> {
+    pub(crate) fn under(policy: &'a str) -> Self {
+        Self { policy }
+    }
+
+    fn opening(&self) -> Fields {
+        let mut fields = Fields::over("lns.build.step.v1");
+        fields.field(self.policy.as_bytes());
+        fields
+    }
+
+    /// One instruction over the image before it, which is what makes a build reuse its leading steps.
+    pub(crate) fn key(&self, parent: &str, instruction: &str, copied: Option<&str>) -> String {
+        let mut fields = self.opening();
+        fields.field(parent.as_bytes());
+        fields.field(instruction.as_bytes());
+        match copied {
+            Some(copied) => {
+                fields.field(b"copied");
+                fields.field(copied.as_bytes());
+            }
+            None => fields.field(b"nothing copied"),
         }
-        None => fields.field(b"nothing copied"),
+        fields.finish()
     }
-    fields.finish()
-}
 
-/// A `RUN` as the guest is actually asked to run it: `ARG` reaches a command and its environment
-/// without committing anything of its own, so the written text alone does not tell two runs apart.
-pub(crate) fn run_key(parent: &str, step: &RunStep) -> String {
-    let mut fields = Fields::over("lns.build.step.v1");
-    fields.field(parent.as_bytes());
-    fields.field(b"RUN");
-    fields.each(&step.argv);
-    fields.field(b"env");
-    fields.each(&step.env);
-    fields.field(step.user.as_bytes());
-    fields.field(step.workdir.as_bytes());
-    fields.finish()
-}
-
-/// A `COPY` or an `ADD` by what it puts in its layer, which is where its sources, its destination and its `--chown` all end up.
-pub(crate) fn transfer_key(parent: &str, instruction: &str, copied: &ChangeSet) -> String {
-    step_key(parent, instruction, Some(&changes_hash(copied)))
-}
-
-/// An instruction that writes only config, by the config the image then carries — the same reason a `RUN` is keyed by its resolved command.
-pub(crate) fn config_key(parent: &str, instruction: &str, config: &ConfigDraft) -> String {
-    let mut fields = Fields::over("lns.build.step.v1");
-    fields.field(parent.as_bytes());
-    fields.field(instruction.as_bytes());
-    fields.field(b"config");
-    fields.pairs(&config.env);
-    fields.pairs(&config.labels);
-    for optional in [&config.user, &config.workdir] {
-        fields.field(optional.as_deref().unwrap_or_default().as_bytes());
+    /// A `RUN` as the guest is actually asked to run it: `ARG` reaches a command and its environment
+    /// without committing anything of its own, so the written text alone does not tell two runs apart.
+    pub(crate) fn run(&self, parent: &str, step: &RunStep) -> String {
+        let mut fields = self.opening();
+        fields.field(parent.as_bytes());
+        fields.field(b"RUN");
+        fields.each(&step.argv);
+        fields.field(b"env");
+        fields.each(&step.env);
+        fields.field(step.user.as_bytes());
+        fields.field(step.workdir.as_bytes());
+        fields.finish()
     }
-    for argv in [&config.entrypoint, &config.cmd, &config.shell] {
-        match argv {
-            Some(argv) => fields.each(argv),
-            None => fields.field(b"unset"),
+
+    /// A `COPY` or an `ADD` by what it puts in its layer, which is where its sources, its destination and its `--chown` all end up.
+    pub(crate) fn transfer(&self, parent: &str, instruction: &str, copied: &ChangeSet) -> String {
+        self.key(parent, instruction, Some(&changes_hash(copied)))
+    }
+
+    /// An instruction that writes only config, by the config the image then carries — the same reason a `RUN` is keyed by its resolved command.
+    pub(crate) fn config(&self, parent: &str, instruction: &str, config: &ConfigDraft) -> String {
+        let mut fields = self.opening();
+        fields.field(parent.as_bytes());
+        fields.field(instruction.as_bytes());
+        fields.field(b"config");
+        fields.pairs(&config.env);
+        fields.pairs(&config.labels);
+        for optional in [&config.user, &config.workdir] {
+            fields.field(optional.as_deref().unwrap_or_default().as_bytes());
         }
+        for argv in [&config.entrypoint, &config.cmd, &config.shell] {
+            match argv {
+                Some(argv) => fields.each(argv),
+                None => fields.field(b"unset"),
+            }
+        }
+        fields.each(&config.exposed_ports);
+        fields.each(&config.volumes);
+        fields.finish()
     }
-    fields.each(&config.exposed_ports);
-    fields.each(&config.volumes);
-    fields.finish()
 }
 
 /// Every byte the context holds, so a file edited beside the Containerfile is a different build and a file only touched is not.
@@ -228,6 +258,12 @@ mod tests {
     use crate::containerfile::upper::{Change, ChangeSet};
     use std::path::Path;
 
+    const POLICY: &str = "sha256:the-policy-this-document-declares";
+
+    fn steps() -> Steps<'static> {
+        Steps::under(POLICY)
+    }
+
     fn hashed(context: &FakeContext) -> String {
         context_hash(context, Path::new("/ctx")).expect("this context reads")
     }
@@ -287,7 +323,7 @@ mod tests {
     fn a_key_names_the_algorithm_that_made_it() {
         for key in [
             image_key("b", "t", "c", "arm64"),
-            step_key("parent", "RUN true", None),
+            steps().key("parent", "RUN true", None),
             hashed(&one_file(b"one\n", 0o644)),
         ] {
             assert!(key.starts_with("sha256:"), "{key}");
@@ -424,7 +460,7 @@ mod tests {
 
     #[test]
     fn the_parent_the_instruction_and_the_copied_content_each_change_the_instruction_key() {
-        let key = step_key(
+        let key = steps().key(
             "built@sha256:parent",
             "COPY app /srv",
             Some("sha256:copied"),
@@ -432,25 +468,25 @@ mod tests {
 
         assert_eq!(
             key,
-            step_key(
+            steps().key(
                 "built@sha256:parent",
                 "COPY app /srv",
                 Some("sha256:copied")
             ),
         );
         for other in [
-            step_key("built@sha256:other", "COPY app /srv", Some("sha256:copied")),
-            step_key(
+            steps().key("built@sha256:other", "COPY app /srv", Some("sha256:copied")),
+            steps().key(
                 "built@sha256:parent",
                 "COPY app /opt",
                 Some("sha256:copied"),
             ),
-            step_key(
+            steps().key(
                 "built@sha256:parent",
                 "COPY app /srv",
                 Some("sha256:edited"),
             ),
-            step_key("built@sha256:parent", "COPY app /srv", None),
+            steps().key("built@sha256:parent", "COPY app /srv", None),
         ] {
             assert_ne!(key, other);
         }
@@ -461,8 +497,8 @@ mod tests {
     #[test]
     fn an_instruction_that_copies_nothing_is_keyed_apart_from_one_that_copies_an_empty_set() {
         assert_ne!(
-            step_key("parent", "RUN true", None),
-            step_key(
+            steps().key("parent", "RUN true", None),
+            steps().key(
                 "parent",
                 "RUN true",
                 Some(&changes_hash(&ChangeSet::default()))
@@ -506,9 +542,9 @@ mod tests {
     /// still run two different commands; the key is over what the guest is asked to run.
     #[test]
     fn a_run_is_keyed_by_the_command_the_env_the_user_and_the_workdir_it_resolved_to() {
-        let key = run_key("built@sha256:parent", &run_step());
+        let key = steps().run("built@sha256:parent", &run_step());
 
-        assert_eq!(key, run_key("built@sha256:parent", &run_step()));
+        assert_eq!(key, steps().run("built@sha256:parent", &run_step()));
         for changed in [
             RunStep {
                 argv: vec!["/bin/sh".into(), "-c".into(), "npm i -g agent@2".into()],
@@ -527,9 +563,57 @@ mod tests {
                 ..run_step()
             },
         ] {
-            assert_ne!(key, run_key("built@sha256:parent", &changed));
+            assert_ne!(key, steps().run("built@sha256:parent", &changed));
         }
-        assert_ne!(key, run_key("built@sha256:other", &run_step()));
+        assert_ne!(key, steps().run("built@sha256:other", &run_step()));
+    }
+
+    /// A step is what one document's rules let an instruction do, so a second document with other
+    /// rules must boot its own guest rather than inherit an image the first one's egress fetched.
+    #[test]
+    fn two_documents_that_declare_different_policy_do_not_share_a_step() {
+        let strict = document(
+            r#"{"http":[{"match":"registry.npmjs.org","verdict":"allow"}]}"#,
+            "[]",
+        );
+        let generous = document(r#"{"http":[{"match":"*","verdict":"allow"}]}"#, "[]");
+        let with_a_credential = document(
+            r#"{"http":[{"match":"registry.npmjs.org","verdict":"allow"}]}"#,
+            r#"[{"envVar":"NPM_TOKEN"}]"#,
+        );
+        let key = |definition: &str| {
+            let policy = policy_fingerprint(definition).expect("this document reads");
+            Steps::under(&policy).run("built@sha256:parent", &run_step())
+        };
+
+        assert_eq!(
+            key(&strict),
+            key(&strict),
+            "the same document is the same step",
+        );
+        assert_ne!(
+            key(&strict),
+            key(&generous),
+            "an instruction that may reach anything is not the instruction that may reach one host",
+        );
+        assert_ne!(
+            key(&strict),
+            key(&with_a_credential),
+            "a step carrying a credential is not the step that carries none",
+        );
+    }
+
+    #[test]
+    fn a_definition_that_is_not_json_names_itself_rather_than_keying_a_build() {
+        let err = policy_fingerprint("not json").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("the document this build is held to"),
+            "{err:#}"
+        );
+    }
+
+    fn document(egress: &str, credentials: &str) -> String {
+        format!(r#"{{"spec":{{"image":"./image","egress":{egress},"credentials":{credentials}}}}}"#)
     }
 
     /// The line a `RUN` was written on moves when a comment above it does, and moving a line
@@ -537,8 +621,8 @@ mod tests {
     #[test]
     fn the_line_a_run_was_written_on_is_not_part_of_its_key() {
         assert_eq!(
-            run_key("built@sha256:parent", &run_step()),
-            run_key(
+            steps().run("built@sha256:parent", &run_step()),
+            steps().run(
                 "built@sha256:parent",
                 &RunStep {
                     line: 9,
@@ -559,7 +643,7 @@ mod tests {
                 bytes: bytes.to_vec(),
             }],
         };
-        let key = transfer_key(
+        let key = steps().transfer(
             "built@sha256:parent",
             "COPY app /srv/app",
             &copied(b"one\n"),
@@ -567,7 +651,7 @@ mod tests {
 
         assert_eq!(
             key,
-            transfer_key(
+            steps().transfer(
                 "built@sha256:parent",
                 "COPY app /srv/app",
                 &copied(b"one\n")
@@ -575,7 +659,7 @@ mod tests {
         );
         assert_ne!(
             key,
-            transfer_key(
+            steps().transfer(
                 "built@sha256:parent",
                 "COPY app /srv/app",
                 &copied(b"two\n")
@@ -584,7 +668,7 @@ mod tests {
         );
         assert_ne!(
             key,
-            transfer_key("built@sha256:parent", "ADD app /srv/app", &copied(b"one\n")),
+            steps().transfer("built@sha256:parent", "ADD app /srv/app", &copied(b"one\n")),
         );
     }
 
@@ -601,19 +685,19 @@ mod tests {
             exposed_ports: vec!["8080".into()],
             volumes: vec!["/data".into()],
         };
-        let key = config_key("built@sha256:parent", "ENV MODE=research", &draft);
+        let key = steps().config("built@sha256:parent", "ENV MODE=research", &draft);
 
         assert_eq!(
             key,
-            config_key("built@sha256:parent", "ENV MODE=research", &draft)
+            steps().config("built@sha256:parent", "ENV MODE=research", &draft)
         );
         assert_ne!(
             key,
-            config_key("built@sha256:other", "ENV MODE=research", &draft)
+            steps().config("built@sha256:other", "ENV MODE=research", &draft)
         );
         assert_ne!(
             key,
-            config_key("built@sha256:parent", "ENV MODE=review", &draft)
+            steps().config("built@sha256:parent", "ENV MODE=review", &draft)
         );
         for changed in [
             ConfigDraft {
@@ -655,7 +739,7 @@ mod tests {
         ] {
             assert_ne!(
                 key,
-                config_key("built@sha256:parent", "ENV MODE=research", &changed)
+                steps().config("built@sha256:parent", "ENV MODE=research", &changed)
             );
         }
     }

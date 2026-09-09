@@ -85,6 +85,7 @@ struct Prepared {
     context_hash: String,
     arch: String,
     cache_dir: PathBuf,
+    policy: String,
 }
 
 impl Prepared {
@@ -96,6 +97,7 @@ impl Prepared {
             context_hash: &self.context_hash,
             arch: &self.arch,
             rebuild,
+            policy: &self.policy,
         }
     }
 }
@@ -122,6 +124,7 @@ fn prepare(request: &BuildRequest<'_>) -> Result<Prepared> {
         context_hash,
         arch: crate::image::want_arch().to_string(),
         cache_dir: crate::cache::root()?,
+        policy: key::policy_fingerprint(request.definition)?,
         located,
         text,
         file,
@@ -176,24 +179,32 @@ pub(crate) async fn build(
     })
 }
 
+/// What `lns sandbox build` was asked to build: the resolved document, and the policy a step is held to.
+pub struct SandboxBuild<'a> {
+    pub definition: &'a str,
+    pub definition_dir: &'a str,
+    pub rebuild: bool,
+    pub authored_egress: Option<&'a str>,
+    pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
+}
+
 /// `lns sandbox build`: the build a run would do, with no run around it and nothing published.
-pub async fn build_sandbox(
-    definition: &str,
-    definition_dir: &str,
-    rebuild: bool,
-) -> Result<lns_ipc::Response> {
+pub async fn build_sandbox(request: &SandboxBuild<'_>) -> Result<lns_ipc::Response> {
+    let definition = request.definition;
     let image = image_of(definition)?;
     let (frame_tx, mut frames) = tokio::sync::mpsc::channel(1);
     // A build asked for on its own has no run to carry a step's output to, so it is drained here rather than left to fill.
     tokio::spawn(async move { while frames.recv().await.is_some() {} });
-    let mut args = args_for_a_build(definition, definition_dir);
+    let mut args = args_for_a_build(definition, request.definition_dir);
     args.image = Some(image.clone());
+    args.authored_egress = request.authored_egress.map(str::to_string);
+    args.packed_filesets = request.packed_filesets.to_vec();
     let built = build(
         &BuildRequest {
             args: &args,
             definition,
             image: &image,
-            rebuild,
+            rebuild: request.rebuild,
         },
         frame_tx,
     )
@@ -371,6 +382,7 @@ pub struct RealBuiltImageSweep;
 
 impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
     async fn sweep(&self, cache_root: &Path, surviving_runs: &[String]) -> Result<Vec<String>> {
+        let _exclusive = crate::image_store::cache_lock().write().await;
         let named = super::cache::still_referenced(
             &RealCacheFs,
             cache_root,
@@ -382,7 +394,27 @@ impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
             &crate::image_store::RealFs,
             &crate::image_store::real::RealCaches::new(cache_root),
             &cache_root.join("images"),
-            &std::collections::HashSet::new(),
+            &crate::image_store::recorded_run_pins().await?,
+            &named,
+        )
+        .await
+    }
+
+    async fn candidates(
+        &self,
+        cache_root: &Path,
+        surviving_runs: &[String],
+    ) -> Result<Vec<String>> {
+        let _shared = crate::image_store::cache_lock().read().await;
+        let named = super::cache::would_be_referenced(
+            &RealCacheFs,
+            cache_root,
+            surviving_runs,
+            &|reference| holds_the_image(cache_root, reference),
+        );
+        crate::image_store::unreferenced_builds_with(
+            &crate::image_store::RealFs,
+            &cache_root.join("images"),
             &named,
         )
         .await
@@ -490,7 +522,7 @@ impl BuildHost for RealBuildHost {
 
     async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
         BuildCache::new(&RealCacheFs, &self.cache_dir)
-            .get(kind, key, &|reference| self.holds(reference))
+            .get(kind, key, &self.source, &|reference| self.holds(reference))
             .map(|entry| entry.reference)
     }
 
@@ -498,10 +530,7 @@ impl BuildHost for RealBuildHost {
         if let Err(e) = BuildCache::new(&RealCacheFs, &self.cache_dir).remember(
             kind,
             key,
-            &Entry {
-                reference: reference.to_string(),
-                source: self.source.clone(),
-            },
+            &Entry::built_from(reference, &self.source),
         ) {
             log::warn!("this build will not be reused; its key was not written: {e:#}");
         }

@@ -364,6 +364,14 @@ impl lns_service::ipc::BuiltImageSweep for NoBuilds {
     ) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    async fn candidates(
+        &self,
+        _cache_root: &Path,
+        _surviving_runs: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 #[given("a run dir with no run record")]

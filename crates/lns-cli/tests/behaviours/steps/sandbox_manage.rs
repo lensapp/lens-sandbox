@@ -153,6 +153,21 @@ fn running_sandbox_kept(w: &mut BehaviourWorld) -> Result<(), String> {
     }
 }
 
+#[given(regex = r#"^the sweep would drop the built image "([^"]+)"$"#)]
+fn the_sweep_would_drop(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.prunable_built_images.push(reference);
+}
+
+#[then("the service received a PruneRuns request")]
+fn service_received_prune_runs(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::PruneRuns) {
+        Ok(())
+    } else {
+        Err(format!("expected PruneRuns among {requests:?}"))
+    }
+}
+
 #[then("the service received a PruneImages request")]
 fn service_received_prune_images(w: &mut BehaviourWorld) -> Result<(), String> {
     let requests = w.sandbox.requests.lock().unwrap();

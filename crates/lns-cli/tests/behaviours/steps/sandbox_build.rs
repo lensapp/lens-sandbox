@@ -13,10 +13,40 @@ fn document() -> String {
     "apiVersion: lns.run/v1\nkind: sandbox\nname: agent\nspec:\n  image: ./image\n".to_string()
 }
 
+fn document_with_a_mixin() -> String {
+    format!("{}  mixins:\n    - ./project-egress.yaml\n", document())
+}
+
+const AUTHORED_EGRESS: &str = r#"{"http":[{"match":"registry.npmjs.org","verdict":"allow"}]}"#;
+
 #[given("a document whose spec.image names a Containerfile")]
 fn a_document_naming_a_containerfile(w: &mut BehaviourWorld) {
     w.author_files
         .insert(PathBuf::from("/work/lns.yaml"), document());
+}
+
+#[given("a document whose spec.image names a Containerfile and declares a mixin")]
+fn a_document_declaring_a_mixin(w: &mut BehaviourWorld) {
+    w.author_files
+        .insert(PathBuf::from("/work/lns.yaml"), document_with_a_mixin());
+}
+
+#[given("the service resolves that document")]
+fn the_service_resolves_that_document(w: &mut BehaviourWorld) {
+    w.sandbox.resolve_response = Some(Response::DefinitionResolved {
+        definition: serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "sandbox",
+            "name": "agent",
+            "spec": { "image": "./image" },
+        })
+        .to_string(),
+        mixins: vec!["./project-egress.yaml".to_string()],
+        pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
+        authored_egress: AUTHORED_EGRESS.to_string(),
+        packed_filesets: Vec::new(),
+    });
 }
 
 #[given(regex = r#"^a second document "([^"]+)" whose spec\.image names a Containerfile$"#)]
@@ -65,10 +95,67 @@ fn build_request(w: &BehaviourWorld) -> Result<(String, String, bool), String> {
                 definition,
                 definition_dir,
                 rebuild,
+                ..
             } => Some((definition.clone(), definition_dir.clone(), *rebuild)),
             _ => None,
         })
         .ok_or_else(|| "no build reached the service".to_string())
+}
+
+fn method_order(w: &BehaviourWorld) -> Vec<&'static str> {
+    w.sandbox
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|request| match request {
+            Request::ResolveDefinition { .. } => Some("resolve"),
+            Request::BuildSandbox { .. } => Some("build"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[then("the service resolved the document before it built it")]
+fn the_service_resolved_first(w: &mut BehaviourWorld) -> Result<(), String> {
+    match method_order(w).as_slice() {
+        ["resolve", "build"] => Ok(()),
+        other => Err(format!("the service was asked for {other:?}")),
+    }
+}
+
+#[then("the service was not asked to resolve the document")]
+fn the_service_was_not_asked_to_resolve(w: &mut BehaviourWorld) -> Result<(), String> {
+    match method_order(w).contains(&"resolve") {
+        true => Err("a document declaring no mixin needs no resolution".to_string()),
+        false => Ok(()),
+    }
+}
+
+#[then("the build carries the resolved document and what its mixins authored")]
+fn the_build_carries_what_was_resolved(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    let Some(Request::BuildSandbox {
+        definition,
+        authored_egress,
+        ..
+    }) = requests
+        .iter()
+        .find(|request| matches!(request, Request::BuildSandbox { .. }))
+    else {
+        return Err("no build reached the service".to_string());
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(definition).map_err(|e| format!("definition was not json: {e}"))?;
+    if value["spec"].get("mixins").is_some() {
+        return Err(format!("the build carried an unresolved document: {value}"));
+    }
+    if authored_egress.as_deref() != Some(AUTHORED_EGRESS) {
+        return Err(format!(
+            "the build carried {authored_egress:?} as the egress its mixins authored"
+        ));
+    }
+    Ok(())
 }
 
 #[then(regex = r#"^the service was asked to build "([^"]+)"$"#)]
