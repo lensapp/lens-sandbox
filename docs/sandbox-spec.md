@@ -2279,7 +2279,7 @@ runs exactly what the author tested:
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
-| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact, and `image` is rewritten to that image's digest reference. `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer, so what the guest starts from is disclosed with the rest of the document. |
+| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact — the same repository, so one grant and one visibility setting cover both — and `image` is rewritten to that image's digest reference. `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer ([§7.3](#73-the-build-source-layer)), so what the guest starts from is disclosed with the rest of the document. A built image over the machine's limit — 4 GiB unless the machine says otherwise — fails the push, naming the layer that grew it and the instruction that wrote it, the way a fileset over its limit fails validate. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 | `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
@@ -2297,10 +2297,19 @@ surfaces stay unresolved, on purpose:
 
 `workdir`, every volume, every fileset, and every other field publish unchanged.
 
+**A push never publishes a document whose image it does not have.** For a
+path-form `image` that means the build happens first and the image is uploaded
+before the document that names its digest: a consumer that receives the document
+receives an image to pull, never a Containerfile to build.
+
 `lns push --dry-run` performs everything short of the upload and prints the
-digests that would publish, for every artifact the push would create. It stays
-offline, so it does **not** resolve tool versions — in any of them — and it says
-when declared tools mean the real digest may differ from the preview.
+digests that would publish, for every artifact the push would create. It builds
+nothing: for a path-form `image` it prints the build key ([§3.1.1](#311-image))
+and, only where that key is already answered on this machine, the digest it
+answers with. Where it is not, the preview says so — a digest that has not been
+built can be known only by building. It stays offline otherwise, so it does
+**not** resolve tool versions — in any of them — and it says when declared tools
+mean the real digest may differ from the preview.
 
 ### 6.1 A local mixin publishes with the document that names it
 
@@ -2363,7 +2372,8 @@ blob, and the media type names the kind:
 
 Every kind carries one layer per `filesets[].path` entry it declares
 ([§3.1.11](#3111-filesets)), plus at most one README layer
-([§7.2](#72-the-readme-layer)). Nothing else is addressable on its own, so one
+([§7.2](#72-the-readme-layer)) and, for a sandbox published from a Containerfile,
+one build source layer ([§7.3](#73-the-build-source-layer)). Nothing else is addressable on its own, so one
 reference names one complete, digest-pinned thing. A consumer correlates fileset
 layers by their media type, in manifest order, and MUST leave out any layer whose
 media type it does not consume rather than guess at it.
@@ -2505,6 +2515,37 @@ The README never enters the guest. It is not a fileset, it is not mounted, and a
 consumer that materializes filesets leaves it out like any other layer whose
 media type it does not consume ([§7](#7-distribution)). Relative links inside it
 resolve against nothing; a README SHOULD use absolute URLs.
+
+### 7.3 The build source layer
+
+A sandbox whose `image` named a Containerfile publishes that file and its context
+as a layer of the same artifact:
+
+```json
+{
+  "mediaType": "application/vnd.lns.image.source.v1.tar+gzip",
+  "digest": "sha256:…",
+  "size": 4096,
+  "annotations": { "org.opencontainers.image.title": "./image/Containerfile" }
+}
+```
+
+The layer is a deterministic gzipped tar of the build context, rooted at the
+context directory, so the Containerfile sits in it under its own name and every
+file a build would send sits beside it. The title annotation is the path
+[`imageSource`](#6-publish-time-transforms) records, which is how a consumer
+knows which entry of the tar holds the instructions.
+
+The layer exists so disclosure survives the push. `image` names a digest, and a
+digest says nothing about what produced it; with the layer,
+[`lns inspect`](cli-spec.md#31-lns-artifact) on a pulled artifact prints the
+instructions and lists the context with each file's size, without building or
+running anything. A symlink in the context is listed by offline validation and
+not sent ([§3.1.1](#311-image)), so it is not in the layer either.
+
+The layer never enters the guest. It is not a fileset, it is not mounted, and a
+consumer that materializes filesets leaves it out like any other layer whose
+media type it does not consume ([§7](#7-distribution)).
 
 ---
 
