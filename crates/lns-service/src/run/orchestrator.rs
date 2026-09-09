@@ -430,6 +430,11 @@ async fn orchestrate(
     for (attachment, bind) in bind_attachments.iter_mut().zip(&args.binds) {
         attachment.seeded_paths = crate::artifact::fileset::seeded_paths(bind, &fileset_specs);
     }
+    // Every path a fileset lands on, before staging rewrites some of them under `/.lens`: a captured layer must carry none of them.
+    let fileset_paths: Vec<String> = fileset_specs
+        .iter()
+        .map(|spec| spec.guest_path.clone())
+        .collect();
     crate::artifact::fileset::stage_what_a_mount_would_hide(
         &mut fileset_specs,
         &args.volumes,
@@ -707,9 +712,14 @@ async fn orchestrate(
     // One read of the hook decides both the guest's mount options and this capture, so a captured upper never holds a metacopy stub.
     if capture_hook_armed
         && let Some(parent) = image_ref.as_deref()
-        && let Err(e) =
-            crate::containerfile::real::capture_after_run(&run_id, parent, &cmd, command_exited)
-                .await
+        && let Err(e) = crate::containerfile::real::capture_after_run(
+            &run_id,
+            parent,
+            &cmd,
+            &fileset_paths,
+            command_exited,
+        )
+        .await
     {
         log::warn!("the built layer was not captured: {e:#}");
     }

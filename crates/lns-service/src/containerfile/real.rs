@@ -27,6 +27,7 @@ pub async fn capture_after_run(
     run_id: &str,
     parent_reference: &str,
     command: &[String],
+    fileset_paths: &[String],
     command_exited: std::time::Instant,
 ) -> Result<BuiltLayer> {
     let started = std::time::Instant::now();
@@ -41,6 +42,16 @@ pub async fn capture_after_run(
     })
     .await
     .context("the upper-volume reader stopped before it finished")??;
+
+    let (changes, dropped) = super::exclude::only_the_workloads_writes(changes, fileset_paths);
+    if dropped.total() > 0 {
+        log::info!(
+            "Excluded",
+            "{} entries this boot wrote for the run, {} a fileset seeded",
+            dropped.boot,
+            dropped.fileset,
+        );
+    }
 
     let layers = LayerCache::new(cache_dir.join("layers"));
     let built = super::import_captured(

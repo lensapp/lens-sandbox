@@ -1,6 +1,7 @@
 //! Slice 1 of the Containerfile executor (lensapp/lens-sandbox#393): what one guest wrote,
 //! captured as one OCI layer over its base image and imported where the boot path finds it.
 
+pub(crate) mod exclude;
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
 pub(crate) mod import;
