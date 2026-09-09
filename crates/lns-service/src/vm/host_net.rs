@@ -199,6 +199,11 @@ fn parse_observed_mask(value: &str) -> Option<Ipv4Addr> {
 
 /// Apple's plist is XML and lns carries no plist parser, so the two keys it needs are read directly and anything else falls back.
 pub fn parse_bootpd_network(text: &str) -> Option<HostNetwork> {
+    if text.matches("<key>net_address</key>").count() != 1
+        || text.matches("<key>net_mask</key>").count() != 1
+    {
+        return None;
+    }
     let network: Ipv4Addr = plist_string(text, "net_address")?.parse().ok()?;
     let prefix_len = plist_string(text, "net_mask")
         .and_then(|mask| mask.parse::<Ipv4Addr>().ok())

@@ -450,6 +450,11 @@ mod tests {
             Vec::new(),
             1_000,
         );
+        allocator.set_network(HostNetwork {
+            network: addr(0),
+            prefix_len: 29,
+            gateway: addr(1),
+        });
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
             .expect("free");
@@ -488,6 +493,11 @@ mod tests {
                 .collect(),
             1_000,
         );
+        allocator.set_network(HostNetwork {
+            network: Ipv4Addr::new(10, 0, 0, 8),
+            prefix_len: 29,
+            gateway: Ipv4Addr::new(10, 0, 0, 9),
+        });
         let error = allocator
             .reserve("run-a", "52:54:00:00:00:01")
             .expect_err("nothing left");
