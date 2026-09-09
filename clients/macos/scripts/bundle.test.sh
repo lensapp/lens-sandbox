@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -eux
 bundle_scripts=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bundle_test_root=$(mktemp -d)
 trap 'rm -rf "$bundle_test_root"' EXIT HUP INT TERM
