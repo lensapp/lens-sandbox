@@ -22,10 +22,13 @@ pub fn capture_hook_enabled() -> bool {
 }
 
 /// Reads what one stopped run wrote and imports it as one layer on top of the image it booted.
+/// `command_exited` is when the workload's session ended, so the report can answer what a build
+/// costs after the instruction itself is done.
 pub async fn capture_after_run(
     run_id: &str,
     parent_reference: &str,
     command: &[String],
+    command_exited: std::time::Instant,
 ) -> Result<BuiltLayer> {
     let started = std::time::Instant::now();
     let cache_dir = crate::cache::root()?;
@@ -59,10 +62,11 @@ pub async fn capture_after_run(
     publish(&cache_dir, &built.reference);
     log::info!(
         "Built",
-        "{} ({} entries, {} bytes, {:.2?} from exit)",
+        "{} ({} entries, {} bytes, {:.2?} from exit, {:.2?} to read and import)",
         built.reference,
         built.entries,
         built.layer_bytes,
+        command_exited.elapsed(),
         started.elapsed(),
     );
     Ok(built)

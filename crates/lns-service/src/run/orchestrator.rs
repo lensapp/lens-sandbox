@@ -686,6 +686,7 @@ async fn orchestrate(
     let session_started = std::time::Instant::now();
     let session_code =
         vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx).await?;
+    let command_exited = std::time::Instant::now();
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
 
@@ -703,7 +704,9 @@ async fn orchestrate(
     // Slice 1 of lensapp/lens-sandbox#393: the guest is powered off, so its upper volume is final.
     if crate::containerfile::real::capture_hook_enabled()
         && let Some(parent) = image_ref.as_deref()
-        && let Err(e) = crate::containerfile::real::capture_after_run(&run_id, parent, &cmd).await
+        && let Err(e) =
+            crate::containerfile::real::capture_after_run(&run_id, parent, &cmd, command_exited)
+                .await
     {
         log::warn!("the built layer was not captured: {e:#}");
     }

@@ -1855,7 +1855,7 @@ fn the_capture_reports_its_measurement(world: &mut E2eWorld) {
     let run = world.result.as_ref().expect("a run must have happened");
     let reported = format!("{}\n{}", run.stdout, run.stderr)
         .lines()
-        .find(|line| line.contains("Built") && line.contains("lns-build.local"))
+        .find(|line| line.contains("lns-build.local") && line.contains("from exit"))
         .map(str::trim)
         .map(str::to_string)
         .unwrap_or_else(|| {
