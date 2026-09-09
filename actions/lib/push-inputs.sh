@@ -34,19 +34,21 @@ repository_of() {
   printf '%s' "$repository"
 }
 
-exact_tool_versions() {
-  case "${INPUT_EXACT_TOOLS-}" in
-    true | false) EXACT_TOOLS=$INPUT_EXACT_TOOLS ;;
+boolean_input() {
+  local name=$1 value=$2 target=$3
+  case "$value" in
+    true | false) printf -v "$target" '%s' "$value" ;;
     *)
-      echo "::error::require-exact-tool-versions must be 'true' or 'false', not '${INPUT_EXACT_TOOLS-}'."
+      echo "::error::$name must be 'true' or 'false', not '$value'."
       exit 1
       ;;
   esac
 }
 
 main() {
-  local file first host repository raw tag tag_host tag_repository
-  exact_tool_versions
+  local file first host repository raw tag tag_host tag_repository exact_tools push
+  boolean_input require-exact-tool-versions "${INPUT_EXACT_TOOLS-}" exact_tools
+  boolean_input push "${INPUT_PUSH-}" push
 
   file="$RUNNER_TEMP/lns-push-tags.txt"
   : >"$file"
@@ -86,7 +88,8 @@ TAGS
     echo "host=$host"
     echo "repository=$repository"
     echo "file=$file"
-    echo "exact-tools=$EXACT_TOOLS"
+    echo "exact-tools=$exact_tools"
+    echo "push=$push"
   } >>"$GITHUB_OUTPUT"
 }
 

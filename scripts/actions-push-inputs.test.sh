@@ -1,10 +1,11 @@
 #!/bin/sh
-# What lns-push makes of its `tags` and `require-exact-tool-versions` inputs
-# before anything is validated, dry-run or published.
+# What lns-push makes of its `tags`, `push` and `require-exact-tool-versions`
+# inputs before anything is validated, dry-run or published.
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$SCRIPT_DIR/../actions/lib/push-inputs.sh"
+ACTION="$SCRIPT_DIR/../actions/lns-push/action.yml"
 
 PASS=0
 FAIL=0
@@ -17,7 +18,8 @@ cleanup() {
 trap cleanup EXIT
 
 # Runs the script in a scratch runner: $1 is the tags input, $2 the
-# require-exact-tool-versions input. Leaves the outputs in $OUT, the tag list
+# require-exact-tool-versions input, $3 the push input (defaults to `true`).
+# Leaves the outputs in $OUT, the tag list
 # in $TAGS_FILE, everything the step printed in $LOG, and the status in $STATUS.
 run_inputs() {
     work=$(mktemp -d "$ROOT/run.XXXXXX")
@@ -27,6 +29,7 @@ run_inputs() {
     set +e
     INPUT_TAGS=$1 \
         INPUT_EXACT_TOOLS=$2 \
+        INPUT_PUSH=${3-true} \
         RUNNER_TEMP="$work" \
         GITHUB_OUTPUT="$OUT" \
         bash "$SCRIPT" >"$LOG" 2>&1
@@ -168,6 +171,46 @@ test_exact_tool_versions_is_a_boolean() {
     assert_eq "exact-tools empty: status" 1 "$STATUS"
 }
 
+# `push` is the same switch: a typo used to read as "off", so the job went
+# green having published nothing.
+test_push_is_a_boolean() {
+    run_inputs "acme/hermes:v1" true true
+    assert_eq "push true: status" 0 "$STATUS"
+    assert_eq "push true" true "$(output push)"
+
+    run_inputs "acme/hermes:v1" true false
+    assert_eq "push false: status" 0 "$STATUS"
+    assert_eq "push false" false "$(output push)"
+
+    run_inputs "acme/hermes:v1" true ture
+    assert_eq "push typo: status" 1 "$STATUS"
+    case "$(cat "$LOG")" in
+        *"push"*"ture"*)
+            record "push typo: names the input and the value" yes "" ;;
+        *)
+            record "push typo: names the input and the value" no "$(cat "$LOG")" ;;
+    esac
+
+    run_inputs "acme/hermes:v1" true ""
+    assert_eq "push empty: status" 1 "$STATUS"
+}
+
+# The publish step must read the validated switch, not the raw input.
+test_the_publish_step_reads_the_validated_switch() {
+    if grep -q "if: steps.tags.outputs.push == 'true'" "$ACTION"; then
+        record "the publish step is gated on the validated push output" yes ""
+    else
+        record "the publish step is gated on the validated push output" no \
+            "$(grep -n 'if:' "$ACTION" || echo 'no if: in action.yml')"
+    fi
+    if grep -q "inputs.push == 'true'" "$ACTION"; then
+        record "the publish step no longer reads the raw input" no \
+            "action.yml still gates on inputs.push"
+    else
+        record "the publish step no longer reads the raw input" yes ""
+    fi
+}
+
 echo "── actions/lib/push-inputs.sh ──"
 test_bare_tag_is_fully_qualified
 test_qualified_tag_is_left_alone
@@ -178,6 +221,8 @@ test_a_reference_without_a_tag_is_refused
 test_a_reference_without_a_namespace_is_refused
 test_no_tags_at_all_is_refused
 test_exact_tool_versions_is_a_boolean
+test_push_is_a_boolean
+test_the_publish_step_reads_the_validated_switch
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
