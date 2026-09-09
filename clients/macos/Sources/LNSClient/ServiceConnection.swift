@@ -14,9 +14,15 @@ public struct ServiceConnection {
         return AsyncThrowingStream(bufferingPolicy: latestOnly ? .bufferingNewest(1) : .unbounded) { continuation in
             var decoder = FrameDecoder()
             var started = false
-            var received = false
+            var finished = false
+            var deadline = ReplyDeadline(streaming: !once && latestOnly, now: ProcessInfo.processInfo.systemUptime)
+            let timer = DispatchSource.makeTimerSource(queue: queue)
 
             func finish(_ error: Error? = nil) {
+                guard !finished else { return }
+                finished = true
+                timer.cancel()
+                connection.stateUpdateHandler = nil
                 if let error { continuation.finish(throwing: error) }
                 else { continuation.finish() }
                 connection.cancel()
@@ -25,9 +31,11 @@ public struct ServiceConnection {
             func receive() {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, complete, error in
                     if let error { finish(error); return }
+                    guard !finished else { return }
                     do {
                         for payload in try decoder.append(data ?? Data()) {
-                            received = true
+                            deadline.received(now: ProcessInfo.processInfo.systemUptime)
+                            if !once && latestOnly { timer.cancel() }
                             continuation.yield(payload)
                             if once { finish(); return }
                         }
@@ -39,7 +47,7 @@ public struct ServiceConnection {
                 }
             }
 
-            continuation.onTermination = { _ in connection.cancel() }
+            continuation.onTermination = { _ in queue.async { finish() } }
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready where !started:
@@ -49,13 +57,17 @@ public struct ServiceConnection {
                         else { receive() }
                     })
                 case let .failed(error), let .waiting(error): finish(error)
-                case .cancelled: continuation.finish()
+                case .cancelled: finish()
                 default: break
                 }
             }
-            queue.asyncAfter(deadline: .now() + 10) {
-                if !received { finish(ServiceError(message: "The service did not respond.")) }
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler {
+                if deadline.expired(now: ProcessInfo.processInfo.systemUptime) {
+                    finish(ServiceError(message: "The service stopped responding before completing the request. Check its state before trying again."))
+                }
             }
+            timer.resume()
             connection.start(queue: queue)
         }
     }
