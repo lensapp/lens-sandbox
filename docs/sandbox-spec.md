@@ -2526,15 +2526,18 @@ as a layer of the same artifact:
   "mediaType": "application/vnd.lns.image.source.v1.tar+gzip",
   "digest": "sha256:…",
   "size": 4096,
-  "annotations": { "org.opencontainers.image.title": "./image/Containerfile" }
+  "annotations": { "org.opencontainers.image.title": "./image" }
 }
 ```
 
 The layer is a deterministic gzipped tar of the build context, rooted at the
 context directory, so the Containerfile sits in it under its own name and every
-file a build would send sits beside it. The title annotation is the path
-[`imageSource`](#6-publish-time-transforms) records, which is how a consumer
-knows which entry of the tar holds the instructions.
+file a build would send sits beside it. The title annotation is exactly the path
+[`imageSource`](#6-publish-time-transforms) records — the path the author wrote,
+which may name the context directory rather than the file. Which entry of the
+tar holds the instructions is therefore read out of the tar: the name the
+recorded path ends in where the author named a file, and otherwise
+`Containerfile`, then `Dockerfile`, in the order a build searches a context.
 
 The layer exists so disclosure survives the push. `image` names a digest, and a
 digest says nothing about what produced it; with the layer,
