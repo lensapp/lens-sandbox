@@ -104,6 +104,7 @@ pub struct SessionParams {
     pub confine: bool,
     /// Tell the broker this session exists only for its host client, so a vanished stream hangs the child up.
     pub dies_with_client: bool,
+    pub expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
 }
 
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
@@ -140,9 +141,23 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
 pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
+    expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
 ) -> Result<Option<i32>> {
     while let Some(frame) = read_one_frame(&mut reader).await? {
         match frame {
+            ServerFrame::NetworkApplied { address } => {
+                let address: std::net::Ipv4Addr = address
+                    .parse()
+                    .context("the guest reported a malformed assigned address")?;
+                let expected = expected_guest_addresses
+                    .as_ref()
+                    .context("the guest reported an address when the host offered none")?;
+                anyhow::ensure!(
+                    expected.contains(&address),
+                    "the guest reported unoffered assigned address {address}"
+                );
+                log::info!("Address", "guest assigned {address}");
+            }
             ServerFrame::StdoutBytes(bytes) => {
                 if frame_tx.send(WireFrame::Stdout(bytes)).await.is_err() {
                     return Ok(None);
@@ -336,7 +351,7 @@ mod tests {
         bytes.extend(framed(&ServerFrame::StderrBytes(b"err".to_vec())));
         bytes.extend(framed(&ServerFrame::ExitStatus(42)));
         let (tx, mut rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
             .await
             .unwrap();
         assert!(matches!(rx.recv().await, Some(WireFrame::Stdout(b)) if b == b"out"));
@@ -349,10 +364,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assigned_address_report_is_validated_before_normal_session_frames() {
+        let reported = ServerFrame::NetworkApplied {
+            address: "192.168.64.254".into(),
+        };
+        let mut bytes = framed(&reported);
+        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
+        let (tx, _rx) = mpsc::channel(2);
+        let code = read_server_frames(
+            io::Cursor::new(bytes),
+            tx,
+            Some(vec!["192.168.64.254".parse().expect("address")]),
+        )
+        .await
+        .expect("offered address");
+        assert_eq!(code, Some(0));
+
+        for address in ["192.168.64.200", "not-an-address"] {
+            let (tx, _rx) = mpsc::channel(1);
+            let error = read_server_frames(
+                io::Cursor::new(framed(&ServerFrame::NetworkApplied {
+                    address: address.into(),
+                })),
+                tx,
+                Some(vec!["192.168.64.254".parse().expect("address")]),
+            )
+            .await
+            .expect_err("untrusted report");
+            assert!(error.to_string().contains("reported"), "{error:#}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
         let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
         let (tx, _rx) = mpsc::channel(1);
-        let error = read_server_frames(io::Cursor::new(bytes), tx)
+        let error = read_server_frames(io::Cursor::new(bytes), tx, None)
             .await
             .expect_err("a refusal is not a workload exit");
         let refusal = error
@@ -370,7 +417,7 @@ mod tests {
     async fn returns_none_when_stream_closes_without_exit_status() {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, _rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
             .await
             .expect("EOF after a frame ends the loop cleanly");
         assert_eq!(
@@ -384,7 +431,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
             .await
             .expect("dropped stdout receiver ends the loop cleanly");
         assert_eq!(code, None);
@@ -395,7 +442,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StderrBytes(b"err".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
             .await
             .expect("dropped stderr receiver ends the loop cleanly");
         assert_eq!(code, None);

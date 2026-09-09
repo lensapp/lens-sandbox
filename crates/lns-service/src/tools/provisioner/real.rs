@@ -220,6 +220,7 @@ async fn run_provisioner(
         mac: address.as_ref().map(|held| held.mac.clone()),
     };
 
+    let expected_guest_addresses = address.as_ref().map(|lease| lease.net.candidates.clone());
     let address_monitor = address.as_ref().map(vm::guest_addr::real::Lease::monitor);
     let mut vm_task = tokio::spawn(vm::boot_with_owner(spec, None, (address, address_monitor)));
     let mut connector_rx = connector_rx;
@@ -248,6 +249,7 @@ async fn run_provisioner(
         env,
         std::time::Duration::from_secs(timeout),
         MAX_DRIVER_OUTPUT_BYTES,
+        expected_guest_addresses,
     )
     .await
     .context("driving the provisioner install script")?;

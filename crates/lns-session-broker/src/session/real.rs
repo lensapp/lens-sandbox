@@ -140,6 +140,7 @@ pub fn handle_session(
     conn: RawFd,
     pid_tx: Option<SyncSender<libc::pid_t>>,
     forker: &dyn Forker,
+    applied_address: Option<&str>,
 ) -> Result<SessionOutcome, SessionError> {
     let opening = match read_client_frame(conn) {
         Some(frame) => frame,
@@ -166,6 +167,16 @@ pub fn handle_session(
     else {
         unreachable!("validate_open_session guarantees OpenSession");
     };
+    if let Some(address) = applied_address {
+        let conn = SharedFd::new(conn);
+        send_frame(
+            &conn,
+            &ServerFrame::NetworkApplied {
+                address: address.to_string(),
+            },
+        );
+        std::mem::forget(conn);
+    }
     let identity = RunIdentity {
         uid: env_u32("LENS_RUN_UID"),
         gid: env_u32("LENS_RUN_GID"),
@@ -771,7 +782,7 @@ mod tests {
 
         let (pid_tx, pid_rx) = mpsc::sync_channel::<libc::pid_t>(1);
         let handle = std::thread::spawn(move || {
-            let _ = handle_session(server, Some(pid_tx), &*forker_for_thread);
+            let _ = handle_session(server, Some(pid_tx), &*forker_for_thread, None);
         });
 
         let pid = pid_rx

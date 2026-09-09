@@ -43,6 +43,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
     let network = network::narrate(network::set_up());
+    let applied_address = network.applied_address.clone();
     eprintln!("lns-session-broker: {}", network.line);
     // Only a lease stashes DNS servers for the broker to read back; a host-assigned address carries its own.
     if network.dhcp_dns
@@ -81,7 +82,8 @@ fn run() -> Result<i32, String> {
     });
 
     let forker = forker::LibcForker;
-    let primary_outcome = session::handle_session(primary_conn, None, &forker);
+    let primary_outcome =
+        session::handle_session(primary_conn, None, &forker, applied_address.as_deref());
 
     // SAFETY: listen_fd is owned and unused after this block.
     unsafe {
@@ -139,7 +141,7 @@ fn run_exec_session(conn: std::os::fd::RawFd, pid_slot: Arc<Mutex<Option<libc::p
         }
     });
     let forker = forker::LibcForker;
-    if let Err(e) = session::handle_session(conn, Some(tx), &forker) {
+    if let Err(e) = session::handle_session(conn, Some(tx), &forker, None) {
         eprintln!("lns-session-broker: exec session ended: {e}");
     }
 }

@@ -612,6 +612,7 @@ async fn orchestrate(
         initial_winsize,
         confine: !SUPERVISED,
         dies_with_client: false,
+        expected_guest_addresses: address.as_ref().map(|lease| lease.net.candidates.clone()),
     };
 
     let frame_tx_for_session = frame_tx.clone();

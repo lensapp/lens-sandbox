@@ -1182,6 +1182,7 @@ pub(super) fn build_session_params(
             .map(|(rows, cols)| lns_session::Winsize { rows, cols }),
         confine: true,
         dies_with_client: true,
+        expected_guest_addresses: None,
     }
 }
 

@@ -79,6 +79,7 @@ pub enum ClientFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerFrame {
+    NetworkApplied { address: String },
     StdoutBytes(Vec<u8>),
     StderrBytes(Vec<u8>),
     ExitStatus(i32),
@@ -309,6 +310,9 @@ mod tests {
     #[test]
     fn server_frames_round_trip() {
         for frame in [
+            ServerFrame::NetworkApplied {
+                address: "192.168.64.254".into(),
+            },
             ServerFrame::StdoutBytes(b"hello".to_vec()),
             ServerFrame::StderrBytes(b"err".to_vec()),
             ServerFrame::ExitStatus(0),

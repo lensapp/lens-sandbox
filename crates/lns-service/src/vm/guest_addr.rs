@@ -74,6 +74,25 @@ impl std::fmt::Display for AllocError {
 
 impl std::error::Error for AllocError {}
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectError {
+    UnknownOwner,
+    NotOffered(Ipv4Addr),
+}
+
+impl std::fmt::Display for SelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownOwner => write!(f, "the guest has no address reservation"),
+            Self::NotOffered(address) => {
+                write!(f, "the guest selected unoffered address {address}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SelectError {}
+
 pub trait ConflictSource: Send + Sync {
     fn conflicts_for(&self, owner: &str) -> Vec<Conflict>;
 }
@@ -184,6 +203,16 @@ impl Allocator {
     }
 
     /// Called on teardown and on a failed launch alike: an address a guest never booted with is free at once.
+    pub fn select(&self, owner: &str, address: Ipv4Addr) -> Result<(), SelectError> {
+        let mut held = self.held.lock().expect("reservation table poisoned");
+        let reservation = held.get_mut(owner).ok_or(SelectError::UnknownOwner)?;
+        if !reservation.candidates.contains(&address) {
+            return Err(SelectError::NotOffered(address));
+        }
+        reservation.candidates = vec![address];
+        Ok(())
+    }
+
     pub fn release(&self, owner: &str) {
         let mut held = self.held.lock().expect("reservation table poisoned");
         held.remove(owner);
@@ -464,6 +493,34 @@ mod tests {
             .expect_err("nothing left");
         assert!(matches!(error, AllocError::Exhausted { .. }), "{error:?}");
         assert!(error.to_string().contains("10.0.0.8/29"), "{error}");
+    }
+
+    #[test]
+    fn a_confirmed_guest_address_releases_spares_and_rejects_unoffered_reports() {
+        let allocator = empty_host();
+        let plan = allocator
+            .reserve("run-a", "52:54:00:00:00:01")
+            .expect("reserve");
+        assert_eq!(
+            allocator.select("run-a", addr(200)),
+            Err(SelectError::NotOffered(addr(200)))
+        );
+        allocator
+            .select("run-a", plan.candidates[1])
+            .expect("offered address");
+        assert_eq!(
+            allocator.reserved()[0].candidates,
+            vec![plan.candidates[1]],
+            "only the address the guest proved remains reserved"
+        );
+        let next = allocator
+            .reserve("run-b", "52:54:00:00:00:02")
+            .expect("spares released");
+        assert!(next.candidates.contains(&plan.candidates[0]));
+        assert_eq!(
+            allocator.select("missing", plan.candidates[0]),
+            Err(SelectError::UnknownOwner)
+        );
     }
 
     #[test]

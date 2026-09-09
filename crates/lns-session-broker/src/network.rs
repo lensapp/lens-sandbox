@@ -125,32 +125,40 @@ pub struct Narration {
     pub line: String,
     pub refusal: Option<BrokerExitReason>,
     pub dhcp_dns: bool,
+    pub applied_address: Option<String>,
 }
 
 pub fn narrate(result: NetworkResult) -> Narration {
-    let (line, refusal, dhcp_dns) = match result {
+    let (line, refusal, dhcp_dns, applied_address) = match result {
         NetworkResult::NoInterface => (
             "no network device; the guest runs without egress".to_string(),
             None,
             false,
+            None,
         ),
-        NetworkResult::Dhcp => ("leased an address over DHCP".to_string(), None, true),
-        NetworkResult::Applied(applied) => (applied.report(), None, false),
+        NetworkResult::Dhcp => ("leased an address over DHCP".to_string(), None, true, None),
+        NetworkResult::Applied(applied) => {
+            let address = applied.address.to_string();
+            (applied.report(), None, false, Some(address))
+        }
         NetworkResult::BestEffortFailed(reason) => (
             format!("best-effort network setup failed: {}", reason.summary()),
             None,
             false,
+            None,
         ),
         NetworkResult::Refused(reason) => (
             format!("refusing to start the workload: {}", reason.summary()),
             Some(reason),
             false,
+            None,
         ),
     };
     Narration {
         line,
         refusal,
         dhcp_dns,
+        applied_address,
     }
 }
 
