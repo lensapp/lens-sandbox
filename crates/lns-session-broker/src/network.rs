@@ -686,12 +686,48 @@ mod static_tests {
         }
     }
 
+    fn applied_of(result: &NetworkResult) -> Option<&Applied> {
+        match result {
+            NetworkResult::Applied(applied) => Some(applied),
+            _ => None,
+        }
+    }
+
+    fn refusal_of(result: &NetworkResult) -> Option<&BrokerExitReason> {
+        match result {
+            NetworkResult::Refused(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn best_effort_of(result: &NetworkResult) -> Option<&BrokerExitReason> {
+        match result {
+            NetworkResult::BestEffortFailed(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn env_of(pairs: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
     #[test]
     fn a_guest_with_no_network_device_is_left_alone_and_never_refuses() {
         let runner = tests::FakeCommandRunner::with_outcomes(vec![]);
         let fs = tests::FakeFsWriter::missing();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
         assert!(matches!(result, NetworkResult::NoInterface), "{result:?}");
+        assert!(
+            refusal_of(&result).is_none()
+                && applied_of(&result).is_none()
+                && best_effort_of(&result).is_none(),
+            "a host that attaches no device neither configures a guest nor refuses one: {result:?}"
+        );
         assert!(
             runner.calls().is_empty(),
             "the Linux backend attaches no device, so nothing is configured and nothing fails"
@@ -711,9 +747,7 @@ mod static_tests {
         ]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let NetworkResult::Applied(applied) = result else {
-            panic!("expected a configured guest, got {result:?}");
-        };
+        let applied = applied_of(&result).expect("expected a configured guest");
         assert_eq!(applied.address, Ipv4Addr::new(192, 168, 64, 254));
         assert_eq!(applied.gateway, Ipv4Addr::new(192, 168, 64, 1));
 
@@ -784,11 +818,8 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let NetworkResult::Applied(applied) =
-            set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true)
-        else {
-            panic!("the second candidate is usable");
-        };
+        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
+        let applied = applied_of(&result).expect("the second candidate is usable");
         assert_eq!(applied.address, Ipv4Addr::new(192, 168, 64, 253));
         assert!(
             runner
@@ -809,10 +840,17 @@ mod static_tests {
         ]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let NetworkResult::Refused(BrokerExitReason::NoStaticAddress { offered }) = result else {
-            panic!("expected a typed exhaustion refusal, got {result:?}");
-        };
-        assert_eq!(offered, vec!["192.168.64.254", "192.168.64.253"]);
+        let reason = refusal_of(&result).expect("expected a typed exhaustion refusal");
+        assert!(
+            applied_of(&result).is_none(),
+            "a refused guest is not a configured one"
+        );
+        assert_eq!(
+            reason,
+            &BrokerExitReason::NoStaticAddress {
+                offered: vec!["192.168.64.254".into(), "192.168.64.253".into()],
+            }
+        );
     }
 
     #[test]
@@ -828,13 +866,13 @@ mod static_tests {
         ]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let NetworkResult::Refused(BrokerExitReason::GatewayUnreachable { gateway, address }) =
-            result
-        else {
-            panic!("expected a gateway refusal, got {result:?}");
-        };
-        assert_eq!(gateway, "192.168.64.1");
-        assert_eq!(address, "192.168.64.254");
+        assert_eq!(
+            refusal_of(&result).expect("expected a gateway refusal"),
+            &BrokerExitReason::GatewayUnreachable {
+                gateway: "192.168.64.1".into(),
+                address: "192.168.64.254".into(),
+            }
+        );
     }
 
     #[test]
@@ -847,9 +885,9 @@ mod static_tests {
         ]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let NetworkResult::Refused(BrokerExitReason::NetworkSetupFailed(error)) = result else {
-            panic!("expected the step's own failure, got {result:?}");
-        };
+        let error = refusal_of(&result)
+            .expect("expected the step's own failure")
+            .summary();
         assert!(error.contains("ip addr add"), "{error}");
         assert!(error.contains("exited with 2"), "{error}");
     }
@@ -864,10 +902,70 @@ mod static_tests {
         ]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), false);
-        let NetworkResult::BestEffortFailed(reason) = result else {
-            panic!("a workload with no egress must not be refused a boot, got {result:?}");
+        assert!(
+            refusal_of(&result).is_none(),
+            "a workload with no egress must not be refused a boot: {result:?}"
+        );
+        assert_eq!(
+            best_effort_of(&result)
+                .expect("the failure is still reported")
+                .as_str(),
+            "no_static_address"
+        );
+    }
+
+    #[test]
+    fn a_guest_that_cannot_run_arping_says_so_instead_of_taking_the_address() {
+        let missing = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file or directory",
+            ))
         };
-        assert_eq!(reason.as_str(), "no_static_address");
+        let probe =
+            tests::FakeCommandRunner::with_outcomes(vec![missing(), tests::ok(0), tests::ok(0)]);
+        let fs = tests::FakeFsWriter::ok();
+        let probe_failed = set_up_network(&probe, &fs, NetworkPlan::Static(plan()), true);
+        assert!(
+            refusal_of(&probe_failed)
+                .expect("a guest that cannot probe must not take the address")
+                .summary()
+                .contains("spawn `arping -D 192.168.64.254`"),
+            "{probe_failed:?}"
+        );
+
+        let gateway = tests::FakeCommandRunner::with_outcomes(vec![
+            missing(),
+            tests::ok(0),
+            tests::ok(0),
+            tests::ok(0),
+            tests::ok(0),
+            tests::ok(0),
+            tests::ok(0),
+        ]);
+        let gateway_failed = set_up_network(&gateway, &fs, NetworkPlan::Static(plan()), true);
+        assert!(
+            refusal_of(&gateway_failed)
+                .expect("a guest that cannot reach arping cannot confirm its gateway")
+                .summary()
+                .contains("spawn `arping 192.168.64.1`"),
+            "{gateway_failed:?}"
+        );
+    }
+
+    #[test]
+    fn an_arping_that_neither_answers_nor_stays_silent_is_a_failure_not_a_free_address() {
+        let runner =
+            tests::FakeCommandRunner::with_outcomes(vec![tests::ok(2), tests::ok(0), tests::ok(0)]);
+        let fs = tests::FakeFsWriter::ok();
+        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
+        let error = refusal_of(&result)
+            .expect("an unknown arping outcome is not permission to take the address")
+            .summary();
+        assert!(
+            error.contains("`arping -D 192.168.64.254` exited with 2"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -891,9 +989,7 @@ mod static_tests {
             tests::FakeCommandRunner::with_outcomes(vec![tests::ok(1), tests::ok(0), tests::ok(0)]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_network(&runner, &fs, NetworkPlan::Dhcp, true);
-        let NetworkResult::Refused(reason) = result else {
-            panic!("expected a refusal, got {result:?}");
-        };
+        let reason = refusal_of(&result).expect("expected a refusal");
         assert_eq!(reason.as_str(), "no_dhcp_lease");
     }
 
@@ -954,13 +1050,17 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_with_env(&runner, &fs, |key| match key {
-            k if k == lns_session::GUEST_NET_ENV => {
-                Some("192.168.64.254/24|192.168.64.1|192.168.64.1".to_string())
-            }
-            k if k == lns_session::EGRESS_ALLOWED_ENV => Some("1".to_string()),
-            _ => None,
-        });
+        let result = set_up_with_env(
+            &runner,
+            &fs,
+            env_of(vec![
+                (
+                    lns_session::GUEST_NET_ENV,
+                    "192.168.64.254/24|192.168.64.1|192.168.64.1",
+                ),
+                (lns_session::EGRESS_ALLOWED_ENV, "1"),
+            ]),
+        );
         assert!(matches!(result, NetworkResult::Applied(_)), "{result:?}");
     }
 
@@ -969,11 +1069,10 @@ mod static_tests {
         let runner = tests::FakeCommandRunner::with_outcomes(vec![]);
         let fs = tests::FakeFsWriter::ok();
         let broken = |egress: &'static str| {
-            move |key: &str| match key {
-                k if k == lns_session::GUEST_NET_ENV => Some("nonsense".to_string()),
-                k if k == lns_session::EGRESS_ALLOWED_ENV => Some(egress.to_string()),
-                _ => None,
-            }
+            env_of(vec![
+                (lns_session::GUEST_NET_ENV, "nonsense"),
+                (lns_session::EGRESS_ALLOWED_ENV, egress),
+            ])
         };
         assert!(matches!(
             set_up_with_env(&runner, &fs, broken("1")),

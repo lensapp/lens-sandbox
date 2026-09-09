@@ -360,10 +360,10 @@ mod tests {
         let summary = reason.summary();
         assert!(summary.contains("192.168.64.254"), "{summary}");
         assert!(summary.contains("192.168.64.253"), "{summary}");
+        let explained = reason.explain();
         assert!(
-            reason.explain().contains("remedy"),
-            "an operator gets a next step: {}",
-            reason.explain()
+            explained.contains("remedy"),
+            "an operator gets a next step: {explained}"
         );
     }
 
@@ -377,6 +377,11 @@ mod tests {
         let summary = reason.summary();
         assert!(summary.contains("192.168.64.1"), "{summary}");
         assert!(summary.contains("192.168.64.254"), "{summary}");
+        let explained = reason.explain();
+        assert!(
+            explained.contains("stayed silent") && explained.contains("remedy"),
+            "the operator is told what was tried and what to do: {explained}"
+        );
         assert_ne!(reason.as_str(), BrokerExitReason::NoDhcpLease.as_str());
     }
 
@@ -385,12 +390,15 @@ mod tests {
         let reason =
             BrokerExitReason::NetworkSetupFailed("spawn `ip link set lo up`: ENOENT".into());
         assert_eq!(reason.as_str(), "network_setup_failed");
+        let summary = reason.summary();
         assert!(
-            reason
-                .summary()
-                .contains("spawn `ip link set lo up`: ENOENT"),
-            "the real error must not be replaced by a story: {}",
-            reason.summary()
+            summary.contains("spawn `ip link set lo up`: ENOENT"),
+            "the real error must not be replaced by a story: {summary}"
+        );
+        let explained = reason.explain();
+        assert!(
+            explained.contains("does not start without a network"),
+            "the operator is told why a network failure is fatal for this run: {explained}"
         );
     }
 
