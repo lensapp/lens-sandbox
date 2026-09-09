@@ -1,0 +1,10 @@
+apiVersion: lns.run/v1
+kind: mixin
+name: lns-actions-ci-fixture
+spec:
+  egress:
+    http:
+      - match: api.github.com
+        verdict: allow
+      - match: objects.githubusercontent.com
+        verdict: allow
