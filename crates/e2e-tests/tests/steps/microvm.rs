@@ -1847,9 +1847,8 @@ fn run_command_over_the_built_image(world: &mut E2eWorld, cmd_line: String) {
     run_microvm(world, vec![], &cmd_line);
 }
 
-/// Slice 1 owes lensapp/lens-sandbox#393 two numbers: the layer's size, and the time from the
-/// workload's exit to the imported layer. The capture prints both, and this step reads them out
-/// of the run's own output so the scenario's log carries the measurement.
+/// Slice 1 owes lensapp/lens-sandbox#393 the layer's size and the time from the workload's exit to
+/// the imported layer, so the scenario's own log carries what the capture reported.
 #[then("the capture reports the layer size and the time from the command's exit")]
 fn the_capture_reports_its_measurement(world: &mut E2eWorld) {
     let run = world.result.as_ref().expect("a run must have happened");

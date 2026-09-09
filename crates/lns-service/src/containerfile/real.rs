@@ -21,9 +21,8 @@ pub fn capture_hook_enabled() -> bool {
     std::env::var_os(CAPTURE_HOOK_ENV).is_some_and(|value| !value.is_empty())
 }
 
-/// Reads what one stopped run wrote and imports it as one layer on top of the image it booted.
-/// `command_exited` is when the workload's session ended, so the report can answer what a build
-/// costs after the instruction itself is done.
+/// Reads what one stopped run wrote, imports it as one layer over the image it booted, and reports
+/// the cost from `command_exited`, when the workload's own session ended.
 pub async fn capture_after_run(
     run_id: &str,
     parent_reference: &str,

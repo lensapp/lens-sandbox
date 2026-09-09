@@ -44,11 +44,9 @@ impl Ext4Upper {
     }
 }
 
-/// The guest never unmounts the volume — the broker syncs and powers off — so `INCOMPAT_RECOVER`
-/// stays set and `ext4-view` refuses a journal this repo's writer builds without JBD2 checksums.
-/// `sync(2)` writes the block device's dirty metadata after committing the journal, so the home
-/// blocks are current and the journal holds nothing newer: clearing the flag on the way in reads
-/// the volume the guest synced, and reads nothing the journal alone would know.
+/// The guest syncs and powers off without unmounting, so the volume still claims it needs
+/// recovery through a journal `ext4-view` cannot read — but `sync(2)` has already written the home
+/// blocks, so the flag comes off on the way in and the reader sees what the guest synced.
 struct SyncedImage {
     file: std::fs::File,
 }
@@ -127,9 +125,8 @@ impl UpperTree for Ext4Upper {
     }
 }
 
-/// Overlayfs writes a deletion as a 0:0 character device, so a character device here is the
-/// deletion a `RUN` made; `ext4-view` reports no rdev, so no other character device can be told
-/// apart from one.
+/// Overlayfs writes a deletion as a 0:0 character device and `ext4-view` reports no rdev, so every
+/// character device in the upper reads as the deletion a `RUN` made.
 fn kind_of(file_type: FileType) -> UpperKind {
     match file_type {
         FileType::Directory => UpperKind::Directory,
@@ -145,8 +142,8 @@ mod tests {
     use super::*;
     use crate::upperfs::{Plan, write_ext4};
 
-    /// An ext4 volume shaped like a run's: formatted by this repo's writer, then marked as a
-    /// filesystem that was mounted and never unmounted, which is how every guest leaves it.
+    /// An ext4 volume shaped like a run's: this repo's writer formats it, then it is marked as
+    /// mounted-and-never-unmounted, which is how every guest leaves one.
     fn unclean_image() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("upper.img");

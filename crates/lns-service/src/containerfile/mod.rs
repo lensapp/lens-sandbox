@@ -1,6 +1,5 @@
-//! Slice 1 of the Containerfile executor (lensapp/lens-sandbox#393): one filesystem-changing
-//! instruction captured out of a guest as one OCI layer, assembled onto its base image, and
-//! imported where the ordinary boot path finds it. No parser, one hard-coded command.
+//! Slice 1 of the Containerfile executor (lensapp/lens-sandbox#393): what one guest wrote,
+//! captured as one OCI layer over its base image and imported where the boot path finds it.
 
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
