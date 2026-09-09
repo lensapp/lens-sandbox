@@ -47,6 +47,22 @@ Feature: building the image a document names
     And the output contains "lns.yaml"
     And the service received no request
 
+  Scenario: a document that declares a mixin is resolved before it is built
+    Given a document whose spec.image names a Containerfile and declares a mixin
+    And the service resolves that document
+    And the service builds it into 3 layers
+    When the user runs sandbox command "build"
+    Then the exit code is 0
+    And the service resolved the document before it built it
+    And the build carries the resolved document and what its mixins authored
+
+  Scenario: a document that declares no mixin is built without a resolution
+    Given a document whose spec.image names a Containerfile
+    And the service builds it into 3 layers
+    When the user runs sandbox command "build"
+    Then the exit code is 0
+    And the service was not asked to resolve the document
+
   Scenario: what the service refuses is what the user reads
     Given a document whose spec.image names a Containerfile
     And the service refuses the build with "spec.image \"alpine:3.20\" names an image to pull"

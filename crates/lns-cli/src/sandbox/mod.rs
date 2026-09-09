@@ -407,11 +407,15 @@ async fn build<W: std::io::Write>(
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_string_lossy()
         .into_owned();
+    let resolved = resolve_before_building(svc, &definition, &definition_dir).await?;
+
     match svc
         .one_shot(Request::BuildSandbox {
-            definition,
+            definition: resolved.definition,
             definition_dir,
             rebuild: args.rebuild,
+            authored_egress: resolved.authored_egress,
+            packed_filesets: resolved.packed_filesets,
         })
         .await?
     {
@@ -445,6 +449,56 @@ fn definition_json(yaml: &str, path: &std::path::Path) -> Result<String> {
     let value: serde_json::Value =
         serde_yaml::from_str(yaml).with_context(|| format!("parsing {}", path.display()))?;
     serde_json::to_string(&value).context("normalizing the definition to json")
+}
+
+/// What a build boots its steps from: the merged document, and the policy its other sources authored.
+struct DefinitionToBuild {
+    definition: String,
+    authored_egress: Option<String>,
+    packed_filesets: Vec<lns_ipc::PackedFilesetSource>,
+}
+
+/// A build step is the document's own run with one instruction in its place, so it takes the same resolution a run takes: a document still declaring mixins reaches no plan.
+async fn resolve_before_building(
+    svc: &impl SandboxService,
+    definition: &str,
+    definition_dir: &str,
+) -> Result<DefinitionToBuild> {
+    if !declares_a_mixin(definition) {
+        return Ok(DefinitionToBuild {
+            definition: definition.to_string(),
+            authored_egress: None,
+            packed_filesets: Vec::new(),
+        });
+    }
+    match svc
+        .one_shot(Request::ResolveDefinition {
+            definition: definition.to_string(),
+            project_dir: definition_dir.to_string(),
+            mixins: Vec::new(),
+        })
+        .await?
+    {
+        Response::DefinitionResolved {
+            definition,
+            authored_egress,
+            packed_filesets,
+            ..
+        } => Ok(DefinitionToBuild {
+            definition,
+            authored_egress: Some(authored_egress),
+            packed_filesets,
+        }),
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+fn declares_a_mixin(definition: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(definition)
+        .ok()
+        .and_then(|value| value["spec"]["mixins"].as_array().map(|m| !m.is_empty()))
+        .unwrap_or(false)
 }
 
 /// §8.4 has the service render what ran and this machine write where the user said, so a document nobody named is never created.

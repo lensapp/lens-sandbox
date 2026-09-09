@@ -605,8 +605,17 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition,
             definition_dir,
             rebuild,
+            authored_egress,
+            packed_filesets,
         } => image_response(
-            crate::containerfile::real::build_sandbox(definition, definition_dir, *rebuild).await,
+            crate::containerfile::real::build_sandbox(&crate::containerfile::real::SandboxBuild {
+                definition,
+                definition_dir,
+                rebuild: *rebuild,
+                authored_egress: authored_egress.as_deref(),
+                packed_filesets,
+            })
+            .await,
         ),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
         Request::Unknown { method } => Response::Error {
@@ -3213,6 +3222,8 @@ mod tests {
                 definition: serde_json::json!({"spec": {"image": "alpine:3.20"}}).to_string(),
                 definition_dir: "/work".into(),
                 rebuild: false,
+                authored_egress: None,
+                packed_filesets: Vec::new(),
             },
             Instant::now(),
         )

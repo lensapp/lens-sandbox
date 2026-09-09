@@ -143,24 +143,32 @@ pub(crate) async fn build(
     })
 }
 
+/// What `lns sandbox build` was asked to build: the resolved document, and the policy a step is held to.
+pub struct SandboxBuild<'a> {
+    pub definition: &'a str,
+    pub definition_dir: &'a str,
+    pub rebuild: bool,
+    pub authored_egress: Option<&'a str>,
+    pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
+}
+
 /// `lns sandbox build`: the build a run would do, with no run around it and nothing published.
-pub async fn build_sandbox(
-    definition: &str,
-    definition_dir: &str,
-    rebuild: bool,
-) -> Result<lns_ipc::Response> {
+pub async fn build_sandbox(request: &SandboxBuild<'_>) -> Result<lns_ipc::Response> {
+    let definition = request.definition;
     let image = image_of(definition)?;
     let (frame_tx, mut frames) = tokio::sync::mpsc::channel(1);
     // A build asked for on its own has no run to carry a step's output to, so it is drained here rather than left to fill.
     tokio::spawn(async move { while frames.recv().await.is_some() {} });
-    let mut args = args_for_a_build(definition, definition_dir);
+    let mut args = args_for_a_build(definition, request.definition_dir);
     args.image = Some(image.clone());
+    args.authored_egress = request.authored_egress.map(str::to_string);
+    args.packed_filesets = request.packed_filesets.to_vec();
     let built = build(
         &BuildRequest {
             args: &args,
             definition,
             image: &image,
-            rebuild,
+            rebuild: request.rebuild,
         },
         frame_tx,
     )
