@@ -398,7 +398,8 @@ an instruction it does not implement.
 | `USER`, `WORKDIR` | As written. |
 | `RUN` | Shell form, exec form, and here-documents. |
 | `COPY`, `ADD` | From the build context only. |
-| `ENTRYPOINT`, `CMD`, `SHELL` | Shell and exec form. |
+| `ENTRYPOINT`, `CMD` | Shell and exec form. |
+| `SHELL` | Exec form only — a JSON array, as Docker defines it. |
 | `EXPOSE`, `VOLUME` | As written. |
 
 | Refused | Alternative the refusal MUST name |
@@ -409,6 +410,7 @@ an instruction it does not implement.
 | `ADD` of an archive it would unpack | `COPY` the archive and `RUN tar`. |
 | `ONBUILD`, `HEALTHCHECK`, `STOPSIGNAL` | None in v1; the refusal names where the subset grows. |
 | `MAINTAINER` | `LABEL org.opencontainers.image.authors`. |
+| A `SHELL` in shell form | The exec form: `SHELL ["/bin/bash", "-c"]`. |
 | A `COPY` or `ADD` source that leaves the context — a `..` segment or an absolute path | A path inside the context; the artifact ships the context, so a source outside it reaches nothing a consumer receives. |
 
 The subset grows by decision, never by accident.

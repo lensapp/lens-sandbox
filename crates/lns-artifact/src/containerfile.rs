@@ -87,13 +87,7 @@ const ARCHIVE_SUFFIXES: [&str; 9] = [
 
 /// Parse a Containerfile and hold it to the v1 subset; each refusal names its instruction, its line and the alternative to use (§3.1.1).
 pub fn parse(text: &str) -> Result<Containerfile, Vec<String>> {
-    let parsed = parse_dockerfile::parse(text).map_err(|e| {
-        vec![format!(
-            "line {}: {}",
-            e.line(),
-            first_sentence(&e.to_string())
-        )]
-    })?;
+    let parsed = parse_dockerfile::parse(text).map_err(|e| vec![parse_refusal(text, &e)])?;
     let lines = LineIndex::of(text);
     let mut instructions = Vec::new();
     let mut refusals = Vec::new();
@@ -112,6 +106,24 @@ pub fn parse(text: &str) -> Result<Containerfile, Vec<String>> {
     } else {
         Err(refusals)
     }
+}
+
+/// The exec form is the only one `SHELL` has, in Docker and here, so the parse error it fails with carries the form to write instead.
+const SHELL_EXEC_FORM: &str = r#"SHELL takes exec form only; write SHELL ["/bin/bash", "-c"]"#;
+
+/// A file that does not parse is refused as a whole, so the instruction it failed on is read back from the text the author wrote.
+fn parse_refusal(text: &str, error: &parse_dockerfile::Error) -> String {
+    let line = error.line();
+    let message = format!("line {line}: {}", first_sentence(&error.to_string()));
+    match keyword_on(text, line) {
+        Some(keyword) if keyword == "SHELL" => format!("{message}; {SHELL_EXEC_FORM}"),
+        _ => message,
+    }
+}
+
+fn keyword_on(text: &str, line: usize) -> Option<String> {
+    let written = text.lines().nth(line.checked_sub(1)?)?;
+    Some(written.split_whitespace().next()?.to_ascii_uppercase())
 }
 
 /// The parser reports the position twice — in the message and in `line()`/`column()` — and a refusal states it once.
@@ -619,6 +631,19 @@ mod tests {
                 body: "echo $HOME\n".to_string()
             }],
             "a quoted delimiter is what tells the build to leave the body alone"
+        );
+    }
+
+    #[test]
+    fn a_shell_written_in_shell_form_is_refused_with_the_exec_form_it_takes() {
+        let refusal = refusal("FROM alpine\nSHELL /bin/bash -c\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("SHELL"),
+            "got: {refusal}"
+        );
+        assert!(
+            refusal.contains(r#"SHELL ["/bin/bash", "-c"]"#),
+            "SHELL is a JSON array in Docker, and the author needs to read that: {refusal}"
         );
     }
 
