@@ -114,26 +114,12 @@ pub(crate) async fn build(
     };
     let plan = executor::BuildPlan {
         file: &file,
+        label: &located.label,
         text: &text,
         context_hash: &context_hash,
         arch: &arch,
         rebuild: request.rebuild,
     };
-    if !plan.rebuild {
-        log::info!(
-            "Building",
-            "{} ({} instructions)",
-            located.label,
-            file.instructions.len()
-        );
-    } else {
-        log::info!(
-            "Building",
-            "{} ({} instructions), ignoring the cache",
-            located.label,
-            file.instructions.len()
-        );
-    }
     let built = executor::build(&host, &plan)
         .await
         .with_context(|| format!("building {}", located.label))?;

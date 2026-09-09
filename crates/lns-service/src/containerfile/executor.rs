@@ -102,6 +102,8 @@ pub(crate) trait BuildHost {
 /// What one build is asked for: the file, the bytes behind it, and whether the cache may answer.
 pub(crate) struct BuildPlan<'a> {
     pub file: &'a Containerfile,
+    /// What `spec.image` named, as every line about this build spells it.
+    pub label: &'a str,
     /// The Containerfile as it was written, comments and all — the key measures the file, not the parse.
     pub text: &'a str,
     pub context_hash: &'a str,
@@ -183,6 +185,16 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         });
     }
 
+    crate::log::info!(
+        "Building",
+        "{} ({} instructions){}",
+        plan.label,
+        plan.file.instructions.len(),
+        match plan.rebuild {
+            true => ", ignoring the cache",
+            false => "",
+        },
+    );
     let mut build = Build {
         parent: base.reference,
         base_env: base.env,
@@ -854,6 +866,7 @@ mod tests {
     fn plan<'a>(file: &'a Containerfile, text: &'a str) -> BuildPlan<'a> {
         BuildPlan {
             file,
+            label: "./image/Containerfile",
             text,
             context_hash: "sha256:context",
             arch: "arm64",

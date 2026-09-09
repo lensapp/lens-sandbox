@@ -43,6 +43,10 @@ pub struct E2eWorld {
     pub run_budget: Option<std::time::Duration>,
     /// Destinations the definition's own policy allows, so a scenario whose workload really fetches something is not left at an approval prompt.
     pub project_egress: Vec<String>,
+    /// The build cache key each `lns sandbox build` printed, in the order the scenario asked for them.
+    pub build_keys: Vec<String>,
+    /// How many instructions the service had booted a guest for when the last build started.
+    pub instructions_before_build: usize,
 }
 
 impl E2eWorld {
