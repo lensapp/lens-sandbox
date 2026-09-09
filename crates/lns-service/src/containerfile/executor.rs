@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 
 use super::exclude::only_the_workloads_writes;
-use super::parse::{Command, Containerfile, InstructionKind, Transfer};
+use super::parse::{Command, Containerfile, HereDoc, InstructionKind, Transfer};
 use super::upper::ChangeSet;
 
 /// The shell a `RUN` in shell form is run through until a `SHELL` instruction says otherwise.
@@ -19,6 +19,9 @@ const DEFAULT_USER: &str = "root";
 
 /// The directory a `RUN` runs in until a `WORKDIR` instruction says otherwise.
 const DEFAULT_WORKDIR: &str = "/";
+
+/// The delimiter a here-document is handed to the shell with, extended until the body cannot end it early.
+const HERE_DOC_DELIMITER: &str = "LNSHEREDOC";
 
 /// One `RUN` as the build guest is asked to run it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,7 +269,7 @@ async fn commit<H: BuildHost>(
 }
 
 /// A `RUN` is given the build arguments and the environment as one scope, the way Docker's shell sees them.
-fn run_step(build: &Build, line: usize, command: &Command, here_docs: &[String]) -> RunStep {
+fn run_step(build: &Build, line: usize, command: &Command, here_docs: &[HereDoc]) -> RunStep {
     RunStep {
         parent: build.parent.clone(),
         argv: run_argv(build, command, here_docs),
@@ -280,18 +283,63 @@ fn run_step(build: &Build, line: usize, command: &Command, here_docs: &[String])
     }
 }
 
-fn run_argv(build: &Build, command: &Command, here_docs: &[String]) -> Vec<String> {
+fn run_argv(build: &Build, command: &Command, here_docs: &[HereDoc]) -> Vec<String> {
     match command {
         Command::Exec(argv) => argv.clone(),
         Command::Shell(text) => {
             let mut argv = build.shell.clone();
-            argv.push(if here_docs.is_empty() {
-                text.clone()
-            } else {
-                here_docs.concat()
-            });
+            argv.push(shell_text(text, here_docs));
             argv
         }
+    }
+}
+
+/// A here-document with nothing before it is the script itself; with a command before it, it is
+/// that command's standard input, which is what handing the shell the here-document back does.
+fn shell_text(text: &str, here_docs: &[HereDoc]) -> String {
+    if here_docs.is_empty() {
+        return text.to_string();
+    }
+    if text.is_empty() {
+        return bodies(here_docs);
+    }
+    let mut script = text.to_string();
+    let mut fed = String::new();
+    for doc in here_docs {
+        let delimiter = delimiter_for(&doc.body);
+        let opener = match doc.expand {
+            true => format!(" <<{delimiter}"),
+            false => format!(" <<'{delimiter}'"),
+        };
+        script.push_str(&opener);
+        fed.push_str(&ending_in_a_newline(&doc.body));
+        fed.push_str(&delimiter);
+        fed.push('\n');
+    }
+    format!("{script}\n{fed}")
+}
+
+fn bodies(here_docs: &[HereDoc]) -> String {
+    here_docs
+        .iter()
+        .map(|doc| doc.body.clone())
+        .collect::<Vec<String>>()
+        .concat()
+}
+
+/// A body holding the delimiter on a line of its own would end the document early, so the delimiter grows until it cannot.
+fn delimiter_for(body: &str) -> String {
+    let mut delimiter = HERE_DOC_DELIMITER.to_string();
+    while body.lines().any(|line| line == delimiter) {
+        delimiter.push('X');
+    }
+    delimiter
+}
+
+fn ending_in_a_newline(body: &str) -> String {
+    match body.ends_with('\n') || body.is_empty() {
+        true => body.to_string(),
+        false => format!("{body}\n"),
     }
 }
 
@@ -427,7 +475,7 @@ fn label(kind: &InstructionKind) -> String {
         InstructionKind::User(user) => format!("USER {user}"),
         InstructionKind::Workdir(dir) => format!("WORKDIR {dir}"),
         InstructionKind::Run { command, here_docs } => match command {
-            Command::Shell(text) if text.is_empty() => format!("RUN {}", here_docs.concat().trim()),
+            Command::Shell(text) if text.is_empty() => format!("RUN {}", bodies(here_docs).trim()),
             Command::Shell(text) => format!("RUN {text}"),
             Command::Exec(argv) => format!("RUN {}", json_argv(argv)),
         },
@@ -1020,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_here_document_run_is_run_as_the_script_it_holds() {
+    async fn a_here_document_run_with_nothing_before_it_is_run_as_the_script_it_holds() {
         let host = FakeHost::new();
         built(&host, "FROM alpine\nRUN <<EOF\necho one\necho two\nEOF\n").await;
 
@@ -1031,6 +1079,58 @@ mod tests {
                 "-c".to_string(),
                 "echo one\necho two\n".to_string()
             ],
+        );
+    }
+
+    /// `RUN <<EOF cat > /entry` writes the file: the rest of the line is the command, and the body
+    /// is what it reads, which is what handing the shell the here-document back does.
+    #[tokio::test]
+    async fn a_here_document_run_keeps_the_rest_of_its_line_and_feeds_the_body_on_stdin() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nRUN <<EOF cat > /usr/local/bin/entry\n#!/bin/sh\necho hi\nEOF\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.runs()[0].argv,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "cat > /usr/local/bin/entry <<LNSHEREDOC\n#!/bin/sh\necho hi\nLNSHEREDOC\n"
+                    .to_string(),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quoted_here_document_delimiter_keeps_the_shell_out_of_the_body() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nRUN <<'EOF' cat > /entry\necho $HOME\nEOF\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.runs()[0].argv[2],
+            "cat > /entry <<'LNSHEREDOC'\necho $HOME\nLNSHEREDOC\n",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_spells_the_delimiter_gets_one_the_body_cannot_end() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nRUN <<EOF cat > /entry\nLNSHEREDOC\nEOF\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.runs()[0].argv[2],
+            "cat > /entry <<LNSHEREDOCX\nLNSHEREDOC\nLNSHEREDOCX\n",
         );
     }
 

@@ -36,7 +36,7 @@ pub(crate) enum InstructionKind {
     Workdir(String),
     Run {
         command: Command,
-        here_docs: Vec<String>,
+        here_docs: Vec<HereDoc>,
     },
     Copy(Transfer),
     Add(Transfer),
@@ -45,6 +45,13 @@ pub(crate) enum InstructionKind {
     Shell(Vec<String>),
     Expose(Vec<String>),
     Volume(Vec<String>),
+}
+
+/// One here-document body of a `RUN`, and whether the shell expands variables in it — a quoted delimiter (`<<'EOF'`) says it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HereDoc {
+    pub expand: bool,
+    pub body: String,
 }
 
 /// A `RUN`, `CMD` or `ENTRYPOINT` argument in the two forms Docker defines.
@@ -214,7 +221,10 @@ fn accept_run(
         here_docs: run
             .here_docs
             .iter()
-            .map(|doc| doc.value.to_string())
+            .map(|doc| HereDoc {
+                expand: doc.expand,
+                body: doc.value.to_string(),
+            })
             .collect(),
     })
 }
@@ -451,13 +461,34 @@ mod tests {
     }
 
     #[test]
-    fn a_here_doc_run_keeps_its_body() {
+    fn a_here_doc_run_keeps_its_body_and_the_rest_of_its_line() {
         assert_eq!(
-            kinds("FROM alpine\nRUN <<EOF\necho hi\nEOF\n")[1],
+            kinds("FROM alpine\nRUN <<EOF cat > /out\necho hi\nEOF\n")[1],
             InstructionKind::Run {
-                command: Command::Shell(String::new()),
-                here_docs: vec!["echo hi\n".into()],
+                command: Command::Shell("cat > /out".into()),
+                here_docs: vec![HereDoc {
+                    expand: true,
+                    body: "echo hi\n".into(),
+                }],
             },
+        );
+    }
+
+    /// A quoted delimiter is Docker's spelling for "do not expand this body", and the build owes it.
+    #[test]
+    fn a_quoted_here_doc_delimiter_says_the_body_is_not_expanded() {
+        let InstructionKind::Run { here_docs, .. } =
+            kinds("FROM alpine\nRUN <<'EOF'\necho $HOME\nEOF\n")[1].clone()
+        else {
+            panic!("this is a RUN");
+        };
+
+        assert_eq!(
+            here_docs,
+            vec![HereDoc {
+                expand: false,
+                body: "echo $HOME\n".into(),
+            }],
         );
     }
 
