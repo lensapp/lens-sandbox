@@ -1814,11 +1814,13 @@ fn one_layer_was_captured(world: &mut E2eWorld) {
         .expect("Given a clean lns cache home first")
         .path();
     let run_id = last_run(world).expect("the run must have reported its id");
-    let path = home
-        .join(".lns")
-        .join("runs")
-        .join(&run_id)
-        .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
+    let run_dir = crate::specutil::run_dir_for_prefix(home, &run_id).unwrap_or_else(|e| {
+        panic!(
+            "the run the CLI reported as {run_id:?} must have a directory: {e}\n--- service.log ---\n{}",
+            crate::steps::service::read_service_log(world),
+        )
+    });
+    let path = run_dir.join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
     let reference = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| {
             let run = world.result.as_ref();
