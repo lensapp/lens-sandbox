@@ -152,8 +152,16 @@ fn accept(
     match instruction {
         I::From(from) => one(accept_from(from, line, seen_from)?),
         I::Arg(arg) => Ok(accept_arg(&arg.arguments.value)),
-        I::Env(env) => one(InstructionKind::Env(key_values(&env.arguments.value))),
-        I::Label(label) => one(InstructionKind::Label(key_values(&label.arguments.value))),
+        I::Env(env) => one(InstructionKind::Env(key_values(
+            "ENV",
+            &env.arguments.value,
+            line,
+        )?)),
+        I::Label(label) => one(InstructionKind::Label(key_values(
+            "LABEL",
+            &label.arguments.value,
+            line,
+        )?)),
         I::User(user) => one(InstructionKind::User(user.arguments.value.to_string())),
         I::Workdir(workdir) => one(InstructionKind::Workdir(
             workdir.arguments.value.to_string(),
@@ -360,28 +368,45 @@ fn volume_targets(arguments: &parse_dockerfile::JsonOrStringArray<'_, 1>) -> Vec
 }
 
 /// `ENV` and `LABEL` take pairs in one line, quoted where a value holds a space, plus the legacy `ENV KEY value` spelling.
-fn key_values(arguments: &str) -> Vec<(String, String)> {
+fn key_values(
+    instruction: &str,
+    arguments: &str,
+    line: usize,
+) -> Result<Vec<(String, String)>, String> {
     let words = split_words(arguments);
     if words.first().is_some_and(|word| !word.contains('=')) {
         let mut words = words.into_iter();
         let key = words.next().unwrap_or_default();
         let value = words.collect::<Vec<_>>().join(" ");
-        return vec![(key, unquote(&value).to_string())];
+        return Ok(vec![(key, unquote(&value).to_string())]);
     }
     words
         .iter()
-        .filter_map(|word| word.split_once('='))
-        .map(|(key, value)| (key.to_string(), unquote(value).to_string()))
+        .map(|word| match word.split_once('=') {
+            Some((key, value)) => Ok((key.to_string(), unquote(value).to_string())),
+            None => Err(format!(
+                "line {line}: {instruction} word {word:?} names no value; write {instruction} KEY=value, or the legacy one-pair form {instruction} KEY value"
+            )),
+        })
         .collect()
 }
 
-/// Splitting on whitespace outside quotes, because `ENV A="one two" B=3` is one instruction with two pairs.
+/// Splitting on whitespace outside quotes, because `ENV A="one two" B=3` is one instruction with two pairs; a backslash escapes the character after it, as Docker's parser has it, so `A=/opt/a\ b` is one word and `\"` is part of a value.
 fn split_words(arguments: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
-    for c in arguments.chars() {
+    let mut chars = arguments.chars();
+    while let Some(c) = chars.next() {
         match (quote, c) {
+            (Some('\''), c) => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    word.push(c);
+                }
+            }
+            (_, '\\') => word.push(chars.next().unwrap_or('\\')),
             (Some(open), c) if c == open => quote = None,
             (Some(_), c) => word.push(c),
             (None, '"' | '\'') => quote = Some(c),
@@ -754,6 +779,44 @@ mod tests {
         assert_eq!(
             built.instructions[13].kind,
             InstructionKind::Volume(vec!["/data".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_backslash_escape_in_a_value_reaches_the_image_config_as_the_character_it_escapes() {
+        let built = built(concat!(
+            "FROM alpine\n",
+            "ENV GREETING=\"say \\\"hi\\\"\" DIR=/opt/a\\ b\n",
+        ));
+        assert_eq!(
+            built.instructions[1].kind,
+            InstructionKind::Env(vec![
+                ("GREETING".to_string(), "say \"hi\"".to_string()),
+                ("DIR".to_string(), "/opt/a b".to_string()),
+            ]),
+            "an escaped quote is part of the value, and an escaped space does not split the word"
+        );
+    }
+
+    #[test]
+    fn an_env_word_without_an_equals_sign_is_refused_rather_than_dropped() {
+        let refusal = refusal("FROM alpine\nENV NODE_ENV=production DEBUG\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("DEBUG"),
+            "got: {refusal}"
+        );
+        assert!(
+            refusal.contains("KEY=value"),
+            "the author needs the form to write instead: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_label_word_without_an_equals_sign_is_refused_the_same_way() {
+        let refusal = refusal("FROM alpine\nLABEL a=b c\n");
+        assert!(
+            refusal.contains("LABEL") && refusal.contains("line 2"),
+            "got: {refusal}"
         );
     }
 
