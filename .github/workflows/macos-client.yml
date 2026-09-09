@@ -1,0 +1,25 @@
+name: Native macOS client
+
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'clients/macos/**'
+      - 'crates/lns-ipc/**'
+      - 'crates/lns-service/src/ipc/**'
+      - '.github/workflows/macos-client.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: make -C clients/macos verify

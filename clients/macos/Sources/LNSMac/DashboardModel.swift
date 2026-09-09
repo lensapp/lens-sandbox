@@ -24,10 +24,13 @@ final class DashboardModel: ObservableObject {
     @Published var archiveChoice: Bool?
     private let service: ServiceConnection
     private var watching = false
-    private var refreshTask: Task<DashboardData, Error>?
+    private let refreshes: DashboardRefresh
     private var offerTask: Task<Void, Never>?
 
-    init(service: ServiceConnection) { self.service = service }
+    init(service: ServiceConnection) {
+        self.service = service
+        refreshes = DashboardRefresh { try await service.dashboard() }
+    }
 
     var data: DashboardData { feed.data }
     var connected: Bool { feed.connected }
@@ -45,7 +48,7 @@ final class DashboardModel: ObservableObject {
     func watch() async {
         guard !watching else { return }
         watching = true
-        defer { watching = false; refreshTask?.cancel(); refreshTask = nil }
+        defer { watching = false; disconnect() }
         var retry: UInt64 = 1
         while !Task.isCancelled {
             do {
@@ -75,14 +78,9 @@ final class DashboardModel: ObservableObject {
     }
 
     private func reload() async throws {
-        if let refreshTask { _ = try await refreshTask.value; return }
         loading = true
-        let task = Task { try await service.dashboard() }
-        refreshTask = task
-        defer { refreshTask = nil; loading = false }
-        let snapshot = try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: { task.cancel() }
+        defer { loading = false }
+        let snapshot = try await refreshes.refresh()
         try Task.checkCancellation()
         feed.receive(snapshot)
         connectionNotice = nil
@@ -91,6 +89,7 @@ final class DashboardModel: ObservableObject {
     }
 
     private func disconnect() {
+        refreshes.cancel()
         feed.disconnect()
         selectedEvent = nil
         clearHistory()
