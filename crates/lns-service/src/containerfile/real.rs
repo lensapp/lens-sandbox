@@ -99,6 +99,7 @@ pub(crate) async fn build(
         )
     })?;
     let context_hash = key::context_hash(&RealContextFs, &located.context)?;
+    let policy = key::policy_fingerprint(request.definition)?;
 
     let cache_dir = crate::cache::root()?;
     let arch = crate::image::want_arch().to_string();
@@ -119,6 +120,7 @@ pub(crate) async fn build(
         context_hash: &context_hash,
         arch: &arch,
         rebuild: request.rebuild,
+        policy: &policy,
     };
     let built = executor::build(&host, &plan)
         .await

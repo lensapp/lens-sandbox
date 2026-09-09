@@ -109,6 +109,8 @@ pub(crate) struct BuildPlan<'a> {
     pub context_hash: &'a str,
     pub arch: &'a str,
     pub rebuild: bool,
+    /// What the document declares a step may reach and carry, as `key::policy_fingerprint` spells it.
+    pub policy: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +141,14 @@ struct Build {
     /// A build the user asked to rebuild reads no key, and still writes every one it produces.
     rebuild: bool,
     reused_steps: usize,
+    /// The policy every step of this build is keyed under, so no step of another document answers for one of these.
+    policy: String,
+}
+
+impl Build {
+    fn steps(&self) -> key::Steps<'_> {
+        key::Steps::under(&self.policy)
+    }
 }
 
 pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Built> {
@@ -207,6 +217,7 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         layers: 0,
         rebuild: plan.rebuild,
         reused_steps: 0,
+        policy: plan.policy.to_string(),
     };
     for instruction in instructions {
         let created_by = label(&instruction.kind);
@@ -240,7 +251,7 @@ async fn step<H: BuildHost>(
         }
         InstructionKind::Run { command, here_docs } => {
             let step = run_step(build, line, command, here_docs);
-            let key = key::run_key(&build.parent, &step);
+            let key = build.steps().run(&build.parent, &step);
             if reuse(host, build, &key, true).await {
                 return Ok(());
             }
@@ -261,7 +272,9 @@ async fn step<H: BuildHost>(
         InstructionKind::Copy(transfer) | InstructionKind::Add(transfer) => {
             let step = copy_step(host, build, line, transfer).await?;
             let changes = host.copy(&step).await?;
-            let key = key::transfer_key(&build.parent, &label(kind), &changes);
+            let key = build
+                .steps()
+                .transfer(&build.parent, &label(kind), &changes);
             if reuse(host, build, &key, true).await {
                 return Ok(());
             }
@@ -314,7 +327,9 @@ async fn step<H: BuildHost>(
             }
         }
     }
-    let key = key::config_key(&build.parent, &label(kind), &build.config);
+    let key = build
+        .steps()
+        .config(&build.parent, &label(kind), &build.config);
     if reuse(host, build, &key, false).await {
         return Ok(());
     }
@@ -871,6 +886,7 @@ mod tests {
             context_hash: "sha256:context",
             arch: "arm64",
             rebuild: false,
+            policy: "sha256:the-policy-this-document-declares",
         }
     }
 
