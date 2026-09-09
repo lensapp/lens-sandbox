@@ -3242,6 +3242,29 @@ mod tests {
         }
     }
 
+    /// A push asks for the same build, and is turned away by the same rule.
+    #[tokio::test]
+    async fn handle_request_build_image_for_push_refuses_a_document_that_names_no_containerfile() {
+        let resp = handle_request(
+            &Request::BuildImageForPush {
+                definition: serde_json::json!({"spec": {"image": "alpine:3.20"}}).to_string(),
+                definition_dir: "/work".into(),
+                rebuild: false,
+                plan_only: true,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        match resp {
+            Response::Error { message } => assert!(
+                message.contains("names an image to pull, not a Containerfile"),
+                "{message}"
+            ),
+            other => unreachable!("expected Error, got {other:?}"),
+        }
+    }
+
     /// What a Containerfile build left behind is swept with the runs, and named in the same answer.
     #[tokio::test]
     #[serial_test::serial(env, global_runs)]

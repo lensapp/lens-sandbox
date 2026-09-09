@@ -406,6 +406,18 @@ mod tests {
         );
     }
 
+    /// What a projection says about the image: what the guest starts from, and what built it.
+    fn image_of(
+        inspection: &ArtifactInspection,
+    ) -> Option<(&str, Option<&lns_ipc::BuildSourceView>)> {
+        match inspection {
+            ArtifactInspection::Sandbox(view) => {
+                Some((view.image.as_str(), view.image_source.as_ref()))
+            }
+            ArtifactInspection::Image(_) | ArtifactInspection::Mixin(_) => None,
+        }
+    }
+
     #[test]
     fn a_sandbox_built_from_a_containerfile_discloses_it_beside_the_digest_it_runs() {
         let inspection = project_inspection(
@@ -421,15 +433,30 @@ mod tests {
             Some(read_build_source("./image/Containerfile", &packed_source().data).unwrap()),
         )
         .unwrap();
-        let ArtifactInspection::Sandbox(view) = inspection else {
-            panic!("a published sandbox projects as one");
-        };
-        assert_eq!(view.image, "ghcr.io/team/hermes@sha256:abc");
-        let source = view
-            .image_source
-            .expect("an approver decides on what a build ran, not only on its digest");
+
+        let (image, source) = image_of(&inspection).expect("a published sandbox projects as one");
+        assert_eq!(image, "ghcr.io/team/hermes@sha256:abc");
+        let source = source.expect("an approver decides on what a build ran, not only its digest");
         assert_eq!(source.containerfile, "./image/Containerfile");
         assert_eq!(source.context.len(), 2);
+    }
+
+    #[test]
+    fn a_kind_that_carries_no_image_discloses_none() {
+        let projected = project_inspection(
+            "registry.example.test/team/app:latest",
+            digest(),
+            None,
+            "application/vnd.oci.image.config.v1+json",
+            &resolution("{}", &[]),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            image_of(&projected).is_none(),
+            "only a sandbox names what a guest starts from"
+        );
     }
 
     #[test]
