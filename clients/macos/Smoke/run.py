@@ -38,7 +38,12 @@ with tempfile.TemporaryDirectory(prefix="lns-ui-", dir="/tmp") as directory:
                 assert service.poll() is None, "service exited before binding"
                 assert time.monotonic() < deadline, "service startup timed out"
                 time.sleep(0.05)
-            subprocess.run([client_binary, address, entry], check=True, timeout=30)
+            client = subprocess.run([client_binary, address, entry], capture_output=True, text=True, timeout=30)
+            if client.returncode != 0:
+                errors = [line for line in client.stderr.splitlines() if "Fatal error" in line or "Error raised" in line]
+                detail = " | ".join(errors or client.stderr.splitlines()[:8])
+                raise RuntimeError(f"Swift client exited {client.returncode}: {detail}")
+            print(client.stdout, end="")
             assert service.wait(timeout=5) == 0
             assert "example.com" in (run_dir / "decisions.yaml").read_text(), "removal lost the policy decision"
         except BaseException:
