@@ -1,3 +1,436 @@
+//! The instruction loop: slice 3 of lensapp/lens-sandbox#393.
+//!
+//! One instruction at a time, in the order it was written. A `RUN` runs in a build guest booted
+//! from the image the build has so far and what it wrote becomes one layer; a `COPY` or an `ADD`
+//! becomes one layer of the context's files; everything else writes the image config.
+
+use anyhow::{Context, Result, bail};
+
+use super::exclude::only_the_workloads_writes;
+use super::parse::{Command, Containerfile, InstructionKind, Transfer};
+use super::upper::ChangeSet;
+
+/// The shell a `RUN` in shell form is run through until a `SHELL` instruction says otherwise.
+const DEFAULT_SHELL: [&str; 2] = ["/bin/sh", "-c"];
+
+/// The identity a `RUN` runs as until a `USER` instruction says otherwise: a build installs into
+/// the image, which nothing else in the guest may write.
+const DEFAULT_USER: &str = "root";
+
+/// The directory a `RUN` runs in until a `WORKDIR` instruction says otherwise.
+const DEFAULT_WORKDIR: &str = "/";
+
+/// One `RUN` as the build guest is asked to run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunStep {
+    pub parent: String,
+    pub argv: Vec<String>,
+    pub env: Vec<String>,
+    pub user: String,
+    pub workdir: String,
+    pub line: usize,
+}
+
+/// One `COPY` or `ADD` as the context is asked for it, with every path already expanded and rooted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopyStep {
+    pub sources: Vec<String>,
+    pub destination: String,
+    pub owner: Option<String>,
+    pub line: usize,
+}
+
+/// What the Containerfile declares about the built image, over whatever its base already said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConfigDraft {
+    pub env: Vec<(String, String)>,
+    pub labels: Vec<(String, String)>,
+    pub user: Option<String>,
+    pub workdir: Option<String>,
+    pub entrypoint: Option<Vec<String>>,
+    pub cmd: Option<Vec<String>>,
+    pub shell: Option<Vec<String>>,
+    pub exposed_ports: Vec<String>,
+    pub volumes: Vec<String>,
+}
+
+/// One instruction's result: the layer it produced, if it produced one, over the image so far.
+pub(crate) struct Commit<'a> {
+    pub parent: &'a str,
+    pub layer: Option<&'a ChangeSet>,
+    pub config: &'a ConfigDraft,
+    pub created_by: &'a str,
+}
+
+/// What one build guest wrote, and every path a fileset seeded into it — neither belongs in a layer.
+pub(crate) struct RunOutcome {
+    pub changes: ChangeSet,
+    pub fileset_paths: Vec<String>,
+}
+
+/// What the loop needs of the world: a registry, a build guest, the build context, and the local store.
+pub(crate) trait BuildHost {
+    /// The digest-pinned reference the `FROM` resolved to, pulled so the build can stand on its config.
+    async fn resolve_base(&self, image: &str) -> Result<String>;
+    async fn run(&self, step: &RunStep) -> Result<RunOutcome>;
+    async fn copy(&self, step: &CopyStep) -> Result<ChangeSet>;
+    async fn commit(&self, commit: &Commit<'_>) -> Result<String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Built {
+    pub reference: String,
+    pub layers: usize,
+}
+
+/// What the instructions have decided so far: the image to stand on, the scopes a `RUN` is given, and the config the next commit writes.
+struct Build {
+    parent: String,
+    /// The `ARG`s declared before `FROM`: Docker keeps them out of the stage until it declares them again.
+    global_args: Vec<(String, String)>,
+    args: Vec<(String, String)>,
+    config: ConfigDraft,
+    user: String,
+    workdir: String,
+    shell: Vec<String>,
+    layers: usize,
+}
+
+pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Result<Built> {
+    let mut global_args = Vec::new();
+    let mut instructions = file.instructions.iter();
+    let from = loop {
+        let Some(instruction) = instructions.next() else {
+            bail!(
+                "a Containerfile must name what it builds on with FROM, and this one names nothing"
+            );
+        };
+        match &instruction.kind {
+            InstructionKind::From { image } => break (instruction.line, image),
+            InstructionKind::Arg { name, default } => {
+                if let Some(value) = default {
+                    let value = expand(value, &global_args);
+                    set(&mut global_args, name, &value);
+                }
+            }
+            other => bail!(
+                "line {}: {} comes before FROM, and a build has nothing to run it on yet",
+                instruction.line,
+                label(other),
+            ),
+        }
+    };
+    let (line, image) = from;
+    let image = expand(image, &global_args);
+    let parent = host
+        .resolve_base(&image)
+        .await
+        .with_context(|| format!("line {line}: FROM {image}"))?;
+
+    let mut build = Build {
+        parent,
+        global_args,
+        args: Vec::new(),
+        config: ConfigDraft::default(),
+        user: DEFAULT_USER.to_string(),
+        workdir: DEFAULT_WORKDIR.to_string(),
+        shell: DEFAULT_SHELL.map(str::to_string).to_vec(),
+        layers: 0,
+    };
+    for instruction in instructions {
+        let created_by = label(&instruction.kind);
+        step(host, &mut build, instruction.line, &instruction.kind)
+            .await
+            .with_context(|| format!("line {}: {created_by}", instruction.line))?;
+    }
+    Ok(Built {
+        reference: build.parent,
+        layers: build.layers,
+    })
+}
+
+async fn step<H: BuildHost>(
+    host: &H,
+    build: &mut Build,
+    line: usize,
+    kind: &InstructionKind,
+) -> Result<()> {
+    match kind {
+        InstructionKind::From { image } => {
+            bail!("a second FROM ({image}) is not supported; lns builds one stage")
+        }
+        InstructionKind::Arg { name, default } => {
+            declare_arg(build, name, default.as_deref());
+            return Ok(());
+        }
+        InstructionKind::Run { command, here_docs } => {
+            let outcome = host.run(&run_step(build, line, command, here_docs)).await?;
+            let (changes, dropped) =
+                only_the_workloads_writes(outcome.changes, &outcome.fileset_paths);
+            if dropped.total() > 0 {
+                crate::log::debug!(
+                    boot = dropped.boot,
+                    fileset = dropped.fileset,
+                    "the captured layer drops what this boot wrote for the guest",
+                );
+            }
+            return commit(host, build, Some(&changes), kind).await;
+        }
+        InstructionKind::Copy(transfer) | InstructionKind::Add(transfer) => {
+            let changes = host.copy(&copy_step(build, line, transfer)).await?;
+            return commit(host, build, Some(&changes), kind).await;
+        }
+        InstructionKind::Env(pairs) => {
+            for (key, value) in pairs {
+                let value = expand(value, &scope(build));
+                set(&mut build.config.env, key, &value);
+            }
+        }
+        InstructionKind::Label(pairs) => {
+            for (key, value) in pairs {
+                let value = expand(value, &scope(build));
+                set(&mut build.config.labels, key, &value);
+            }
+        }
+        InstructionKind::User(user) => {
+            build.user = expand(user, &scope(build));
+            build.config.user = Some(build.user.clone());
+        }
+        InstructionKind::Workdir(dir) => {
+            build.workdir = join_workdir(&build.workdir, &expand(dir, &scope(build)));
+            build.config.workdir = Some(build.workdir.clone());
+        }
+        InstructionKind::Entrypoint(command) => {
+            build.config.entrypoint = Some(argv_of(command, &build.shell));
+        }
+        InstructionKind::Cmd(command) => {
+            build.config.cmd = Some(argv_of(command, &build.shell));
+        }
+        InstructionKind::Shell(shell) => {
+            build.shell = shell.clone();
+            build.config.shell = Some(shell.clone());
+        }
+        InstructionKind::Expose(ports) => {
+            for port in ports {
+                let port = expand(port, &scope(build));
+                if !build.config.exposed_ports.contains(&port) {
+                    build.config.exposed_ports.push(port);
+                }
+            }
+        }
+        InstructionKind::Volume(targets) => {
+            for target in targets {
+                let target = expand(target, &scope(build));
+                if !build.config.volumes.contains(&target) {
+                    build.config.volumes.push(target);
+                }
+            }
+        }
+    }
+    commit(host, build, None, kind).await
+}
+
+async fn commit<H: BuildHost>(
+    host: &H,
+    build: &mut Build,
+    layer: Option<&ChangeSet>,
+    kind: &InstructionKind,
+) -> Result<()> {
+    build.parent = host
+        .commit(&Commit {
+            parent: &build.parent,
+            layer,
+            config: &build.config,
+            created_by: &label(kind),
+        })
+        .await?;
+    if layer.is_some() {
+        build.layers += 1;
+    }
+    Ok(())
+}
+
+/// A `RUN` is given the build arguments and the environment as one scope, the way Docker's shell sees them.
+fn run_step(build: &Build, line: usize, command: &Command, here_docs: &[String]) -> RunStep {
+    RunStep {
+        parent: build.parent.clone(),
+        argv: run_argv(build, command, here_docs),
+        env: scope(build)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        user: build.user.clone(),
+        workdir: build.workdir.clone(),
+        line,
+    }
+}
+
+fn run_argv(build: &Build, command: &Command, here_docs: &[String]) -> Vec<String> {
+    match command {
+        Command::Exec(argv) => argv.clone(),
+        Command::Shell(text) => {
+            let mut argv = build.shell.clone();
+            argv.push(if here_docs.is_empty() {
+                text.clone()
+            } else {
+                here_docs.concat()
+            });
+            argv
+        }
+    }
+}
+
+fn copy_step(build: &Build, line: usize, transfer: &Transfer) -> CopyStep {
+    let scope = scope(build);
+    CopyStep {
+        sources: transfer
+            .sources
+            .iter()
+            .map(|source| expand(source, &scope))
+            .collect(),
+        destination: join_workdir(&build.workdir, &expand(&transfer.destination, &scope)),
+        owner: transfer.owner.clone(),
+        line,
+    }
+}
+
+/// A stage inherits a global `ARG` only where it declares the name again, which is Docker's rule.
+fn declare_arg(build: &mut Build, name: &str, default: Option<&str>) {
+    let value = match default {
+        Some(default) => Some(expand(default, &scope(build))),
+        None => value_of(&build.global_args, name).map(str::to_string),
+    };
+    if let Some(value) = value {
+        set(&mut build.args, name, &value);
+    }
+}
+
+/// What a `RUN` and every expansion see: the build arguments, with the environment over them.
+fn scope(build: &Build) -> Vec<(String, String)> {
+    let mut scope = build.args.clone();
+    for (key, value) in &build.config.env {
+        set(&mut scope, key, value);
+    }
+    scope
+}
+
+fn set(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
+    match pairs.iter_mut().find(|(existing, _)| existing == key) {
+        Some(pair) => pair.1 = value.to_string(),
+        None => pairs.push((key.to_string(), value.to_string())),
+    }
+}
+
+fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(existing, _)| existing == key)
+        .map(|(_, value)| value.as_str())
+}
+
+/// `$NAME` and `${NAME}`, the two spellings Docker expands in an instruction's arguments; a name nothing declared expands to nothing.
+fn expand(value: &str, scope: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(dollar) = rest.find('$') {
+        out.push_str(&rest[..dollar]);
+        let after = &rest[dollar + 1..];
+        let (name, tail) = match after.strip_prefix('{') {
+            Some(braced) => match braced.split_once('}') {
+                Some((name, tail)) => (name, tail),
+                None => {
+                    out.push('$');
+                    rest = after;
+                    continue;
+                }
+            },
+            None => {
+                let end = after
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(after.len());
+                (&after[..end], &after[end..])
+            }
+        };
+        if name.is_empty() {
+            out.push('$');
+        } else {
+            out.push_str(value_of(scope, name).unwrap_or_default());
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A relative `WORKDIR` or `COPY` destination joins the directory in force, as Docker defines it.
+fn join_workdir(workdir: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    format!("{}/{path}", workdir.trim_end_matches('/'))
+}
+
+fn argv_of(command: &Command, shell: &[String]) -> Vec<String> {
+    match command {
+        Command::Exec(argv) => argv.clone(),
+        Command::Shell(text) => {
+            let mut argv = shell.to_vec();
+            argv.push(text.clone());
+            argv
+        }
+    }
+}
+
+/// One instruction as its history entry and its refusal both name it.
+fn label(kind: &InstructionKind) -> String {
+    match kind {
+        InstructionKind::From { image } => format!("FROM {image}"),
+        InstructionKind::Arg { name, default } => match default {
+            Some(default) => format!("ARG {name}={default}"),
+            None => format!("ARG {name}"),
+        },
+        InstructionKind::Env(pairs) => format!("ENV {}", assignments(pairs)),
+        InstructionKind::Label(pairs) => format!("LABEL {}", assignments(pairs)),
+        InstructionKind::User(user) => format!("USER {user}"),
+        InstructionKind::Workdir(dir) => format!("WORKDIR {dir}"),
+        InstructionKind::Run { command, here_docs } => match command {
+            Command::Shell(text) if text.is_empty() => format!("RUN {}", here_docs.concat().trim()),
+            Command::Shell(text) => format!("RUN {text}"),
+            Command::Exec(argv) => format!("RUN {}", json_argv(argv)),
+        },
+        InstructionKind::Copy(transfer) => format!("COPY {}", transferred(transfer)),
+        InstructionKind::Add(transfer) => format!("ADD {}", transferred(transfer)),
+        InstructionKind::Entrypoint(command) => format!("ENTRYPOINT {}", commanded(command)),
+        InstructionKind::Cmd(command) => format!("CMD {}", commanded(command)),
+        InstructionKind::Shell(shell) => format!("SHELL {}", json_argv(shell)),
+        InstructionKind::Expose(ports) => format!("EXPOSE {}", ports.join(" ")),
+        InstructionKind::Volume(targets) => format!("VOLUME {}", targets.join(" ")),
+    }
+}
+
+fn assignments(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn transferred(transfer: &Transfer) -> String {
+    format!("{} {}", transfer.sources.join(" "), transfer.destination)
+}
+
+fn commanded(command: &Command) -> String {
+    match command {
+        Command::Shell(text) => text.clone(),
+        Command::Exec(argv) => json_argv(argv),
+    }
+}
+
+fn json_argv(argv: &[String]) -> String {
+    serde_json::to_string(argv).unwrap_or_else(|_| argv.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,7 +829,10 @@ mod tests {
         .await;
 
         let steps = host.runs();
-        assert_eq!((steps[0].user.as_str(), steps[0].workdir.as_str()), ("root", "/"));
+        assert_eq!(
+            (steps[0].user.as_str(), steps[0].workdir.as_str()),
+            ("root", "/")
+        );
         assert_eq!(
             (steps[1].user.as_str(), steps[1].workdir.as_str()),
             ("node", "/srv"),
@@ -483,7 +919,11 @@ mod tests {
             })
             .seeding(&["/opt/agent-skills"]);
 
-        built(&host, "FROM alpine\nRUN install-a-tool\nRUN install-another\n").await;
+        built(
+            &host,
+            "FROM alpine\nRUN install-a-tool\nRUN install-another\n",
+        )
+        .await;
 
         for (layer, _, created_by) in host.commits() {
             let paths: Vec<String> = layer
@@ -557,7 +997,10 @@ mod tests {
         .await;
 
         assert!(refusal.contains("line 3"), "{refusal}");
-        assert!(refusal.contains("RUN reach-an-undeclared-host"), "{refusal}");
+        assert!(
+            refusal.contains("RUN reach-an-undeclared-host"),
+            "{refusal}"
+        );
         assert!(refusal.contains("exited 2"), "{refusal}");
         assert_eq!(
             host.runs().len(),
@@ -566,25 +1009,92 @@ mod tests {
         );
     }
 
+    /// The parser refuses both of these before the loop sees them; the loop still answers for a
+    /// parsed file it is handed, because slice 2's type is what it takes and any caller can build one.
     #[tokio::test]
-    async fn a_file_that_does_not_begin_with_from_stops_the_build_naming_the_line() {
+    async fn an_instruction_before_from_stops_the_build_naming_its_line() {
         let host = FakeHost::new();
-        let refusal = refused(&host, "RUN echo hi\nFROM alpine\n").await;
+        let file = Containerfile {
+            instructions: vec![
+                crate::containerfile::parse::Instruction {
+                    line: 1,
+                    kind: InstructionKind::Run {
+                        command: Command::Shell("echo hi".into()),
+                        here_docs: Vec::new(),
+                    },
+                },
+                crate::containerfile::parse::Instruction {
+                    line: 2,
+                    kind: InstructionKind::From {
+                        image: "alpine".into(),
+                    },
+                },
+            ],
+        };
 
-        assert!(refusal.contains("FROM"), "{refusal}");
+        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
         assert!(refusal.contains("line 1"), "{refusal}");
+        assert!(refusal.contains("RUN echo hi"), "{refusal}");
+        assert!(refusal.contains("FROM"), "{refusal}");
         assert!(
             host.calls().is_empty(),
             "a build that cannot start must reach no guest and no store",
         );
+        assert!(
+            parse("RUN echo hi\nFROM alpine\n").is_err(),
+            "the parser refuses the same file first",
+        );
     }
 
     #[tokio::test]
-    async fn a_file_with_no_instruction_at_all_stops_the_build() {
+    async fn a_file_with_no_from_at_all_stops_the_build() {
         let host = FakeHost::new();
-        let refusal = refused(&host, "# nothing but a comment\n").await;
+        let file = Containerfile {
+            instructions: vec![crate::containerfile::parse::Instruction {
+                line: 1,
+                kind: InstructionKind::Arg {
+                    name: "VERSION".into(),
+                    default: Some("1".into()),
+                },
+            }],
+        };
 
+        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
         assert!(refusal.contains("FROM"), "{refusal}");
+        assert!(parse("# nothing but a comment\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_second_from_stops_the_build_where_the_loop_meets_it() {
+        let host = FakeHost::new();
+        let file = Containerfile {
+            instructions: vec![
+                instruction(
+                    1,
+                    InstructionKind::From {
+                        image: "alpine".into(),
+                    },
+                ),
+                instruction(
+                    2,
+                    InstructionKind::From {
+                        image: "node:24".into(),
+                    },
+                ),
+            ],
+        };
+
+        let refusal = format!("{:#}", build(&host, &file).await.unwrap_err());
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("a second FROM"), "{refusal}");
+        assert!(
+            parse("FROM alpine\nFROM node:24\n").is_err(),
+            "the parser refuses the same file first",
+        );
+    }
+
+    fn instruction(line: usize, kind: InstructionKind) -> crate::containerfile::parse::Instruction {
+        crate::containerfile::parse::Instruction { line, kind }
     }
 
     #[tokio::test]
@@ -648,9 +1158,12 @@ mod tests {
 
         let refusal = format!(
             "{:#}",
-            build(&NoContext, &containerfile("FROM alpine\nCOPY missing /srv\n"))
-                .await
-                .unwrap_err()
+            build(
+                &NoContext,
+                &containerfile("FROM alpine\nCOPY missing /srv\n")
+            )
+            .await
+            .unwrap_err()
         );
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("COPY missing /srv"), "{refusal}");
