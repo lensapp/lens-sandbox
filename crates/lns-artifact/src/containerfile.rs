@@ -239,7 +239,7 @@ fn accept_arg(arguments: &str) -> Vec<InstructionKind> {
         .map(|word| match word.split_once('=') {
             Some((name, default)) => InstructionKind::Arg {
                 name: name.to_string(),
-                default: Some(unquote(default).to_string()),
+                default: Some(default.to_string()),
             },
             None => InstructionKind::Arg {
                 name: word.to_string(),
@@ -416,12 +416,12 @@ fn key_values(
         let mut words = words.into_iter();
         let key = words.next().unwrap_or_default();
         let value = words.collect::<Vec<_>>().join(" ");
-        return Ok(vec![(key, unquote(&value).to_string())]);
+        return Ok(vec![(key, value)]);
     }
     words
         .iter()
         .map(|word| match word.split_once('=') {
-            Some((key, value)) => Ok((key.to_string(), unquote(value).to_string())),
+            Some((key, value)) => Ok((key.to_string(), value.to_string())),
             None => Err(format!(
                 "line {line}: {instruction} word {word:?} names no value; write {instruction} KEY=value, or the legacy one-pair form {instruction} KEY value"
             )),
@@ -460,18 +460,6 @@ fn split_words(arguments: &str) -> Vec<String> {
         words.push(word);
     }
     words
-}
-
-fn unquote(value: &str) -> &str {
-    for quote in ['"', '\''] {
-        if let Some(inner) = value
-            .strip_prefix(quote)
-            .and_then(|v| v.strip_suffix(quote))
-        {
-            return inner;
-        }
-    }
-    value
 }
 
 /// The `ARG` defaults a build starts with, which the executor substitutes and the cache key holds.
@@ -668,23 +656,18 @@ mod tests {
     fn a_quoted_here_document_delimiter_is_recorded_so_the_build_does_not_expand_its_body() {
         let unquoted = built("FROM alpine\nRUN <<EOF\necho $HOME\nEOF\n");
         let quoted = built("FROM alpine\nRUN <<'EOF'\necho $HOME\nEOF\n");
-        let docs = |file: &Containerfile| match &file.instructions[1].kind {
-            InstructionKind::Run { here_docs, .. } => here_docs.clone(),
-            other => panic!("expected a RUN: {other:?}"),
-        };
-        assert_eq!(
-            docs(&unquoted),
-            vec![HereDoc {
-                expand: true,
-                body: "echo $HOME\n".to_string()
-            }]
-        );
-        assert_eq!(
-            docs(&quoted),
-            vec![HereDoc {
-                expand: false,
-                body: "echo $HOME\n".to_string()
+        let run = |expand: bool| InstructionKind::Run {
+            command: Command::Shell(String::new()),
+            here_docs: vec![HereDoc {
+                expand,
+                body: "echo $HOME\n".to_string(),
             }],
+            flags: Vec::new(),
+        };
+        assert_eq!(unquoted.instructions[1].kind, run(true));
+        assert_eq!(
+            quoted.instructions[1].kind,
+            run(false),
             "a quoted delimiter is what tells the build to leave the body alone"
         );
     }

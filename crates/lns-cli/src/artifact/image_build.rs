@@ -213,48 +213,45 @@ mod tests {
         fs
     }
 
-    struct BigContext;
-
-    impl Fs for BigContext {
-        fn is_dir(&self, path: &Path) -> bool {
-            path == Path::new("/p/image")
-        }
-        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
-            assert_eq!(path, Path::new("/p/image/Containerfile"));
-            Ok("FROM alpine\n".to_string())
-        }
-        fn write(&self, _path: &Path, _contents: &str) -> std::io::Result<()> {
-            unreachable!("an offline render writes nothing")
-        }
-        fn exists(&self, path: &Path) -> bool {
-            path == Path::new("/p/image/Containerfile")
-        }
-        fn is_symlink(&self, _path: &Path) -> bool {
-            false
-        }
-        fn size(&self, path: &Path) -> std::io::Result<u64> {
-            match path.file_name().and_then(|name| name.to_str()) {
-                Some("big.bin") => Ok(500 * 1024 * 1024),
-                _ => Ok(12),
-            }
-        }
+    #[test]
+    fn a_context_file_is_sized_rather_than_read_so_a_big_one_reads_true_and_costs_nothing() {
+        let mut fs = MapFs::with(&[
+            ("/p/image/Containerfile", "FROM alpine\n"),
+            ("/p/image/big.bin", "a stand-in for half a gigabyte"),
+        ]);
+        fs.sizes
+            .insert(PathBuf::from("/p/image/big.bin"), 500 * 1024 * 1024);
+        let built = built_from(&fs, Path::new("/p"), "./image")
+            .expect("reading")
+            .expect("a path-form image is built");
+        assert_eq!(
+            built.context[1].disclosure(),
+            "500.0 MiB",
+            "the size is the file's, not what a capped read returned"
+        );
+        let touched = fs.touched.borrow().join(", ");
+        assert_eq!(
+            touched.as_str(),
+            "list /p/image, size /p/image/Containerfile, size /p/image/big.bin"
+        );
     }
 
-    impl lns_artifact::walk::SnapshotFs for BigContext {
-        fn read_limited(&self, path: &Path, _max_bytes: u64) -> std::io::Result<Vec<u8>> {
-            panic!("a context file is disclosed by its size, never read: {path:?}")
-        }
-        fn dir_entries(&self, _dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
-            Ok(["Containerfile", "big.bin"]
-                .into_iter()
-                .map(|name| lns_artifact::walk::DirEntry {
-                    name: name.to_string(),
-                    dir: false,
-                    mode: 0o644,
-                    symlink: false,
-                })
-                .collect())
-        }
+    #[test]
+    fn validate_does_not_walk_the_context_because_it_reads_only_the_containerfile() {
+        let fs = MapFs::with(&[
+            ("/p/image/Containerfile", "FROM alpine\n"),
+            ("/p/image/app/main.js", "console.log(1)\n"),
+        ]);
+        assert_eq!(
+            image_problems(&fs, Path::new("/p"), "./image"),
+            Vec::<String>::new()
+        );
+        let touched = fs.touched.borrow().join(", ");
+        assert_eq!(
+            touched.as_str(),
+            "",
+            "the subset gate lists nothing and sizes nothing"
+        );
     }
 
     #[test]
@@ -273,22 +270,17 @@ mod tests {
         ]);
         let problems = image_problems(&fs, Path::new("/p"), "./image");
         assert_eq!(problems.len(), 1, "got: {problems:?}");
-        assert!(
-            problems[0].contains("line 2")
-                && problems[0].contains("./toolchain")
-                && problems[0].contains("RUN tar"),
-            "docker build would unpack it and lns would copy one file: {problems:?}"
-        );
+        let refusal = problems[0].clone();
+        assert!(refusal.contains("line 2"), "{refusal}");
+        assert!(refusal.contains("./toolchain"), "{refusal}");
+        assert!(refusal.contains("RUN tar"), "{refusal}");
     }
 
     #[test]
     fn an_add_of_an_ordinary_file_is_left_alone() {
         let fs = MapFs::with(&[
-            (
-                "/p/image/Containerfile",
-                "FROM alpine\nADD ./entrypoint.sh /entrypoint.sh\n",
-            ),
-            ("/p/image/entrypoint.sh", "#!/bin/sh\nexec node .\n"),
+            ("/p/image/Containerfile", "FROM alpine\nADD ./e.sh /e.sh\n"),
+            ("/p/image/e.sh", "#!/bin/sh\nexec node .\n"),
         ]);
         assert_eq!(
             image_problems(&fs, Path::new("/p"), "./image"),
@@ -297,54 +289,15 @@ mod tests {
     }
 
     #[test]
-    fn a_context_file_is_sized_rather_than_read_so_a_big_one_reads_true_and_costs_nothing() {
-        let built = built_from(&BigContext, Path::new("/p"), "./image")
-            .expect("reading")
-            .expect("a path-form image is built");
+    fn an_add_source_the_context_does_not_hold_is_left_to_the_build_to_fail_on() {
+        let fs = MapFs::with(&[(
+            "/p/image/Containerfile",
+            "FROM alpine\nADD ./absent /opt/absent\n",
+        )]);
         assert_eq!(
-            built.context[1].disclosure(),
-            "500.0 MiB",
-            "the size is the file's, not what a capped read returned"
-        );
-    }
-
-    #[test]
-    fn validate_does_not_walk_the_context_because_it_reads_only_the_containerfile() {
-        struct NoContext;
-        impl Fs for NoContext {
-            fn is_dir(&self, path: &Path) -> bool {
-                path == Path::new("/p/image")
-            }
-            fn read_to_string(&self, _path: &Path) -> std::io::Result<String> {
-                Ok("FROM alpine\n".to_string())
-            }
-            fn write(&self, _path: &Path, _contents: &str) -> std::io::Result<()> {
-                unreachable!("an offline check writes nothing")
-            }
-            fn exists(&self, path: &Path) -> bool {
-                path == Path::new("/p/image/Containerfile")
-            }
-            fn is_symlink(&self, _path: &Path) -> bool {
-                false
-            }
-            fn size(&self, _path: &Path) -> std::io::Result<u64> {
-                unreachable!("the subset gate sizes nothing")
-            }
-        }
-        impl lns_artifact::walk::SnapshotFs for NoContext {
-            fn read_limited(&self, _path: &Path, _max: u64) -> std::io::Result<Vec<u8>> {
-                unreachable!("the subset gate reads only the Containerfile")
-            }
-            fn dir_entries(
-                &self,
-                _dir: &Path,
-            ) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
-                panic!("the subset gate does not list the context")
-            }
-        }
-        assert_eq!(
-            image_problems(&NoContext, Path::new("/p"), "./image"),
-            Vec::<String>::new()
+            image_problems(&fs, Path::new("/p"), "./image"),
+            Vec::<String>::new(),
+            "a source that cannot be read cannot be sniffed, and a missing file is not this check's refusal"
         );
     }
 
@@ -353,19 +306,14 @@ mod tests {
         let built = built_from(&context_with_a_symlink(), Path::new("/p"), "./image")
             .expect("a context an npm install wrote still reads")
             .expect("a path-form image is built");
-        let listed: Vec<(&str, bool)> = built
-            .context
-            .iter()
-            .map(|file| (file.path.as_str(), file.sent))
-            .collect();
+        let mut listed = Vec::new();
+        for file in &built.context {
+            listed.push(format!("{} sent={}", file.path, file.sent));
+        }
+        let listed = listed.join(", ");
         assert_eq!(
-            listed,
-            [
-                ("Containerfile", true),
-                ("app/main.js", true),
-                ("node_modules/.bin/tsc", false),
-                ("node_modules/typescript/bin/tsc", true),
-            ],
+            listed.as_str(),
+            "Containerfile sent=true, app/main.js sent=true, node_modules/.bin/tsc sent=false, node_modules/typescript/bin/tsc sent=true",
             "the symlink is listed, and named as one a build does not send"
         );
     }
@@ -375,18 +323,16 @@ mod tests {
         let built = built_from(&context_with_a_symlink(), Path::new("/p"), "./image")
             .expect("reading")
             .expect("a path-form image is built");
+        let summary = built.summary();
         assert!(
-            built.summary().contains("context 3 files"),
-            "the skipped symlink is not one of them: {}",
-            built.summary()
+            summary.contains("context 3 files"),
+            "the skipped symlink is not one of them: {summary}"
         );
     }
 
     #[test]
     fn a_symlink_in_the_context_does_not_stop_validate_reading_the_containerfile() {
-        assert_eq!(
-            image_problems(&context_with_a_symlink(), Path::new("/p"), "./image"),
-            Vec::<String>::new()
-        );
+        let problems = image_problems(&context_with_a_symlink(), Path::new("/p"), "./image");
+        assert!(problems.is_empty(), "got: {problems:?}");
     }
 }

@@ -483,15 +483,23 @@ mod tests {
         struct Linked;
         impl SnapshotFs for Linked {
             fn read_limited(&self, _: &Path, _: u64) -> io::Result<Vec<u8>> {
-                Ok(Vec::new())
+                Ok(b"plain".to_vec())
             }
             fn dir_entries(&self, _: &Path) -> io::Result<Vec<DirEntry>> {
-                Ok(vec![DirEntry {
-                    name: "link".to_string(),
-                    dir: false,
-                    mode: 0o777,
-                    symlink: true,
-                }])
+                Ok(vec![
+                    DirEntry {
+                        name: "a.txt".to_string(),
+                        dir: false,
+                        mode: 0o644,
+                        symlink: false,
+                    },
+                    DirEntry {
+                        name: "link".to_string(),
+                        dir: false,
+                        mode: 0o777,
+                        symlink: true,
+                    },
+                ])
             }
         }
         let err = walk(&Linked, Path::new("/work/files"), Kind::Sandbox)
