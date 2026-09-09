@@ -426,11 +426,6 @@ jobs:
   actions:
     needs: changes
     if: needs.changes.outputs.actions == 'true'
-    # Step-level `if:` cannot read `secrets`, so the staging self-test gates
-    # on these; unset in a fork, the steps skip.
-    env:
-      LNS_HUB_STAGING_TOKEN: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
-      LNS_HUB_STAGING_NAMESPACE: ${{ vars.LNS_HUB_STAGING_NAMESPACE || secrets.LNS_HUB_STAGING_USERNAME }}
     strategy:
       fail-fast: false
       matrix:
@@ -460,28 +455,6 @@ jobs:
             exit 1
           fi
           lns artifact validate -f docs/examples/claude-code/lns.yaml
-
-      - name: setup-lns (pinned release)
-        id: pinned
-        uses: ./actions/setup-lns
-        with:
-          version: 0.25.0
-
-      - name: The pinned release runs, validates a document, and brings no service
-        env:
-          REPORTED: ${{ steps.pinned.outputs.version }}
-        run: |
-          set -euo pipefail
-          lns --version
-          if [ "$REPORTED" != "0.25.0" ] || [ "$(lns --version | awk '{print $NF}')" != "0.25.0" ]; then
-            echo "::error::pinned install is not 0.25.0 (reported '$REPORTED')."
-            exit 1
-          fi
-          lns artifact validate -f docs/examples/claude-code/lns.yaml
-          if [ -e "$(dirname "$(command -v lns)")/lns-service" ]; then
-            echo "::error::setup-lns installed lns-service; it must extract lns only."
-            exit 1
-          fi
 
       # lns-login / lns-logout against a host that cannot resolve: what they
       # pin is the file `lns artifact push` reads, not a round trip. The
@@ -571,47 +544,39 @@ jobs:
             exit 1
           fi
 
-      # The one real publish: main only, ubuntu only, and only once a person
-      # has stored the staging credentials (issue #398).
-      - name: lns-login (hub.staging.lns.run)
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main'
-          && matrix.runner == 'ubuntu-latest' && env.LNS_HUB_STAGING_TOKEN != ''
-        uses: ./actions/lns-login
+      # Everything above ran against the newest release, which is what a
+      # workflow that names no version gets. The same actions again, this
+      # time against a pinned CLI: what changes underneath them is the tool,
+      # not the action.
+      - name: setup-lns (pinned release)
+        id: pinned
+        uses: ./actions/setup-lns
         with:
-          registry: hub.staging.lns.run
-          username: ${{ secrets.LNS_HUB_STAGING_USERNAME }}
-          password: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
+          version: 0.25.0
 
-      - name: lns-push (mixin fixture to hub.staging.lns.run)
-        id: staging
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main'
-          && matrix.runner == 'ubuntu-latest' && env.LNS_HUB_STAGING_TOKEN != ''
+      - name: The pinned release runs, validates a document, and brings no service
+        env:
+          REPORTED: ${{ steps.pinned.outputs.version }}
+        run: |
+          set -euo pipefail
+          lns --version
+          if [ "$REPORTED" != "0.25.0" ] || [ "$(lns --version | awk '{print $NF}')" != "0.25.0" ]; then
+            echo "::error::pinned install is not 0.25.0 (reported '$REPORTED')."
+            exit 1
+          fi
+          lns artifact validate -f docs/examples/claude-code/lns.yaml
+          if [ -e "$(dirname "$(command -v lns)")/lns-service" ]; then
+            echo "::error::setup-lns installed lns-service; it must extract lns only."
+            exit 1
+          fi
+
+      - name: lns-push (mixin fixture, dry run, pinned CLI)
         uses: ./actions/lns-push
         with:
           file: actions/lns-push/fixtures/mixin.yaml
           kind: mixin
-          tags: hub.staging.lns.run/${{ env.LNS_HUB_STAGING_NAMESPACE }}/ci-fixture:sha-${{ github.sha }}
-
-      - name: The staging push reported a digest
-        if: steps.staging.outcome == 'success'
-        env:
-          DIGEST: ${{ steps.staging.outputs.digest }}
-          REFS: ${{ steps.staging.outputs.refs }}
-        run: |
-          set -euo pipefail
-          case "$DIGEST" in
-            sha256:*) : ;;
-            *) echo "::error::the staging push reported digest '$DIGEST'."; exit 1 ;;
-          esac
-          printf '%s\n' "$REFS"
-
-      - name: lns-logout (hub.staging.lns.run)
-        if: always() && steps.staging.outcome != 'skipped'
-        uses: ./actions/lns-logout
-        with:
-          registry: hub.staging.lns.run
+          tags: lns-ci/actions-mixin-fixture:pinned-${{ github.sha }}
+          push: false
 
       # ci.yml publishes no lns build artifact, so the `binary` input is
       # exercised against a stand-in executable: what it pins is that the
@@ -642,6 +607,67 @@ jobs:
             exit 1
           fi
 
+  # The one real publish, in its own job: a pull request can change the
+  # composite action code this workflow loads from the checkout, so the
+  # staging credentials must never be in the environment of a job a pull
+  # request can run. This one exists only on a push to main, where the code
+  # is main's, and only once a person has stored the credentials in the
+  # `actions-staging` environment (issue #398).
+  actions-staging:
+    needs: [changes, actions]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.changes.outputs.actions == 'true'
+    runs-on: ubuntu-latest
+    environment: actions-staging
+    # Step-level `if:` cannot read `secrets`, so the publish gates on these;
+    # unset, the steps skip and the job is green.
+    env:
+      LNS_HUB_STAGING_TOKEN: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
+      LNS_HUB_STAGING_NAMESPACE: ${{ vars.LNS_HUB_STAGING_NAMESPACE || secrets.LNS_HUB_STAGING_USERNAME }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: setup-lns (newest release)
+        uses: ./actions/setup-lns
+        with:
+          version: latest
+
+      - name: lns-login (hub.staging.lns.run)
+        if: env.LNS_HUB_STAGING_TOKEN != ''
+        uses: ./actions/lns-login
+        with:
+          registry: hub.staging.lns.run
+          username: ${{ secrets.LNS_HUB_STAGING_USERNAME }}
+          password: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
+
+      - name: lns-push (mixin fixture to hub.staging.lns.run)
+        id: staging
+        if: env.LNS_HUB_STAGING_TOKEN != ''
+        uses: ./actions/lns-push
+        with:
+          file: actions/lns-push/fixtures/mixin.yaml
+          kind: mixin
+          tags: hub.staging.lns.run/${{ env.LNS_HUB_STAGING_NAMESPACE }}/ci-fixture:sha-${{ github.sha }}
+
+      - name: The staging push reported a digest
+        if: steps.staging.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+          REFS: ${{ steps.staging.outputs.refs }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) : ;;
+            *) echo "::error::the staging push reported digest '$DIGEST'."; exit 1 ;;
+          esac
+          printf '%s\n' "$REFS"
+
+      - name: lns-logout (hub.staging.lns.run)
+        if: always() && steps.staging.outcome != 'skipped'
+        uses: ./actions/lns-logout
+        with:
+          registry: hub.staging.lns.run
   # Aggregate gate — single required status check on `main` branch
   # protection. Lets us split/rename the underlying jobs without
   # touching branch protection. Treats `skipped` as OK so docs-only PRs
@@ -650,7 +676,7 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft, actions]
+    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft, actions, actions-staging]
     if: always()
     steps:
       - name: Verify all gates passed
@@ -668,8 +694,9 @@ jobs:
             || ! ok "${{ needs.audit.result }}" \
             || ! ok "${{ needs.check-release-build.result }}" \
             || ! ok "${{ needs.verify-static-nft.result }}" \
-            || ! ok "${{ needs.actions.result }}"; then
-            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }}"
+            || ! ok "${{ needs.actions.result }}" \
+            || ! ok "${{ needs['actions-staging'].result }}"; then
+            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.
@@ -680,4 +707,5 @@ jobs:
             echo "Changes detector failed: changes=${{ needs.changes.result }}"
             exit 1
           fi
-          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }})."
+          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }})."
+
