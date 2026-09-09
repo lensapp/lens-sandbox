@@ -10,19 +10,25 @@ import threading
 
 def reply(listener, errors):
     try:
-        connection, _ = listener.accept()
-        with connection:
-            connection.settimeout(10)
-            header = connection.recv(8, socket.MSG_WAITALL)
-            assert header[:4] == b"LNS2", "invalid wire magic"
-            size, = struct.unpack(">I", header[4:])
-            assert 1 < size <= 1_048_576, "invalid frame size"
-            body = connection.recv(size, socket.MSG_WAITALL)
-            assert body[0] == 1, "invalid wire subtype"
-            request = json.loads(body[1:])
-            assert request["type"] == "InspectApprovalOffer"
-            payload = b'\x01{"type":"ApprovalOffer","offer":null}'
-            connection.sendall(b"LNS2" + struct.pack(">I", len(payload)) + payload)
+        responses = [
+            ("InspectApprovalOffer", [{"type": "ApprovalOffer", "offer": None}]),
+            ("ReadDashboard", [{"type": "DashboardBegin"}, {"type": "DashboardWarning", "message": "local transport fixture"}, {"type": "DashboardEnd"}]),
+        ]
+        for expected, messages in responses:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(10)
+                header = connection.recv(8, socket.MSG_WAITALL)
+                assert header[:4] == b"LNS2", "invalid wire magic"
+                size, = struct.unpack(">I", header[4:])
+                assert 1 < size <= 1_048_576, "invalid frame size"
+                body = connection.recv(size, socket.MSG_WAITALL)
+                assert body[0] == 1, "invalid wire subtype"
+                request = json.loads(body[1:])
+                assert request["type"] == expected
+                for message in messages:
+                    payload = b"\x01" + json.dumps(message).encode()
+                    connection.sendall(b"LNS2" + struct.pack(">I", len(payload)) + payload)
     except Exception as error:
         errors.append(error)
 

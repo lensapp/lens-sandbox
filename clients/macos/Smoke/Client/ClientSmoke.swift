@@ -13,6 +13,8 @@ struct ClientSmoke {
             guard case .offer(nil) = try await client.send(.inspectOffer(id: "gone")) else {
                 throw ServiceError(message: "local transport probe returned an unexpected reply")
             }
+            let snapshot = try await client.dashboard()
+            try require(snapshot.warnings == ["local transport fixture"], "finite local read lost its data")
             print("PASS: local transport")
             return
         }

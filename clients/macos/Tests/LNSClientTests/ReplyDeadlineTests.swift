@@ -8,7 +8,7 @@ final class ReplyDeadlineTests: XCTestCase {
         XCTAssertTrue(deadline.expired(now: 110), "a silent service must not leave a client waiting forever")
     }
 
-    func testAFiniteDashboardReadMustKeepMakingProgressUntilEOF() {
+    func testAFiniteDashboardReadMustKeepMakingProgressUntilCompletion() {
         var deadline = ReplyDeadline(streaming: false, now: 100)
         deadline.received(now: 109)
         XCTAssertFalse(deadline.expired(now: 110))

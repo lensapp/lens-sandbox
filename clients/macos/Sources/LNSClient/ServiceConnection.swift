@@ -81,16 +81,7 @@ public struct ServiceConnection: ServiceClient {
     }
 
     public func dashboard() async throws -> DashboardData {
-        var reader = DashboardRead()
-        var snapshot: DashboardData?
-        for try await data in try replies(to: .readDashboard, latestOnly: false) {
-            try Task.checkCancellation()
-            let message = try JSONDecoder().decode(DashboardMessage.self, from: data)
-            if let complete = try reader.receive(message) { snapshot = complete }
-        }
-        try reader.finish()
-        guard let snapshot else { throw ServiceError(message: "The service returned no dashboard snapshot.") }
-        return snapshot
+        try await readDashboard(replies(to: .readDashboard, latestOnly: false))
     }
 }
 #endif

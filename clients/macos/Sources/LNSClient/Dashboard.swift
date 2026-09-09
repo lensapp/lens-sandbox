@@ -79,6 +79,7 @@ public enum DashboardMessage: Decodable {
 }
 
 public struct DashboardRead {
+    static let incomplete = ServiceError(message: "The dashboard disconnected before its snapshot was complete. Reconnect or refresh to try again.")
     private var pending = DashboardData()
     private var begun = false
     private var complete = false
@@ -102,8 +103,18 @@ public struct DashboardRead {
         return nil
     }
     public func finish() throws {
-        guard complete else { throw ServiceError(message: "The dashboard disconnected before its snapshot was complete. Reconnect or refresh to try again.") }
+        guard complete else { throw Self.incomplete }
     }
+}
+
+func readDashboard(_ replies: AsyncThrowingStream<Data, Error>) async throws -> DashboardData {
+    var reader = DashboardRead()
+    for try await data in replies {
+        try Task.checkCancellation()
+        let message = try JSONDecoder().decode(DashboardMessage.self, from: data)
+        if let complete = try reader.receive(message) { return complete }
+    }
+    throw DashboardRead.incomplete
 }
 
 public struct DashboardFeed {
