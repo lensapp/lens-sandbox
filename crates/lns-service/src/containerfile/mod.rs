@@ -5,6 +5,7 @@ pub(crate) mod exclude;
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
 pub(crate) mod import;
+pub(crate) mod parse;
 pub mod real;
 pub(crate) mod tar_layer;
 pub(crate) mod upper;

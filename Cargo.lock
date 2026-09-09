@@ -3551,6 +3551,7 @@ dependencies = [
  "objc2-virtualization",
  "oci-client",
  "oci-spec",
+ "parse-dockerfile",
  "png 0.17.16",
  "rand 0.8.6",
  "regex",
@@ -4527,6 +4528,15 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "parse-dockerfile"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6bf36e89d16b0fcc540dfe420c99d692c703c436f1ea605195bc0a95651d69e"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]
