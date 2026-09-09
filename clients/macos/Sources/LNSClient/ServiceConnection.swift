@@ -56,7 +56,8 @@ public struct ServiceConnection: ServiceClient {
                         if let error { finish(error) }
                         else { receive() }
                     })
-                case let .failed(error), let .waiting(error): finish(error)
+                case let .failed(error), let .waiting(error):
+                    finish(ServiceError(message: "Local service connection failed: \(error). Path: \(String(describing: connection.currentPath))."))
                 case .cancelled: finish()
                 default: break
                 }
