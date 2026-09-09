@@ -57,11 +57,46 @@ jobs:
       lns-tag: ${{ steps.release.outputs['tag_name'] }}
       lns-install-released: ${{ steps.release.outputs['scripts/lns-install--release_created'] }}
       lns-install-tag: ${{ steps.release.outputs['scripts/lns-install--tag_name'] }}
+      actions-released: ${{ steps.release.outputs['actions--release_created'] }}
+      actions-tag: ${{ steps.release.outputs['actions--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Force-move the floating major tag consumers reference
+  # (`lensapp/lens-sandbox/actions/setup-lns@lns-actions-v0`) to the release
+  # release-please just cut. `contents: write` is all it needs — no CDN
+  # credentials, so it stays off the `release` environment and never waits
+  # for a reviewer.
+  move-actions-major-tag:
+    needs: release-please
+    if: needs.release-please.outputs.actions-released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.actions-tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-please.outputs.actions-tag }}
+
+      - name: Move lns-actions-v<major> to the new release
+        run: |
+          set -euo pipefail
+          version="${TAG#lns-actions-v}"
+          major="${version%%.*}"
+          if ! printf '%s' "$major" | grep -qE '^[0-9]+$'; then
+            echo "::error::cannot derive a major version from tag '$TAG'."
+            exit 1
+          fi
+          floating="lns-actions-v${major}"
+          git tag --force "$floating" "${TAG}^{commit}"
+          git push --force origin "refs/tags/${floating}"
+          echo "$floating now points at $TAG."
 
   # Publish scripts/lns-install/lns-install.sh to the get.lns.run CDN.
   # Decoupled from build-lns so the installer (which is version-agnostic
