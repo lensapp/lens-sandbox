@@ -3552,7 +3552,6 @@ dependencies = [
  "objc2-virtualization",
  "oci-client",
  "oci-spec",
- "parse-dockerfile",
  "png 0.17.16",
  "rand 0.8.6",
  "regex",

@@ -77,6 +77,69 @@ pub struct Flag {
     pub value: Option<String>,
 }
 
+impl Transfer {
+    /// `--chown` as written; a build resolves the name against the image it is building.
+    pub fn owner(&self) -> Option<&str> {
+        self.flag("chown")
+    }
+
+    /// `--chmod` as the octal mode it has to be: the parse refuses every other spelling, so a build never reads one.
+    pub fn mode(&self) -> Option<u32> {
+        self.flag("chmod")
+            .and_then(|written| u32::from_str_radix(written, 8).ok())
+    }
+
+    fn flag(&self, name: &str) -> Option<&str> {
+        self.flags
+            .iter()
+            .find(|flag| flag.name == name)
+            .and_then(|flag| flag.value.as_deref())
+    }
+}
+
+/// The flags v1 refuses, each with the one sentence it is refused with: the parse holds `lns validate` and the build to the same list, so a file that validates is a file that builds (§3.1.1).
+const REFUSED_FLAGS: [(&str, &str, &str); 3] = [
+    (
+        "network",
+        "RUN",
+        "a build step runs under the document's own network and confinement, so there is nothing to widen it to",
+    ),
+    (
+        "security",
+        "RUN",
+        "a build step runs under the document's own network and confinement, so there is nothing to widen it to",
+    ),
+    (
+        "link",
+        "COPY",
+        "lns commits every step as its own layer already, so drop the flag",
+    ),
+];
+
+fn refuse_a_flag_v1_cannot_honour(
+    instruction: &str,
+    options: &[parse_dockerfile::Flag<'_>],
+    line: usize,
+) -> Result<(), String> {
+    for (name, refused_for, because) in REFUSED_FLAGS {
+        let refused_here = refused_for == instruction || (name == "link" && instruction == "ADD");
+        if !refused_here {
+            continue;
+        }
+        let Some(flag) = options.iter().find(|flag| flag.name.value == name) else {
+            continue;
+        };
+        let written = match flag.value.as_ref().map(|value| value.value.as_ref()) {
+            Some(value) => format!("--{name}={value}"),
+            None => format!("--{name}"),
+        };
+        return Err(format!(
+            "line {line}: {instruction} {written} is not supported; {because}"
+        ));
+    }
+    Ok(())
+}
+
 /// The issue that decides what the subset grows to hold, named by every refusal that has no alternative today.
 const SUBSET_ISSUE: &str = "https://github.com/lensapp/lens-sandbox/issues/393";
 
@@ -253,6 +316,7 @@ fn accept_run(
     run: &parse_dockerfile::RunInstruction<'_>,
     line: usize,
 ) -> Result<InstructionKind, String> {
+    refuse_a_flag_v1_cannot_honour("RUN", &run.options, line)?;
     if let Some(mount) = run.options.iter().find(|flag| flag.name.value == "mount") {
         let target = mount.value.as_ref().map(|v| v.value.as_ref()).unwrap_or("");
         return Err(format!(
@@ -283,6 +347,7 @@ fn accept_copy(
             "line {line}: COPY --from={stage} is not supported; lns builds one stage, so build the earlier stage as its own image and name it in FROM"
         ));
     }
+    refuse_a_flag_v1_cannot_honour("COPY", &copy.options, line)?;
     Ok(InstructionKind::Copy(transfer(
         "COPY",
         &copy.src,
@@ -296,6 +361,7 @@ fn accept_add(
     add: &parse_dockerfile::AddInstruction<'_>,
     line: usize,
 ) -> Result<InstructionKind, String> {
+    refuse_a_flag_v1_cannot_honour("ADD", &add.options, line)?;
     let moved = transfer("ADD", &add.src, &add.dest, &add.options, line)?;
     for source in &moved.sources {
         if is_remote(source) {
@@ -363,10 +429,21 @@ fn transfer(
             }
         }
     }
+    let flags = flags(options);
+    if let Some(written) = flags
+        .iter()
+        .find(|flag| flag.name == "chmod")
+        .and_then(|flag| flag.value.as_deref())
+        && u32::from_str_radix(written, 8).is_err()
+    {
+        return Err(format!(
+            "line {line}: {instruction} --chmod={written} is not an octal mode; write it as --chmod=755"
+        ));
+    }
     Ok(Transfer {
         sources,
         destination: dest.value.to_string(),
-        flags: flags(options),
+        flags,
     })
 }
 
@@ -511,6 +588,79 @@ mod tests {
             "got: {refusal}"
         );
         assert!(refusal.contains("name it in FROM"), "got: {refusal}");
+    }
+
+    /// §3.1.1: offline validation refuses what the build refuses, so every flag the build cannot honour is refused here.
+    #[test]
+    fn a_run_that_widens_its_own_network_is_refused_where_it_is_written() {
+        let refusal = refusal("FROM alpine\nRUN --network=host npm i\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("RUN --network=host"),
+            "got: {refusal}"
+        );
+        assert!(
+            refusal.contains("the document's own network"),
+            "got: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_widens_its_own_confinement_is_refused_where_it_is_written() {
+        let refusal = refusal("FROM alpine\nRUN --security=insecure make\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("RUN --security=insecure"),
+            "got: {refusal}"
+        );
+    }
+
+    #[test]
+    fn copy_link_is_refused_because_every_step_is_already_its_own_layer() {
+        let refusal = refusal("FROM alpine\nCOPY --link app /srv/app\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("COPY --link"),
+            "got: {refusal}"
+        );
+        assert!(refusal.contains("drop the flag"), "got: {refusal}");
+    }
+
+    #[test]
+    fn add_link_is_refused_the_way_copy_link_is() {
+        let refusal = refusal("FROM alpine\nADD --link app /srv/app\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("ADD --link"),
+            "got: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_chmod_that_is_not_an_octal_mode_is_refused_with_the_spelling_to_use() {
+        let refusal = refusal("FROM alpine\nCOPY --chmod=u+x app /srv/app\n");
+        assert!(
+            refusal.contains("line 2") && refusal.contains("--chmod=u+x"),
+            "got: {refusal}"
+        );
+        assert!(refusal.contains("--chmod=755"), "got: {refusal}");
+    }
+
+    /// The build honours these two, so the parse hands them on already read rather than leaving each caller to read them again.
+    #[test]
+    fn a_transfer_reads_back_the_owner_and_the_octal_mode_it_was_written_with() {
+        let built = built("FROM alpine\nCOPY --chown=node:node --chmod=750 app /srv/app\n");
+        let InstructionKind::Copy(transfer) = &built.instructions[1].kind else {
+            panic!("the second instruction is the COPY");
+        };
+        assert_eq!(transfer.owner(), Some("node:node"));
+        assert_eq!(transfer.mode(), Some(0o750));
+    }
+
+    #[test]
+    fn a_transfer_with_neither_flag_reads_back_neither() {
+        let built = built("FROM alpine\nCOPY app /srv/app\n");
+        let InstructionKind::Copy(transfer) = &built.instructions[1].kind else {
+            panic!("the second instruction is the COPY");
+        };
+        assert_eq!(transfer.owner(), None);
+        assert_eq!(transfer.mode(), None);
     }
 
     #[test]

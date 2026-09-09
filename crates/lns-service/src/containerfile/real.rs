@@ -81,7 +81,7 @@ pub(crate) async fn build_for_run(
 struct Prepared {
     located: locate::Located,
     text: String,
-    file: super::parse::Containerfile,
+    file: lns_artifact::containerfile::Containerfile,
     context_hash: String,
     arch: String,
     cache_dir: PathBuf,
@@ -112,7 +112,7 @@ fn prepare(request: &BuildRequest<'_>) -> Result<Prepared> {
     let located = locate::locate(&RealContextFs, Path::new(definition_dir), image)?;
     let text = std::fs::read_to_string(&located.containerfile)
         .with_context(|| format!("reading {}", located.containerfile.display()))?;
-    let file = super::parse::parse(&text).map_err(|refusals| {
+    let file = lns_artifact::containerfile::parse(&text).map_err(|refusals| {
         anyhow::anyhow!(
             "{} is not a Containerfile lns can build:\n  {}",
             located.label,

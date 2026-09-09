@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use super::cache::Kind;
 use super::exclude::only_the_workloads_writes;
 use super::key;
-use super::parse::{Command, Containerfile, HereDoc, InstructionKind, Transfer};
 use super::upper::ChangeSet;
+use lns_artifact::containerfile::{Command, Containerfile, HereDoc, InstructionKind, Transfer};
 
 /// The shell a `RUN` in shell form is run through until a `SHELL` instruction says otherwise.
 const DEFAULT_SHELL: [&str; 2] = ["/bin/sh", "-c"];
@@ -187,7 +187,7 @@ pub(crate) async fn open<H: BuildHost>(
         };
         after_from += 1;
         match &instruction.kind {
-            InstructionKind::From { image } => break (instruction.line, image),
+            InstructionKind::From { image, .. } => break (instruction.line, image),
             InstructionKind::Arg { name, default } => {
                 if let Some(value) = default {
                     let value = expand(value, &global_args)?;
@@ -304,14 +304,16 @@ async fn step<H: BuildHost>(
     kind: &InstructionKind,
 ) -> Result<()> {
     match kind {
-        InstructionKind::From { image } => {
+        InstructionKind::From { image, .. } => {
             bail!("a second FROM ({image}) is not supported; lns builds one stage")
         }
         InstructionKind::Arg { name, default } => {
             declare_arg(build, name, default.as_deref())?;
             return Ok(());
         }
-        InstructionKind::Run { command, here_docs } => {
+        InstructionKind::Run {
+            command, here_docs, ..
+        } => {
             let step = run_step(build, line, command, here_docs);
             let key = build.steps().run(&build.parent, &step);
             if reuse(host, build, &key, true).await {
@@ -535,8 +537,8 @@ async fn copy_step<H: BuildHost>(
         sources,
         destination,
         into_directory,
-        owner: transfer.owner.clone(),
-        mode: transfer.mode,
+        owner: transfer.owner().map(str::to_string),
+        mode: transfer.mode(),
         line,
     })
 }
@@ -673,7 +675,7 @@ fn argv_of(command: &Command, shell: &[String]) -> Vec<String> {
 /// One instruction as its history entry and its refusal both name it.
 fn label(kind: &InstructionKind) -> String {
     match kind {
-        InstructionKind::From { image } => format!("FROM {image}"),
+        InstructionKind::From { image, .. } => format!("FROM {image}"),
         InstructionKind::Arg { name, default } => match default {
             Some(default) => format!("ARG {name}={default}"),
             None => format!("ARG {name}"),
@@ -682,7 +684,9 @@ fn label(kind: &InstructionKind) -> String {
         InstructionKind::Label(pairs) => format!("LABEL {}", assignments(pairs)),
         InstructionKind::User(user) => format!("USER {user}"),
         InstructionKind::Workdir(dir) => format!("WORKDIR {dir}"),
-        InstructionKind::Run { command, here_docs } => match command {
+        InstructionKind::Run {
+            command, here_docs, ..
+        } => match command {
             Command::Shell(text) if text.is_empty() => format!("RUN {}", bodies(here_docs).trim()),
             Command::Shell(text) => format!("RUN {text}"),
             Command::Exec(argv) => format!("RUN {}", json_argv(argv)),
@@ -723,8 +727,8 @@ fn json_argv(argv: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::containerfile::parse::parse;
     use crate::containerfile::upper::{Change, ChangeSet};
+    use lns_artifact::containerfile::parse;
     use std::sync::Mutex;
 
     /// What the loop asked the host to do, in the order it asked.
@@ -948,7 +952,7 @@ mod tests {
         }
     }
 
-    fn containerfile(text: &str) -> crate::containerfile::parse::Containerfile {
+    fn containerfile(text: &str) -> lns_artifact::containerfile::Containerfile {
         parse(text).expect("the subset accepts this file")
     }
 
@@ -1666,17 +1670,19 @@ mod tests {
         let host = FakeHost::new();
         let file = Containerfile {
             instructions: vec![
-                crate::containerfile::parse::Instruction {
+                lns_artifact::containerfile::Instruction {
                     line: 1,
                     kind: InstructionKind::Run {
                         command: Command::Shell("echo hi".into()),
                         here_docs: Vec::new(),
+                        flags: Vec::new(),
                     },
                 },
-                crate::containerfile::parse::Instruction {
+                lns_artifact::containerfile::Instruction {
                     line: 2,
                     kind: InstructionKind::From {
                         image: "alpine".into(),
+                        flags: Vec::new(),
                     },
                 },
             ],
@@ -1703,7 +1709,7 @@ mod tests {
     async fn a_file_with_no_from_at_all_stops_the_build() {
         let host = FakeHost::new();
         let file = Containerfile {
-            instructions: vec![crate::containerfile::parse::Instruction {
+            instructions: vec![lns_artifact::containerfile::Instruction {
                 line: 1,
                 kind: InstructionKind::Arg {
                     name: "VERSION".into(),
@@ -1729,12 +1735,14 @@ mod tests {
                     1,
                     InstructionKind::From {
                         image: "alpine".into(),
+                        flags: Vec::new(),
                     },
                 ),
                 instruction(
                     2,
                     InstructionKind::From {
                         image: "node:24".into(),
+                        flags: Vec::new(),
                     },
                 ),
             ],
@@ -1752,8 +1760,8 @@ mod tests {
         );
     }
 
-    fn instruction(line: usize, kind: InstructionKind) -> crate::containerfile::parse::Instruction {
-        crate::containerfile::parse::Instruction { line, kind }
+    fn instruction(line: usize, kind: InstructionKind) -> lns_artifact::containerfile::Instruction {
+        lns_artifact::containerfile::Instruction { line, kind }
     }
 
     #[tokio::test]
@@ -1898,7 +1906,7 @@ mod tests {
     async fn a_plan_of_a_file_with_no_from_is_refused_the_way_a_build_is() {
         let host = FakeHost::new();
         let file = Containerfile {
-            instructions: vec![crate::containerfile::parse::Instruction {
+            instructions: vec![lns_artifact::containerfile::Instruction {
                 line: 1,
                 kind: InstructionKind::Arg {
                     name: "VERSION".into(),
