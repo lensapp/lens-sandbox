@@ -263,7 +263,7 @@ impl ConflictSource for Allocator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::vm::host_net::{BOOTPD_PLIST_PATH, LEASES_PATH, tests::FakeHostFiles};
 
@@ -281,6 +281,13 @@ mod tests {
         }
     }
 
+    struct UnobservableNeighbors;
+    impl Neighbors for UnobservableNeighbors {
+        fn observed(&self) -> std::io::Result<Vec<Ipv4Addr>> {
+            Err(std::io::Error::other("arp: no such file"))
+        }
+    }
+
     fn allocator_with(files: FakeHostFiles, neighbours: Vec<Ipv4Addr>, now: u64) -> Allocator {
         Allocator::new(
             Arc::new(files),
@@ -289,7 +296,7 @@ mod tests {
         )
     }
 
-    fn empty_host() -> Allocator {
+    pub(crate) fn empty_host() -> Allocator {
         allocator_with(
             FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
@@ -699,6 +706,74 @@ mod tests {
             .expect("again");
         assert_eq!(first.candidates, again.candidates);
         assert_eq!(allocator.reserved().len(), 1);
+    }
+
+    #[test]
+    fn a_neighbor_table_that_cannot_be_observed_stops_allocation_instead_of_guessing() {
+        let allocator = Allocator::new(
+            Arc::new(FakeHostFiles::new().with(LEASES_PATH, "")),
+            Arc::new(UnobservableNeighbors),
+            Arc::new(FixedClock(1_000)),
+        );
+        let error = allocator
+            .reserve("run-a", "52:54:00:00:00:01")
+            .expect_err("an unobserved ARP table removes an exclusion");
+        assert!(matches!(error, AllocError::Neighbors(_)), "{error:?}");
+        let rendered = error.to_string();
+        assert!(rendered.contains("neighbor table"), "{rendered}");
+        assert!(
+            rendered.contains("arp: no such file"),
+            "the cause the host reported must survive: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_refused_confirmation_says_whether_the_address_or_the_reservation_was_wrong() {
+        assert_eq!(
+            SelectError::NotOffered(addr(200)).to_string(),
+            "the guest selected unoffered address 192.168.64.200"
+        );
+        assert_eq!(
+            SelectError::UnknownOwner.to_string(),
+            "the guest has no address reservation"
+        );
+    }
+
+    #[test]
+    fn a_runs_monitor_is_told_about_its_own_conflict_and_no_one_elses() {
+        let allocator = empty_host();
+        allocator
+            .reserve("run-a", "52:54:00:00:00:01")
+            .expect("first");
+        allocator
+            .reserve("run-b", "52:54:00:00:00:02")
+            .expect("second");
+        let stolen = "{\n\tip_address=192.168.64.254\n\thw_address=1,52:54:0:99:99:99\n\tlease=0x7d0\n}\n\
+             {\n\tip_address=192.168.64.251\n\thw_address=1,52:54:0:88:88:88\n\tlease=0x7d0\n}\n";
+        let after = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, stolen),
+            Vec::new(),
+            1_000,
+        );
+        copy_reservations(&allocator, &after);
+        assert_eq!(
+            after
+                .conflicts_for("run-a")
+                .into_iter()
+                .map(|conflict| conflict.address)
+                .collect::<Vec<_>>(),
+            vec![addr(254)],
+            "a run's monitor warns about the address that run holds"
+        );
+        assert_eq!(
+            after
+                .conflicts_for("run-b")
+                .into_iter()
+                .map(|conflict| conflict.address)
+                .collect::<Vec<_>>(),
+            vec![addr(251)]
+        );
+        assert!(after.conflicts_for("run-z").is_empty());
     }
 
     #[tokio::test(start_paused = true)]
