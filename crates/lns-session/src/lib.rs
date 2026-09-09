@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+mod net;
+pub use net::{GuestNet, GuestNetError};
+
 pub const BROKER_PORT: u32 = 1029;
+
+/// Whether this run's policy allows egress, so the guest knows if a network failure is fatal or merely logged.
+pub const EGRESS_ALLOWED_ENV: &str = "LENS_SANDBOX_EGRESS_ALLOWED";
+
+/// The address plan the host reserved for this guest, absent when the host leaves the guest to DHCP.
+pub const GUEST_NET_ENV: &str = "LENS_SANDBOX_NET";
 
 pub const FORWARD_PORT: u32 = 1030;
 
@@ -73,6 +82,64 @@ pub enum ServerFrame {
     StdoutBytes(Vec<u8>),
     StderrBytes(Vec<u8>),
     ExitStatus(i32),
+    Refused(BrokerExitReason),
+}
+
+/// Why the broker refused to start a workload: the host renders the text, so the wire carries the cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerExitReason {
+    NoDhcpLease,
+    NoStaticAddress { offered: Vec<String> },
+    GatewayUnreachable { gateway: String, address: String },
+    NetworkSetupFailed(String),
+}
+
+impl BrokerExitReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoDhcpLease => "no_dhcp_lease",
+            Self::NoStaticAddress { .. } => "no_static_address",
+            Self::GatewayUnreachable { .. } => "gateway_unreachable",
+            Self::NetworkSetupFailed(_) => "network_setup_failed",
+        }
+    }
+
+    /// One line, for an error chain that adds its own context.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::NoDhcpLease => "the guest got no address from the host DHCP server".into(),
+            Self::NoStaticAddress { offered } => format!(
+                "every address the host offered is already in use: {}",
+                offered.join(", ")
+            ),
+            Self::GatewayUnreachable { gateway, address } => {
+                format!("the gateway {gateway} did not answer ARP from {address}")
+            }
+            Self::NetworkSetupFailed(error) => {
+                format!("the guest could not set up its network: {error}")
+            }
+        }
+    }
+
+    /// The summary plus what the user can do about it, for the host's own error render.
+    pub fn explain(&self) -> String {
+        let tail = match self {
+            Self::NoDhcpLease => {
+                "  remedy: let every run exit, which tears the shared network down, then start again"
+            }
+            Self::NoStaticAddress { .. } => {
+                "  another guest or the host DHCP server holds each of them\n  remedy: stop a run you no longer need, then start again"
+            }
+            Self::GatewayUnreachable { .. } => {
+                "  the guest configured the address the host gave it and the host network stayed silent\n  remedy: let every run exit, then start again"
+            }
+            Self::NetworkSetupFailed(_) => {
+                "  this run's policy allows network egress, so the workload does not start without a network"
+            }
+        };
+        format!("{}\n{tail}", self.summary())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,11 +313,85 @@ mod tests {
             ServerFrame::StderrBytes(b"err".to_vec()),
             ServerFrame::ExitStatus(0),
             ServerFrame::ExitStatus(129),
+            ServerFrame::Refused(BrokerExitReason::NoDhcpLease),
+            ServerFrame::Refused(BrokerExitReason::NoStaticAddress {
+                offered: vec!["192.168.64.254".into()],
+            }),
+            ServerFrame::Refused(BrokerExitReason::GatewayUnreachable {
+                gateway: "192.168.64.1".into(),
+                address: "192.168.64.254".into(),
+            }),
+            ServerFrame::Refused(BrokerExitReason::NetworkSetupFailed(
+                "`ip link set eth0 up` exited with 1".into(),
+            )),
         ] {
             let bytes = encode_frame(&frame).unwrap();
             let back: ServerFrame = decode_frame(&bytes[4..]).unwrap();
             assert_eq!(back, frame);
         }
+    }
+
+    #[test]
+    fn a_missing_lease_names_the_remedy_that_actually_clears_it() {
+        let reason = BrokerExitReason::NoDhcpLease;
+        assert_eq!(reason.as_str(), "no_dhcp_lease");
+        assert_eq!(
+            reason.summary(),
+            "the guest got no address from the host DHCP server"
+        );
+        let explained = reason.explain();
+        assert!(explained.starts_with(&reason.summary()), "{explained}");
+        assert!(
+            explained.contains("let every run exit"),
+            "the remedy works because the shared network goes with the last guest: {explained}"
+        );
+        assert!(
+            !explained.contains("content filter"),
+            "the guest never sees kernel evidence, so it must not blame the content filter: {explained}"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_candidate_list_names_every_address_that_answered() {
+        let reason = BrokerExitReason::NoStaticAddress {
+            offered: vec!["192.168.64.254".into(), "192.168.64.253".into()],
+        };
+        assert_eq!(reason.as_str(), "no_static_address");
+        let summary = reason.summary();
+        assert!(summary.contains("192.168.64.254"), "{summary}");
+        assert!(summary.contains("192.168.64.253"), "{summary}");
+        assert!(
+            reason.explain().contains("remedy"),
+            "an operator gets a next step: {}",
+            reason.explain()
+        );
+    }
+
+    #[test]
+    fn a_silent_gateway_is_not_reported_as_a_taken_address() {
+        let reason = BrokerExitReason::GatewayUnreachable {
+            gateway: "192.168.64.1".into(),
+            address: "192.168.64.254".into(),
+        };
+        assert_eq!(reason.as_str(), "gateway_unreachable");
+        let summary = reason.summary();
+        assert!(summary.contains("192.168.64.1"), "{summary}");
+        assert!(summary.contains("192.168.64.254"), "{summary}");
+        assert_ne!(reason.as_str(), BrokerExitReason::NoDhcpLease.as_str());
+    }
+
+    #[test]
+    fn a_setup_failure_reason_carries_the_underlying_error_text() {
+        let reason =
+            BrokerExitReason::NetworkSetupFailed("spawn `ip link set lo up`: ENOENT".into());
+        assert_eq!(reason.as_str(), "network_setup_failed");
+        assert!(
+            reason
+                .summary()
+                .contains("spawn `ip link set lo up`: ENOENT"),
+            "the real error must not be replaced by a story: {}",
+            reason.summary()
+        );
     }
 
     #[test]
