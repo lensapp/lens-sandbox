@@ -1,0 +1,14 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: lns-actions-ci-fixture
+spec:
+  image: docker.io/library/debian:bookworm-slim
+  command: sh -c "echo the lns-actions CI fixture ran"
+  workdir: /workspace
+  resources:
+    cpu: 1
+    memory: 512Mi
+  egress:
+    http:
+      - match: example.com
+        verdict: deny

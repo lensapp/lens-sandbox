@@ -1,0 +1,210 @@
+# lns-actions 0.1.0 # x-release-please-version
+name: lns push
+description: >-
+  Validates an lns document, dry-runs the push into the job summary, and
+  publishes it under every tag given. A tag without a namespace is refused —
+  nothing here assumes one.
+
+inputs:
+  file:
+    description: Document to publish, e.g. mixins/gh/gh.yaml.
+    required: true
+  tags:
+    description: >-
+      References to publish, one per line (commas also separate). Each is
+      `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`.
+    required: true
+  push:
+    description: Publish, or stop after the dry run.
+    required: false
+    default: "true"
+  kind:
+    description: >-
+      Kind the document must be (`sandbox` or `mixin`). Empty accepts either.
+    required: false
+    default: ""
+  require-exact-tool-versions:
+    description: >-
+      Fail when the dry run reports tool versions that resolve at push time,
+      so a published document pins what a consumer will install.
+    required: false
+    default: "true"
+
+outputs:
+  digest:
+    description: Manifest digest published, e.g. sha256:… (empty on a dry run).
+    value: ${{ steps.push.outputs.digest }}
+  refs:
+    description: Every reference pushed, one per line (empty on a dry run).
+    value: ${{ steps.push.outputs.refs }}
+  first-push:
+    description: >-
+      `true` when the first tag's repository did not exist before this push.
+    value: ${{ steps.push.outputs.first-push }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the tags
+      id: tags
+      shell: bash
+      env:
+        INPUT_TAGS: ${{ inputs.tags }}
+      run: |
+        set -euo pipefail
+
+        refuse() {
+          echo "::error::tag '$1' $2. Use <namespace>/<name>:<tag> or <host>/<namespace>/<name>:<tag> — lns-push never assumes a namespace."
+          exit 1
+        }
+
+        file="$RUNNER_TEMP/lns-push-tags.txt"
+        : >"$file"
+        first=""
+        host=""
+        repo=""
+        while IFS= read -r raw; do
+          tag=$(printf '%s' "$raw" | tr -d '[:space:]')
+          [ -n "$tag" ] || continue
+          case "${tag##*/}" in
+            *:*) : ;;
+            *) refuse "$tag" "names no tag" ;;
+          esac
+          repository=${tag%:*}
+          case "${repository%%/*}" in
+            *.* | *:* | localhost)
+              tag_host=${repository%%/*}
+              tag_repo=${repository#*/}
+              ;;
+            *)
+              tag_host=hub.lns.run
+              tag_repo=$repository
+              ;;
+          esac
+          case "$tag_repo" in
+            */*) : ;;
+            *) refuse "$tag" "has no namespace segment" ;;
+          esac
+          printf '%s\n' "$tag" >>"$file"
+          if [ -z "$first" ]; then
+            first=$tag
+            host=$tag_host
+            repo=$tag_repo
+          fi
+        done <<TAGS
+        $(printf '%s' "$INPUT_TAGS" | tr ',' '\n')
+        TAGS
+
+        if [ -z "$first" ]; then
+          echo "::error::tags is empty; give at least one <namespace>/<name>:<tag>."
+          exit 1
+        fi
+        {
+          echo "first=$first"
+          echo "host=$host"
+          echo "repository=$repo"
+          echo "file=$file"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Validate the document
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_KIND: ${{ inputs.kind }}
+      run: |
+        set -euo pipefail
+        if [ -n "$INPUT_KIND" ]; then
+          lns artifact validate -f "$INPUT_FILE" --kind "$INPUT_KIND"
+        else
+          lns artifact validate -f "$INPUT_FILE"
+        fi
+
+    - name: Dry run
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_EXACT_TOOLS: ${{ inputs.require-exact-tool-versions }}
+        FIRST_TAG: ${{ steps.tags.outputs.first }}
+      run: |
+        set -euo pipefail
+
+        set +e
+        output=$(lns artifact push "$FIRST_TAG" -f "$INPUT_FILE" --dry-run --yes 2>&1)
+        status=$?
+        set -e
+        printf '%s\n' "$output"
+        {
+          echo "### lns-push dry run — \`$FIRST_TAG\`"
+          echo
+          echo '```'
+          printf '%s\n' "$output"
+          echo '```'
+        } >>"$GITHUB_STEP_SUMMARY"
+        if [ "$status" -ne 0 ]; then
+          echo "::error::the dry run refused this document; nothing was pushed."
+          exit "$status"
+        fi
+        if [ "$INPUT_EXACT_TOOLS" = true ] &&
+          printf '%s\n' "$output" | grep -q 'resolve at push time'; then
+          echo "::error::the dry run reports tool versions that resolve at push time; pin them in the document, or set require-exact-tool-versions: false."
+          exit 1
+        fi
+
+    - name: Push
+      id: push
+      if: inputs.push == 'true'
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        TAGS_FILE: ${{ steps.tags.outputs.file }}
+        REGISTRY_HOST: ${{ steps.tags.outputs.host }}
+        REPOSITORY: ${{ steps.tags.outputs.repository }}
+      run: |
+        set -euo pipefail
+
+        code=$(curl -sS -o /dev/null -w '%{http_code}' -m 30 \
+          "https://$REGISTRY_HOST/v2/$REPOSITORY/tags/list" || echo 000)
+        first_push=false
+        if [ "$code" = 404 ]; then
+          first_push=true
+        fi
+
+        digest=""
+        refs=""
+        refs_md=""
+        while IFS= read -r tag; do
+          [ -n "$tag" ] || continue
+          set +e
+          output=$(lns artifact push "$tag" -f "$INPUT_FILE" --yes 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::pushing $tag failed."
+            exit "$status"
+          fi
+          pushed=$(printf '%s\n' "$output" | grep '^built and pushed ' | tail -1)
+          digest=${pushed##*@}
+          refs="$refs$tag"$'\n'
+          refs_md="$refs_md- \`$tag\`"$'\n'
+        done <"$TAGS_FILE"
+
+        {
+          echo "digest=$digest"
+          echo "first-push=$first_push"
+          echo 'refs<<LNS_REFS_EOF'
+          printf '%s' "$refs"
+          echo 'LNS_REFS_EOF'
+        } >>"$GITHUB_OUTPUT"
+
+        {
+          echo "### lns-push published"
+          echo
+          echo "Digest \`$digest\`, from \`$INPUT_FILE\`:"
+          echo
+          printf '%s' "$refs_md"
+          if [ "$first_push" = true ]; then
+            echo
+            echo "$REPOSITORY is new and private. Publish it at https://$REGISTRY_HOST/$REPOSITORY/settings"
+          fi
+        } >>"$GITHUB_STEP_SUMMARY"
