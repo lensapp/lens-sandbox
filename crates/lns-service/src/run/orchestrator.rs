@@ -518,6 +518,8 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
+    // Slice 1 of lensapp/lens-sandbox#393: a run whose upper becomes a layer keeps every copy-up whole, because the host's reader sees no xattr.
+    let capture_hook_armed = crate::containerfile::real::capture_hook_enabled();
     let (cpus, memory_mib) = (vm_size.cpus, vm_size.mem_mib);
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 
@@ -540,6 +542,7 @@ async fn orchestrate(
             port: crate::relay::VSOCK_PORT,
             fd_tx: session.relay.fd_tx.clone(),
         }),
+        capture_upper: capture_hook_armed,
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
@@ -701,8 +704,8 @@ async fn orchestrate(
     )
     .await?;
 
-    // Slice 1 of lensapp/lens-sandbox#393: the guest is powered off, so its upper volume is final.
-    if crate::containerfile::real::capture_hook_enabled()
+    // One read of the hook decides both the guest's mount options and this capture, so a captured upper never holds a metacopy stub.
+    if capture_hook_armed
         && let Some(parent) = image_ref.as_deref()
         && let Err(e) =
             crate::containerfile::real::capture_after_run(&run_id, parent, &cmd, command_exited)

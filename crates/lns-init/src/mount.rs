@@ -262,12 +262,19 @@ impl fmt::Display for MountError {
 
 impl std::error::Error for MountError {}
 
-pub fn overlay_options() -> String {
+/// A captured run keeps neither: `metacopy` leaves a copy-up with no data and `redirect_dir` leaves a
+/// path in an xattr, and the host reads the upper as an OCI layer through a reader that sees no xattr.
+pub fn overlay_options(capture_upper: bool) -> String {
+    let xattr_shortcuts = if capture_upper {
+        "redirect_dir=off,metacopy=off"
+    } else {
+        "redirect_dir=on,metacopy=on"
+    };
     format!(
         "lowerdir={COMPOSEFS_META}::{CONTENT},\
          upperdir={UPPER_MOUNTPOINT}/upper,\
          workdir={UPPER_MOUNTPOINT}/work,\
-         redirect_dir=on,metacopy=on"
+         {xattr_shortcuts}"
     )
 }
 
@@ -1295,7 +1302,7 @@ fn mount_composefs_and_exec_broker_inner(
     do_mkdir(sys, &upper_upper, 0o755)?;
     do_mkdir(sys, &upper_work, 0o755)?;
 
-    let opts = overlay_options();
+    let opts = overlay_options(params.capture_upper);
     // The workload rootfs stays permissive: images legitimately ship and exec their own suid binaries.
     do_mount(
         sys,
@@ -1427,7 +1434,7 @@ mod tests {
 
     #[test]
     fn overlay_options_uses_data_only_lower_syntax() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(
             opts.contains("/composefs-meta::/content"),
             "missing `::` data-only-lower syntax: {opts}"
@@ -1436,14 +1443,25 @@ mod tests {
 
     #[test]
     fn overlay_options_enables_redirect_dir_and_metacopy() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(opts.contains("redirect_dir=on"));
         assert!(opts.contains("metacopy=on"));
     }
 
+    /// A metacopy copy-up holds a mode and no data, and a redirect holds a path in an xattr the host's
+    /// reader cannot see; a run whose upper becomes a layer trades both for whole copies.
+    #[test]
+    fn a_captured_run_mounts_the_overlay_without_metacopy_or_redirect_dir() {
+        let opts = overlay_options(true);
+        assert!(opts.contains("redirect_dir=off"), "{opts}");
+        assert!(opts.contains("metacopy=off"), "{opts}");
+        assert!(!opts.contains("=on"), "{opts}");
+        assert!(opts.contains("upperdir=/mnt/upper/upper"), "{opts}");
+    }
+
     #[test]
     fn overlay_options_carries_upper_and_work() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(opts.contains("upperdir=/mnt/upper/upper"));
         assert!(opts.contains("workdir=/mnt/upper/work"));
     }
@@ -1459,6 +1477,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         assert!(validate_cmdline(&p).is_ok());
     }
@@ -1474,6 +1493,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("upper.dev"));
@@ -1490,6 +1510,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("content.tag"));
@@ -1506,6 +1527,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("composefs.descriptor.dev"));
@@ -1522,6 +1544,7 @@ mod tests {
             incomplete_volumes: vec![3],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("volume.3"), "{err}");
@@ -1538,6 +1561,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![1],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("bind.1"), "{err}");
@@ -2177,6 +2201,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         }
     }
 
@@ -2228,6 +2253,27 @@ mod tests {
             .unwrap();
         assert!(move_root < chroot, "move_mount(.,/) precedes chroot(.)");
         assert!(matches!(calls.last(), Some(Call::Fexecve(7))));
+    }
+
+    /// The key the host sets when it will read this run's upper as a layer must reach the overlay mount itself.
+    #[test]
+    fn the_capture_key_reaches_the_overlay_mount() {
+        let sys = FakeSyscalls::new();
+        let mut params = full_params();
+        params.capture_upper = true;
+        let _ =
+            mount_composefs_and_exec_broker_inner(&params, None, "/newroot", FULL_CMDLINE, &sys);
+
+        let overlay = sys
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount { fstype, data, .. } if fstype == "overlay" => data,
+                _ => None,
+            })
+            .expect("the overlay must be mounted");
+        assert!(overlay.contains("metacopy=off"), "{overlay}");
+        assert!(overlay.contains("redirect_dir=off"), "{overlay}");
     }
 
     #[test]
