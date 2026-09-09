@@ -23,6 +23,7 @@ sha2 = "0.10"
 thiserror = "2"
 hex = "0.4"
 tar = "0.4"
+parse-dockerfile = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 serde_yaml = "0.9"
