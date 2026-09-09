@@ -385,7 +385,7 @@ impl BuildHost for RealBuildHost {
 
     async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
         BuildCache::new(&RealCacheFs, &self.cache_dir)
-            .get(kind, key, &|reference| self.holds(reference))
+            .get(kind, key, &self.source, &|reference| self.holds(reference))
             .map(|entry| entry.reference)
     }
 
@@ -393,10 +393,7 @@ impl BuildHost for RealBuildHost {
         if let Err(e) = BuildCache::new(&RealCacheFs, &self.cache_dir).remember(
             kind,
             key,
-            &Entry {
-                reference: reference.to_string(),
-                source: self.source.clone(),
-            },
+            &Entry::built_from(reference, &self.source),
         ) {
             log::warn!("this build will not be reused; its key was not written: {e:#}");
         }

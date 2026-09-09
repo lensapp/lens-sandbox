@@ -29,12 +29,21 @@ impl Kind {
     }
 }
 
-/// One remembered build: what it produced, and the file it was built from.
+/// One remembered build: what it produced, and every document that has answered for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Entry {
     pub reference: String,
-    /// The Containerfile's absolute path, so a sweep can ask whether the document is still here.
-    pub source: String,
+    /// Every Containerfile absolute path this key has answered for, so one copy leaving the machine does not drop the image the others need.
+    pub sources: Vec<String>,
+}
+
+impl Entry {
+    pub(crate) fn built_from(reference: &str, source: &str) -> Self {
+        Self {
+            reference: reference.to_string(),
+            sources: vec![source.to_string()],
+        }
+    }
 }
 
 /// The cache directory as the host holds it: a key nothing answers for is absent, not an error.
@@ -66,18 +75,54 @@ impl<'a, F: CacheFs> BuildCache<'a, F> {
         }
     }
 
-    /// What this machine built for the key, while it still holds the image the entry names.
-    pub(crate) fn get(&self, kind: Kind, key: &str, holds: &dyn Fn(&str) -> bool) -> Option<Entry> {
+    /// What this machine built for the key, while it still holds the image the entry names; the
+    /// asking document is recorded, so the entry outlives whichever copy of it goes first.
+    pub(crate) fn get(
+        &self,
+        kind: Kind,
+        key: &str,
+        source: &str,
+        holds: &dyn Fn(&str) -> bool,
+    ) -> Option<Entry> {
         let entry = self.entry_at(&self.path(kind, key))?;
-        holds(&entry.reference).then_some(entry)
+        if !holds(&entry.reference) {
+            return None;
+        }
+        Some(self.also_answering_for(kind, key, entry, source))
     }
 
     pub(crate) fn remember(&self, kind: Kind, key: &str, entry: &Entry) -> Result<()> {
         let path = self.path(kind, key);
-        let bytes = serde_json::to_vec(entry).context("writing a build cache entry")?;
+        let merged = match self.entry_at(&path) {
+            Some(held) if held.reference == entry.reference => {
+                let mut merged = held;
+                let added: Vec<String> = entry
+                    .sources
+                    .iter()
+                    .filter(|source| !merged.sources.contains(source))
+                    .cloned()
+                    .collect();
+                merged.sources.extend(added);
+                merged
+            }
+            _ => entry.clone(),
+        };
+        let bytes = serde_json::to_vec(&merged).context("writing a build cache entry")?;
         self.fs
             .write(&path, &bytes)
             .with_context(|| format!("remembering this build at {}", path.display()))
+    }
+
+    fn also_answering_for(&self, kind: Kind, key: &str, entry: Entry, source: &str) -> Entry {
+        if entry.sources.iter().any(|held| held == source) {
+            return entry;
+        }
+        let mut refreshed = entry;
+        refreshed.sources.push(source.to_string());
+        if let Err(e) = self.remember(kind, key, &refreshed) {
+            crate::log::warn!("this build answered for a second document unrecorded: {e:#}");
+        }
+        refreshed
     }
 
     /// Every entry whose document has left this machine, or whose image has, goes; what the rest name stays.
@@ -104,7 +149,11 @@ impl<'a, F: CacheFs> BuildCache<'a, F> {
             for path in self.fs.list(&self.root.join(kind.dir())) {
                 match self.entry_at(&path) {
                     Some(entry)
-                        if self.fs.exists(Path::new(&entry.source)) && holds(&entry.reference) =>
+                        if holds(&entry.reference)
+                            && entry
+                                .sources
+                                .iter()
+                                .any(|source| self.fs.exists(Path::new(source))) =>
                     {
                         kept.insert(entry.reference);
                     }
@@ -236,10 +285,7 @@ pub(crate) mod tests {
     }
 
     fn entry(reference: &str, source: &str) -> Entry {
-        Entry {
-            reference: reference.to_string(),
-            source: source.to_string(),
-        }
+        Entry::built_from(reference, source)
     }
 
     fn everything(_: &str) -> bool {
@@ -261,12 +307,30 @@ pub(crate) mod tests {
             .expect("the cache is writable");
 
         assert_eq!(
-            cache.get(Kind::Image, "sha256:aa", &everything),
+            cache.get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/image/Containerfile",
+                &everything
+            ),
             Some(remembered)
         );
-        assert_eq!(cache.get(Kind::Image, "sha256:bb", &everything), None);
         assert_eq!(
-            cache.get(Kind::Step, "sha256:aa", &everything),
+            cache.get(
+                Kind::Image,
+                "sha256:bb",
+                "/work/image/Containerfile",
+                &everything
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                Kind::Step,
+                "sha256:aa",
+                "/work/image/Containerfile",
+                &everything
+            ),
             None,
             "an instruction key and an image key are two keys, not one",
         );
@@ -285,7 +349,10 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        assert_eq!(cache.get(Kind::Step, "sha256:aa", &nothing), None);
+        assert_eq!(
+            cache.get(Kind::Step, "sha256:aa", "/work/Containerfile", &nothing),
+            None
+        );
     }
 
     #[test]
@@ -293,9 +360,150 @@ pub(crate) mod tests {
         let fs = FakeCacheFs::with(&[("/cache/containerfile-builds/images/sha256-aa", "{")]);
         let cache = BuildCache::new(&fs, Path::new("/cache"));
 
-        assert_eq!(cache.get(Kind::Image, "sha256:aa", &everything), None);
+        assert_eq!(
+            cache.get(Kind::Image, "sha256:aa", "/work/Containerfile", &everything),
+            None
+        );
         assert_eq!(cache.sweep(&everything).dropped, 1);
         assert!(fs.paths().is_empty());
+    }
+
+    /// The key excludes the path by decision, so two copies of one document share an entry; the one
+    /// that goes first must not take the other's image with it.
+    #[test]
+    fn a_second_document_that_hits_a_key_is_recorded_as_answering_for_it() {
+        let fs = FakeCacheFs::default();
+        let cache = BuildCache::new(&fs, Path::new("/cache"));
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &entry("built@sha256:one", "/work/a/Containerfile"),
+            )
+            .unwrap();
+        fs.write(Path::new("/work/b/Containerfile"), b"FROM base\n")
+            .unwrap();
+
+        let hit = cache
+            .get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/b/Containerfile",
+                &everything,
+            )
+            .expect("the key answers");
+
+        assert_eq!(
+            hit.sources,
+            ["/work/a/Containerfile", "/work/b/Containerfile"]
+        );
+        assert_eq!(
+            cache.sweep(&everything).kept,
+            BTreeSet::from(["built@sha256:one".to_string()]),
+            "the copy that is still here keeps the image the other one built",
+        );
+    }
+
+    /// One document asking twice is one source, not a list that grows with every build.
+    #[test]
+    fn the_document_that_built_a_key_is_recorded_once() {
+        let fs = FakeCacheFs::default();
+        let cache = BuildCache::new(&fs, Path::new("/cache"));
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &entry("built@sha256:one", "/work/a/Containerfile"),
+            )
+            .unwrap();
+
+        cache
+            .get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/a/Containerfile",
+                &everything,
+            )
+            .expect("the key answers");
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &entry("built@sha256:one", "/work/a/Containerfile"),
+            )
+            .unwrap();
+
+        let held = cache
+            .get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/a/Containerfile",
+                &everything,
+            )
+            .expect("the key answers");
+        assert_eq!(held.sources, ["/work/a/Containerfile"]);
+    }
+
+    /// A key that now names a different image is that build's entry, not an amended one.
+    #[test]
+    fn a_key_rebuilt_into_another_image_forgets_the_documents_of_the_old_one() {
+        let fs = FakeCacheFs::default();
+        let cache = BuildCache::new(&fs, Path::new("/cache"));
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &entry("built@sha256:one", "/work/a/Containerfile"),
+            )
+            .unwrap();
+
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &entry("built@sha256:two", "/work/b/Containerfile"),
+            )
+            .unwrap();
+
+        let held = cache
+            .get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/b/Containerfile",
+                &everything,
+            )
+            .expect("the key answers");
+        assert_eq!(held.reference, "built@sha256:two");
+        assert_eq!(held.sources, ["/work/b/Containerfile"]);
+    }
+
+    /// A hit the cache cannot write back is still a hit: the build is reused, and the operator is told once.
+    #[test]
+    fn a_hit_an_unwritable_cache_cannot_record_still_answers() {
+        let fs = FakeCacheFs {
+            unwritable: true,
+            ..FakeCacheFs::with(&[(
+                "/cache/containerfile-builds/images/sha256-aa",
+                r#"{"reference":"built@sha256:one","sources":["/work/a/Containerfile"]}"#,
+            )])
+        };
+        let mut hit = None;
+        let messages = crate::test_env::captured_messages(|| {
+            hit = BuildCache::new(&fs, Path::new("/cache")).get(
+                Kind::Image,
+                "sha256:aa",
+                "/work/b/Containerfile",
+                &everything,
+            );
+        });
+
+        assert_eq!(hit.expect("the key answers").reference, "built@sha256:one");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("answered for a second document")),
+            "{messages:?}"
+        );
     }
 
     #[test]
