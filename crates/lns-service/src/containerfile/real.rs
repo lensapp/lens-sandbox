@@ -28,8 +28,10 @@ pub async fn capture_after_run(
     parent_reference: &str,
     command: &[String],
     fileset_paths: &[String],
+    guest_stop: crate::run::GuestStop,
     command_exited: std::time::Instant,
 ) -> Result<BuiltLayer> {
+    super::refuse_unless_the_guest_stopped(guest_stop)?;
     let started = std::time::Instant::now();
     let cache_dir = crate::cache::root()?;
     let upper_image = crate::cache::run_dir(&cache_dir, run_id).join("upper.img");

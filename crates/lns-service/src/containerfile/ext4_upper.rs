@@ -46,7 +46,9 @@ impl Ext4Upper {
 
 /// The guest syncs and powers off without unmounting, so the volume still claims it needs
 /// recovery through a journal `ext4-view` cannot read — but `sync(2)` has already written the home
-/// blocks, so the flag comes off on the way in and the reader sees what the guest synced.
+/// blocks, so the flag comes off on the way in and the reader sees what the guest synced. The mask
+/// costs the reader its one signal that a volume is unsynced, so this path is the only one that
+/// takes it: a run that did not exit through the broker's sync is refused before the volume is read.
 struct SyncedImage {
     file: std::fs::File,
 }

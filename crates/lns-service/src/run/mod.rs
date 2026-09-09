@@ -11,6 +11,13 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
+/// Whether the guest was done with its filesystem when the run's shutdown returned, or the grace period ended first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestStop {
+    Stopped,
+    GraceExpired,
+}
+
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {
     pub code: i32,

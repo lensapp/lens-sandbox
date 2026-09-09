@@ -698,7 +698,7 @@ async fn orchestrate(
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
 
-    super::shutdown::publish_exit_after_quiesce(
+    let (_, guest_stop) = super::shutdown::publish_exit_after_quiesce(
         &run_id,
         session_code,
         super::shutdown::shutdown_after_session(
@@ -717,6 +717,7 @@ async fn orchestrate(
             parent,
             &cmd,
             &fileset_paths,
+            guest_stop,
             command_exited,
         )
         .await

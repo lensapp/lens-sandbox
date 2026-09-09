@@ -29,6 +29,18 @@ pub struct BuiltLayer {
     pub entries: usize,
 }
 
+/// A capture reads the volume the guest synced, and the reader masks the recovery flag to do it; a run
+/// that did not exit through the broker's sync is refused instead.
+pub(crate) fn refuse_unless_the_guest_stopped(stop: crate::run::GuestStop) -> Result<()> {
+    match stop {
+        crate::run::GuestStop::Stopped => Ok(()),
+        crate::run::GuestStop::GraceExpired => anyhow::bail!(
+            "the guest had not stopped when its shutdown grace period ended, so its upper volume \
+             may still be writing; a run that did not exit through the broker's sync is refused"
+        ),
+    }
+}
+
 pub(crate) async fn import_captured<F: Fs>(
     fs: &F,
     changes: &ChangeSet,
@@ -299,6 +311,22 @@ mod tests {
         assert!(
             format!("{err:#}").contains("writing the captured change set as an OCI layer"),
             "{err:#}"
+        );
+    }
+
+    /// The reader masks the volume's recovery flag, so it cannot tell a synced volume from one a live
+    /// guest is still writing; only the guest's own stop can, and it is what the capture asks for.
+    #[test]
+    fn a_run_the_grace_period_outlived_is_refused_by_name() {
+        refuse_unless_the_guest_stopped(crate::run::GuestStop::Stopped)
+            .expect("a guest that stopped is what the capture reads");
+
+        let err = refuse_unless_the_guest_stopped(crate::run::GuestStop::GraceExpired).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("grace"), "{message}");
+        assert!(
+            message.contains("still be writing"),
+            "the refusal must say why the volume cannot be read: {message}",
         );
     }
 
