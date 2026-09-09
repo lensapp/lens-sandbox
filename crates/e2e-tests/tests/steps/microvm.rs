@@ -1862,13 +1862,17 @@ fn built_reference_of_last_run(world: &mut E2eWorld) -> Result<String, String> {
     let home = world
         .home
         .as_ref()
-        .map(|home| home.path().join(".lns"))
-        .ok_or("the service must run in a home this scenario owns")?;
+        .ok_or("the service must run in a home this scenario owns")?
+        .path()
+        .to_path_buf();
     let run_id = last_run(world)?;
-    let path = home
-        .join("runs")
-        .join(&run_id)
-        .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
+    let run_dir = crate::specutil::run_dir_for_prefix(&home, &run_id).map_err(|e| {
+        format!(
+            "the run the CLI reported as {run_id:?} must have a directory: {e}\n--- service.log ---\n{}",
+            crate::steps::service::read_service_log(world),
+        )
+    })?;
+    let path = run_dir.join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
     std::fs::read_to_string(&path)
         .map(|reference| reference.trim().to_string())
         .map_err(|e| {
