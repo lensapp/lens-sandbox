@@ -90,6 +90,19 @@ pub fn workload_exit_event(cx: &OcsfCtx, exit_code: i32, killed: bool) -> Map<St
     into_object(lns_ocsf::workload_exit(&cx.ctx(), exit_code, killed))
 }
 
+pub fn broker_exit_event(
+    cx: &OcsfCtx,
+    exit_code: i32,
+    reason: &lns_session::BrokerExitReason,
+) -> Map<String, Value> {
+    into_object(lns_ocsf::broker_refusal(
+        &cx.ctx(),
+        reason.as_str(),
+        &reason.summary(),
+        exit_code,
+    ))
+}
+
 pub fn workload_restart_event(cx: &OcsfCtx, image: &str) -> Map<String, Value> {
     into_object(lns_ocsf::workload_restart(&cx.ctx(), image))
 }
@@ -286,6 +299,39 @@ mod tests {
         assert_eq!(egress["class_uid"], 4002);
         assert_eq!(egress["unmapped"]["lns_result"], "success");
         assert_eq!(egress["unmapped"]["lns_origin"], "guest-proxy");
+    }
+
+    #[test]
+    fn each_broker_refusal_selects_its_own_audit_kind() {
+        let cx = OcsfCtx::at_unix("9e8d7c6b0000".into(), "calm-finch".into(), 1_780_000_000);
+        let lease = broker_exit_event(&cx, 1, &lns_session::BrokerExitReason::NoDhcpLease);
+        assert_eq!(lease["unmapped"]["lns_kind"], "no_dhcp_lease");
+        let taken = broker_exit_event(
+            &cx,
+            1,
+            &lns_session::BrokerExitReason::NoStaticAddress {
+                offered: vec!["192.168.64.254".into()],
+            },
+        );
+        assert_eq!(taken["unmapped"]["lns_kind"], "no_static_address");
+        assert!(
+            taken["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("192.168.64.254")),
+            "the audit says which addresses were refused: {taken:?}"
+        );
+        let setup = broker_exit_event(
+            &cx,
+            1,
+            &lns_session::BrokerExitReason::NetworkSetupFailed("busybox is missing".into()),
+        );
+        assert_eq!(setup["unmapped"]["lns_kind"], "network_setup_failed");
+        assert!(
+            setup["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("busybox is missing")),
+            "the real error must reach the audit: {setup:?}"
+        );
     }
 
     #[test]

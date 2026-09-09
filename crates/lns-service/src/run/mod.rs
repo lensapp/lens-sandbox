@@ -11,6 +11,14 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
+pub fn broker_exit_reason(result: &Result<i32>) -> Option<lns_session::BrokerExitReason> {
+    result.as_ref().err().and_then(|error| {
+        error
+            .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
+            .map(|refusal| refusal.reason.clone())
+    })
+}
+
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {
     pub code: i32,
@@ -109,6 +117,14 @@ fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     }
 }
 
+/// A broker refusal is rendered from its typed reason, not from the guest's own bytes: this render is CRLF-corrected and reaches a detached run's log.
+fn failure_message(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+        Some(refusal) => refusal.reason.explain(),
+        None => format!("{error:#}"),
+    }
+}
+
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
         Ok(code) => {
@@ -128,7 +144,7 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
                 .send(WireFrame::Json(Response::RunLog {
                     level: lns_ipc::LogLevel::Error,
                     verb: None,
-                    message: format!("{e:#}"),
+                    message: failure_message(&e),
                 }))
                 .await;
             1
@@ -583,6 +599,51 @@ mod tests {
             Some(WireFrame::Json(Response::RunExit { code: 1 })) => {}
             other => panic!("expected RunExit{{1}}, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_dhcp_refusal_is_rendered_by_the_host_and_not_as_a_workload_exit() {
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        let result = Err(
+            anyhow::Error::new(crate::vm::session_client::BrokerRefusal {
+                reason: lns_session::BrokerExitReason::NoDhcpLease,
+            })
+            .context("reading broker session frames"),
+        );
+        assert_eq!(
+            broker_exit_reason(&result),
+            Some(lns_session::BrokerExitReason::NoDhcpLease),
+            "the service owns the stable reason shown in the audit"
+        );
+        let code = emit_completion(&tx, result).await;
+        assert_eq!(code, 1);
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
+                assert!(matches!(level, lns_ipc::LogLevel::Error));
+                assert_eq!(
+                    message,
+                    lns_session::BrokerExitReason::NoDhcpLease.explain()
+                );
+                assert!(
+                    !message.contains("reading broker session frames"),
+                    "the user reads the cause and the remedy, not the host's call stack: {message}"
+                );
+            }
+            other => panic!("expected the host-rendered refusal, got {other:?}"),
+        }
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunExit { code: reported })) => {
+                assert_eq!(reported, code)
+            }
+            other => panic!("expected the typed RunExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_run_failure_keeps_its_whole_error_chain() {
+        let error = anyhow::anyhow!("connection refused").context("booting the microVM");
+        let message = failure_message(&error);
+        assert_eq!(message, "booting the microVM: connection refused");
     }
 
     #[test]

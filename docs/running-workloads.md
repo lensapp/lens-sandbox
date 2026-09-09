@@ -1048,6 +1048,54 @@ every run publishes it — no flag opts in:
 - Explicit `-p` entries combine with the declared set; on a container-port
   conflict the explicit `-p` wins.
 
+### How a guest gets its address (macOS)
+
+By default a guest asks the shared macOS network for an address over DHCP, and
+nothing about that has changed. If no address arrives, the run now stops with a
+named reason instead of starting a workload that cannot reach anything:
+
+```
+the guest got no address from the host DHCP server
+  remedy: let every run exit, which tears the shared network down, then start again
+```
+
+There is a second, **opt-in** path. With `LNS_STATIC_GUEST_NET=1` set in the
+environment `lns-service` starts in, the host picks the address itself and hands
+it to the guest on its kernel command line, so the guest is configured before it
+ever sends a packet:
+
+```sh
+LNS_STATIC_GUEST_NET=1 lns service start
+```
+
+What the host does, per booting guest:
+
+- reads the shared network's own parameters (`/etc/bootpd.plist`, falling back
+  to Apple's `192.168.64.0/24` with the gateway at `.1`) — it never writes them;
+- excludes the network and broadcast addresses, the gateway, every unexpired
+  lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
+  address already reserved for another guest, under one lock so two guests
+  booting together cannot pick the same address;
+- reserves three candidates from the top of the range and gives the guest a
+  stable hardware address derived from its run id.
+
+In the guest, the broker takes the first candidate that is silent to an ARP
+probe, announces it, and checks the gateway answers. If every candidate is
+taken, or the gateway does not answer, the run stops with a named reason — it
+never falls back to DHCP, so a guest is never quietly addressed by someone else.
+
+**The limitation you are opting into.** macOS 15 offers no way to tell Apple's
+DHCP server that an address is spoken for. lns picks from the top of the range
+and Apple allocates from the bottom, which keeps them apart in practice, but a
+long-lived static guest can still be handed the same address later by Apple's
+own server. lns *detects* this — every reservation is re-read against the live
+lease file and a mismatch is logged naming the address and the other holder —
+but it cannot *prevent* it. That is why this path is off by default and why the
+default remains DHCP.
+
+Linux hosts are unaffected: their guests have no network interface at all, and
+the setting is ignored.
+
 ### Interactive, TTY, and detached sessions
 
 | Flag                  | Default | Meaning                                                              |

@@ -170,7 +170,11 @@ async fn run_provisioner(
 
     let run_as = vm::resolve_run_as(Some("0"), Some(0), None, None);
     let argv = vec!["/bin/sh".to_string(), DRIVER.to_string()];
-    let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None);
+    let provisioner_owner = format!("{scratch_id}/tools");
+    let address = vm::guest_addr::real::reserve(&provisioner_owner, &provisioner_owner)
+        .context("reserving an address on the host network for the tool provisioner")?;
+    let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None)
+        .with_guest_net(address.as_ref().map(|held| &held.net));
 
     #[cfg(target_os = "macos")]
     let console_fd = vm::diag_console::spawn(
@@ -212,6 +216,7 @@ async fn run_provisioner(
         console_fd,
         debug: false,
         exec,
+        mac: address.as_ref().map(|held| held.mac.clone()),
     };
 
     let mut vm_task = tokio::spawn(vm::boot(spec, None));

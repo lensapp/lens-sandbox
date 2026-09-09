@@ -84,11 +84,13 @@ pub async fn handle(
     )
     .instrument(tracing::Span::current())
     .await;
+    let refusal = super::broker_exit_reason(&result);
     let code = emit_completion(&frame_tx, result).await;
-    if let Err(e) = crate::audit::record_run_exited(
+    if let Err(e) = crate::audit::record_run_exited_with_reason(
         &finished_run_id,
         &microvm_label,
         code,
+        refusal,
         &crate::clock::RealClock,
     ) {
         log::warn!("run exit not audited: {e:#}");
@@ -498,13 +500,16 @@ async fn orchestrate(
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
     );
+    let address = vm::guest_addr::real::reserve(&run_id, &run_id)
+        .context("reserving an address on the host network for this guest")?;
     let exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
         &cmd,
         image.config.as_ref(),
         Some(&session),
-    );
+    )
+    .with_guest_net(address.as_ref().map(|held| &held.net));
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -545,6 +550,7 @@ async fn orchestrate(
         console_fd,
         debug: args.debug,
         exec,
+        mac: address.as_ref().map(|held| held.mac.clone()),
     };
 
     let initial_winsize = args

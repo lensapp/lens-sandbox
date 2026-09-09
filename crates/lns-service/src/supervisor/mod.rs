@@ -63,6 +63,7 @@ pub struct SupervisorSession {
     pub assets: SupervisorAssets,
     pub relay: Relay,
     pub watcher: Option<crate::approval_flow::watcher::PolicyWatcher>,
+    pub egress_allowed: bool,
 }
 
 impl SupervisorSession {
