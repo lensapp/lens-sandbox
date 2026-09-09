@@ -37,14 +37,16 @@ pub(crate) fn declared_env(config: &str) -> Result<Vec<(String, String)>> {
         .unwrap_or_default())
 }
 
+/// A step's `created` is fixed, because the wall clock would make an unchanged instruction on an unchanged parent a new digest on every build and nothing could ever be reused.
+pub(crate) const STEP_CREATED: &str = "1970-01-01T00:00:00Z";
+
 pub(crate) fn assemble(
     parent: &ParentImage,
     layer: Option<&LayerBlob>,
     draft: &ConfigDraft,
     created_by: &str,
-    created: &str,
 ) -> Result<BuiltImage> {
-    let config = config_over(&parent.config, layer, draft, created_by, created)?;
+    let config = config_over(&parent.config, layer, draft, created_by)?;
     let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(config.as_bytes())));
 
     let mut manifest = parent.manifest.clone();
@@ -77,14 +79,13 @@ fn config_over(
     layer: Option<&LayerBlob>,
     draft: &ConfigDraft,
     created_by: &str,
-    created: &str,
 ) -> Result<String> {
     let mut config: Value =
         serde_json::from_str(parent).context("parsing the base image's config")?;
     let object = config
         .as_object_mut()
         .context("the base image's config is not a JSON object")?;
-    object.insert("created".to_string(), json!(created));
+    object.insert("created".to_string(), json!(STEP_CREATED));
 
     let diff_ids = object
         .get_mut("rootfs")
@@ -102,7 +103,7 @@ fn config_over(
     let Some(history) = history.as_array_mut() else {
         bail!("the base image's config has a history that is not a list");
     };
-    let mut entry = json!({ "created": created, "created_by": created_by });
+    let mut entry = json!({ "created": STEP_CREATED, "created_by": created_by });
     if layer.is_none() {
         entry["empty_layer"] = json!(true);
     }
@@ -324,7 +325,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "2026-09-09T00:00:00Z",
         )
         .unwrap()
     }
@@ -355,6 +355,16 @@ pub(crate) mod tests {
         assert_eq!(config["config"]["WorkingDir"], json!("/srv"));
     }
 
+    /// Slice 4 keys reuse on the built digest, which the wall clock would make new on every build.
+    #[test]
+    fn the_same_step_on_the_same_parent_assembles_the_same_image_twice() {
+        let first = built();
+        let second = built();
+
+        assert_eq!(first.manifest_digest, second.manifest_digest);
+        assert_eq!(first.config, second.config);
+    }
+
     #[test]
     fn one_history_entry_records_what_produced_the_layer() {
         let built = built();
@@ -363,13 +373,10 @@ pub(crate) mod tests {
             history,
             json!([
                 { "created_by": "ADD alpine.tar" },
-                { "created": "2026-09-09T00:00:00Z", "created_by": "RUN spike" },
+                { "created": STEP_CREATED, "created_by": "RUN spike" },
             ]),
         );
-        assert_eq!(
-            config_value(&built)["created"],
-            json!("2026-09-09T00:00:00Z")
-        );
+        assert_eq!(config_value(&built)["created"], json!(STEP_CREATED));
     }
 
     #[test]
@@ -386,12 +393,11 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap();
         assert_eq!(
             config_value(&built)["history"],
-            json!([{ "created": "now", "created_by": "RUN spike" }]),
+            json!([{ "created": STEP_CREATED, "created_by": "RUN spike" }]),
         );
     }
 
@@ -452,7 +458,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap();
         assert_eq!(built.manifest.artifact_type, None);
@@ -473,7 +478,7 @@ pub(crate) mod tests {
     }
 
     fn drafted(draft: &ConfigDraft) -> Value {
-        let built = assemble(&parent(), Some(&layer()), draft, "RUN one", "now").unwrap();
+        let built = assemble(&parent(), Some(&layer()), draft, "RUN one").unwrap();
         serde_json::from_str::<Value>(&built.config).unwrap()["config"].clone()
     }
 
@@ -504,7 +509,7 @@ pub(crate) mod tests {
             labels: vec![("org.opencontainers.image.title".into(), "agent".into())],
             ..ConfigDraft::default()
         };
-        let built = assemble(&parent, Some(&layer()), &draft, "LABEL one", "now").unwrap();
+        let built = assemble(&parent, Some(&layer()), &draft, "LABEL one").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&built.config).unwrap()["config"]["Labels"],
             json!({
@@ -596,7 +601,7 @@ pub(crate) mod tests {
             volumes: vec!["/data".into()],
             ..ConfigDraft::default()
         };
-        let built = assemble(&parent, Some(&layer()), &draft, "VOLUME /data", "now").unwrap();
+        let built = assemble(&parent, Some(&layer()), &draft, "VOLUME /data").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&built.config).unwrap()["config"]["Volumes"],
             json!({ "/var/lib/base": {}, "/data": {} }),
@@ -611,7 +616,7 @@ pub(crate) mod tests {
             user: Some("node".into()),
             ..ConfigDraft::default()
         };
-        let built = assemble(&parent, Some(&layer()), &draft, "USER node", "now").unwrap();
+        let built = assemble(&parent, Some(&layer()), &draft, "USER node").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&built.config).unwrap()["config"]["User"],
             json!("node"),
@@ -626,14 +631,8 @@ pub(crate) mod tests {
             "rootfs": { "type": "layers", "diff_ids": [] },
         })
         .to_string();
-        let err = assemble(
-            &parent,
-            Some(&layer()),
-            &ConfigDraft::default(),
-            "RUN one",
-            "now",
-        )
-        .unwrap_err();
+        let err =
+            assemble(&parent, Some(&layer()), &ConfigDraft::default(), "RUN one").unwrap_err();
         assert!(
             format!("{err:#}").contains("config block that is not an object"),
             "{err:#}"
@@ -648,7 +647,7 @@ pub(crate) mod tests {
             env: vec![("MODE".into(), "research".into())],
             ..ConfigDraft::default()
         };
-        let built = assemble(&parent(), None, &draft, "ENV MODE=research", "now").unwrap();
+        let built = assemble(&parent(), None, &draft, "ENV MODE=research").unwrap();
         let config: Value = serde_json::from_str(&built.config).unwrap();
 
         assert_eq!(
@@ -660,7 +659,7 @@ pub(crate) mod tests {
         assert_eq!(
             config["history"].as_array().unwrap().last().unwrap(),
             &json!({
-                "created": "now",
+                "created": STEP_CREATED,
                 "created_by": "ENV MODE=research",
                 "empty_layer": true,
             }),
@@ -678,7 +677,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap_err();
         assert!(
@@ -698,7 +696,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("not a JSON object"), "{err:#}");
@@ -715,7 +712,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("no rootfs.diff_ids"), "{err:#}");
@@ -736,7 +732,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap_err();
         assert!(

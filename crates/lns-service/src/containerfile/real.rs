@@ -273,7 +273,6 @@ impl BuildHost for RealBuildHost {
                 parent: &parent,
                 draft: commit.config,
                 created_by: commit.created_by,
-                created: &crate::time_fmt::rfc3339_now(),
                 now_unix_secs: now_unix_secs(),
             },
         )

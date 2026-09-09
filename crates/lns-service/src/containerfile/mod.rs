@@ -55,7 +55,6 @@ pub(crate) struct StepCommit<'a> {
     pub parent: &'a ParentImage,
     pub draft: &'a executor::ConfigDraft,
     pub created_by: &'a str,
-    pub created: &'a str,
     pub now_unix_secs: u64,
 }
 
@@ -69,7 +68,6 @@ pub(crate) async fn commit_step<F: Fs>(
         parent,
         draft,
         created_by,
-        created,
         now_unix_secs,
     } = *step;
     let layer = match changes {
@@ -78,7 +76,7 @@ pub(crate) async fn commit_step<F: Fs>(
         }
         None => None,
     };
-    let built = image::assemble(parent, layer.as_ref(), draft, created_by, created)
+    let built = image::assemble(parent, layer.as_ref(), draft, created_by)
         .context("assembling the built image's config and manifest")?;
     let reference = import::import(
         fs,
@@ -130,7 +128,6 @@ mod tests {
                 parent: &parent(),
                 draft: &executor::ConfigDraft::default(),
                 created_by: "RUN sh -c 'echo built-by-lns > /created; rm /etc/alpine-release'",
-                created: "2026-09-09T00:00:00Z",
                 now_unix_secs: 1_757_000_000,
             },
         )
@@ -307,7 +304,6 @@ mod tests {
                     ..executor::ConfigDraft::default()
                 },
                 created_by: "USER node",
-                created: "2026-09-09T00:00:00Z",
                 now_unix_secs: 1_757_000_000,
             },
         )
@@ -342,7 +338,6 @@ mod tests {
                 parent: &parent,
                 draft: &executor::ConfigDraft::default(),
                 created_by: "RUN one",
-                created: "now",
                 now_unix_secs: 0,
             },
         )
@@ -380,7 +375,6 @@ mod tests {
                 parent: &parent(),
                 draft: &executor::ConfigDraft::default(),
                 created_by: "RUN one",
-                created: "now",
                 now_unix_secs: 0,
             },
         )

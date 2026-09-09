@@ -108,7 +108,6 @@ pub(crate) mod tests {
             Some(&layer()),
             &crate::containerfile::executor::ConfigDraft::default(),
             "RUN spike",
-            "now",
         )
         .unwrap()
     }
