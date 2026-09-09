@@ -34,7 +34,7 @@ pub async fn capture_after_run(
     let parent = parent_image(&manifests, parent_reference)?;
 
     let changes = tokio::task::spawn_blocking(move || {
-        let tree = Ext4Upper::open(&upper_image)?;
+        let tree = Ext4Upper::open_run_upper(&upper_image)?;
         upper::capture(&tree)
     })
     .await
