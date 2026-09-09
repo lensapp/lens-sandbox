@@ -114,7 +114,11 @@ const SHELL_EXEC_FORM: &str = r#"SHELL takes exec form only; write SHELL ["/bin/
 /// A file that does not parse is refused as a whole, so the instruction it failed on is read back from the text the author wrote.
 fn parse_refusal(text: &str, error: &parse_dockerfile::Error) -> String {
     let line = error.line();
-    let message = format!("line {line}: {}", first_sentence(&error.to_string()));
+    let said = first_sentence(&error.to_string());
+    let message = match line {
+        0 => said,
+        line => format!("line {line}: {said}"),
+    };
     match keyword_on(text, line) {
         Some(keyword) if keyword == "SHELL" => format!("{message}; {SHELL_EXEC_FORM}"),
         _ => message,
@@ -582,8 +586,14 @@ mod tests {
 
     #[test]
     fn a_containerfile_with_no_from_is_refused_because_a_build_starts_from_an_image() {
-        let refusal = refusal("RUN echo hi\n");
-        assert!(refusal.contains("FROM"), "got: {refusal}");
+        for text in ["RUN echo hi\n", ""] {
+            let refusal = refusal(text);
+            assert!(refusal.contains("FROM"), "got: {refusal}");
+            assert!(
+                !refusal.contains("line 0"),
+                "a file with no FROM has no offending line, and there is no line 0 to read: {refusal}"
+            );
+        }
     }
 
     #[test]
