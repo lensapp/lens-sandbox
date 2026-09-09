@@ -39,6 +39,37 @@ Feature: an image built from a Containerfile beside the document
     Then the exit code is 0
     And the output contains "built from ./image/Dockerfile"
 
+  Scenario: inspect prints the Containerfile itself, so an approver reads what a build would run
+    Given an lns.yaml whose image is "./image"
+    And the file "image/Dockerfile" holds:
+      """
+      FROM docker.io/library/node:24-bookworm
+      RUN npm ci
+      """
+    And the file "image/app/main.js" holds:
+      """
+      console.log("hermes");
+      """
+    When the user runs artifact command "inspect"
+    Then the exit code is 0
+    And the output contains "built from ./image/Dockerfile (2 lines, context 2 files)"
+    And the output contains "RUN npm ci"
+
+  Scenario: inspect lists the context a build would send, with each file's size
+    Given an lns.yaml whose image is "./image"
+    And the file "image/Dockerfile" holds:
+      """
+      FROM docker.io/library/node:24-bookworm
+      """
+    And the file "image/app/main.js" holds:
+      """
+      console.log("hermes");
+      """
+    When the user runs artifact command "inspect"
+    Then the exit code is 0
+    And the output contains "context:      Dockerfile (40 B)"
+    And the output contains "context:      app/main.js (23 B)"
+
   Scenario: a directory holding both builds the Containerfile, as Podman does
     Given an lns.yaml whose image is "./image"
     And the directory "image" holds a "Containerfile"

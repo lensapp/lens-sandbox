@@ -239,7 +239,10 @@ pub fn inspect_local<F: Fs, W: Write>(
     let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
     let built_from =
         super::image_build::built_from(fs, path.parent().unwrap_or(cwd), &def.spec.image)?;
-    render_effective(as_mixin, &def.name, &composed, built_from.as_deref(), out)?;
+    render_effective(as_mixin, &def.name, &composed, built_from.as_ref(), out)?;
+    if let Some(built) = &built_from {
+        render_containerfile(built, out)?;
+    }
     Ok(0)
 }
 
@@ -325,7 +328,7 @@ fn render_effective<W: Write>(
     as_mixin: bool,
     name: &str,
     composed: &Composition,
-    built_from: Option<&str>,
+    built_from: Option<&super::image_build::BuiltImage>,
     out: &mut W,
 ) -> Result<()> {
     let spec = &composed.spec;
@@ -334,7 +337,17 @@ fn render_effective<W: Write>(
     } else {
         writeln!(out, "Sandbox: {name}")?;
         match built_from {
-            Some(containerfile) => writeln!(out, "  image:        built from {containerfile}")?,
+            Some(built) => {
+                writeln!(out, "  image:        {}", built.summary())?;
+                for file in &built.context {
+                    writeln!(
+                        out,
+                        "  context:      {} ({})",
+                        file.path,
+                        crate::output::format_bytes(file.bytes)
+                    )?;
+                }
+            }
             None => writeln!(out, "  image:        {}", spec.image)?,
         }
     }
@@ -402,6 +415,19 @@ fn render_effective<W: Write>(
                 lns_artifact::merge::tool_name(tool)
             )
         )?;
+    }
+    Ok(())
+}
+
+/// The Containerfile itself, because an approver decides on what a build would run rather than on its name (§3.1.1).
+fn render_containerfile<W: Write>(
+    built: &super::image_build::BuiltImage,
+    out: &mut W,
+) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "{}:", built.containerfile)?;
+    for line in built.text.lines() {
+        writeln!(out, "  {line}")?;
     }
     Ok(())
 }
