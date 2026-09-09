@@ -140,6 +140,14 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
             code
         }
         Err(e) => {
+            let code = if e
+                .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
+                .is_some()
+            {
+                125
+            } else {
+                1
+            };
             let _ = frame_tx
                 .send(WireFrame::Json(Response::RunLog {
                     level: lns_ipc::LogLevel::Error,
@@ -147,7 +155,7 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
                     message: failure_message(&e),
                 }))
                 .await;
-            1
+            code
         }
     };
     let _ = frame_tx
@@ -616,7 +624,7 @@ mod tests {
             "the service owns the stable reason shown in the audit"
         );
         let code = emit_completion(&tx, result).await;
-        assert_eq!(code, 1);
+        assert_eq!(code, 125);
         match rx.recv().await {
             Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
                 assert!(matches!(level, lns_ipc::LogLevel::Error));
