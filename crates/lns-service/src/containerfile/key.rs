@@ -1,4 +1,168 @@
 //! What a build is keyed by: slice 4 of lensapp/lens-sandbox#393.
+//!
+//! An image is a function of the base it stands on, the Containerfile's own text, the bytes of the
+//! context beside it and the architecture a guest boots — so those four are the key, and a build
+//! whose key this machine already holds is not run again. One instruction is keyed the same way,
+//! by the image it stands on and its own text, plus what it copies when it copies anything.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
+
+use super::context::{ContextFs, EntryKind};
+use super::upper::{Change, ChangeSet};
+
+/// The whole image: what a second `lns sandbox build` of an untouched document finds and does not run again.
+pub(crate) fn image_key(base: &str, text: &str, context: &str, arch: &str) -> String {
+    let mut fields = Fields::over("lns.build.image.v1");
+    fields.field(base.as_bytes());
+    fields.field(text.as_bytes());
+    fields.field(context.as_bytes());
+    fields.field(arch.as_bytes());
+    fields.finish()
+}
+
+/// One instruction over the image before it, which is what makes a build reuse its leading steps.
+pub(crate) fn step_key(parent: &str, instruction: &str, copied: Option<&str>) -> String {
+    let mut fields = Fields::over("lns.build.step.v1");
+    fields.field(parent.as_bytes());
+    fields.field(instruction.as_bytes());
+    match copied {
+        Some(copied) => {
+            fields.field(b"copied");
+            fields.field(copied.as_bytes());
+        }
+        None => fields.field(b"nothing copied"),
+    }
+    fields.finish()
+}
+
+/// Every byte the context holds, so a file edited beside the Containerfile is a different build and a file only touched is not.
+pub(crate) fn context_hash<F: ContextFs>(fs: &F, context: &Path) -> Result<String> {
+    let mut fields = Fields::over("lns.build.context.v1");
+    walk(fs, context, "", &mut fields)?;
+    Ok(fields.finish())
+}
+
+/// What a `COPY` or an `ADD` puts in its layer, which is the part of its key the instruction text cannot see.
+pub(crate) fn changes_hash(changes: &ChangeSet) -> String {
+    let mut fields = Fields::over("lns.build.copied.v1");
+    for change in &changes.changes {
+        match change {
+            Change::Directory {
+                path,
+                mode,
+                uid,
+                gid,
+            } => {
+                fields.field(b"directory");
+                fields.entry(path, *mode, *uid, *gid);
+            }
+            Change::Regular {
+                path,
+                mode,
+                uid,
+                gid,
+                bytes,
+            } => {
+                fields.field(b"regular");
+                fields.entry(path, *mode, *uid, *gid);
+                fields.field(bytes);
+            }
+            Change::Symlink {
+                path,
+                target,
+                uid,
+                gid,
+            } => {
+                fields.field(b"symlink");
+                fields.entry(path, 0, *uid, *gid);
+                fields.field(target.as_bytes());
+            }
+            Change::Removed { path } => {
+                fields.field(b"removed");
+                fields.field(path.as_bytes());
+            }
+        }
+    }
+    fields.finish()
+}
+
+fn walk<F: ContextFs>(fs: &F, directory: &Path, prefix: &str, fields: &mut Fields) -> Result<()> {
+    let mut names = fs
+        .entries(directory)
+        .with_context(|| format!("reading the build context at {}", directory.display()))?;
+    names.sort();
+    for name in names {
+        let path = directory.join(&name);
+        let relative = match prefix.is_empty() {
+            true => name.clone(),
+            false => format!("{prefix}/{name}"),
+        };
+        let Some(meta) = fs
+            .meta(&path)
+            .with_context(|| format!("reading {} in the build context", path.display()))?
+        else {
+            continue;
+        };
+        fields.field(relative.as_bytes());
+        match meta.kind {
+            EntryKind::Directory => {
+                fields.field(b"directory");
+                fields.field(&meta.mode.to_be_bytes());
+                walk(fs, &path, &relative, fields)?;
+            }
+            EntryKind::Regular => {
+                fields.field(b"regular");
+                fields.field(&meta.mode.to_be_bytes());
+                fields.field(
+                    &fs.read(&path).with_context(|| {
+                        format!("reading {} in the build context", path.display())
+                    })?,
+                );
+            }
+            EntryKind::Symlink => {
+                fields.field(b"symlink");
+                fields.field(
+                    fs.read_link(&path)
+                        .with_context(|| {
+                            format!("reading {} in the build context", path.display())
+                        })?
+                        .as_bytes(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A digest over fields rather than over their concatenation: every field carries its own length, so no two different inputs can spell one key.
+struct Fields(Sha256);
+
+impl Fields {
+    fn over(domain: &str) -> Self {
+        let mut fields = Self(Sha256::new());
+        fields.field(domain.as_bytes());
+        fields
+    }
+
+    fn field(&mut self, bytes: &[u8]) {
+        self.0.update((bytes.len() as u64).to_be_bytes());
+        self.0.update(bytes);
+    }
+
+    fn entry(&mut self, path: &str, mode: u32, uid: u32, gid: u32) {
+        self.field(path.as_bytes());
+        self.field(&mode.to_be_bytes());
+        self.field(&uid.to_be_bytes());
+        self.field(&gid.to_be_bytes());
+    }
+
+    fn finish(self) -> String {
+        format!("sha256:{}", hex::encode(self.0.finalize()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -28,7 +192,12 @@ mod tests {
         );
         for other in [
             image_key("base@sha256:bb", "FROM base\n", "sha256:ctx", "arm64"),
-            image_key("base@sha256:aa", "FROM base\nRUN true\n", "sha256:ctx", "arm64"),
+            image_key(
+                "base@sha256:aa",
+                "FROM base\nRUN true\n",
+                "sha256:ctx",
+                "arm64",
+            ),
             image_key("base@sha256:aa", "FROM base\n", "sha256:other", "arm64"),
             image_key("base@sha256:aa", "FROM base\n", "sha256:ctx", "amd64"),
         ] {
@@ -41,8 +210,18 @@ mod tests {
     #[test]
     fn the_same_containerfile_with_different_whitespace_in_a_comment_is_a_different_text_and_so_a_different_key()
      {
-        let one = image_key("base@sha256:aa", "# build the agent\nFROM base\n", "c", "arm64");
-        let other = image_key("base@sha256:aa", "#  build the agent\nFROM base\n", "c", "arm64");
+        let one = image_key(
+            "base@sha256:aa",
+            "# build the agent\nFROM base\n",
+            "c",
+            "arm64",
+        );
+        let other = image_key(
+            "base@sha256:aa",
+            "#  build the agent\nFROM base\n",
+            "c",
+            "arm64",
+        );
 
         assert_ne!(one, other);
     }
@@ -96,7 +275,8 @@ mod tests {
     #[test]
     fn a_context_symlink_hashes_the_target_it_names_and_not_what_it_points_at() {
         let mut one = FakeContext::new();
-        one.file("app.js", 0o644, b"one\n").symlink("main", "app.js");
+        one.file("app.js", 0o644, b"one\n")
+            .symlink("main", "app.js");
         let mut other = FakeContext::new();
         other
             .file("app.js", 0o644, b"one\n")
@@ -123,7 +303,8 @@ mod tests {
 
         let refusal = format!(
             "{:#}",
-            context_hash(&context, Path::new("/ctx")).expect_err("an unreadable context is refused")
+            context_hash(&context, Path::new("/ctx"))
+                .expect_err("an unreadable context is refused")
         );
 
         assert!(refusal.contains("permission denied"), "{refusal}");
@@ -133,28 +314,45 @@ mod tests {
     #[test]
     fn a_context_directory_that_will_not_list_stops_the_build_naming_it() {
         let mut context = one_file(b"one\n", 0o644);
-        context.unlistable("");
+        context.dir("skills", 0o755).unlistable("skills");
 
         let refusal = format!(
             "{:#}",
-            context_hash(&context, Path::new("/ctx")).expect_err("a context that will not list is refused")
+            context_hash(&context, Path::new("/ctx"))
+                .expect_err("a context that will not list is refused")
         );
 
-        assert!(refusal.contains("/ctx"), "{refusal}");
+        assert!(refusal.contains("/ctx/skills"), "{refusal}");
     }
 
     #[test]
     fn the_parent_the_instruction_and_the_copied_content_each_change_the_instruction_key() {
-        let key = step_key("built@sha256:parent", "COPY app /srv", Some("sha256:copied"));
+        let key = step_key(
+            "built@sha256:parent",
+            "COPY app /srv",
+            Some("sha256:copied"),
+        );
 
         assert_eq!(
             key,
-            step_key("built@sha256:parent", "COPY app /srv", Some("sha256:copied")),
+            step_key(
+                "built@sha256:parent",
+                "COPY app /srv",
+                Some("sha256:copied")
+            ),
         );
         for other in [
             step_key("built@sha256:other", "COPY app /srv", Some("sha256:copied")),
-            step_key("built@sha256:parent", "COPY app /opt", Some("sha256:copied")),
-            step_key("built@sha256:parent", "COPY app /srv", Some("sha256:edited")),
+            step_key(
+                "built@sha256:parent",
+                "COPY app /opt",
+                Some("sha256:copied"),
+            ),
+            step_key(
+                "built@sha256:parent",
+                "COPY app /srv",
+                Some("sha256:edited"),
+            ),
             step_key("built@sha256:parent", "COPY app /srv", None),
         ] {
             assert_ne!(key, other);
@@ -167,7 +365,11 @@ mod tests {
     fn an_instruction_that_copies_nothing_is_keyed_apart_from_one_that_copies_an_empty_set() {
         assert_ne!(
             step_key("parent", "RUN true", None),
-            step_key("parent", "RUN true", Some(&changes_hash(&ChangeSet::default()))),
+            step_key(
+                "parent",
+                "RUN true",
+                Some(&changes_hash(&ChangeSet::default()))
+            ),
         );
     }
 
