@@ -382,9 +382,20 @@ pub fn detect_backend() -> Box<dyn VmmBackend> {
 }
 
 pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<()> {
+    boot_with_owner(spec, backend, ()).await
+}
+
+pub async fn boot_with_owner<T: Send + 'static>(
+    spec: VmSpec,
+    backend: Option<Box<dyn VmmBackend>>,
+    owner: T,
+) -> Result<()> {
     let backend = backend.unwrap_or_else(detect_backend);
     log::debug!("starting microVM via {} backend", backend.name());
-    let handle = tokio::task::spawn_blocking(move || backend.run(spec));
+    let handle = tokio::task::spawn_blocking(move || {
+        let _owner = owner;
+        backend.run(spec)
+    });
     handle.await??;
     Ok(())
 }
@@ -392,6 +403,72 @@ pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingBackend {
+        started: std::sync::mpsc::Sender<()>,
+        finish: std::sync::mpsc::Receiver<Result<()>>,
+    }
+
+    impl VmmBackend for BlockingBackend {
+        fn run(&self, _spec: VmSpec) -> Result<()> {
+            self.started.send(()).expect("test listening");
+            self.finish.recv().expect("test result")
+        }
+        fn name(&self) -> &'static str {
+            "blocking"
+        }
+    }
+
+    struct DropSignal(std::sync::mpsc::Sender<()>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.send(()).expect("test listening");
+        }
+    }
+
+    #[tokio::test]
+    async fn vm_owner_lives_until_delayed_vmm_teardown_is_confirmed() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            DropSignal(dropped_tx),
+        ));
+        started_rx.recv().expect("VMM started");
+        assert!(
+            dropped_rx.try_recv().is_err(),
+            "a stop request is not confirmed network detach"
+        );
+        finish_tx.send(Ok(())).expect("finish VMM");
+        task.await.expect("boot task").expect("VMM result");
+        dropped_rx.recv().expect("owner released after teardown");
+    }
+
+    #[tokio::test]
+    async fn vm_owner_is_released_after_a_failed_launch() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            DropSignal(dropped_tx),
+        ));
+        started_rx.recv().expect("VMM started");
+        finish_tx
+            .send(Err(anyhow::anyhow!("launch failed")))
+            .expect("fail VMM");
+        assert!(task.await.expect("boot task").is_err());
+        dropped_rx.recv().expect("failed launch releases owner");
+    }
 
     #[test]
     fn the_kernel_environment_tells_the_broker_if_egress_is_allowed() {
