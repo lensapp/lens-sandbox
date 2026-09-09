@@ -275,7 +275,7 @@ pub(crate) mod tests {
             self
         }
 
-        fn unlistable(&mut self, path: &str) -> &mut Self {
+        pub(crate) fn unlistable(&mut self, path: &str) -> &mut Self {
             self.unlistable = Some(format!("/ctx/{path}"));
             self
         }

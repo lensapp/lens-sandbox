@@ -24,10 +24,11 @@ use super::upper::{self, ChangeSet};
 /// Where the reference of the image a run built lands, in the run's own directory: two runs ending together would overwrite one pointer, and removing the run removes what it built from.
 pub const BUILT_REFERENCE_FILE: &str = "built-image";
 
-/// Where "already built for this document on this machine" is remembered. Slice 4 of
-/// lensapp/lens-sandbox#393 replaces this with the real key — the `FROM` digest, the context's
+/// Where "already built for this document on this machine" is remembered, which is this cache's own
+/// directory and not `lns_ipc::build_cache_root()`, whose sweeper owns everything under it. Slice 4
+/// of lensapp/lens-sandbox#393 replaces this with the real key — the `FROM` digest, the context's
 /// content hash and the architecture — and with `lns sandbox build`.
-const BUILT_POINTER_DIR: &str = "builds";
+const BUILT_POINTER_DIR: &str = "containerfile-builds";
 
 /// What a run boots from when its `spec.image` named a Containerfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +68,11 @@ pub(crate) async fn build_for_run(
 
     let cache_dir = crate::cache::root()?;
     let pointer = pointer_path(&cache_dir, &located, &text);
-    let built = match already_built(&cache_dir, &pointer) {
+    let reusable = locate::holds_only_its_containerfile(&RealContextFs, &located);
+    let built = match reusable
+        .then(|| already_built(&cache_dir, &pointer))
+        .flatten()
+    {
         Some(reference) => BuiltForRun {
             reference,
             label: located.label.clone(),
@@ -77,7 +82,9 @@ pub(crate) async fn build_for_run(
             let built =
                 run_the_instructions(args, definition, &located, &file, &cache_dir, frame_tx)
                     .await?;
-            remember(&cache_dir, &pointer, &built.reference);
+            if reusable {
+                remember(&cache_dir, &pointer, &built.reference);
+            }
             built
         }
     };
