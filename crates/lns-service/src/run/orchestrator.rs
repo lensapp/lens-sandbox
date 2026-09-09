@@ -616,6 +616,7 @@ async fn orchestrate(
     let frame_tx_for_session = frame_tx.clone();
     log::progress("Booting", "microVM", 0, 0);
     let boot_start = std::time::Instant::now();
+    let _address_monitor = address.as_ref().map(vm::guest_addr::real::Lease::monitor);
     let mut vm_task = tokio::spawn(async move {
         let _volume_leases = volume_leases;
         vm::boot(spec, None).await

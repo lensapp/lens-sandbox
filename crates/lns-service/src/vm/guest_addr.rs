@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lns_session::GuestNet;
 use serde::{Deserialize, Serialize};
@@ -45,7 +46,7 @@ pub struct Reservation {
 }
 
 /// Apple's DHCP server leased an address lns had reserved: the run that holds it is no longer alone on that address.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Conflict {
     pub owner: String,
     pub address: Ipv4Addr,
@@ -75,6 +76,34 @@ impl std::fmt::Display for AllocError {
 }
 
 impl std::error::Error for AllocError {}
+
+pub trait ConflictSource: Send + Sync {
+    fn conflicts_for(&self, owner: &str) -> Vec<Conflict>;
+}
+
+pub async fn monitor_conflicts(
+    source: Arc<dyn ConflictSource>,
+    owner: String,
+    every: Duration,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+    report: Arc<dyn Fn(Conflict) + Send + Sync>,
+) {
+    let mut interval = tokio::time::interval(every);
+    let mut reported = HashSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stop => return,
+            _ = interval.tick() => {
+                for conflict in source.conflicts_for(&owner) {
+                    if reported.insert(conflict.clone()) {
+                        report(conflict);
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub struct Allocator {
     files: Arc<dyn HostFiles>,
@@ -217,6 +246,15 @@ impl Allocator {
         if let Ok(text) = serde_json::to_string(&all) {
             let _ = self.store.save(&text);
         }
+    }
+}
+
+impl ConflictSource for Allocator {
+    fn conflicts_for(&self, owner: &str) -> Vec<Conflict> {
+        self.conflicts()
+            .into_iter()
+            .filter(|conflict| conflict.owner == owner)
+            .collect()
     }
 }
 
@@ -733,6 +771,71 @@ mod tests {
             .expect("again");
         assert_eq!(first.candidates, again.candidates);
         assert_eq!(allocator.reserved().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn conflict_monitor_checks_throughout_one_guests_lifecycle_and_routes_its_warning() {
+        #[derive(Default)]
+        struct Source(Mutex<Vec<Conflict>>);
+        impl ConflictSource for Source {
+            fn conflicts_for(&self, owner: &str) -> Vec<Conflict> {
+                self.0
+                    .lock()
+                    .expect("source poisoned")
+                    .iter()
+                    .filter(|conflict| conflict.owner == owner)
+                    .cloned()
+                    .collect()
+            }
+        }
+
+        let source = Arc::new(Source::default());
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let reported_by_monitor = reported.clone();
+        let report: Arc<dyn Fn(Conflict) + Send + Sync> = Arc::new(move |conflict| {
+            reported_by_monitor
+                .lock()
+                .expect("reports poisoned")
+                .push(conflict);
+        });
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(monitor_conflicts(
+            source.clone(),
+            "run-a".into(),
+            Duration::from_secs(30),
+            stop_rx,
+            report,
+        ));
+        tokio::task::yield_now().await;
+        source.0.lock().expect("source poisoned").extend([
+            Conflict {
+                owner: "run-a".into(),
+                address: addr(254),
+                holder: Some("52:54:00:99:99:99".into()),
+            },
+            Conflict {
+                owner: "run-b".into(),
+                address: addr(253),
+                holder: None,
+            },
+        ]);
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *reported.lock().expect("reports poisoned"),
+            vec![Conflict {
+                owner: "run-a".into(),
+                address: addr(254),
+                holder: Some("52:54:00:99:99:99".into()),
+            }],
+            "the monitor must warn the run whose live reservation acquired the conflict"
+        );
+
+        stop_tx.send(()).expect("monitor alive");
+        task.await.expect("monitor task");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(reported.lock().expect("reports poisoned").len(), 1);
     }
 
     #[test]

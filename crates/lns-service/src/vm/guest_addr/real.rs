@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use tracing::Instrument;
 
 use anyhow::Result;
 use lns_session::GuestNet;
 
-use super::{Allocator, ReservationStore};
+use super::{Allocator, Conflict, ReservationStore};
 use crate::log;
 use crate::vm::host_net::real::{RealHostFiles, RealNeighbors};
 
@@ -56,6 +59,43 @@ impl Drop for Lease {
     }
 }
 
+pub struct ConflictMonitor {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for ConflictMonitor {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+impl Lease {
+    pub fn monitor(&self) -> ConflictMonitor {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let report: Arc<dyn Fn(Conflict) + Send + Sync> = Arc::new(|conflict| {
+            log::warn!(
+                "the host has leased {} to {} while run {} holds it",
+                conflict.address,
+                conflict.holder.as_deref().unwrap_or("an unknown guest"),
+                conflict.owner
+            );
+        });
+        tokio::spawn(
+            super::monitor_conflicts(
+                allocator().clone(),
+                self.owner.clone(),
+                Duration::from_secs(30),
+                stopped,
+                report,
+            )
+            .instrument(tracing::Span::current()),
+        );
+        ConflictMonitor { stop: Some(stop) }
+    }
+}
+
 /// The only entry point a boot path uses: `None` means this build boots on DHCP, exactly as it did before.
 pub fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
     if !SUPPORTED || !super::enabled(|k| std::env::var(k).ok()) {
@@ -73,14 +113,6 @@ pub fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
             .join(" or "),
         net.gateway
     );
-    for conflict in allocator().conflicts() {
-        log::warn!(
-            "the host has leased {} to {} while run {} holds it",
-            conflict.address,
-            conflict.holder.as_deref().unwrap_or("an unknown guest"),
-            conflict.owner
-        );
-    }
     Ok(Some(Lease {
         owner: owner.to_string(),
         mac,

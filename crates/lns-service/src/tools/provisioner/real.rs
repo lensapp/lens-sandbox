@@ -219,6 +219,7 @@ async fn run_provisioner(
         mac: address.as_ref().map(|held| held.mac.clone()),
     };
 
+    let _address_monitor = address.as_ref().map(vm::guest_addr::real::Lease::monitor);
     let mut vm_task = tokio::spawn(vm::boot(spec, None));
     let mut connector_rx = connector_rx;
     let connector = tokio::select! {
