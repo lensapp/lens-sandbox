@@ -45,7 +45,6 @@ fn run_ipc_runtime(
 
     rt.block_on(async {
         spawn_signal_listener(shutdown.clone());
-        lns_service::vm::guest_addr::real::reconcile_at_start();
         tokio::spawn(lns_service::update_check::run_periodic(shutdown.clone()));
 
         let result = ipc::run_server(socket, shutdown.clone(), started_at).await;

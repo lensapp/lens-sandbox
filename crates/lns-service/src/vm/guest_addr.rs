@@ -3,11 +3,9 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lns_session::GuestNet;
-use serde::{Deserialize, Serialize};
-
 use super::host_net::{HostFiles, HostNetwork, Neighbors, read_active_leases};
 use crate::clock::Clock;
+use lns_session::GuestNet;
 
 pub mod real;
 
@@ -32,13 +30,7 @@ pub fn enabled(get: impl Fn(&str) -> Option<String>) -> bool {
     get(ENABLE_ENV).as_deref() == Some("1")
 }
 
-/// Where the reservation table survives a service restart, so a restarted service does not hand out an address a run still holds.
-pub trait ReservationStore: Send + Sync {
-    fn load(&self) -> std::io::Result<String>;
-    fn save(&self, text: &str) -> std::io::Result<()>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reservation {
     pub owner: String,
     pub mac: String,
@@ -114,7 +106,6 @@ pub struct Allocator {
     files: Arc<dyn HostFiles>,
     neighbors: Arc<dyn Neighbors>,
     clock: Arc<dyn Clock>,
-    store: Arc<dyn ReservationStore>,
     network: Mutex<Option<HostNetwork>>,
     held: Mutex<HashMap<String, Reservation>>,
 }
@@ -124,23 +115,13 @@ impl Allocator {
         files: Arc<dyn HostFiles>,
         neighbors: Arc<dyn Neighbors>,
         clock: Arc<dyn Clock>,
-        store: Arc<dyn ReservationStore>,
     ) -> Self {
-        let held = store
-            .load()
-            .ok()
-            .and_then(|text| serde_json::from_str::<Vec<Reservation>>(&text).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| (r.owner.clone(), r))
-            .collect();
         Self {
             files,
             neighbors,
             clock,
-            store,
             network: Mutex::new(None),
-            held: Mutex::new(held),
+            held: Mutex::new(HashMap::new()),
         }
     }
 
@@ -194,7 +175,6 @@ impl Allocator {
                 candidates: candidates.clone(),
             },
         );
-        self.persist(&held);
         Ok(GuestNet {
             candidates,
             prefix_len: network.prefix_len,
@@ -206,19 +186,7 @@ impl Allocator {
     /// Called on teardown and on a failed launch alike: an address a guest never booted with is free at once.
     pub fn release(&self, owner: &str) {
         let mut held = self.held.lock().expect("reservation table poisoned");
-        if held.remove(owner).is_some() {
-            self.persist(&held);
-        }
-    }
-
-    /// After a restart the surviving runs decide the table: a reservation whose run is gone was never anyone's address.
-    pub fn reconcile(&self, live: &HashSet<String>) {
-        let mut held = self.held.lock().expect("reservation table poisoned");
-        let before = held.len();
-        held.retain(|owner, _| live.contains(owner));
-        if held.len() != before {
-            self.persist(&held);
-        }
+        held.remove(owner);
     }
 
     pub fn reserved(&self) -> Vec<Reservation> {
@@ -254,14 +222,6 @@ impl Allocator {
         found.sort_by(|a, b| (&a.owner, a.address).cmp(&(&b.owner, b.address)));
         found
     }
-
-    fn persist(&self, held: &HashMap<String, Reservation>) {
-        let mut all: Vec<&Reservation> = held.values().collect();
-        all.sort_by(|a, b| a.owner.cmp(&b.owner));
-        if let Ok(text) = serde_json::to_string(&all) {
-            let _ = self.store.save(&text);
-        }
-    }
 }
 
 impl ConflictSource for Allocator {
@@ -285,33 +245,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct MemoryStore {
-        text: Mutex<Option<String>>,
-    }
-
-    impl MemoryStore {
-        fn holding(text: &str) -> Self {
-            Self {
-                text: Mutex::new(Some(text.to_string())),
-            }
-        }
-    }
-
-    impl ReservationStore for MemoryStore {
-        fn load(&self) -> std::io::Result<String> {
-            self.text
-                .lock()
-                .expect("store poisoned")
-                .clone()
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-        }
-        fn save(&self, text: &str) -> std::io::Result<()> {
-            *self.text.lock().expect("store poisoned") = Some(text.to_string());
-            Ok(())
-        }
-    }
-
     struct FakeNeighbors(Vec<Ipv4Addr>);
     impl Neighbors for FakeNeighbors {
         fn observed(&self) -> std::io::Result<Vec<Ipv4Addr>> {
@@ -319,17 +252,11 @@ mod tests {
         }
     }
 
-    fn allocator_with(
-        files: FakeHostFiles,
-        neighbours: Vec<Ipv4Addr>,
-        now: u64,
-        store: Arc<MemoryStore>,
-    ) -> Allocator {
+    fn allocator_with(files: FakeHostFiles, neighbours: Vec<Ipv4Addr>, now: u64) -> Allocator {
         Allocator::new(
             Arc::new(files),
             Arc::new(FakeNeighbors(neighbours)),
             Arc::new(FixedClock(now)),
-            store,
         )
     }
 
@@ -338,10 +265,16 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         )
     }
 
+    fn copy_reservations(from: &Allocator, to: &Allocator) {
+        *to.held.lock().expect("reservations poisoned") = from
+            .reserved()
+            .into_iter()
+            .map(|reservation| (reservation.owner.clone(), reservation))
+            .collect();
+    }
     fn addr(last: u8) -> Ipv4Addr {
         Ipv4Addr::new(192, 168, 64, last)
     }
@@ -404,7 +337,6 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, leases),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -428,7 +360,6 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, &leases),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -443,7 +374,6 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, leases),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -460,7 +390,6 @@ mod tests {
             ),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let error = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -471,12 +400,7 @@ mod tests {
 
     #[test]
     fn a_host_that_never_started_its_shared_network_has_no_lease_file_and_that_is_fine() {
-        let allocator = allocator_with(
-            FakeHostFiles::new(),
-            Vec::new(),
-            1_000,
-            Arc::new(MemoryStore::default()),
-        );
+        let allocator = allocator_with(FakeHostFiles::new(), Vec::new(), 1_000);
         assert_eq!(
             allocator
                 .reserve("run-a", "52:54:00:00:00:01")
@@ -496,7 +420,6 @@ mod tests {
                 .with(BOOTPD_PLIST_PATH, plist),
             Vec::new(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -517,7 +440,6 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, ""),
             vec![addr(254), addr(253)],
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let plan = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -536,7 +458,6 @@ mod tests {
                 .map(|last| Ipv4Addr::new(10, 0, 0, last))
                 .collect(),
             1_000,
-            Arc::new(MemoryStore::default()),
         );
         let error = allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -570,91 +491,20 @@ mod tests {
     }
 
     #[test]
-    fn a_restarted_service_keeps_the_addresses_its_running_guests_hold() {
-        let store = Arc::new(MemoryStore::default());
-        let before = allocator_with(
-            FakeHostFiles::new().with(LEASES_PATH, ""),
-            Vec::new(),
-            1_000,
-            store.clone(),
-        );
-        let held = before.reserve("run-a", "52:54:00:00:00:01").expect("first");
-        drop(before);
-
-        let after = allocator_with(
-            FakeHostFiles::new().with(LEASES_PATH, ""),
-            Vec::new(),
-            1_000,
-            store,
-        );
-        assert_eq!(
-            after.reserved(),
-            vec![Reservation {
-                owner: "run-a".into(),
-                mac: "52:54:00:00:00:01".into(),
-                candidates: held.candidates.clone(),
-            }]
-        );
-        let next = after.reserve("run-b", "52:54:00:00:00:02").expect("second");
+    fn a_new_service_process_starts_with_no_reservations() {
+        let before = empty_host();
+        before.reserve("run-a", "52:54:00:00:00:01").expect("first");
+        assert_eq!(before.reserved().len(), 1);
         assert!(
-            next.candidates.iter().all(|a| !held.candidates.contains(a)),
-            "a restart must not hand out an address a surviving guest already applied"
+            empty_host().reserved().is_empty(),
+            "the service owns every VM process, so process exit tears down every reservation holder"
         );
-    }
-
-    #[test]
-    fn reconciling_after_a_restart_frees_every_address_no_live_run_holds() {
-        let store = Arc::new(MemoryStore::default());
-        let allocator = allocator_with(
-            FakeHostFiles::new().with(LEASES_PATH, ""),
-            Vec::new(),
-            1_000,
-            store.clone(),
-        );
-        allocator.reserve("run-a", "52:54:00:00:00:01").expect("a");
-        allocator.reserve("run-b", "52:54:00:00:00:02").expect("b");
-
-        allocator.reconcile(&HashSet::from(["run-b".to_string()]));
-        assert_eq!(
-            allocator
-                .reserved()
-                .into_iter()
-                .map(|r| r.owner)
-                .collect::<Vec<_>>(),
-            vec!["run-b".to_string()]
-        );
-        assert!(
-            store.load().expect("saved").contains("run-b"),
-            "the table an unclean shutdown leaves behind is the one the next service reads"
-        );
-        assert!(!store.load().expect("saved").contains("run-a"));
-
-        allocator.reconcile(&HashSet::from(["run-b".to_string()]));
-        assert_eq!(
-            allocator.reserved().len(),
-            1,
-            "reconciling twice is a no-op"
-        );
-    }
-
-    #[test]
-    fn a_stored_table_that_cannot_be_read_starts_empty_rather_than_refusing_to_boot() {
-        for text in ["not json", ""] {
-            let allocator = allocator_with(
-                FakeHostFiles::new().with(LEASES_PATH, ""),
-                Vec::new(),
-                1_000,
-                Arc::new(MemoryStore::holding(text)),
-            );
-            assert!(allocator.reserved().is_empty(), "{text}");
-        }
     }
 
     #[test]
     fn an_external_lease_on_a_reserved_address_is_reported_as_a_conflict() {
-        let store = Arc::new(MemoryStore::default());
         let files = FakeHostFiles::new().with(LEASES_PATH, "");
-        let allocator = allocator_with(files, Vec::new(), 1_000, store.clone());
+        let allocator = allocator_with(files, Vec::new(), 1_000);
         allocator
             .reserve("run-a", "52:54:00:00:00:01")
             .expect("free host");
@@ -669,8 +519,8 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, stolen),
             Vec::new(),
             1_000,
-            store,
         );
+        copy_reservations(&allocator, &after);
         assert_eq!(
             after.conflicts(),
             vec![Conflict {
@@ -684,12 +534,10 @@ mod tests {
 
     #[test]
     fn a_lease_to_the_guests_own_hardware_is_not_a_conflict() {
-        let store = Arc::new(MemoryStore::default());
         let allocator = allocator_with(
             FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
             1_000,
-            store.clone(),
         );
         allocator
             .reserve("run-a", "52:54:00:AB:CD:EF")
@@ -700,19 +548,17 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, ours),
             Vec::new(),
             1_000,
-            store,
         );
+        copy_reservations(&allocator, &after);
         assert!(after.conflicts().is_empty(), "{:?}", after.conflicts());
     }
 
     #[test]
     fn an_expired_or_unreadable_lease_file_reports_no_conflict() {
-        let store = Arc::new(MemoryStore::default());
         let allocator = allocator_with(
             FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
             1_000,
-            store.clone(),
         );
         allocator
             .reserve("run-a", "52:54:00:00:00:01")
@@ -724,8 +570,8 @@ mod tests {
             FakeHostFiles::new().with(LEASES_PATH, expired),
             Vec::new(),
             1_000,
-            store.clone(),
         );
+        copy_reservations(&allocator, &stale);
         assert!(
             stale.conflicts().is_empty(),
             "an expired lease holds nobody"
@@ -738,8 +584,8 @@ mod tests {
             ),
             Vec::new(),
             1_000,
-            store,
         );
+        copy_reservations(&allocator, &unreadable);
         assert!(unreadable.conflicts().is_empty());
     }
 

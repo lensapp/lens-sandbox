@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -7,38 +6,17 @@ use tracing::Instrument;
 use anyhow::Result;
 use lns_session::GuestNet;
 
-use super::{Allocator, Conflict, ReservationStore};
+use super::{Allocator, Conflict};
 use crate::log;
 use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors};
-
-struct FileStore {
-    path: PathBuf,
-}
-
-impl ReservationStore for FileStore {
-    fn load(&self) -> std::io::Result<String> {
-        std::fs::read_to_string(&self.path)
-    }
-
-    fn save(&self, contents: &str) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, contents)
-    }
-}
 
 fn allocator() -> &'static Arc<Allocator> {
     static ALLOCATOR: OnceLock<Arc<Allocator>> = OnceLock::new();
     ALLOCATOR.get_or_init(|| {
-        let path = crate::cache::root()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("guest-addresses.json");
         Arc::new(Allocator::new(
             Arc::new(RealHostFiles),
             Arc::new(RealNeighbors),
             Arc::new(crate::clock::RealClock),
-            Arc::new(FileStore { path }),
         ))
     })
 }
@@ -127,16 +105,5 @@ pub async fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
 fn release(owner: &str) {
     if super::enabled(|k| std::env::var(k).ok()) {
         allocator().release(owner);
-    }
-}
-
-/// A guest dies with the service that hosts it, so a reservation from a previous process names nobody and goes back at start.
-pub fn reconcile_at_start() {
-    if SUPPORTED && super::enabled(|k| std::env::var(k).ok()) {
-        let live = crate::run_registry::snapshot()
-            .into_iter()
-            .map(|run| run.id)
-            .collect();
-        allocator().reconcile(&live);
     }
 }
