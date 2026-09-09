@@ -1818,9 +1818,13 @@ fn one_layer_was_captured(world: &mut E2eWorld) {
         .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
     let reference = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| {
+            let run = world.result.as_ref();
             panic!(
-                "the capture must name the image it built in {}: {e}",
-                path.display()
+                "the capture must name the image it built in {}: {e}\n--- run stderr ---\n{}\n--- run stdout ---\n{}\n--- service.log ---\n{}",
+                path.display(),
+                run.map(|r| r.stderr.as_str()).unwrap_or("(no run)"),
+                run.map(|r| r.stdout.as_str()).unwrap_or("(no run)"),
+                crate::steps::service::read_service_log(world),
             )
         })
         .trim()

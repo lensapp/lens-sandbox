@@ -32,7 +32,7 @@ pub(crate) fn start_service_with(world: &mut E2eWorld, extra: &[(&str, &str)]) {
     );
 }
 
-fn read_service_log(world: &E2eWorld) -> String {
+pub(crate) fn read_service_log(world: &E2eWorld) -> String {
     let Some(socket) = &world.service_socket else {
         return "(no socket path on the world)".to_string();
     };
