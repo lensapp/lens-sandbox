@@ -270,6 +270,15 @@ fn report_packed<W: Write>(
 }
 
 /// What one push drives: the author's files, the directory that roots them, the registry, the version index, the builder behind a path-form `spec.image`, and what this machine lets a built image weigh.
+/// What a dry run needs of the world: the same document sources a push reads, and the same size discipline it is held to.
+pub struct DryRunPorts<'a, F: Fs + ?Sized, B: ImageBuilder + ?Sized> {
+    pub fs: &'a F,
+    pub cwd: &'a Path,
+    pub builder: &'a B,
+    pub image_limit: u64,
+    pub rebuild: bool,
+}
+
 pub struct PushPorts<
     'a,
     F: Fs + ?Sized,
@@ -477,6 +486,7 @@ fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()
 async fn preview_the_image<B, W>(
     builder: &B,
     request: &mut ImageRequest<'_>,
+    limit: u64,
     out: &mut W,
 ) -> Result<Option<String>>
 where
@@ -491,6 +501,7 @@ where
     writeln!(out, "key {}", planned.key)?;
     match planned.image {
         Some(image) => {
+            refuse_an_image_over(limit, &image)?;
             writeln!(
                 out,
                 "would publish the image {} builds to, {}",
@@ -600,12 +611,9 @@ where
 
 /// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — printing the digests that would publish; nothing is built and nothing is uploaded.
 pub async fn push_dry_run<F, B, W>(
-    fs: &F,
-    cwd: &Path,
-    builder: &B,
+    ports: DryRunPorts<'_, F, B>,
     doc: &[u8],
     reference: &str,
-    rebuild: bool,
     out: &mut W,
 ) -> Result<i32>
 where
@@ -613,6 +621,13 @@ where
     B: ImageBuilder + ?Sized,
     W: Write,
 {
+    let DryRunPorts {
+        fs,
+        cwd,
+        builder,
+        image_limit,
+        rebuild,
+    } = ports;
     refuse_unpushable_tools(doc)?;
     pack_path_filesets(fs, cwd, doc)?;
     let source = super::image_build::source_layer(fs, cwd, &declared_image(doc))?;
@@ -629,6 +644,7 @@ where
             authored_egress: None,
             packed_filesets: Vec::new(),
         },
+        image_limit,
         out,
     )
     .await?;
@@ -766,12 +782,15 @@ mod tests {
         W: Write,
     {
         push_dry_run(
-            fs,
-            cwd,
-            &FakeBuilder::unconsultable(),
+            DryRunPorts {
+                fs,
+                cwd,
+                builder: &FakeBuilder::unconsultable(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
             doc,
             reference,
-            false,
             out,
         )
         .await
@@ -1787,12 +1806,15 @@ mod tests {
             .merging(r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"./image"}}"#);
         let mut out = Vec::new();
         let code = push_dry_run(
-            &fs_with_a_context_and_a_mixin(),
-            cwd(),
-            &builder,
+            DryRunPorts {
+                fs: &fs_with_a_context_and_a_mixin(),
+                cwd: cwd(),
+                builder: &builder,
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
             WITH_A_CONTAINERFILE_AND_A_MIXIN,
             "ghcr.io/team/hermes:1.4.0",
-            false,
             &mut out,
         )
         .await
@@ -1855,12 +1877,15 @@ mod tests {
     async fn a_dry_run_that_knows_the_digest_previews_the_document_a_push_would_publish() {
         let mut out = Vec::new();
         push_dry_run(
-            &fs_with_a_context(),
-            cwd(),
-            &FakeBuilder::built(&[("sha256:base", 10)]),
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
             WITH_A_CONTAINERFILE,
             "ghcr.io/team/hermes:1.4.0",
-            false,
             &mut out,
         )
         .await

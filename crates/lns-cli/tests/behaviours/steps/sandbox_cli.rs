@@ -832,12 +832,17 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
     let result = match author::load_definition_json_at(&fs, &path) {
         Ok(doc) if push_args.dry_run => {
             distribute::push_dry_run(
-                &fs,
-                &project_dir,
-                &builder,
+                distribute::DryRunPorts {
+                    fs: &fs,
+                    cwd: &project_dir,
+                    builder: &builder,
+                    image_limit: w
+                        .image_limit
+                        .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
+                    rebuild: push_args.rebuild,
+                },
                 &doc,
                 &push_args.reference,
-                push_args.rebuild,
                 &mut out,
             )
             .await

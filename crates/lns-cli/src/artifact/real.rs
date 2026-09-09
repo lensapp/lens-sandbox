@@ -127,12 +127,17 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
     let mut out = std::io::stdout();
     if options.dry_run {
         return super::distribute::push_dry_run(
-            &RealFs,
-            &project_dir,
-            &ServiceImageBuilder,
+            super::distribute::DryRunPorts {
+                fs: &RealFs,
+                cwd: &project_dir,
+                builder: &ServiceImageBuilder,
+                image_limit: crate::config::load_image_limit(
+                    &crate::config::default_config_path()?
+                )?,
+                rebuild: options.rebuild,
+            },
             &doc,
             reference,
-            options.rebuild,
             &mut out,
         )
         .await;

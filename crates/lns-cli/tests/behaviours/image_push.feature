@@ -85,6 +85,14 @@ Feature: publishing the image a Containerfile builds beside the document
     And the output contains "RUN npm install -g @anthropic-ai/claude-code"
     And the published sandbox was not uploaded
 
+  Scenario: a dry run of an image over the limit refuses it, as the push would
+    Given this machine lets a built image weigh 1024 bytes
+    And the build answers with an image whose second layer is 4096 bytes
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the command fails with an exit code other than 0
+    And the output contains "over the 1024-byte limit"
+    And nothing is pushed
+
   Scenario: a push of a document that declares a mixin resolves it before the build
     Given the lns.yaml also declares a mixin
     And the service merges that document's mixin
