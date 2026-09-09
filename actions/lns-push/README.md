@@ -29,7 +29,7 @@ summary, then push it under every tag given.
 | `tags` | — | References to publish, one per line (commas also separate). Required. |
 | `push` | `true` | `false` stops after the dry run — what a pull request wants. |
 | `kind` | _(empty)_ | `sandbox` or `mixin`, the kind the document must be. Empty accepts either. |
-| `require-exact-tool-versions` | `true` | Fail when the dry run reports tool versions that resolve at push time. |
+| `require-exact-tool-versions` | `true` | Fail when the dry run reports tool versions that resolve at push time. `true` or `false`; any other value fails the step. |
 
 ## Outputs
 
@@ -43,8 +43,13 @@ summary, then push it under every tag given.
 
 A tag is `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`.
 `gh:latest` is refused: nothing here assumes a namespace, because the
-namespace is yours, not this repository's. A tag without a host resolves
-against `hub.lns.run`.
+namespace is yours, not this repository's. A tag without a host is the hub's,
+and is qualified as `hub.lns.run/<namespace>/<name>:<tag>` before it reaches
+`lns` — so what the summary reports and what `refs` lists is what was
+published, whatever registry the runner has configured.
+
+Whitespace around a tag is the workflow's line wrapping and is dropped.
+Whitespace inside one is a malformed reference and `lns` refuses it.
 
 ## What the job summary carries
 
