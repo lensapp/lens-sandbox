@@ -15,6 +15,7 @@ pub struct DirEntry {
     pub name: String,
     pub dir: bool,
     pub mode: u32,
+    pub symlink: bool,
 }
 
 /// The two reads a snapshot needs, kept narrow so a caller's wider filesystem port is not a prerequisite.
@@ -80,6 +81,12 @@ fn walk_into<F: SnapshotFs + ?Sized>(
                 entry_rel.display()
             );
         }
+        if entry.symlink {
+            bail!(
+                "fileset contains a symlink: {} — filesets carry only regular files",
+                entry_rel.display()
+            );
+        }
         let entry_abs = dir.join(&entry.name);
         if entry.dir {
             walk_into(fs, &entry_abs, &entry_rel, rules, out, total_bytes)?;
@@ -130,17 +137,12 @@ pub fn real_dir_entries(dir: &Path) -> io::Result<Vec<DirEntry>> {
             )
         })?;
         let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("symlink {name} — filesets carry only regular files"),
-            ));
-        }
         use std::os::unix::fs::PermissionsExt;
         entries.push(DirEntry {
             name,
             dir: file_type.is_dir(),
             mode: entry.metadata()?.permissions().mode() & 0o777,
+            symlink: file_type.is_symlink(),
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -176,6 +178,7 @@ pub fn map_dir_entries<'a>(
             name,
             dir,
             mode: if dir { 0o755 } else { 0o644 },
+            symlink: false,
         })
         .collect())
 }
@@ -247,11 +250,13 @@ mod tests {
                         name: "run.sh".to_string(),
                         dir: false,
                         mode: 0o755,
+                        symlink: false,
                     },
                     DirEntry {
                         name: "notes.md".to_string(),
                         dir: false,
                         mode: 0o644,
+                        symlink: false,
                     },
                 ])
             }
@@ -324,6 +329,7 @@ mod tests {
                 name: "top.txt".to_string(),
                 dir: false,
                 mode: 0o644,
+                symlink: false,
             }])
         }
     }
@@ -393,12 +399,14 @@ mod tests {
                 DirEntry {
                     name: "sub".to_string(),
                     dir: true,
-                    mode: 0o755
+                    mode: 0o755,
+                    symlink: false
                 },
                 DirEntry {
                     name: "top.txt".to_string(),
                     dir: false,
-                    mode: 0o644
+                    mode: 0o644,
+                    symlink: false
                 },
             ]
         );
@@ -454,12 +462,53 @@ mod tests {
     }
 
     #[test]
-    fn a_symlink_in_a_fileset_is_refused_rather_than_followed() {
-        // A fileset is packed into the artifact, so following a link would ship whatever it points at.
+    fn a_symlink_is_listed_as_one_so_each_caller_decides_what_it_means() {
+        // A fileset refuses one and a build context skips it, and only the listing can tell them apart.
         let dir = tempfile::tempdir().expect("tempdir");
         os_symlink("/etc/passwd", dir.path().join("link")).unwrap();
-        let err = real_dir_entries(dir.path()).expect_err("a symlink must be refused");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        fs::write(dir.path().join("plain.txt"), b"x").unwrap();
+        let listed = real_dir_entries(dir.path()).expect("listing");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|e| (e.name.as_str(), e.symlink))
+                .collect::<Vec<_>>(),
+            [("link", true), ("plain.txt", false)]
+        );
+    }
+
+    #[test]
+    fn a_symlink_in_a_fileset_is_refused_rather_than_followed() {
+        // A fileset is packed into the artifact, so following a link would ship whatever it points at.
+        struct Linked;
+        impl SnapshotFs for Linked {
+            fn read_limited(&self, _: &Path, _: u64) -> io::Result<Vec<u8>> {
+                Ok(b"plain".to_vec())
+            }
+            fn dir_entries(&self, _: &Path) -> io::Result<Vec<DirEntry>> {
+                Ok(vec![
+                    DirEntry {
+                        name: "a.txt".to_string(),
+                        dir: false,
+                        mode: 0o644,
+                        symlink: false,
+                    },
+                    DirEntry {
+                        name: "link".to_string(),
+                        dir: false,
+                        mode: 0o777,
+                        symlink: true,
+                    },
+                ])
+            }
+        }
+        let err = walk(&Linked, Path::new("/work/files"), Kind::Sandbox)
+            .expect_err("a symlink must be refused")
+            .to_string();
+        assert!(
+            err.contains("symlink: link") && err.contains("only regular files"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -3406,6 +3406,7 @@ dependencies = [
  "lns-policy",
  "lns-spec",
  "oci-client",
+ "parse-dockerfile",
  "serde",
  "serde_json",
  "serde_yaml",

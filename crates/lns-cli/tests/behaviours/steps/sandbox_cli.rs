@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -396,6 +396,7 @@ fn stream_opens_with_error(w: &mut BehaviourWorld, _run_id: u32, message: String
 
 struct StepFs {
     files: RefCell<HashMap<PathBuf, String>>,
+    symlinks: HashSet<PathBuf>,
 }
 
 impl author::Fs for StepFs {
@@ -403,6 +404,7 @@ impl author::Fs for StepFs {
         self.files
             .borrow()
             .keys()
+            .chain(self.symlinks.iter())
             .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
     }
 
@@ -420,10 +422,13 @@ impl author::Fs for StepFs {
         Ok(())
     }
     fn exists(&self, path: &Path) -> bool {
-        self.files.borrow().contains_key(path)
+        self.files.borrow().contains_key(path) || self.symlinks.contains(path)
     }
-    fn is_symlink(&self, _path: &Path) -> bool {
-        false
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.symlinks.contains(path)
+    }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        author::Fs::read_to_string(self, path).map(|held| held.len() as u64)
     }
 }
 
@@ -434,7 +439,18 @@ impl lns_artifact::walk::SnapshotFs for StepFs {
         Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
-        lns_artifact::walk::map_dir_entries(self.files.borrow().keys(), dir)
+        let held: Vec<PathBuf> = self
+            .files
+            .borrow()
+            .keys()
+            .chain(self.symlinks.iter())
+            .cloned()
+            .collect();
+        let mut listed = lns_artifact::walk::map_dir_entries(held.iter(), dir)?;
+        for entry in &mut listed {
+            entry.symlink = self.symlinks.contains(&dir.join(&entry.name));
+        }
+        Ok(listed)
     }
 }
 
@@ -502,6 +518,7 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
     let cwd = Path::new("/work");
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
+        symlinks: w.author_symlinks.clone(),
     };
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
@@ -701,6 +718,7 @@ pub(crate) async fn drive_artifact_command(w: &mut BehaviourWorld, cmd: &str) {
 async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::PushArgs) {
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
+        symlinks: w.author_symlinks.clone(),
     };
     let producer = StepProducer {
         outcome: w.push_outcome.clone().unwrap_or(Err(

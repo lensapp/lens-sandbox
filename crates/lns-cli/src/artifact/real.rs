@@ -294,6 +294,9 @@ impl super::author::Fs for RealFs {
             .map(|meta| meta.file_type().is_symlink())
             .unwrap_or(false)
     }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        std::fs::metadata(path).map(|meta| meta.len())
+    }
 }
 
 impl lns_artifact::walk::SnapshotFs for RealFs {
