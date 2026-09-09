@@ -7,6 +7,7 @@ pub(crate) mod executor;
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
 pub(crate) mod import;
+pub(crate) mod key;
 pub(crate) mod locate;
 pub(crate) mod parse;
 pub mod real;
