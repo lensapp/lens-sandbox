@@ -174,7 +174,6 @@ impl Allocator {
 
         let candidates: Vec<Ipv4Addr> = network
             .usable_high_to_low()
-            .into_iter()
             .filter(|addr| !taken.contains(addr))
             .take(CANDIDATES_PER_GUEST)
             .collect();

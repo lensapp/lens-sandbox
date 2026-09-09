@@ -48,10 +48,10 @@ impl HostNetwork {
     }
 
     /// High addresses first: Apple's DHCP server hands out from the bottom of the range, so lns starts at the other end.
-    pub fn usable_high_to_low(&self) -> Vec<Ipv4Addr> {
+    pub fn usable_high_to_low(&self) -> impl Iterator<Item = Ipv4Addr> {
         let first = u32::from(self.network) + 1;
         let last = u32::from(self.broadcast()).saturating_sub(1);
-        (first..=last).rev().map(Ipv4Addr::from).collect()
+        (first..=last).rev().map(Ipv4Addr::from)
     }
 
     pub fn contains(&self, addr: Ipv4Addr) -> bool {
@@ -479,7 +479,7 @@ pub(crate) mod tests {
     #[test]
     fn the_usable_range_runs_from_the_top_and_excludes_network_and_broadcast() {
         let net = HostNetwork::default();
-        let usable = net.usable_high_to_low();
+        let usable: Vec<_> = net.usable_high_to_low().collect();
         assert_eq!(usable.first(), Some(&Ipv4Addr::new(192, 168, 64, 254)));
         assert_eq!(usable.last(), Some(&Ipv4Addr::new(192, 168, 64, 1)));
         assert_eq!(usable.len(), 254);
@@ -503,8 +503,25 @@ pub(crate) mod tests {
             gateway: Ipv4Addr::new(10, 0, 0, 9),
         };
         assert_eq!(net.broadcast(), Ipv4Addr::new(10, 0, 0, 15));
-        assert_eq!(net.usable_high_to_low().len(), 6);
+        assert_eq!(net.usable_high_to_low().count(), 6);
         assert_eq!(mask_bits(0), 0);
+    }
+
+    #[test]
+    fn a_broad_subnet_yields_its_first_candidates_without_materialising_the_range() {
+        let net = HostNetwork {
+            network: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 1,
+            gateway: Ipv4Addr::new(1, 0, 0, 1),
+        };
+        assert_eq!(
+            net.usable_high_to_low().take(3).collect::<Vec<_>>(),
+            vec![
+                Ipv4Addr::new(127, 255, 255, 254),
+                Ipv4Addr::new(127, 255, 255, 253),
+                Ipv4Addr::new(127, 255, 255, 252),
+            ]
+        );
     }
 
     #[test]
