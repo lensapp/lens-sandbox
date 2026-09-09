@@ -36,7 +36,7 @@ pub enum InstructionKind {
     Workdir(String),
     Run {
         command: Command,
-        here_docs: Vec<String>,
+        here_docs: Vec<HereDoc>,
         flags: Vec<Flag>,
     },
     Copy(Transfer),
@@ -46,6 +46,13 @@ pub enum InstructionKind {
     Shell(Vec<String>),
     Expose(Vec<String>),
     Volume(Vec<String>),
+}
+
+/// One here-document body of a `RUN`, and whether the build expands variables in it — a quoted delimiter (`<<'EOF'`) says it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HereDoc {
+    pub expand: bool,
+    pub body: String,
 }
 
 /// A `RUN`, `CMD` or `ENTRYPOINT` argument in the two forms Docker defines.
@@ -233,7 +240,10 @@ fn accept_run(
         here_docs: run
             .here_docs
             .iter()
-            .map(|doc| doc.value.to_string())
+            .map(|doc| HereDoc {
+                expand: doc.expand,
+                body: doc.value.to_string(),
+            })
             .collect(),
         flags: flags(&run.options),
     })
@@ -553,9 +563,37 @@ mod tests {
             built.instructions[1].kind,
             InstructionKind::Run {
                 command: Command::Shell(String::new()),
-                here_docs: vec!["echo one\necho two\n".to_string()],
+                here_docs: vec![HereDoc {
+                    expand: true,
+                    body: "echo one\necho two\n".to_string()
+                }],
                 flags: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn a_quoted_here_document_delimiter_is_recorded_so_the_build_does_not_expand_its_body() {
+        let unquoted = built("FROM alpine\nRUN <<EOF\necho $HOME\nEOF\n");
+        let quoted = built("FROM alpine\nRUN <<'EOF'\necho $HOME\nEOF\n");
+        let docs = |file: &Containerfile| match &file.instructions[1].kind {
+            InstructionKind::Run { here_docs, .. } => here_docs.clone(),
+            other => panic!("expected a RUN: {other:?}"),
+        };
+        assert_eq!(
+            docs(&unquoted),
+            vec![HereDoc {
+                expand: true,
+                body: "echo $HOME\n".to_string()
+            }]
+        );
+        assert_eq!(
+            docs(&quoted),
+            vec![HereDoc {
+                expand: false,
+                body: "echo $HOME\n".to_string()
+            }],
+            "a quoted delimiter is what tells the build to leave the body alone"
         );
     }
 
