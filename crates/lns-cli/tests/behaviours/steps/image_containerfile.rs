@@ -31,3 +31,8 @@ fn file_holds(w: &mut BehaviourWorld, step: &Step, path: String) {
         format!("{}\n", content.trim_start_matches('\n').trim_end()),
     );
 }
+
+#[given(regex = r#"^the file "([^"]+)" is a symlink$"#)]
+fn file_is_a_symlink(w: &mut BehaviourWorld, path: String) {
+    w.author_symlinks.insert(PathBuf::from("/work").join(path));
+}

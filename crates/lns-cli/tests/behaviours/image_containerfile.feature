@@ -70,6 +70,18 @@ Feature: an image built from a Containerfile beside the document
     And the output contains "context:      Dockerfile (40 B)"
     And the output contains "context:      app/main.js (23 B)"
 
+  Scenario: a symlink in the context is listed as one a build does not send
+    Given an lns.yaml whose image is "./image"
+    And the file "image/Dockerfile" holds:
+      """
+      FROM docker.io/library/node:24-bookworm
+      """
+    And the file "image/node_modules/.bin/tsc" is a symlink
+    When the user runs artifact command "inspect"
+    Then the exit code is 0
+    And the output contains "built from ./image/Dockerfile (1 lines, context 1 files)"
+    And the output contains "context:      node_modules/.bin/tsc (symlink, not sent)"
+
   Scenario: a directory holding both builds the Containerfile, as Podman does
     Given an lns.yaml whose image is "./image"
     And the directory "image" holds a "Containerfile"

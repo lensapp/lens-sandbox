@@ -340,12 +340,7 @@ fn render_effective<W: Write>(
             Some(built) => {
                 writeln!(out, "  image:        {}", built.summary())?;
                 for file in &built.context {
-                    writeln!(
-                        out,
-                        "  context:      {} ({})",
-                        file.path,
-                        crate::output::format_bytes(file.bytes)
-                    )?;
+                    writeln!(out, "  context:      {} ({})", file.path, file.disclosure())?;
                 }
             }
             None => writeln!(out, "  image:        {}", spec.image)?,

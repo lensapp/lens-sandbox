@@ -33,6 +33,7 @@ impl Fs for MapFs {
         self.files
             .borrow()
             .keys()
+            .chain(self.symlinks.iter())
             .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
     }
 
@@ -67,6 +68,17 @@ impl lns_artifact::walk::SnapshotFs for MapFs {
         Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-        map_dir_entries(self.files.borrow().keys(), dir)
+        let held: Vec<PathBuf> = self
+            .files
+            .borrow()
+            .keys()
+            .chain(self.symlinks.iter())
+            .cloned()
+            .collect();
+        let mut listed = map_dir_entries(held.iter(), dir)?;
+        for entry in &mut listed {
+            entry.symlink = self.symlinks.contains(&dir.join(&entry.name));
+        }
+        Ok(listed)
     }
 }

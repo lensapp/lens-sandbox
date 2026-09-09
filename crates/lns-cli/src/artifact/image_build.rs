@@ -13,10 +13,22 @@ pub struct BuiltImage {
     pub context: Vec<ContextFile>,
 }
 
-/// One file of the build context, as an approver reads it: the path inside the context and its size.
+/// One file of the build context, as an approver reads it: the path inside the context, its size, and whether a build sends it — a symlink is listed and not sent (§3.1.1).
 pub struct ContextFile {
     pub path: String,
     pub bytes: u64,
+    pub sent: bool,
+}
+
+impl ContextFile {
+    /// What one context line discloses: a size for a file a build sends, and the reason for one it does not.
+    pub fn disclosure(&self) -> String {
+        if self.sent {
+            crate::output::format_bytes(self.bytes)
+        } else {
+            "symlink, not sent".to_string()
+        }
+    }
 }
 
 impl BuiltImage {
@@ -26,7 +38,7 @@ impl BuiltImage {
             "built from {} ({} lines, context {} files)",
             self.containerfile,
             self.text.lines().count(),
-            self.context.len()
+            self.context.iter().filter(|file| file.sent).count()
         )
     }
 }
@@ -108,6 +120,14 @@ fn collect_context<F: Fs + ?Sized>(
         .with_context(|| format!("reading the build context {}", dir.display()))?;
     for entry in listed {
         let entry_rel = rel.join(&entry.name);
+        if entry.symlink {
+            out.push(ContextFile {
+                path: entry_rel.display().to_string(),
+                bytes: 0,
+                sent: false,
+            });
+            continue;
+        }
         if entry.dir {
             collect_context(fs, &dir.join(&entry.name), &entry_rel, out)?;
             continue;
@@ -122,6 +142,7 @@ fn collect_context<F: Fs + ?Sized>(
         out.push(ContextFile {
             path: entry_rel.display().to_string(),
             bytes,
+            sent: true,
         });
     }
     Ok(())
@@ -135,4 +156,66 @@ pub fn refuse_an_unbuilt_image(image: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::test_support::MapFs;
+
+    fn context_with_a_symlink() -> MapFs {
+        let mut fs = MapFs::with(&[
+            ("/p/image/Containerfile", "FROM alpine\nCOPY ./app /srv\n"),
+            ("/p/image/app/main.js", "console.log(1)\n"),
+            (
+                "/p/image/node_modules/typescript/bin/tsc",
+                "#!/usr/bin/env node\n",
+            ),
+        ]);
+        fs.symlinks
+            .insert(PathBuf::from("/p/image/node_modules/.bin/tsc"));
+        fs
+    }
+
+    #[test]
+    fn a_symlink_in_the_context_is_disclosed_as_not_sent_rather_than_failing_the_walk() {
+        let built = built_from(&context_with_a_symlink(), Path::new("/p"), "./image")
+            .expect("a context an npm install wrote still reads")
+            .expect("a path-form image is built");
+        let listed: Vec<(&str, bool)> = built
+            .context
+            .iter()
+            .map(|file| (file.path.as_str(), file.sent))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("Containerfile", true),
+                ("app/main.js", true),
+                ("node_modules/.bin/tsc", false),
+                ("node_modules/typescript/bin/tsc", true),
+            ],
+            "the symlink is listed, and named as one a build does not send"
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_the_files_a_build_would_send() {
+        let built = built_from(&context_with_a_symlink(), Path::new("/p"), "./image")
+            .expect("reading")
+            .expect("a path-form image is built");
+        assert!(
+            built.summary().contains("context 3 files"),
+            "the skipped symlink is not one of them: {}",
+            built.summary()
+        );
+    }
+
+    #[test]
+    fn a_symlink_in_the_context_does_not_stop_validate_reading_the_containerfile() {
+        assert_eq!(
+            image_problems(&context_with_a_symlink(), Path::new("/p"), "./image"),
+            Vec::<String>::new()
+        );
+    }
 }

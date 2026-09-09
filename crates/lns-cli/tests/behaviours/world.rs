@@ -65,6 +65,8 @@ pub struct BehaviourWorld {
     pub declared_mounts: DeclaredMountRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
+    /// Paths the offline author verbs see as symlinks rather than files, keyed the same way.
+    pub author_symlinks: std::collections::HashSet<std::path::PathBuf>,
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
     pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
     pub decisions: LocalDecisionsRig,

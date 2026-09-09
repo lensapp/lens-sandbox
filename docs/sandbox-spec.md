@@ -375,6 +375,14 @@ reaches is decided by the same rules a run's traffic is, and no Docker on the
 host is involved. A published document never carries a path — see
 [§6](#6-publish-time-transforms).
 
+**The build context.** The context is the directory the path names, or the
+Containerfile's own directory when the path names a file. It carries regular
+files and directories only: a symlink inside it is not part of the context, is
+not sent to the build, and a `COPY` resolves nothing through it. Offline
+validation ([§5](#5-validation-summary)) MUST list such an entry and say it is not
+sent rather than refuse the document, because an ordinary dependency install
+writes symlinks into a directory an author then names as a context.
+
 **The instruction subset.** Because lns builds the file rather than handing it
 to another engine, it builds a defined subset of the instruction set. The subset
 below is what `lns.run/v1` accepts. Every other instruction MUST be refused by
