@@ -18,6 +18,9 @@ pub async fn run(args: UpdateArgs) -> Result<i32> {
         return Ok(0);
     }
     let lns_path = std::env::current_exe().context("resolving current `lns` executable path")?;
+    let lns_path = tokio::fs::canonicalize(&lns_path)
+        .await
+        .with_context(|| format!("canonicalizing {}", lns_path.display()))?;
     let service = RealServiceClient::new(
         crate::service::socket_path()?,
         crate::service::find_service_binary(),

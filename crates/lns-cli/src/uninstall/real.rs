@@ -50,6 +50,7 @@ async fn build_plan(purge: bool) -> Result<UninstallPlan> {
     let lns = tokio::fs::canonicalize(&lns)
         .await
         .with_context(|| format!("canonicalizing {}", lns.display()))?;
+    crate::installation::require_loose_binaries(&lns)?;
     let mut binaries = Vec::new();
     if let Some(parent) = lns.parent() {
         let service = parent.join("lns-service");

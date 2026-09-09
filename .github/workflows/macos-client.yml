@@ -6,7 +6,12 @@ on:
     paths:
       - 'clients/macos/**'
       - 'crates/lns-ipc/**'
-      - 'crates/lns-service/src/ipc/**'
+      - 'crates/lns-cli/**'
+      - 'crates/lns-service/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
       - '.github/workflows/macos-client.yml'
 
 permissions:

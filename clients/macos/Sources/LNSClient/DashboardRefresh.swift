@@ -26,6 +26,7 @@ public final class DashboardRefresh {
             return snapshot
         }
         let pending = Task {
+            defer { if generation == current { task = nil } }
             while true {
                 dirty = false
                 let snapshot = try await read()
@@ -34,7 +35,6 @@ public final class DashboardRefresh {
             }
         }
         task = pending
-        defer { if generation == current { task = nil } }
         let snapshot = try await withTaskCancellationHandler {
             try await pending.value
         } onCancel: { pending.cancel() }
