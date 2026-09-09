@@ -68,10 +68,17 @@ pub(crate) struct RunOutcome {
     pub fileset_paths: Vec<String>,
 }
 
+/// The image a `FROM` resolved to: the reference the build stands on, and the environment its config already declares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Base {
+    pub reference: String,
+    pub env: Vec<(String, String)>,
+}
+
 /// What the loop needs of the world: a registry, a build guest, the build context, and the local store.
 pub(crate) trait BuildHost {
     /// The digest-pinned reference the `FROM` resolved to, pulled so the build can stand on its config.
-    async fn resolve_base(&self, image: &str) -> Result<String>;
+    async fn resolve_base(&self, image: &str) -> Result<Base>;
     async fn run(&self, step: &RunStep) -> Result<RunOutcome>;
     async fn copy(&self, step: &CopyStep) -> Result<ChangeSet>;
     async fn commit(&self, commit: &Commit<'_>) -> Result<String>;
@@ -86,6 +93,8 @@ pub(crate) struct Built {
 /// What the instructions have decided so far: the image to stand on, the scopes a `RUN` is given, and the config the next commit writes.
 struct Build {
     parent: String,
+    /// What the base image's own config already puts in the environment, which `ENV PATH=…:$PATH` expands against.
+    base_env: Vec<(String, String)>,
     /// The `ARG`s declared before `FROM`: Docker keeps them out of the stage until it declares them again.
     global_args: Vec<(String, String)>,
     args: Vec<(String, String)>,
@@ -122,13 +131,14 @@ pub(crate) async fn build<H: BuildHost>(host: &H, file: &Containerfile) -> Resul
     };
     let (line, image) = from;
     let image = expand(image, &global_args);
-    let parent = host
+    let base = host
         .resolve_base(&image)
         .await
         .with_context(|| format!("line {line}: FROM {image}"))?;
 
     let mut build = Build {
-        parent,
+        parent: base.reference,
+        base_env: base.env,
         global_args,
         args: Vec::new(),
         config: ConfigDraft::default(),
@@ -305,9 +315,12 @@ fn declare_arg(build: &mut Build, name: &str, default: Option<&str>) {
     }
 }
 
-/// What a `RUN` and every expansion see: the build arguments, with the environment over them.
+/// What a `RUN` and every expansion see: the base image's environment, the build arguments over it, and this file's own environment over both.
 fn scope(build: &Build) -> Vec<(String, String)> {
-    let mut scope = build.args.clone();
+    let mut scope = build.base_env.clone();
+    for (key, value) in &build.args {
+        set(&mut scope, key, value);
+    }
     for (key, value) in &build.config.env {
         set(&mut scope, key, value);
     }
@@ -458,6 +471,7 @@ mod tests {
         commits: Mutex<usize>,
         wrote: Mutex<Option<ChangeSet>>,
         fileset_paths: Vec<String>,
+        base_env: Vec<(String, String)>,
         run_fails_on_line: Option<usize>,
         /// One way for each of the other three answers to fail, so no test needs a host of its own.
         base_fails: bool,
@@ -478,6 +492,15 @@ mod tests {
 
         fn seeding(mut self, paths: &[&str]) -> Self {
             self.fileset_paths = paths.iter().map(|p| p.to_string()).collect();
+            self
+        }
+
+        /// What the image the `FROM` names already declares in its config, the way a registry serves it.
+        fn based_on(mut self, env: &[(&str, &str)]) -> Self {
+            self.base_env = env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
             self
         }
 
@@ -550,12 +573,15 @@ mod tests {
     }
 
     impl BuildHost for FakeHost {
-        async fn resolve_base(&self, image: &str) -> Result<String> {
+        async fn resolve_base(&self, image: &str) -> Result<Base> {
             self.calls.lock().unwrap().push(Call::Base(image.into()));
             if self.base_fails {
                 anyhow::bail!("no such image {image}");
             }
-            Ok(format!("registry.test/{image}@sha256:base"))
+            Ok(Base {
+                reference: format!("registry.test/{image}@sha256:base"),
+                env: self.base_env.clone(),
+            })
         }
 
         async fn run(&self, step: &RunStep) -> Result<RunOutcome> {
@@ -802,6 +828,39 @@ mod tests {
         assert_eq!(
             host.final_config().env,
             vec![("MODE".to_string(), "research".to_string())],
+        );
+    }
+
+    /// `FROM node:24-alpine` then `ENV PATH=/opt/agent/bin:$PATH` must keep the base's PATH, not truncate it.
+    #[tokio::test]
+    async fn the_base_image_s_environment_is_what_an_instruction_expands_against() {
+        let host = FakeHost::new().based_on(&[("PATH", "/usr/local/bin:/usr/bin")]);
+        built(
+            &host,
+            "FROM node:24-alpine\nENV PATH=/opt/agent/bin:$PATH\nRUN which agent\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.final_config().env,
+            vec![(
+                "PATH".to_string(),
+                "/opt/agent/bin:/usr/local/bin:/usr/bin".to_string()
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_carries_the_base_image_s_environment_even_where_the_file_declares_none() {
+        let host = FakeHost::new().based_on(&[("PATH", "/usr/bin"), ("NODE_VERSION", "24.0.0")]);
+        built(&host, "FROM node:24-alpine\nRUN node --version\n").await;
+
+        assert_eq!(
+            host.runs()[0].env,
+            vec![
+                "PATH=/usr/bin".to_string(),
+                "NODE_VERSION=24.0.0".to_string()
+            ],
         );
     }
 

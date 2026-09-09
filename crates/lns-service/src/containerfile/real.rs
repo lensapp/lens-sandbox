@@ -13,7 +13,7 @@ use crate::log;
 use crate::oci_layer_cache::LayerCache;
 
 use super::context::{ContextFs, EntryKind, Meta};
-use super::executor::{self, BuildHost, Commit, CopyStep, RunOutcome, RunStep};
+use super::executor::{self, Base, BuildHost, Commit, CopyStep, RunOutcome, RunStep};
 use super::ext4_upper::Ext4Upper;
 use super::image::ParentImage;
 use super::import::LocalStore;
@@ -197,7 +197,7 @@ struct RealBuildHost {
 }
 
 impl BuildHost for RealBuildHost {
-    async fn resolve_base(&self, image: &str) -> Result<String> {
+    async fn resolve_base(&self, image: &str) -> Result<Base> {
         let layers = LayerCache::new(self.cache_dir.join("layers"));
         let ingested = crate::ingest::run(
             Some(image),
@@ -207,9 +207,14 @@ impl BuildHost for RealBuildHost {
             crate::image::pull,
         )
         .await?;
-        ingested
+        let reference = ingested
             .manifest_reference
-            .with_context(|| format!("the base image {image} resolved to no manifest"))
+            .with_context(|| format!("the base image {image} resolved to no manifest"))?;
+        let parent = parent_image(&self.cache_dir.join("manifests"), &reference)?;
+        Ok(Base {
+            env: super::image::declared_env(&parent.config)?,
+            reference,
+        })
     }
 
     async fn run(&self, step: &RunStep) -> Result<RunOutcome> {

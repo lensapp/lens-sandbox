@@ -19,6 +19,24 @@ pub(crate) struct BuiltImage {
     pub config: String,
 }
 
+/// What the base image's config already declares in the environment: a `RUN` carries it, and `$PATH` expands to it.
+pub(crate) fn declared_env(config: &str) -> Result<Vec<(String, String)>> {
+    let config: Value = serde_json::from_str(config).context("parsing the base image's config")?;
+    Ok(config
+        .get("config")
+        .and_then(|runtime| runtime.get("Env"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 pub(crate) fn assemble(
     parent: &ParentImage,
     layer: Option<&LayerBlob>,
@@ -235,6 +253,43 @@ pub(crate) mod tests {
             "history": [{ "created_by": "ADD alpine.tar" }],
         })
         .to_string()
+    }
+
+    #[test]
+    fn the_base_image_s_environment_is_read_as_the_pairs_it_declares() {
+        assert_eq!(
+            declared_env(&parent_config()).unwrap(),
+            vec![("PATH".to_string(), "/usr/bin".to_string())],
+        );
+    }
+
+    #[test]
+    fn a_base_that_declares_no_environment_contributes_none() {
+        let config = serde_json::json!({ "config": { "Cmd": ["/bin/sh"] } }).to_string();
+
+        assert!(declared_env(&config).unwrap().is_empty());
+    }
+
+    /// A registry can serve a config whose Env holds a word with no `=`; it names no variable.
+    #[test]
+    fn an_environment_entry_that_names_no_value_is_not_a_variable() {
+        let config =
+            serde_json::json!({ "config": { "Env": ["PATH=/usr/bin", "BROKEN"] } }).to_string();
+
+        assert_eq!(
+            declared_env(&config).unwrap(),
+            vec![("PATH".to_string(), "/usr/bin".to_string())],
+        );
+    }
+
+    #[test]
+    fn a_config_that_is_not_json_is_refused_by_name() {
+        let err = declared_env("not json").unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("parsing the base image's config"),
+            "{err:#}"
+        );
     }
 
     pub(crate) fn parent_manifest() -> OciImageManifest {
