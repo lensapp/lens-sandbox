@@ -72,13 +72,13 @@ impl RuntimeCacheFs for RealFs {
     }
 }
 
-pub(super) struct RealCaches {
+pub(crate) struct RealCaches {
     layers: LayerCache,
     manifests: ManifestCache,
 }
 
 impl RealCaches {
-    pub(super) fn new(cache_root: &Path) -> Self {
+    pub(crate) fn new(cache_root: &Path) -> Self {
         Self {
             layers: LayerCache::new(cache_root.join("layers")),
             manifests: ManifestCache::new(cache_root.join("manifests")),

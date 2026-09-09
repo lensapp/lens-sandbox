@@ -74,6 +74,15 @@ pub enum Request {
         name: String,
     },
     PruneRuns,
+    /// Build what a local document's `spec.image` names, fill the build cache and publish nothing.
+    BuildSandbox {
+        /// The document as canonical JSON, the same shape a local run sends.
+        definition: String,
+        /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
+        definition_dir: String,
+        /// Ignore every key this build would otherwise answer from, and write the ones it produces.
+        rebuild: bool,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -232,6 +241,20 @@ pub enum Response {
     },
     RunsPruned {
         removed: Vec<String>,
+        /// The built images the sweep dropped: the ones no document on this machine and no run named any more.
+        #[serde(default)]
+        built_images: Vec<String>,
+    },
+    /// What one `lns sandbox build` decided: the key, the image, and whether it had to build it.
+    SandboxBuilt {
+        /// The build cache key: the `FROM` digest, the Containerfile text, the context's content hash and the architecture.
+        key: String,
+        reference: String,
+        /// What `spec.image` named, as the summary prints it.
+        label: String,
+        layers: usize,
+        /// True when the key answered outright, so the build ran nothing.
+        reused: bool,
     },
     RegistryLoginStored,
     RegistryLoggedOut,

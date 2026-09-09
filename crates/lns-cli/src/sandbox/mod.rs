@@ -730,7 +730,7 @@ async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
         }
     }
     match svc.one_shot(Request::PruneRuns).await? {
-        Response::RunsPruned { mut removed } => {
+        Response::RunsPruned { mut removed, built_images } => {
             removed.sort_unstable();
             for run in &removed {
                 writeln!(out, "removed sandbox {run}")?;

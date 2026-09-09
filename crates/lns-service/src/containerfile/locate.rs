@@ -73,19 +73,6 @@ fn in_directory<F: ContextFs>(fs: &F, directory: &Path, written: &str) -> Result
     )
 }
 
-/// Reuse is keyed on the Containerfile alone until slice 4 hashes the context, so a context holding
-/// anything else has no key that would notice an edit to it and must be built again.
-pub(crate) fn holds_only_its_containerfile<F: ContextFs>(fs: &F, located: &Located) -> bool {
-    let Ok(entries) = fs.entries(&located.context) else {
-        return false;
-    };
-    let named = located
-        .containerfile
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string());
-    entries.iter().all(|entry| Some(entry) == named.as_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,48 +223,5 @@ mod tests {
 
         let refusal = refusal(&context, "./image");
         assert!(refusal.contains("permission denied"), "{refusal}");
-    }
-
-    #[test]
-    fn a_context_holding_nothing_but_the_containerfile_may_be_reused() {
-        let mut context = FakeContext::new();
-        context
-            .dir("image", 0o755)
-            .file("image/Containerfile", 0o644, b"FROM alpine\n");
-
-        assert!(holds_only_its_containerfile(
-            &context,
-            &located(&context, "./image")
-        ));
-    }
-
-    #[test]
-    fn a_context_holding_a_file_the_reuse_key_cannot_see_is_built_again() {
-        let mut context = FakeContext::new();
-        context
-            .dir("image", 0o755)
-            .file(
-                "image/Containerfile",
-                0o644,
-                b"FROM alpine\nCOPY app /srv/app\n",
-            )
-            .file("image/app", 0o644, b"one\n");
-
-        assert!(!holds_only_its_containerfile(
-            &context,
-            &located(&context, "./image")
-        ));
-    }
-
-    #[test]
-    fn a_context_that_will_not_list_is_built_again() {
-        let mut context = FakeContext::new();
-        context
-            .dir("image", 0o755)
-            .file("image/Containerfile", 0o644, b"FROM alpine\n");
-        let located = located(&context, "./image");
-        context.unlistable("image");
-
-        assert!(!holds_only_its_containerfile(&context, &located));
     }
 }

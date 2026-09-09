@@ -157,6 +157,116 @@ pub(crate) async fn build(
     })
 }
 
+/// `lns sandbox build`: the build a run would do, with no run around it and nothing published.
+pub async fn build_sandbox(
+    definition: &str,
+    definition_dir: &str,
+    rebuild: bool,
+) -> Result<lns_ipc::Response> {
+    let image = image_of(definition)?;
+    let (frame_tx, mut frames) = tokio::sync::mpsc::channel(1);
+    // A build asked for on its own has no run to carry a step's output to, so it is drained here rather than left to fill.
+    tokio::spawn(async move { while frames.recv().await.is_some() {} });
+    let mut args = args_for_a_build(definition, definition_dir);
+    args.image = Some(image.clone());
+    let built = build(
+        &BuildRequest {
+            args: &args,
+            definition,
+            image: &image,
+            rebuild,
+        },
+        frame_tx,
+    )
+    .await?;
+    Ok(lns_ipc::Response::SandboxBuilt {
+        key: built.key,
+        reference: built.reference,
+        label: built.label,
+        layers: built.layers,
+        reused: built.reused,
+    })
+}
+
+/// What `spec.image` names, refused here when it names an image rather than a file to build.
+fn image_of(definition: &str) -> Result<String> {
+    let document: serde_json::Value =
+        serde_json::from_str(definition).context("reading the document to build")?;
+    let image = document["spec"]["image"]
+        .as_str()
+        .context("this document declares no spec.image, so there is nothing to build")?
+        .to_string();
+    if !names_a_containerfile(&image) {
+        bail!(
+            "spec.image {image:?} names an image to pull, not a Containerfile beside the document; there is nothing to build"
+        );
+    }
+    Ok(image)
+}
+
+/// The run a build step is shaped from when no run asked for the build: the document, its directory, and this machine's defaults.
+fn args_for_a_build(definition: &str, definition_dir: &str) -> RunImageArgs {
+    RunImageArgs {
+        image: None,
+        resolved_image: None,
+        mixins: Vec::new(),
+        composed_mixins: Vec::new(),
+        name: None,
+        cpus: lns_artifact::resources::DEFAULT_VM_SIZE.cpus,
+        mem: lns_artifact::resources::DEFAULT_VM_SIZE.mem_mib,
+        cpus_explicit: false,
+        mem_explicit: false,
+        cpus_config: None,
+        mem_config: None,
+        sandbox_user: None,
+        sandbox_uid: None,
+        entrypoint: None,
+        hostname: None,
+        cmd: Vec::new(),
+        env: Vec::new(),
+        workdir: None,
+        debug: false,
+        tty: false,
+        stdin: false,
+        initial_winsize: None,
+        detached: false,
+        published_ports: Vec::new(),
+        volumes: Vec::new(),
+        binds: Vec::new(),
+        auto_remove: false,
+        verify_sandbox: false,
+        definition: Some(definition.to_string()),
+        definition_dir: Some(definition_dir.to_string()),
+        authored_egress: None,
+        packed_filesets: Vec::new(),
+        denied_host_paths: Vec::new(),
+    }
+}
+
+/// `lns sandbox prune`'s half of the build cache: the entries whose document has gone, and the
+/// images those entries were the last to name.
+pub struct RealBuiltImageSweep;
+
+impl crate::ipc::BuiltImageSweep for RealBuiltImageSweep {
+    async fn sweep(&self, cache_root: &Path, surviving_runs: &[String]) -> Result<Vec<String>> {
+        let named = super::cache::still_referenced(
+            &RealCacheFs,
+            cache_root,
+            surviving_runs,
+            &|reference| holds_the_image(cache_root, reference),
+        )
+        .kept;
+        crate::image_store::remove_unreferenced_builds_with(
+            &crate::image_store::RealFs,
+            &crate::image_store::real::RealCaches::new(cache_root),
+            &cache_root.join("images"),
+            &std::collections::HashSet::new(),
+            &named,
+        )
+        .await
+    }
+}
+
 /// What a build guest wrote, read off its upper volume once the guest has stopped.
 pub(crate) fn capture_change_set(
     run_id: &str,
