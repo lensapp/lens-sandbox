@@ -20,7 +20,18 @@ lns service status   # report whether it's running (PID, uptime, version)
 lns service stop     # ask it to shut down
 ```
 
-You can also quit it from the **Quit** item in its tray menu.
+Its tray menu opens two views and quits the service. The **Audit** view shows the
+timeline of what the runs did. The **Approvals** view shows what they were
+asked, one row per question, gathered under the sandbox that was asked. A mark
+names each question. Point to the mark to read what it asks. The list holds
+what the runs are waiting on. **Archive** holds the rest, behind one click, and
+is open already when nothing waits. Open a row to see the action its card
+showed, and everything that answers it. An open row answers the entry, and
+files it in the Archive, the way
+[`lns approval`](cli-reference.md#lns-approval) answers one. Choose a sandbox or an
+answer to narrow the list. An open connector row offers the grant its card
+offered, so a connector card you closed is answered there too. **Quit** stops
+the service.
 
 If `lns run` reports that it can't reach the service, start it with
 `lns service start`.
@@ -36,8 +47,11 @@ Two environment variables override the defaults (mostly useful for development):
 - `LNS_SOCKET_PATH` — use a specific socket path.
 - `LNS_SERVICE_BIN` — use a specific `lns-service` binary.
 - `LNS_HEADLESS=1` — run without the tray or approval window even when a
-  display is present. Interactive prompts can't be shown headless, so
-  approvals need pre-authorized rules in a mixin the run names.
+  display is present. No card can be shown, so the terminal is the only surface:
+  `lns approval ls` shows what a run has been asked, and `lns approval answer`
+  answers it. A held request still fails closed while it waits, so the answer
+  decides the next attempt rather than the one that raised it. Pre-authorized
+  rules in a mixin the run names avoid the question altogether.
 
 ## Updating
 

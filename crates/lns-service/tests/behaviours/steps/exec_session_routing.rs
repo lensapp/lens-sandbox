@@ -14,6 +14,7 @@ fn make_handle(
         input_tx: Some(input_tx),
         exec_sessions: Default::default(),
         connector: None,
+        approvals: None,
         name: String::new(),
         image: String::new(),
         command: String::new(),

@@ -509,6 +509,7 @@ where
         input_tx: Some(input_tx),
         exec_sessions: Default::default(),
         connector: None,
+        approvals: None,
         name: String::new(),
         image: image_label,
         command: command_label,

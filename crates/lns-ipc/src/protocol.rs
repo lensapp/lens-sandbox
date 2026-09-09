@@ -120,6 +120,18 @@ pub enum Request {
     PruneVolumes {
         dry_run: bool,
     },
+    /// What each run has been asked, or one run's own when a sandbox is named.
+    ListApprovals {
+        sandbox: Option<String>,
+    },
+    AnswerApproval {
+        id: String,
+        answer: ApprovalAnswer,
+    },
+    /// Clears one entry from a run's list. What it decided stays decided.
+    RemoveApproval {
+        id: String,
+    },
     PullImage {
         image: String,
         expected_digest: String,
@@ -314,6 +326,29 @@ pub enum Response {
         reclaimed_bytes: u64,
         failed: Vec<VolumePruneFailure>,
     },
+    ApprovalList {
+        approvals: Vec<ApprovalInfo>,
+    },
+    ApprovalAnswered {
+        approval: ApprovalInfo,
+    },
+    /// No entry answers to the id — an answer, not a fault, the way `RunUnknown` is.
+    ApprovalUnknown {
+        id: String,
+    },
+    /// The answer decided nothing, for the reason named: a rule the gate reaches first, or an entry with no rule of its own.
+    ApprovalNotWritten {
+        id: String,
+        reason: String,
+    },
+    ApprovalRemoved {
+        id: String,
+    },
+    /// The entry stays, because the list could not be written.
+    ApprovalKept {
+        id: String,
+        reason: String,
+    },
     ImagePulled {
         image: ImageInfo,
         warnings: Vec<String>,
@@ -505,6 +540,50 @@ pub struct VolumeInfo {
     pub created: String,
     /// Every sandbox that declares this volume — several can, because a stopped sandbox holds its data until it is removed.
     pub in_use_by: Vec<String>,
+}
+
+/// One question a run was asked, as `lns approval ls` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalInfo {
+    pub id: String,
+    pub sandbox: Option<String>,
+    /// What was asked about: a destination, a connector, or the notice's own words.
+    pub subject: String,
+    /// The gate's own name for it (`CONNECT api.linear.app:443`); a connector and a notice have none.
+    pub action: Option<String>,
+    pub kind: ApprovalEntryKind,
+    /// The answer it has, in the words the list prints: `undecided`, `always allow`, and the rest.
+    pub answer: String,
+    /// Whether `lns approval answer` decides this entry; a connector and a notice are decided elsewhere.
+    pub answerable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalEntryKind {
+    Destination,
+    Connector,
+    Notice,
+}
+
+impl ApprovalEntryKind {
+    /// What the entry asks about, as `lns approval ls` prints it. A notice asks nothing, so it names no question.
+    pub fn question(&self) -> &'static str {
+        match self {
+            Self::Destination => "destination",
+            Self::Connector => "connector",
+            Self::Notice => "",
+        }
+    }
+}
+
+/// The verdicts an entry takes once the request that raised it has gone; a once verdict answers a request the guest still holds, which only the window can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalAnswer {
+    AlwaysAllow,
+    AlwaysDeny,
+    AskAgain,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
