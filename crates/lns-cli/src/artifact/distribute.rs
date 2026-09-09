@@ -269,7 +269,6 @@ fn report_packed<W: Write>(
     Ok(())
 }
 
-/// What one push drives: the author's files, the directory that roots them, the registry, the version index, the builder behind a path-form `spec.image`, and what this machine lets a built image weigh.
 /// What a dry run needs of the world: the same document sources a push reads, and the same size discipline it is held to.
 pub struct DryRunPorts<'a, F: Fs + ?Sized, B: ImageBuilder + ?Sized> {
     pub fs: &'a F,
@@ -279,6 +278,7 @@ pub struct DryRunPorts<'a, F: Fs + ?Sized, B: ImageBuilder + ?Sized> {
     pub rebuild: bool,
 }
 
+/// What one push drives: the author's files, the directory that roots them, the registry, the version index, the builder behind a path-form `spec.image`, and what this machine lets a built image weigh.
 pub struct PushPorts<
     'a,
     F: Fs + ?Sized,

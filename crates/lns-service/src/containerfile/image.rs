@@ -40,14 +40,13 @@ pub(crate) fn declared_env(config: &str) -> Result<Vec<(String, String)>> {
 /// A step's `created` is fixed, because the wall clock would make an unchanged instruction on an unchanged parent a new digest on every build and nothing could ever be reused.
 pub(crate) const STEP_CREATED: &str = "1970-01-01T00:00:00Z";
 
-/// The exact manifest bytes a push uploads: what this machine holds is the parsed manifest, and a
-/// registry addresses the bytes, so the re-serialization is held to the digest the build recorded.
+/// The exact manifest bytes a push uploads: this machine holds a parsed manifest and a registry addresses bytes, so the re-serialization is held to the digest the build recorded.
 pub(crate) fn manifest_bytes(manifest: &OciImageManifest, digest: &str) -> Result<String> {
     let bytes = serde_json::to_string(manifest).context("serializing the built manifest")?;
     let arrived = format!("sha256:{}", hex::encode(Sha256::digest(bytes.as_bytes())));
     if arrived != digest {
         bail!(
-            "the built manifest no longer hashes to {digest} but to {arrived};              a push must upload the bytes its digest names"
+            "the built manifest no longer hashes to {digest} but to {arrived}; a push must upload the bytes its digest names"
         );
     }
     Ok(bytes)

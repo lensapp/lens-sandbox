@@ -228,8 +228,7 @@ pub struct PushBuild<'a> {
     pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
 }
 
-/// `lns push`: build what `spec.image` names, or answer with the key alone, and hand the caller
-/// every blob of the image so the side that holds the registry login uploads it (§6).
+/// `lns push`: build what `spec.image` names, or answer with the key alone, and hand back every blob of the image so the side that holds the registry login uploads it (§6).
 pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Response> {
     let definition = request.definition;
     let image = image_of(definition)?;
@@ -273,8 +272,7 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
     })
 }
 
-/// The image as an uploader needs it: the exact manifest bytes its digest was taken over, its
-/// config, and the file this machine holds each layer in.
+/// The image as an uploader needs it: the manifest bytes its digest was taken over, its config, and the file this machine holds each layer in.
 fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
     let cache_dir = crate::cache::root()?;
     let manifests = cache_dir.join("manifests");
@@ -316,8 +314,7 @@ fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
     })
 }
 
-/// The key a build would be remembered under, read without building: the `FROM` still resolves,
-/// because the key stands on the digest it resolves to.
+/// The key a build would be remembered under, read without building: the `FROM` still resolves, because the key stands on the digest it names.
 async fn plan(
     request: &BuildRequest<'_>,
     frame_tx: Sender<WireFrame>,

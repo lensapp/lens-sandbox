@@ -1977,8 +1977,7 @@ fn printed_key(world: &E2eWorld) -> Option<String> {
         .find_map(|line| line.strip_prefix("key ").map(|key| key.trim().to_string()))
 }
 
-/// Slice 5 of lensapp/lens-sandbox#393: what a push of a path-form `spec.image` publishes, and
-/// what a machine that never built it receives.
+/// Slice 5 of lensapp/lens-sandbox#393: what a push of a path-form `spec.image` publishes.
 #[when("the user pushes the sandbox definition to the local registry")]
 fn push_the_definition(world: &mut E2eWorld) {
     let host = world
@@ -2054,8 +2053,7 @@ fn the_image_landed_beside_the_artifact(world: &mut E2eWorld) -> Result<(), Stri
     }
 }
 
-/// A second machine: the service that built and pushed is stopped, and a home that has never
-/// built anything takes its place, so what the run finds can only have come off the registry.
+/// A second machine: the service that pushed is stopped and a home that has never built anything takes its place, so what the run finds came off the registry.
 #[when("the user pulls the pushed sandbox onto a machine that has never built it")]
 fn pull_onto_a_clean_machine(world: &mut E2eWorld) -> Result<(), String> {
     let reference = world
