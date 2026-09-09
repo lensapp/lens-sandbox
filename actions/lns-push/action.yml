@@ -45,66 +45,13 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Read the tags
+    - name: Read the inputs
       id: tags
       shell: bash
       env:
         INPUT_TAGS: ${{ inputs.tags }}
-      run: |
-        set -euo pipefail
-
-        refuse() {
-          echo "::error::tag '$1' $2. Use <namespace>/<name>:<tag> or <host>/<namespace>/<name>:<tag> — lns-push never assumes a namespace."
-          exit 1
-        }
-
-        file="$RUNNER_TEMP/lns-push-tags.txt"
-        : >"$file"
-        first=""
-        host=""
-        repo=""
-        while IFS= read -r raw; do
-          tag=$(printf '%s' "$raw" | tr -d '[:space:]')
-          [ -n "$tag" ] || continue
-          case "${tag##*/}" in
-            *:*) : ;;
-            *) refuse "$tag" "names no tag" ;;
-          esac
-          repository=${tag%:*}
-          case "${repository%%/*}" in
-            *.* | *:* | localhost)
-              tag_host=${repository%%/*}
-              tag_repo=${repository#*/}
-              ;;
-            *)
-              tag_host=hub.lns.run
-              tag_repo=$repository
-              ;;
-          esac
-          case "$tag_repo" in
-            */*) : ;;
-            *) refuse "$tag" "has no namespace segment" ;;
-          esac
-          printf '%s\n' "$tag" >>"$file"
-          if [ -z "$first" ]; then
-            first=$tag
-            host=$tag_host
-            repo=$tag_repo
-          fi
-        done <<TAGS
-        $(printf '%s' "$INPUT_TAGS" | tr ',' '\n')
-        TAGS
-
-        if [ -z "$first" ]; then
-          echo "::error::tags is empty; give at least one <namespace>/<name>:<tag>."
-          exit 1
-        fi
-        {
-          echo "first=$first"
-          echo "host=$host"
-          echo "repository=$repo"
-          echo "file=$file"
-        } >>"$GITHUB_OUTPUT"
+        INPUT_EXACT_TOOLS: ${{ inputs.require-exact-tool-versions }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/push-inputs.sh"
 
     - name: Validate the document
       shell: bash
@@ -123,7 +70,7 @@ runs:
       shell: bash
       env:
         INPUT_FILE: ${{ inputs.file }}
-        INPUT_EXACT_TOOLS: ${{ inputs.require-exact-tool-versions }}
+        INPUT_EXACT_TOOLS: ${{ steps.tags.outputs.exact-tools }}
         FIRST_TAG: ${{ steps.tags.outputs.first }}
       run: |
         set -euo pipefail
