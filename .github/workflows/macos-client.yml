@@ -22,7 +22,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - run: make -C clients/macos verify
+      - run: |
+          if make -C clients/macos verify > native-verify.log 2>&1; then
+            cat native-verify.log
+          else
+            cat native-verify.log
+            sh scripts/gate-annotate.sh native-verify.log
+          fi
 
   bundle:
     needs: verify
@@ -36,8 +42,20 @@ jobs:
           cache-workspaces: .
           cache-shared-key: native-macos-bundle
           cache-on-failure: true
-      - run: make -C clients/macos package
-      - run: make -C clients/macos smoke
+      - run: |
+          if make -C clients/macos package > native-package.log 2>&1; then
+            cat native-package.log
+          else
+            cat native-package.log
+            sh scripts/gate-annotate.sh native-package.log
+          fi
+      - run: |
+          if make -C clients/macos smoke > native-smoke.log 2>&1; then
+            cat native-smoke.log
+          else
+            cat native-smoke.log
+            sh scripts/gate-annotate.sh native-smoke.log
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: LNS-macos-${{ github.sha }}
