@@ -701,9 +701,14 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
     let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
     let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
     let result = match author::load_definition_json_at(&fs, &path) {
-        Ok(doc) if push_args.dry_run => {
-            distribute::push_dry_run(&fs, &project_dir, &doc, &push_args.reference, &mut out)
-        }
+        Ok(doc) if push_args.dry_run => distribute::push_dry_run_formatted(
+            &fs,
+            &project_dir,
+            &doc,
+            &push_args.reference,
+            push_args.output.format,
+            &mut out,
+        ),
         Ok(doc) => {
             let resolver = StepResolver {
                 versions: w.tool_index.clone(),
@@ -711,7 +716,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
             };
             let answer = w.sandbox.prompt_answer.clone().unwrap_or_default();
             let mut terminal = terminal_for(w, &answer);
-            distribute::push(
+            distribute::push_formatted(
                 distribute::PushPorts {
                     fs: &fs,
                     cwd: &project_dir,
@@ -724,6 +729,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                     assume_yes: push_args.assume_yes,
                     terminal: &mut terminal,
                 },
+                push_args.output.format,
                 &mut out,
             )
             .await

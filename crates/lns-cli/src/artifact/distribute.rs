@@ -207,6 +207,35 @@ pub struct Confirm<'a> {
 /// What each local mixin published as, keyed by its document so every entry naming it pins the same digest.
 type PublishedMixins = Vec<(std::path::PathBuf, String)>;
 
+#[derive(Debug, serde::Serialize)]
+struct PublishedMixin {
+    reference: String,
+    digest: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReadmeLayer {
+    digest: String,
+    size: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ToolVersion {
+    name: String,
+    requested: String,
+    resolved: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PushReport {
+    reference: String,
+    digest: String,
+    mixins: Vec<PublishedMixin>,
+    readme: Option<ReadmeLayer>,
+    tools: Vec<ToolVersion>,
+    dry_run: bool,
+}
+
 /// Publish each planned mixin under its own repository, children first, so every digest exists before the document that pins it is built.
 async fn publish_planned_mixins<F, P, R, W>(
     fs: &F,
@@ -214,7 +243,7 @@ async fn publish_planned_mixins<F, P, R, W>(
     resolver: &R,
     plan: &super::mixin_plan::MixinPlan,
     out: &mut W,
-) -> Result<PublishedMixins>
+) -> Result<(PublishedMixins, Vec<PublishedMixin>, Vec<ToolVersion>)>
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
@@ -222,9 +251,17 @@ where
     W: Write,
 {
     let mut published: PublishedMixins = Vec::new();
+    let mut reports = Vec::new();
+    let mut tools = Vec::new();
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
-        let (doc, _) = pin_declared_tools(resolver, &doc).await?;
+        let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
+        tools.extend(
+            pinned_tools
+                .iter()
+                .map(tool_version)
+                .collect::<Result<Vec<_>>>()?,
+        );
         let (built, packed) = build(fs, &node.root, &doc)?;
         report_packed(out, "packed", &built, &packed)?;
         let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
@@ -246,8 +283,12 @@ where
             node.document.clone(),
             format!("{}@{}", node.repository, built.manifest_digest),
         ));
+        reports.push(PublishedMixin {
+            reference: format!("{}:{tag}", node.repository),
+            digest: built.manifest_digest,
+        });
     }
-    Ok(published)
+    Ok((published, reports, tools))
 }
 
 /// The same walk offline: each digest is computable without the network, so the preview names what every artifact would publish as.
@@ -255,16 +296,18 @@ fn preview_planned_mixins<F, W>(
     fs: &F,
     plan: &super::mixin_plan::MixinPlan,
     out: &mut W,
-) -> Result<PublishedMixins>
+) -> Result<(PublishedMixins, Vec<PublishedMixin>)>
 where
     F: Fs + ?Sized,
     W: Write,
 {
     let mut published: PublishedMixins = Vec::new();
+    let mut reports = Vec::new();
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
         let (built, packed) = build(fs, &node.root, &doc)?;
         report_packed(out, "would pack", &built, &packed)?;
+        let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
         writeln!(
             out,
             "would publish mixin {} → {}@{} ({})",
@@ -277,8 +320,12 @@ where
             node.document.clone(),
             format!("{}@{}", node.repository, built.manifest_digest),
         ));
+        reports.push(PublishedMixin {
+            reference: format!("{}:{tag}", node.repository),
+            digest: built.manifest_digest,
+        });
     }
-    Ok(published)
+    Ok((published, reports))
 }
 
 /// A mixin rides along as its own artifact, so it faces the same gate as the document that names it — otherwise a tool no consumer can provision publishes just by being layered on.
@@ -295,6 +342,23 @@ fn refuse_unpushable_tools(doc: &[u8]) -> Result<()> {
     })
 }
 
+fn tool_version(tool: &PinnedTool) -> Result<ToolVersion> {
+    let declared = lns_artifact::tools::parse(&tool.declared)?;
+    let published = lns_artifact::tools::parse(&tool.published)?;
+    Ok(ToolVersion {
+        name: declared.name,
+        requested: declared.version,
+        resolved: Some(published.version),
+    })
+}
+
+fn readme_layer(built: &BuiltArtifact) -> Option<ReadmeLayer> {
+    built.readme_layer().map(|layer| ReadmeLayer {
+        digest: layer.digest.clone(),
+        size: layer.data.len(),
+    })
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, W>(
     ports: PushPorts<'_, F, P, R>,
@@ -303,6 +367,58 @@ pub async fn push<F, P, R, W>(
     confirm: Confirm<'_>,
     out: &mut W,
 ) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    W: Write,
+{
+    push_formatted(
+        ports,
+        doc,
+        reference,
+        confirm,
+        crate::output::Format::Table,
+        out,
+    )
+    .await
+}
+
+pub async fn push_formatted<F, P, R, W>(
+    ports: PushPorts<'_, F, P, R>,
+    doc: &[u8],
+    reference: &str,
+    confirm: Confirm<'_>,
+    format: crate::output::Format,
+    out: &mut W,
+) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    W: Write,
+{
+    match format {
+        crate::output::Format::Table => {
+            push_collect(ports, doc, reference, confirm, out).await?;
+            Ok(0)
+        }
+        crate::output::Format::Json => {
+            let mut table = Vec::new();
+            let report = push_collect(ports, doc, reference, confirm, &mut table).await?;
+            crate::output::emit_object(&report, out)?;
+            Ok(0)
+        }
+    }
+}
+
+async fn push_collect<F, P, R, W>(
+    ports: PushPorts<'_, F, P, R>,
+    doc: &[u8],
+    reference: &str,
+    confirm: Confirm<'_>,
+    out: &mut W,
+) -> Result<PushReport>
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
@@ -326,10 +442,12 @@ where
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
     super::mixin_plan::confirm_mixin_publication(&plan, reference, assume_yes, terminal, out)?;
-    let published = publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
+    let (published, mixins, mut tools) =
+        publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
     let doc = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     let (built, packed) = build(fs, cwd, &doc)?;
+    let readme = readme_layer(&built);
     report_packed(out, "packed", &built, &packed)?;
     for tool in &pinned_tools {
         if tool.verification == Some(IndexVerification::Absent) {
@@ -341,6 +459,12 @@ where
         }
         writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
+    tools.extend(
+        pinned_tools
+            .iter()
+            .map(tool_version)
+            .collect::<Result<Vec<_>>>()?,
+    );
     producer
         .push_built(&built, reference)
         .await
@@ -355,7 +479,14 @@ where
         "built and pushed {reference}@{}",
         built.manifest_digest
     )?;
-    Ok(0)
+    Ok(PushReport {
+        reference: reference.to_string(),
+        digest: built.manifest_digest,
+        mixins,
+        readme,
+        tools,
+        dry_run: false,
+    })
 }
 
 /// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — offline, printing the digests that would publish; nothing is uploaded.
@@ -370,14 +501,55 @@ where
     F: Fs + ?Sized,
     W: Write,
 {
+    push_dry_run_formatted(fs, cwd, doc, reference, crate::output::Format::Table, out)
+}
+
+pub fn push_dry_run_formatted<F, W>(
+    fs: &F,
+    cwd: &Path,
+    doc: &[u8],
+    reference: &str,
+    format: crate::output::Format,
+    out: &mut W,
+) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    W: Write,
+{
+    match format {
+        crate::output::Format::Table => {
+            push_dry_run_collect(fs, cwd, doc, reference, out)?;
+            Ok(0)
+        }
+        crate::output::Format::Json => {
+            let mut table = Vec::new();
+            let report = push_dry_run_collect(fs, cwd, doc, reference, &mut table)?;
+            crate::output::emit_object(&report, out)?;
+            Ok(0)
+        }
+    }
+}
+
+fn push_dry_run_collect<F, W>(
+    fs: &F,
+    cwd: &Path,
+    doc: &[u8],
+    reference: &str,
+    out: &mut W,
+) -> Result<PushReport>
+where
+    F: Fs + ?Sized,
+    W: Write,
+{
     refuse_unpushable_tools(doc)?;
     pack_path_filesets(fs, cwd, doc)?;
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
-    let published = preview_planned_mixins(fs, &plan, out)?;
+    let (published, mixins) = preview_planned_mixins(fs, &plan, out)?;
     let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (built, packed) = build(fs, cwd, &pinned)?;
+    let readme = readme_layer(&built);
     report_packed(out, "would pack", &built, &packed)?;
     let mut docs: Vec<&[u8]> = vec![&pinned];
     docs.extend(plan.nodes.iter().map(|node| node.bytes.as_slice()));
@@ -395,7 +567,33 @@ where
         built.manifest_digest
     )?;
     writeln!(out, "dry run — built and validated; nothing uploaded")?;
-    Ok(0)
+    Ok(PushReport {
+        reference: reference.to_string(),
+        digest: built.manifest_digest,
+        mixins,
+        readme,
+        tools: preview_tool_versions(&docs),
+        dry_run: true,
+    })
+}
+
+fn preview_tool_versions(docs: &[&[u8]]) -> Vec<ToolVersion> {
+    docs.iter()
+        .filter_map(|doc| serde_json::from_slice::<serde_json::Value>(doc).ok())
+        .filter_map(|value| value["spec"]["tools"].as_array().cloned())
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .and_then(|entry| lns_artifact::tools::parse(entry).ok())
+        })
+        .map(|tool| ToolVersion {
+            name: tool.name,
+            resolved: lns_artifact::tools::is_exact_version(&tool.version)
+                .then(|| tool.version.clone()),
+            requested: tool.version,
+        })
+        .collect()
 }
 
 /// Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
@@ -1218,6 +1416,95 @@ mod tests {
         assert!(
             producer.uploaded.borrow().is_empty(),
             "the symlink target must never reach the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_push_reports_every_published_part() {
+        let fs = MapFs::with(&[
+            ("/work/README.md", "# Hermes\n"),
+            (
+                "/work/mixins/pg/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  env:\n    MODE: research\n",
+            ),
+        ]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg/"],"tools":["node@22"]}}"#;
+        let producer = FakeProducer::ok();
+        let resolver = FakeResolver::with(&[("node@22", "22.11.0")]);
+        let mut out = Vec::new();
+        push_formatted(
+            PushPorts {
+                fs: &fs,
+                cwd: cwd(),
+                producer: &producer,
+                resolver: &resolver,
+            },
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            Confirm {
+                assume_yes: true,
+                terminal: &mut crate::terminal::ScriptedTerminal::answering(&[]),
+            },
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
+        assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(json["dry_run"], false);
+        assert_eq!(json["mixins"].as_array().unwrap().len(), 1);
+        assert!(
+            json["mixins"][0]["reference"]
+                .as_str()
+                .unwrap()
+                .starts_with("ghcr.io/team/postgres-tools:sha256-")
+        );
+        assert!(
+            json["mixins"][0]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            json["readme"]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(json["readme"]["size"], 9);
+        assert_eq!(
+            json["tools"],
+            serde_json::json!([{"name":"node","requested":"22","resolved":"22.11.0"}])
+        );
+    }
+
+    #[test]
+    fn json_dry_run_is_one_object_with_preview_digests() {
+        let fs = MapFs::with(&[("/work/README.md", "# Hermes\n")]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
+        let mut out = Vec::new();
+        push_dry_run_formatted(
+            &fs,
+            cwd(),
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
+        assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["mixins"], serde_json::json!([]));
+        assert_eq!(json["readme"]["size"], 9);
+        assert_eq!(
+            json["tools"],
+            serde_json::json!([{"name":"node","requested":"22.11.0","resolved":"22.11.0"}])
         );
     }
 
