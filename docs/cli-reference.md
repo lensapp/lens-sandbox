@@ -257,6 +257,7 @@ lns sandbox ls [-a] [--format <table|json>]
 lns sandbox inspect <RUN> [--format <table|json>]
 lns sandbox rm <RUN> [-f]
 lns sandbox prune [-f]
+lns sandbox build [-f <FILE>] [--rebuild]
 ```
 
 A sandbox outlives its workload. When the workload exits — or you `lns stop` it —
@@ -276,7 +277,8 @@ workload does.
 | `ls`       | `lns ps`     | List running sandboxes with their state, `CREATED`, `STARTED`, CPU, and memory. `CREATED` is when the sandbox was made and never changes; `STARTED` is when it last booted, so `lns start` moves it. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
 | `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration, including the same `CREATED` and `STARTED` times `lns ps` shows. `CPUS` and `MEM` report the size the sandbox booted with, for a running and for a stopped one, so a document that declares `resources` reads back what it resolved to and not the flag. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
 | `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. What it granted and declined about a connector goes with it, so a new sandbox of that name is asked again. Refuses a running one; `-f`/`--force` stops it first. |
-| `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks first, unless `-f`/`--force`. |
+| `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. It also drops every image a `lns sandbox build` produced that nothing names any more — no document on this machine, and no sandbox — and names each one it dropped. Lists the sandboxes and those images, and asks first, unless `-f`/`--force`. |
+| `build`    | —            | Build the Containerfile this document's `spec.image` names (`./lns.yaml` unless `-f`/`--file` names another), and print the key the build is addressed by. Nothing is published: the image stays on this machine. Each instruction is cached, so an unchanged document rebuilds nothing; `--rebuild` ignores the cache and runs every instruction again. The build runs under the document's own policy, so a document with `mixins` builds what its mixins resolve to. |
 
 ## `lns volume`
 
