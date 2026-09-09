@@ -241,6 +241,18 @@ impl BuildHost for RealBuildHost {
         })
     }
 
+    async fn holds_a_directory_at(&self, parent: &str, path: &str) -> Result<bool> {
+        let manifests = self.cache_dir.join("manifests");
+        let digests: Vec<String> = parent_image(&manifests, parent)?
+            .manifest
+            .layers
+            .iter()
+            .map(|layer| layer.digest.clone())
+            .collect();
+        let layers = CachedLayers(LayerCache::new(self.cache_dir.join("layers")));
+        Ok(super::tree::entry_at(&layers, &digests, path)? == super::tree::ParentEntry::Directory)
+    }
+
     async fn copy(&self, step: &CopyStep) -> Result<ChangeSet> {
         super::context::stage(&RealContextFs, &self.context, step)
     }
@@ -275,6 +287,15 @@ impl BuildHost for RealBuildHost {
             );
         }
         Ok(built.reference)
+    }
+}
+
+/// The image's own layer blobs, as the local layer cache holds them.
+struct CachedLayers(LayerCache);
+
+impl super::tree::LayerBytes for CachedLayers {
+    fn read(&self, digest: &str) -> Result<Vec<u8>> {
+        self.0.read(digest)
     }
 }
 

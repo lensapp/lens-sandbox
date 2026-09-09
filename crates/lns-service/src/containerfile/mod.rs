@@ -12,6 +12,7 @@ pub(crate) mod parse;
 pub mod real;
 pub(crate) mod step;
 pub(crate) mod tar_layer;
+pub(crate) mod tree;
 pub(crate) mod upper;
 
 use anyhow::{Context, Result};

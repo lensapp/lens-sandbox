@@ -36,6 +36,8 @@ pub(crate) struct RunStep {
 pub(crate) struct CopyStep {
     pub sources: Vec<String>,
     pub destination: String,
+    /// Whether the destination names a directory the sources land in, rather than the path one source is written at.
+    pub into_directory: bool,
     pub owner: Option<String>,
     pub line: usize,
 }
@@ -80,6 +82,8 @@ pub(crate) trait BuildHost {
     /// The digest-pinned reference the `FROM` resolved to, pulled so the build can stand on its config.
     async fn resolve_base(&self, image: &str) -> Result<Base>;
     async fn run(&self, step: &RunStep) -> Result<RunOutcome>;
+    /// Whether the image the build has so far holds a directory at this path, which is what decides where a single source lands.
+    async fn holds_a_directory_at(&self, parent: &str, path: &str) -> Result<bool>;
     async fn copy(&self, step: &CopyStep) -> Result<ChangeSet>;
     async fn commit(&self, commit: &Commit<'_>) -> Result<String>;
 }
@@ -187,7 +191,8 @@ async fn step<H: BuildHost>(
             return commit(host, build, Some(&changes), kind).await;
         }
         InstructionKind::Copy(transfer) | InstructionKind::Add(transfer) => {
-            let changes = host.copy(&copy_step(build, line, transfer)).await?;
+            let step = copy_step(host, build, line, transfer).await?;
+            let changes = host.copy(&step).await?;
             return commit(host, build, Some(&changes), kind).await;
         }
         InstructionKind::Env(pairs) => {
@@ -290,18 +295,33 @@ fn run_argv(build: &Build, command: &Command, here_docs: &[String]) -> Vec<Strin
     }
 }
 
-fn copy_step(build: &Build, line: usize, transfer: &Transfer) -> CopyStep {
+/// Where a copy lands: a trailing slash and more than one source both name a directory, and for a
+/// single source the image the build has so far is what says whether one already stands there.
+async fn copy_step<H: BuildHost>(
+    host: &H,
+    build: &Build,
+    line: usize,
+    transfer: &Transfer,
+) -> Result<CopyStep> {
     let scope = scope(build);
-    CopyStep {
-        sources: transfer
-            .sources
-            .iter()
-            .map(|source| expand(source, &scope))
-            .collect(),
-        destination: join_workdir(&build.workdir, &expand(&transfer.destination, &scope)),
+    let sources: Vec<String> = transfer
+        .sources
+        .iter()
+        .map(|source| expand(source, &scope))
+        .collect();
+    let destination = join_workdir(&build.workdir, &expand(&transfer.destination, &scope));
+    let into_directory = destination.ends_with('/')
+        || sources.len() > 1
+        || host
+            .holds_a_directory_at(&build.parent, &destination)
+            .await?;
+    Ok(CopyStep {
+        sources,
+        destination,
+        into_directory,
         owner: transfer.owner.clone(),
         line,
-    }
+    })
 }
 
 /// A stage inherits a global `ARG` only where it declares the name again, which is Docker's rule.
@@ -472,6 +492,8 @@ mod tests {
         wrote: Mutex<Option<ChangeSet>>,
         fileset_paths: Vec<String>,
         base_env: Vec<(String, String)>,
+        /// The paths the image the build stands on holds a directory at, as the parent tree answers.
+        directories: Vec<String>,
         run_fails_on_line: Option<usize>,
         /// One way for each of the other three answers to fail, so no test needs a host of its own.
         base_fails: bool,
@@ -492,6 +514,11 @@ mod tests {
 
         fn seeding(mut self, paths: &[&str]) -> Self {
             self.fileset_paths = paths.iter().map(|p| p.to_string()).collect();
+            self
+        }
+
+        fn holding_directories(mut self, paths: &[&str]) -> Self {
+            self.directories = paths.iter().map(|p| p.to_string()).collect();
             self
         }
 
@@ -593,6 +620,10 @@ mod tests {
                 changes: self.wrote.lock().unwrap().clone().unwrap_or_default(),
                 fileset_paths: self.fileset_paths.clone(),
             })
+        }
+
+        async fn holds_a_directory_at(&self, _parent: &str, path: &str) -> Result<bool> {
+            Ok(self.directories.iter().any(|held| held == path))
         }
 
         async fn copy(&self, step: &CopyStep) -> Result<ChangeSet> {
@@ -1055,6 +1086,53 @@ mod tests {
         let step = host.copies().pop().expect("the COPY reached the host");
         assert_eq!(step.destination, "/srv/dist");
         assert_eq!(step.sources, vec!["app".to_string()]);
+    }
+
+    /// `COPY entrypoint.sh /usr/local/bin` where the image has that directory writes into it; a
+    /// regular file at that path would shadow every binary the base image shipped there.
+    #[tokio::test]
+    async fn a_copy_onto_a_directory_the_image_already_has_lands_inside_it() {
+        let host = FakeHost::new().holding_directories(&["/usr/local/bin"]);
+        built(&host, "FROM alpine\nCOPY entrypoint.sh /usr/local/bin\n").await;
+
+        let step = host.copies().pop().expect("the COPY reached the host");
+        assert!(
+            step.into_directory,
+            "the image holds a directory at the destination, so the source lands in it",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_onto_a_path_the_image_has_no_directory_at_writes_the_file_there() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nCOPY entrypoint.sh /usr/local/bin/entry\n",
+        )
+        .await;
+
+        let step = host.copies().pop().expect("the COPY reached the host");
+        assert!(!step.into_directory);
+    }
+
+    #[tokio::test]
+    async fn a_trailing_slash_and_several_sources_each_name_a_directory_without_asking_the_image() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nCOPY skills/ /opt/agent-skills/\nCOPY one two /srv/both\n",
+        )
+        .await;
+
+        let steps = host.copies();
+        assert!(
+            steps[0].into_directory,
+            "a trailing slash names a directory"
+        );
+        assert!(
+            steps[1].into_directory,
+            "more than one source can only land in a directory",
+        );
     }
 
     #[tokio::test]

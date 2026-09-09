@@ -51,14 +51,13 @@ pub(crate) fn stage<F: ContextFs>(fs: &F, context: &Path, step: &CopyStep) -> Re
             gid: owner.gid,
         });
     }
-    let into_directory = step.sources.len() > 1 || step.destination.ends_with('/');
     for source in &step.sources {
         let from = rooted(context, source)?;
         let meta = fs
             .meta(&from)
             .with_context(|| format!("reading {source} in the build context"))?
             .with_context(|| format!("the build context holds no {source}"))?;
-        let target = if into_directory {
+        let target = if step.into_directory {
             format!("{}/{}", trimmed(&step.destination), base_name(source))
         } else {
             trimmed(&step.destination).to_string()
@@ -379,10 +378,19 @@ pub(crate) mod tests {
 
     fn step(sources: &[&str], destination: &str) -> CopyStep {
         CopyStep {
+            into_directory: sources.len() > 1 || destination.ends_with('/'),
             sources: sources.iter().map(|s| s.to_string()).collect(),
             destination: destination.to_string(),
             owner: None,
             line: 4,
+        }
+    }
+
+    /// The executor decides this from the image the build stands on; the context only obeys it.
+    fn step_into_directory(sources: &[&str], destination: &str) -> CopyStep {
+        CopyStep {
+            into_directory: true,
+            ..step(sources, destination)
         }
     }
 
@@ -397,6 +405,29 @@ pub(crate) mod tests {
             "{:#}",
             stage(context, Path::new("/ctx"), step).expect_err("this copy must be refused")
         )
+    }
+
+    /// The destination is a directory the image already holds, so the file lands under it by name.
+    #[test]
+    fn one_file_lands_under_a_destination_the_step_says_is_a_directory() {
+        let mut context = FakeContext::new();
+        context.file("entrypoint.sh", 0o755, b"#!/bin/sh\n");
+
+        let changes = staged(
+            &context,
+            &step_into_directory(&["entrypoint.sh"], "/usr/local/bin"),
+        );
+
+        assert_eq!(
+            changes.last(),
+            Some(&Change::Regular {
+                path: "usr/local/bin/entrypoint.sh".into(),
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                bytes: b"#!/bin/sh\n".to_vec(),
+            }),
+        );
     }
 
     #[test]
