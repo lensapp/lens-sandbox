@@ -5,6 +5,7 @@ bundle_test_root=$(mktemp -d)
 trap 'rm -rf "$bundle_test_root"' EXIT HUP INT TERM
 export PATH="$bundle_scripts/fixtures:$PATH"
 export BUNDLE_SIGN_LOG="$bundle_test_root/sign.log"
+export BUNDLE_SIGN_FAIL=0
 mkdir -p "$bundle_test_root/helpers" "$bundle_test_root/output"
 cp "$bundle_scripts/fixtures/lns" "$bundle_test_root/helpers/lns"
 cp "$bundle_scripts/fixtures/lns" "$bundle_test_root/helpers/lns-service"
@@ -25,7 +26,7 @@ grep -q -- '--verify --strict' "$BUNDLE_SIGN_LOG"
 echo 'PASS: versioned bundle contains executable helpers and verified signatures'
 
 cp "$bundle_test_root/output/LNS.app/Contents/Info.plist" "$bundle_test_root/original.plist"
-if BUNDLE_SIGN_FAIL=1 build_bundle; then echo 'FAIL: signing failure was accepted' >&2; exit 1; fi
+if (export BUNDLE_SIGN_FAIL=1; build_bundle); then echo 'FAIL: signing failure was accepted' >&2; exit 1; fi
 cmp "$bundle_test_root/original.plist" "$bundle_test_root/output/LNS.app/Contents/Info.plist"
 echo 'PASS: failed signing preserves the previous bundle'
 
