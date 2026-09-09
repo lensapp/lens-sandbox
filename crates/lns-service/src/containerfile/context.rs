@@ -57,22 +57,27 @@ pub(crate) fn stage<F: ContextFs>(fs: &F, context: &Path, step: &CopyStep) -> Re
             .meta(&from)
             .with_context(|| format!("reading {source} in the build context"))?
             .with_context(|| format!("the build context holds no {source}"))?;
-        let target = if step.into_directory {
-            format!("{}/{}", trimmed(&step.destination), base_name(source))
-        } else {
-            trimmed(&step.destination).to_string()
-        };
         match meta.kind {
+            // Docker copies what a directory holds, never the directory's own name.
             EntryKind::Directory => {
-                changes.push(Change::Directory {
-                    path: guest_path(&target),
-                    mode: meta.mode,
-                    uid: owner.uid,
-                    gid: owner.gid,
-                });
+                let target = trimmed(&step.destination).to_string();
+                if !guest_path(&target).is_empty() {
+                    changes.push(Change::Directory {
+                        path: guest_path(&target),
+                        mode: meta.mode,
+                        uid: owner.uid,
+                        gid: owner.gid,
+                    });
+                }
                 walk(fs, &from, &target, owner, &mut changes)?;
             }
-            _ => changes.push(one_entry(fs, &from, &target, meta, owner)?),
+            _ => {
+                let target = match step.into_directory {
+                    true => format!("{}/{}", trimmed(&step.destination), base_name(source)),
+                    false => trimmed(&step.destination).to_string(),
+                };
+                changes.push(one_entry(fs, &from, &target, meta, owner)?)
+            }
         }
     }
     Ok(ChangeSet { changes })
@@ -496,6 +501,71 @@ pub(crate) mod tests {
                 "srv/app/lib/util.js".to_string(),
             ],
         );
+    }
+
+    /// `COPY skills/ /opt/agent-skills/` lands the skills, not a `skills` directory holding them.
+    #[test]
+    fn a_directory_source_lands_its_contents_at_the_destination() {
+        let mut context = FakeContext::new();
+        context
+            .dir("skills", 0o755)
+            .file("skills/prompts.md", 0o644, b"# prompts\n")
+            .dir("skills/lib", 0o755)
+            .file("skills/lib/util.js", 0o644, b"lib\n");
+
+        let paths: Vec<String> = staged(&context, &step(&["skills"], "/opt/agent-skills/"))
+            .iter()
+            .map(|change| change.path().to_string())
+            .collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "opt".to_string(),
+                "opt/agent-skills".to_string(),
+                "opt/agent-skills/lib".to_string(),
+                "opt/agent-skills/lib/util.js".to_string(),
+                "opt/agent-skills/prompts.md".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn two_directory_sources_land_their_contents_beside_each_other() {
+        let mut context = FakeContext::new();
+        context
+            .dir("one", 0o755)
+            .file("one/a", 0o644, b"a\n")
+            .dir("two", 0o755)
+            .file("two/b", 0o644, b"b\n");
+
+        let paths: Vec<String> = staged(&context, &step(&["one", "two"], "/srv/"))
+            .iter()
+            .map(|change| change.path().to_string())
+            .collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "srv".to_string(),
+                "srv/a".to_string(),
+                "srv".to_string(),
+                "srv/b".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn a_directory_copied_into_the_image_root_needs_no_directory_change_of_its_own() {
+        let mut context = FakeContext::new();
+        context.dir("etc", 0o755).file("etc/motd", 0o644, b"hi\n");
+
+        let paths: Vec<String> = staged(&context, &step(&["etc"], "/"))
+            .iter()
+            .map(|change| change.path().to_string())
+            .collect();
+
+        assert_eq!(paths, vec!["motd".to_string()]);
     }
 
     #[test]
