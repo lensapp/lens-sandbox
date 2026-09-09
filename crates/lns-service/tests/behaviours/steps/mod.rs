@@ -10,6 +10,7 @@ pub mod connector_code_ledger;
 pub mod connector_code_renewal;
 pub mod connector_connect;
 pub mod connector_install;
+pub mod dashboard;
 pub mod declared_launch;
 pub mod declared_tools;
 pub mod env_injection;

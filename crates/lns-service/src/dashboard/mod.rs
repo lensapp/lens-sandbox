@@ -2,7 +2,7 @@ pub mod approvals;
 mod filter;
 mod format;
 pub mod live;
-mod sandboxes;
+pub(crate) mod sandboxes;
 
 pub use filter::{Filters, KINDS, visible_indices};
 
@@ -47,13 +47,7 @@ const WEAK_BORDER: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 const HOVER_LINE: Color32 = Color32::from_rgba_premultiplied(34, 34, 34, 34);
 const DRAG_LINE: Color32 = Color32::from_rgba_premultiplied(64, 64, 64, 64);
 
-#[derive(Debug, Clone, Default)]
-pub struct Sandbox {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-}
+pub use lns_ipc::DashboardSandbox as Sandbox;
 
 /// Which of the window's two lists is on screen: what a run did, or what it was asked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -213,7 +207,7 @@ fn load_timeline(state: &mut DashboardState) {
     }
 }
 
-fn active_sandboxes() -> Vec<Sandbox> {
+pub(crate) fn active_sandboxes() -> Vec<Sandbox> {
     crate::run_registry::snapshot()
         .into_iter()
         .map(|s| Sandbox {

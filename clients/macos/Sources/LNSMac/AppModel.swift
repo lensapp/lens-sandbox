@@ -12,13 +12,16 @@ final class AppModel: ObservableObject {
     @Published var connectionNotice: String?
     var onSnapshot: ((ApprovalSnapshot) -> Void)?
     private let service: ServiceConnection
+    let dashboard: DashboardModel
     private var watching: Task<Void, Never>?
 
     init() {
         let path = ProcessInfo.processInfo.environment["LNS_SOCKET_PATH"]
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/run.lns/service.sock").path
-        service = ServiceConnection(path: path)
+        let connection = ServiceConnection(path: path)
+        service = connection
+        dashboard = DashboardModel(service: connection)
     }
 
     func start() {
@@ -77,5 +80,21 @@ final class AppModel: ObservableObject {
                 NSApplication.shared.terminate(nil)
             } catch { notice = error.localizedDescription }
         }
+    }
+
+    func dismissNotices() {
+        let observed = snapshot.notices
+        guard connected, !observed.isEmpty else { return }
+        Task {
+            do {
+                guard case .acknowledged = try await service.send(.dismissNotices(observed)) else {
+                    throw ServiceError(message: "The service did not confirm notice dismissal.")
+                }
+            } catch { notice = error.localizedDescription }
+        }
+    }
+
+    func dismissVisibleRequests() {
+        for approval in snapshot.approvals { respond(to: approval, with: .dismiss) }
     }
 }

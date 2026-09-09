@@ -1,5 +1,6 @@
 mod audit;
 mod codec;
+mod dashboard;
 mod ledger;
 mod live_approvals;
 mod paths;
@@ -15,6 +16,7 @@ pub use codec::{
     decode_wire_frame_from_payload, decode_wire_frame_sync, encode_frame, encode_raw_frame,
     encode_wire_frame, read_frame_bytes_async,
 };
+pub use dashboard::{DashboardApproval, DashboardEvent, DashboardSandbox};
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};
 pub use live_approvals::{
     ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot,

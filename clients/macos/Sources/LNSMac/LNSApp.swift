@@ -3,10 +3,15 @@ import SwiftUI
 import LNSClient
 
 @main
+@MainActor
 struct LNSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
+        Window("LNS", id: "dashboard") {
+            DashboardView(model: delegate.model.dashboard, live: delegate.model)
+        }
+        .defaultSize(width: 1100, height: 740)
         Window("LNS Approvals", id: "approvals") {
             ApprovalList(model: delegate.model)
                 .frame(minWidth: 440, minHeight: 320)
@@ -33,13 +38,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { model.stop() }
 }
 
+@MainActor
 struct MenuContent: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(model.connected ? "\(model.snapshot.approvals.count) pending approvals" : "Service disconnected")
+        Button("Audit…") { dashboard(.audit) }
         Button("Approvals…") {
+            dashboard(.approvals)
+        }
+        Button("Live Requests…") {
             openWindow(id: "approvals")
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
@@ -48,6 +58,12 @@ struct MenuContent: View {
             .disabled(!model.connected)
         Button("Quit Interface") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private func dashboard(_ page: DashboardPage) {
+        model.dashboard.page = page
+        openWindow(id: "dashboard")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
