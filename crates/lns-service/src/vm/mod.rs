@@ -439,6 +439,7 @@ mod tests {
             })),
             DropSignal(dropped_tx),
         ));
+        tokio::task::yield_now().await;
         started_rx.recv().expect("VMM started");
         assert!(
             dropped_rx.try_recv().is_err(),
@@ -462,6 +463,7 @@ mod tests {
             })),
             DropSignal(dropped_tx),
         ));
+        tokio::task::yield_now().await;
         started_rx.recv().expect("VMM started");
         finish_tx
             .send(Err(anyhow::anyhow!("launch failed")))
