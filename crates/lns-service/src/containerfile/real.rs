@@ -283,34 +283,8 @@ fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
             format!("the built image {normalized} is not in this machine's manifest cache")
         })?;
     let layers = LayerCache::new(cache_dir.join("layers"));
-    Ok(lns_ipc::PushableImage {
-        reference: normalized,
-        digest: cached.manifest_digest.clone(),
-        manifest: super::image::manifest_bytes(&cached.manifest, &cached.manifest_digest)?,
-        manifest_media_type: cached
-            .manifest
-            .media_type
-            .clone()
-            .unwrap_or_else(|| oci_client::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
-        config_digest: cached.manifest.config.digest.clone(),
-        config_media_type: cached.manifest.config.media_type.clone(),
-        config: cached.config.clone(),
-        layers: cached
-            .manifest
-            .layers
-            .iter()
-            .map(|layer| {
-                Ok(lns_ipc::PushableLayer {
-                    digest: layer.digest.clone(),
-                    media_type: layer.media_type.clone(),
-                    size: layer.size.max(0) as u64,
-                    path: layers
-                        .path_for(&layer.digest)?
-                        .to_string_lossy()
-                        .into_owned(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
+    super::image::pushable(normalized, &cached, |digest| {
+        Ok(layers.path_for(digest)?.to_string_lossy().into_owned())
     })
 }
 

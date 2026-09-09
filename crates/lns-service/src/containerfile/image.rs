@@ -52,6 +52,40 @@ pub(crate) fn manifest_bytes(manifest: &OciImageManifest, digest: &str) -> Resul
     Ok(bytes)
 }
 
+/// The image as an uploader needs it, projected off what this machine cached: the manifest bytes its digest was taken over, its config, and where each layer sits (§6). A manifest that names no media type is an OCI one, and a registry that under-declares a layer's size is read as zero rather than as a negative.
+pub(crate) fn pushable(
+    reference: String,
+    cached: &crate::image::manifest_cache::CachedManifest,
+    path_for: impl Fn(&str) -> Result<String>,
+) -> Result<lns_ipc::PushableImage> {
+    Ok(lns_ipc::PushableImage {
+        digest: cached.manifest_digest.clone(),
+        manifest: manifest_bytes(&cached.manifest, &cached.manifest_digest)?,
+        manifest_media_type: cached
+            .manifest
+            .media_type
+            .clone()
+            .unwrap_or_else(|| oci_client::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
+        config_digest: cached.manifest.config.digest.clone(),
+        config_media_type: cached.manifest.config.media_type.clone(),
+        config: cached.config.clone(),
+        layers: cached
+            .manifest
+            .layers
+            .iter()
+            .map(|layer| {
+                Ok(lns_ipc::PushableLayer {
+                    digest: layer.digest.clone(),
+                    media_type: layer.media_type.clone(),
+                    size: layer.size.max(0) as u64,
+                    path: path_for(&layer.digest)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        reference,
+    })
+}
+
 pub(crate) fn assemble(
     parent: &ParentImage,
     layer: Option<&LayerBlob>,
@@ -461,6 +495,75 @@ pub(crate) mod tests {
             format!("sha256:{}", hex::encode(Sha256::digest(bytes.as_bytes()))),
             built.manifest_digest,
         );
+    }
+
+    fn cached_from(built: &BuiltImage) -> crate::image::manifest_cache::CachedManifest {
+        crate::image::manifest_cache::CachedManifest {
+            manifest: built.manifest.clone(),
+            manifest_digest: built.manifest_digest.clone(),
+            config: built.config.clone(),
+        }
+    }
+
+    #[test]
+    fn a_pushable_image_names_every_layer_the_manifest_does_and_where_this_machine_holds_it() {
+        let built = built();
+        let image = pushable(
+            "lns-build.local/built@sha256:abc".into(),
+            &cached_from(&built),
+            |digest| Ok(format!("/layers/{digest}")),
+        )
+        .expect("the manifest this machine holds projects as it stands");
+        assert_eq!(image.reference, "lns-build.local/built@sha256:abc");
+        assert_eq!(image.digest, built.manifest_digest);
+        assert_eq!(image.config, built.config);
+        assert_eq!(image.layers.len(), built.manifest.layers.len());
+        for (pushable, declared) in image.layers.iter().zip(&built.manifest.layers) {
+            assert_eq!(pushable.digest, declared.digest);
+            assert_eq!(pushable.path, format!("/layers/{}", declared.digest));
+            assert_eq!(pushable.size, declared.size as u64);
+        }
+    }
+
+    /// A manifest names no media type where the cache stored one written without it, and a push has to say what it is uploading.
+    #[test]
+    fn a_manifest_that_declares_no_media_type_publishes_as_an_oci_one() {
+        let mut built = built();
+        built.manifest.media_type = None;
+        built.manifest_digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
+        );
+        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
+            .expect("a manifest with no media type still publishes");
+        assert_eq!(
+            image.manifest_media_type,
+            oci_client::manifest::OCI_IMAGE_MEDIA_TYPE
+        );
+    }
+
+    /// A size is a byte count, so a descriptor that declares a negative one is read as nothing rather than wrapping to an enormous number.
+    #[test]
+    fn a_layer_that_declares_a_negative_size_is_read_as_zero_bytes() {
+        let mut built = built();
+        built.manifest.layers[0].size = -1;
+        built.manifest_digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
+        );
+        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
+            .expect("projecting");
+        assert_eq!(image.layers[0].size, 0);
+    }
+
+    #[test]
+    fn a_layer_this_machine_cannot_place_stops_the_projection() {
+        let built = built();
+        let err = pushable("built".into(), &cached_from(&built), |digest| {
+            anyhow::bail!("no cache entry for {digest}")
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no cache entry"), "{err:#}");
     }
 
     #[test]

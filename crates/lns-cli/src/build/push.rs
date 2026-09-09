@@ -54,7 +54,7 @@ pub(crate) async fn push_artifact(built: &BuiltArtifact, target: &str) -> Result
 
 /// Upload a built image into `repository` — every layer this machine holds on disk, its config, then the manifest that references them — and answer with the digest reference the published document names (`docs/sandbox-spec.md` §6).
 pub(crate) async fn push_image(image: &lns_ipc::PushableImage, repository: &str) -> Result<String> {
-    let tag = format!("{repository}:{}", image.digest.replace(':', "-"));
+    let tag = lns_artifact::image::published_tag(repository, &image.digest);
     let reference: Reference = tag
         .parse()
         .with_context(|| format!("invalid image target {tag}"))?;
