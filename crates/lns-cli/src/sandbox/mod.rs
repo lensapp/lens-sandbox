@@ -452,6 +452,7 @@ fn definition_json(yaml: &str, path: &std::path::Path) -> Result<String> {
 }
 
 /// What a build boots its steps from: the merged document, and the policy its other sources authored.
+#[derive(Debug)]
 struct DefinitionToBuild {
     definition: String,
     authored_egress: Option<String>,
@@ -1579,6 +1580,39 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    /// A prune says what it would drop before it asks, so a service that cannot read the index must stop it, not silence it.
+    #[tokio::test]
+    async fn a_built_image_listing_surfaces_the_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::new(Response::Error {
+            message: "the image index is not readable".into(),
+        });
+        let err = prunable_built_images(&svc).await.unwrap_err();
+        assert!(format!("{err:#}").contains("the image index is not readable"));
+
+        let svc = CannedService::new(Response::Pong);
+        let err = prunable_built_images(&svc).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    /// A build resolves the document first, and a resolution the service refuses is the build's refusal.
+    #[tokio::test]
+    async fn a_resolution_before_a_build_surfaces_the_refusal_and_rejects_an_unrelated_answer() {
+        const WITH_A_MIXIN: &str = r#"{"spec":{"mixins":["./project-egress.yaml"]}}"#;
+        let svc = CannedService::new(Response::Error {
+            message: "no such mixin: ./project-egress.yaml".into(),
+        });
+        let err = resolve_before_building(&svc, WITH_A_MIXIN, "/work")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no such mixin"));
+
+        let svc = CannedService::new(Response::Pong);
+        let err = resolve_before_building(&svc, WITH_A_MIXIN, "/work")
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
     }
 
