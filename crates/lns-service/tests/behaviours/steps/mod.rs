@@ -19,6 +19,7 @@ pub mod guest_scripts;
 pub mod host_binds;
 pub mod image_management;
 pub mod ipc;
+pub mod live_approvals;
 pub mod mixin_directory;
 pub mod mixin_flag;
 pub mod mixin_resolution;

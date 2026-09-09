@@ -8,6 +8,11 @@ pub enum Request {
     Ping,
     Status,
     Shutdown,
+    WatchApprovals,
+    RespondToApproval {
+        token: String,
+        action: crate::LiveApprovalAction,
+    },
     Unknown {
         method: String,
     },
@@ -215,6 +220,10 @@ pub enum Response {
     Pong,
     Status(StatusInfo),
     ShuttingDown,
+    LiveApprovals(crate::LiveApprovalSnapshot),
+    /// The answer was queued; snapshots report subsequent state and persistence failures.
+    LiveApprovalSubmitted,
+    LiveApprovalStale,
     Error {
         message: String,
     },

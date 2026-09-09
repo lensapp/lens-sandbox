@@ -1,6 +1,7 @@
 mod audit;
 mod codec;
 mod ledger;
+mod live_approvals;
 mod paths;
 mod protocol;
 mod socket;
@@ -15,6 +16,9 @@ pub use codec::{
     encode_wire_frame, read_frame_bytes_async,
 };
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};
+pub use live_approvals::{
+    ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot,
+};
 pub use paths::{
     LnsHomeError, audit_anchor_for_run, audit_log_for_run, audit_runs_root, build_cache_root,
     config_path, connection_ledger, connection_ledger_anchor, connector_grants_path,

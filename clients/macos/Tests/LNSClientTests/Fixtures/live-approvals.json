@@ -1,0 +1,17 @@
+{
+  "type": "LiveApprovals",
+  "approvals": [
+    {
+      "id": "approval-1",
+      "token": "presentation-1",
+      "host": "api.example.com",
+      "action": "CONNECT api.example.com:443",
+      "run": "quiet_river",
+      "raw": false,
+      "waiting": true,
+      "submitting": false,
+      "offer": null
+    }
+  ],
+  "notices": ["A decision could not be saved."]
+}

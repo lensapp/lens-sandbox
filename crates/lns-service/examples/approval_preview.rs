@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use eframe::egui;
+use lns_service::approval_flow::inbox::{Snapshot, StackItem};
 use lns_service::approval_flow::protocol::Treatment;
 use lns_service::approval_flow::session::PendingPrompt;
 use lns_service::approval_flow::window::{
-    Snapshot, StackItem, install_icon_font, install_system_fonts, lds_visuals, quiet_debug_overlays,
+    install_icon_font, install_system_fonts, lds_visuals, quiet_debug_overlays,
 };
 use lns_service::tray::{
     CardAction, MIN_WINDOW_HEIGHT, ViewportPlacement, WINDOW_WIDTH, content_cap,

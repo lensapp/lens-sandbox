@@ -523,9 +523,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn start_with_policy_threads_through_adapter_to_supervisor_session() {
-        use crate::approval_flow::window::{self, WindowState};
+        use crate::approval_flow::inbox::{self as window, ApprovalInbox};
         use crate::test_env::EnvVarGuard;
-        window::install(WindowState::new());
+        window::install(ApprovalInbox::new());
         let d = tempfile::TempDir::new().expect("tempdir");
         let _home = EnvVarGuard::set("LNS_HOME", d.path());
         let supervisor_bin = d.path().join("supervisor.real");
@@ -553,9 +553,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn start_merges_a_sandbox_shipped_policy_under_the_local_decisions() {
-        use crate::approval_flow::window::{self, WindowState};
+        use crate::approval_flow::inbox::{self as window, ApprovalInbox};
         use crate::test_env::EnvVarGuard;
-        window::install(WindowState::new());
+        window::install(ApprovalInbox::new());
         let d = tempfile::TempDir::new().expect("tempdir");
         let _home = EnvVarGuard::set("LNS_HOME", d.path());
         let supervisor_bin = d.path().join("supervisor.real");

@@ -148,6 +148,11 @@ async fn handle_connection(
     let request: Request = decode_frame(&mut &bytes[..])?;
 
     match request {
+        Request::WatchApprovals => {
+            let inbox =
+                crate::approval_flow::inbox::get().context("approval inbox is unavailable")?;
+            super::stream_approvals(&mut stream, inbox.watch(), &shutdown).await
+        }
         Request::RunImage(args) => handle_run(stream, *args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
         Request::StartRun { run, attach, stdin } => {
