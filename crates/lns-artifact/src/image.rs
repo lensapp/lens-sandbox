@@ -280,6 +280,12 @@ mod tests {
     }
 
     #[test]
+    fn a_document_with_no_spec_object_is_published_exactly_as_it_arrived() {
+        let bare = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes"}"#;
+        assert_eq!(forget_source(bare).expect("forgetting"), bare.to_vec());
+    }
+
+    #[test]
     fn a_document_that_never_recorded_a_source_is_published_as_it_stands() {
         let published: serde_json::Value = serde_json::from_slice(
             &forget_source(&doc("ghcr.io/team/base:1")).expect("forgetting"),

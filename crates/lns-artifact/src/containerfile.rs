@@ -643,22 +643,27 @@ mod tests {
     }
 
     /// The build honours these two, so the parse hands them on already read rather than leaving each caller to read them again.
+    fn copied(text: &str) -> Transfer {
+        built(text)
+            .instructions
+            .into_iter()
+            .find_map(|instruction| match instruction.kind {
+                InstructionKind::Copy(transfer) => Some(transfer),
+                _ => None,
+            })
+            .expect("this file holds a COPY")
+    }
+
     #[test]
     fn a_transfer_reads_back_the_owner_and_the_octal_mode_it_was_written_with() {
-        let built = built("FROM alpine\nCOPY --chown=node:node --chmod=750 app /srv/app\n");
-        let InstructionKind::Copy(transfer) = &built.instructions[1].kind else {
-            panic!("the second instruction is the COPY");
-        };
+        let transfer = copied("FROM alpine\nCOPY --chown=node:node --chmod=750 app /srv/app\n");
         assert_eq!(transfer.owner(), Some("node:node"));
         assert_eq!(transfer.mode(), Some(0o750));
     }
 
     #[test]
     fn a_transfer_with_neither_flag_reads_back_neither() {
-        let built = built("FROM alpine\nCOPY app /srv/app\n");
-        let InstructionKind::Copy(transfer) = &built.instructions[1].kind else {
-            panic!("the second instruction is the COPY");
-        };
+        let transfer = copied("FROM alpine\nCOPY app /srv/app\n");
         assert_eq!(transfer.owner(), None);
         assert_eq!(transfer.mode(), None);
     }

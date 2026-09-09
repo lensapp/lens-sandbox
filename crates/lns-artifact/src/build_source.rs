@@ -232,6 +232,16 @@ mod tests {
         assert_eq!(read.text, "FROM alpine\n");
     }
 
+    /// The publisher's own line about a layer it is packing has to say something even where the pack is about to refuse it.
+    #[test]
+    fn a_context_with_no_instructions_in_it_is_named_by_the_path_that_was_recorded() {
+        let layer = ImageSourceLayer {
+            image_source: "./image".into(),
+            files: vec![file("app/main.js", "x")],
+        };
+        assert_eq!(layer.containerfile(), "./image");
+    }
+
     #[test]
     fn a_context_recorded_as_a_directory_with_no_instructions_in_it_is_refused() {
         let err = pack(&ImageSourceLayer {
