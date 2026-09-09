@@ -728,6 +728,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logout_reports_that_it_removed_the_file_without_a_running_service() {
+        let client = FakeClient::for_logout(LogoutOutcome::LoggedOutFromFile);
+        let mut out = Vec::new();
+        let code = logout(
+            &LogoutArgs {
+                registry: Some("ghcr.io".into()),
+            },
+            "docker.io",
+            &client,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "The background service was not running; removed ghcr.io from ~/.lns/registry-auth.json.\n"
+        );
+    }
+
+    #[tokio::test]
     async fn logout_surfaces_other_service_failures() {
         let client = FakeClient::for_logout(LogoutOutcome::Failed("store is unreadable".into()));
         let err = logout(
