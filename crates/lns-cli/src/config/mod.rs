@@ -649,10 +649,14 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn the_defaults_file_lives_in_the_one_directory_lns_keeps_everything_in() {
+        let home = TempDir::new().unwrap();
+        let _scope = crate::test_env::EnvScope::set("LNS_HOME", home.path());
+
         assert_eq!(
             default_config_path().unwrap(),
-            lns_ipc::config_path().unwrap(),
+            home.path().join("config.yaml"),
             "the config file is not a location of its own; LNS_HOME moves it with everything else"
         );
     }

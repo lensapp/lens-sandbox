@@ -1,10 +1,16 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use eframe::egui::ViewportId;
 
+use super::View;
+
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
-static OPEN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static OPEN_REQUESTED: AtomicU8 = AtomicU8::new(NOTHING);
+
+const NOTHING: u8 = 0;
+const TIMELINE: u8 = 1;
+const APPROVALS: u8 = 2;
 
 pub fn viewport_id() -> ViewportId {
     ViewportId::from_hash_of("lns-audit-dashboard")
@@ -27,12 +33,23 @@ pub fn set_watching(watching: bool) {
     WATCHING.store(watching, Ordering::Release);
 }
 
-pub fn request_open() {
-    OPEN_REQUESTED.store(true, Ordering::Release);
+/// Asks the tray thread to raise the window on this view; the newest request wins, because it is the one the user just made.
+pub fn request_open(view: View) {
+    OPEN_REQUESTED.store(
+        match view {
+            View::Timeline => TIMELINE,
+            View::Approvals => APPROVALS,
+        },
+        Ordering::Release,
+    );
 }
 
-pub fn take_open_request() -> bool {
-    OPEN_REQUESTED.swap(false, Ordering::AcqRel)
+pub fn take_open_request() -> Option<View> {
+    match OPEN_REQUESTED.swap(NOTHING, Ordering::AcqRel) {
+        TIMELINE => Some(View::Timeline),
+        APPROVALS => Some(View::Approvals),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -69,8 +86,20 @@ mod tests {
     #[test]
     #[serial]
     fn the_open_request_is_a_one_shot_latch() {
-        request_open();
-        assert!(take_open_request());
-        assert!(!take_open_request());
+        request_open(View::Timeline);
+        assert_eq!(take_open_request(), Some(View::Timeline));
+        assert_eq!(
+            take_open_request(),
+            None,
+            "a window already raised must not raise itself again on the next frame"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn the_menu_item_the_user_chose_is_the_view_the_window_opens_on() {
+        request_open(View::Timeline);
+        request_open(View::Approvals);
+        assert_eq!(take_open_request(), Some(View::Approvals));
     }
 }
