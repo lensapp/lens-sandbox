@@ -18,6 +18,7 @@ pub mod pulled_host_path_consent;
 pub mod run;
 pub mod run_config_defaults;
 pub mod sandbox_author;
+pub mod sandbox_build;
 pub mod sandbox_cli;
 pub mod sandbox_distribute;
 pub mod sandbox_inspect_cli;

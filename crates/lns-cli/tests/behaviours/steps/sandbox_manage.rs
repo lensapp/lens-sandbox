@@ -364,6 +364,7 @@ fn service_will_sweep(w: &mut BehaviourWorld, first: String, second: String) {
     });
     w.sandbox.response = Some(Response::RunsPruned {
         removed: vec![first, second],
+        built_images: Vec::new(),
     });
 }
 
@@ -398,5 +399,6 @@ fn stopped_run(n: u32, name: &str) -> RunSummary {
 fn service_sweeps_nothing(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::RunsPruned {
         removed: Vec::new(),
+        built_images: Vec::new(),
     });
 }
