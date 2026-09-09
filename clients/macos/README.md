@@ -122,6 +122,7 @@ coordinated app/service updates are still required before shipping it.
   sandbox/approval/event/warning frames, then `DashboardEnd`. The client keeps
   every frame and publishes only a completed read. A large timeline is not one
   oversized frame; an interrupted read is an error, not an empty dashboard.
+  `DashboardEnd` completes the request without waiting for a socket EOF.
 - `InspectApprovalOffer` reads the offer a history row still holds.
   `GrantApproval` includes the disclosed digest and is refused if it changed.
   An acknowledgment reports handling, not proof a grant persisted; refreshed
