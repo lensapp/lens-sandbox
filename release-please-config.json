@@ -68,6 +68,18 @@
         {
           "type": "generic",
           "path": "setup-lns/action.yml"
+        },
+        {
+          "type": "generic",
+          "path": "lns-login/action.yml"
+        },
+        {
+          "type": "generic",
+          "path": "lns-logout/action.yml"
+        },
+        {
+          "type": "generic",
+          "path": "lns-push/action.yml"
         }
       ]
     },

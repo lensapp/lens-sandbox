@@ -425,6 +425,11 @@ jobs:
   actions:
     needs: changes
     if: needs.changes.outputs.actions == 'true'
+    # Step-level `if:` cannot read `secrets`, so the staging self-test gates
+    # on these; unset in a fork, the steps skip.
+    env:
+      LNS_HUB_STAGING_TOKEN: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
+      LNS_HUB_STAGING_NAMESPACE: ${{ vars.LNS_HUB_STAGING_NAMESPACE || secrets.LNS_HUB_STAGING_USERNAME }}
     strategy:
       fail-fast: false
       matrix:
@@ -476,6 +481,136 @@ jobs:
             echo "::error::setup-lns installed lns-service; it must extract lns only."
             exit 1
           fi
+
+      # lns-login / lns-logout against a host that cannot resolve: what they
+      # pin is the file `lns artifact push` reads, not a round trip. The
+      # runner has no lns-service, so this is the file fallback's own test.
+      - name: Another host is already logged in
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.lns"
+          printf '{"other.example.invalid":{"username":"keep","secret":"keep-me"}}' \
+            >"$HOME/.lns/registry-auth.json"
+          chmod 0600 "$HOME/.lns/registry-auth.json"
+          jq -e 'keys == ["other.example.invalid"]' "$HOME/.lns/registry-auth.json" >/dev/null
+
+      - name: lns-login (example.invalid)
+        uses: ./actions/lns-login
+        with:
+          registry: example.invalid
+          username: ci
+          password: not-a-real-token
+
+      - name: The login added one entry, 0600, and touched no other host
+        env:
+          EXPECTED_SECRET: not-a-real-token
+        run: |
+          set -euo pipefail
+          file="$HOME/.lns/registry-auth.json"
+          if [ -z "$(find "$file" -perm 600)" ]; then
+            echo "::error::registry-auth.json is not 0600."
+            ls -l "$file"
+            exit 1
+          fi
+          jq -e '
+            (keys | sort) == ["example.invalid", "other.example.invalid"]
+            and .["example.invalid"].username == "ci"
+            and .["example.invalid"].secret == $ENV.EXPECTED_SECRET
+            and .["other.example.invalid"].secret == "keep-me"
+          ' "$file" >/dev/null
+
+      - name: lns-logout (example.invalid)
+        uses: ./actions/lns-logout
+        with:
+          registry: example.invalid
+
+      - name: The logout removed that entry and left the other one
+        run: |
+          set -euo pipefail
+          file="$HOME/.lns/registry-auth.json"
+          if [ -z "$(find "$file" -perm 600)" ]; then
+            echo "::error::registry-auth.json is not 0600."
+            ls -l "$file"
+            exit 1
+          fi
+          jq -e '
+            keys == ["other.example.invalid"]
+            and .["other.example.invalid"].secret == "keep-me"
+          ' "$file" >/dev/null
+
+      - name: lns-push (sandbox fixture, dry run)
+        id: dry-sandbox
+        uses: ./actions/lns-push
+        with:
+          file: actions/lns-push/fixtures/sandbox.yaml
+          kind: sandbox
+          tags: |
+            lns-ci/actions-sandbox-fixture:sha-${{ github.sha }}
+            lns-ci/actions-sandbox-fixture:ci
+          push: false
+
+      - name: lns-push (mixin fixture, dry run)
+        id: dry-mixin
+        uses: ./actions/lns-push
+        with:
+          file: actions/lns-push/fixtures/mixin.yaml
+          kind: mixin
+          tags: lns-ci/actions-mixin-fixture:sha-${{ github.sha }}
+          push: false
+
+      - name: A dry run publishes nothing
+        env:
+          SANDBOX_DIGEST: ${{ steps.dry-sandbox.outputs.digest }}
+          SANDBOX_REFS: ${{ steps.dry-sandbox.outputs.refs }}
+          MIXIN_DIGEST: ${{ steps.dry-mixin.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SANDBOX_DIGEST" ] || [ -n "$SANDBOX_REFS" ] || [ -n "$MIXIN_DIGEST" ]; then
+            echo "::error::push: false reported a digest or a ref."
+            exit 1
+          fi
+
+      # The one real publish: main only, ubuntu only, and only once a person
+      # has stored the staging credentials (issue #398).
+      - name: lns-login (hub.staging.lns.run)
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && matrix.runner == 'ubuntu-latest' && env.LNS_HUB_STAGING_TOKEN != ''
+        uses: ./actions/lns-login
+        with:
+          registry: hub.staging.lns.run
+          username: ${{ secrets.LNS_HUB_STAGING_USERNAME }}
+          password: ${{ secrets.LNS_HUB_STAGING_TOKEN }}
+
+      - name: lns-push (mixin fixture to hub.staging.lns.run)
+        id: staging
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && matrix.runner == 'ubuntu-latest' && env.LNS_HUB_STAGING_TOKEN != ''
+        uses: ./actions/lns-push
+        with:
+          file: actions/lns-push/fixtures/mixin.yaml
+          kind: mixin
+          tags: hub.staging.lns.run/${{ env.LNS_HUB_STAGING_NAMESPACE }}/ci-fixture:sha-${{ github.sha }}
+
+      - name: The staging push reported a digest
+        if: steps.staging.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+          REFS: ${{ steps.staging.outputs.refs }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) : ;;
+            *) echo "::error::the staging push reported digest '$DIGEST'."; exit 1 ;;
+          esac
+          printf '%s\n' "$REFS"
+
+      - name: lns-logout (hub.staging.lns.run)
+        if: always() && steps.staging.outcome != 'skipped'
+        uses: ./actions/lns-logout
+        with:
+          registry: hub.staging.lns.run
 
       # ci.yml publishes no lns build artifact, so the `binary` input is
       # exercised against a stand-in executable: what it pins is that the

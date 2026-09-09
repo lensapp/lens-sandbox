@@ -1,0 +1,21 @@
+# lns-actions 0.1.0 # x-release-please-version
+name: lns logout
+description: >-
+  Removes one registry's stored credential. Calls `lns logout`, and edits
+  ~/.lns/registry-auth.json itself only when the runner has no lns-service.
+  Other hosts are left untouched.
+
+inputs:
+  registry:
+    description: Registry host to log out of, a bare host[:port].
+    required: false
+    default: hub.lns.run
+
+runs:
+  using: composite
+  steps:
+    - name: Log out
+      shell: bash
+      env:
+        LNS_ACTION_REGISTRY: ${{ inputs.registry }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/registry-auth.sh" remove

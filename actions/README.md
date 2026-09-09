@@ -7,6 +7,9 @@ together as one release-please component, `lns-actions`, tagged
 | Action | What it does |
 | --- | --- |
 | [`setup-lns`](setup-lns/) | Installs the lns CLI and puts it on `PATH`. |
+| [`lns-login`](lns-login/) | Stores a hub credential on the runner. |
+| [`lns-logout`](lns-logout/) | Removes one registry's stored credential. |
+| [`lns-push`](lns-push/) | Validates, dry-runs and publishes a document. |
 
 ## Usage
 
@@ -14,8 +17,18 @@ together as one release-please component, `lns-actions`, tagged
 - uses: lensapp/lens-sandbox/actions/setup-lns@lns-actions-v0
   with:
     version: 0.25.0 # or omit: newest lns release
-- run: lns artifact validate -f lns.yaml
+- uses: lensapp/lens-sandbox/actions/lns-login@lns-actions-v0
+  with:
+    username: ${{ vars.LNS_HUB_USERNAME }}
+    password: ${{ secrets.LNS_HUB_TOKEN }}
+- uses: lensapp/lens-sandbox/actions/lns-push@lns-actions-v0
+  with:
+    file: lns.yaml
+    tags: acme/hermes:${{ github.ref_name }}
 ```
+
+Tags name a namespace: `<namespace>/<name>:<tag>` or
+`<host>/<namespace>/<name>:<tag>`. Nothing here assumes one.
 
 ## Pin policy
 
