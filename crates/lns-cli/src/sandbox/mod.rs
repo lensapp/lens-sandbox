@@ -44,6 +44,10 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Remove every stopped sandbox, writable layers included.")]
     Prune(SandboxPruneArgs),
+    #[command(
+        about = "Build the Containerfile this document's spec.image names; publishes nothing."
+    )]
+    Build(SandboxBuildArgs),
 }
 
 #[derive(clap::Args)]
@@ -88,6 +92,24 @@ pub struct SandboxStartArgs {
         help = "With -a: detach chord; on match the CLI detaches, leaving the sandbox running."
     )]
     pub detach_keys: DetachChord,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxBuildArgs {
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Document to build instead of ./lns.yaml."
+    )]
+    pub file: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Ignore the build cache for this build; every instruction runs again."
+    )]
+    pub rebuild: bool,
 }
 
 #[derive(clap::Args)]
@@ -368,7 +390,61 @@ where
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
         SandboxCommand::Save(args) => save(svc, args, out).await,
+        SandboxCommand::Build(args) => build(svc, args, out).await,
     }
+}
+
+/// The document names the Containerfile; the service does the building, and the key it answers with is what names the build everywhere else.
+async fn build<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxBuildArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let (path, yaml) = svc.document(args.file.as_deref())?;
+    let definition = definition_json(&yaml, &path)?;
+    let definition_dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_string_lossy()
+        .into_owned();
+    match svc
+        .one_shot(Request::BuildSandbox {
+            definition,
+            definition_dir,
+            rebuild: args.rebuild,
+        })
+        .await?
+    {
+        Response::SandboxBuilt {
+            key,
+            reference,
+            label,
+            layers,
+            reused,
+        } => {
+            writeln!(out, "key {key}")?;
+            match reused {
+                true => writeln!(
+                    out,
+                    "nothing to build: {label} is unchanged, and {reference} is what it builds to"
+                )?,
+                false => writeln!(
+                    out,
+                    "built {label} as {reference} ({layers} layer{})",
+                    if layers == 1 { "" } else { "s" }
+                )?,
+            }
+            Ok(0)
+        }
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+fn definition_json(yaml: &str, path: &std::path::Path) -> Result<String> {
+    let value: serde_json::Value =
+        serde_yaml::from_str(yaml).with_context(|| format!("parsing {}", path.display()))?;
+    serde_json::to_string(&value).context("normalizing the definition to json")
 }
 
 /// §8.4 has the service render what ran and this machine write where the user said, so a document nobody named is never created.
@@ -730,7 +806,10 @@ async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
         }
     }
     match svc.one_shot(Request::PruneRuns).await? {
-        Response::RunsPruned { mut removed, built_images } => {
+        Response::RunsPruned {
+            mut removed,
+            built_images,
+        } => {
             removed.sort_unstable();
             for run in &removed {
                 writeln!(out, "removed sandbox {run}")?;

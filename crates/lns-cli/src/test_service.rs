@@ -182,6 +182,10 @@ impl SandboxService for CannedService {
     fn write_document(&self, _path: &std::path::Path, _contents: &str) -> std::io::Result<()> {
         Ok(())
     }
+
+    fn document(&self, _file: Option<&std::path::Path>) -> anyhow::Result<(PathBuf, String)> {
+        anyhow::bail!("this test service holds no documents")
+    }
 }
 
 pub(crate) async fn stream_with(frames: &[Vec<u8>]) -> tokio::io::DuplexStream {

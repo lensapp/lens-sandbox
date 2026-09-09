@@ -77,7 +77,9 @@ fn the_service_was_asked_to_build(w: &mut BehaviourWorld, path: String) -> Resul
     let expected = PathBuf::from(&path);
     let expected_dir = expected.parent().expect("the fixture path names a file");
     if dir != expected_dir.to_string_lossy() {
-        return Err(format!("the build was rooted at {dir}, not {expected_dir:?}"));
+        return Err(format!(
+            "the build was rooted at {dir}, not {expected_dir:?}"
+        ));
     }
     let value: serde_json::Value =
         serde_json::from_str(&definition).map_err(|e| format!("definition was not json: {e}"))?;

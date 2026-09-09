@@ -27,6 +27,8 @@ pub trait SandboxService: Send + Sync {
     fn load_policy(&self, path: &str) -> Option<serde_json::Value>;
     /// Where a rendered document lands, created rather than opened, so a path that is already there answers `AlreadyExists` instead of being replaced.
     fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()>;
+    /// The document `-f` selects, resolved against this machine's working directory and read from it.
+    fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
