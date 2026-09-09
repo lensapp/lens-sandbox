@@ -94,7 +94,9 @@ pub fn parse(text: &str) -> Result<Containerfile, Vec<String>> {
     for instruction in &parsed.instructions {
         let line = lines.line_of(upstream::keyword_start(instruction));
         match accept(instruction, line, &mut seen_from) {
-            Ok(kind) => instructions.push(Instruction { line, kind }),
+            Ok(kinds) => {
+                instructions.extend(kinds.into_iter().map(|kind| Instruction { line, kind }))
+            }
             Err(refusal) => refusals.push(refusal),
         }
     }
@@ -138,29 +140,33 @@ fn accept(
     instruction: &parse_dockerfile::Instruction<'_>,
     line: usize,
     seen_from: &mut bool,
-) -> Result<InstructionKind, String> {
+) -> Result<Vec<InstructionKind>, String> {
     use parse_dockerfile::Instruction as I;
     match instruction {
-        I::From(from) => accept_from(from, line, seen_from),
+        I::From(from) => one(accept_from(from, line, seen_from)?),
         I::Arg(arg) => Ok(accept_arg(&arg.arguments.value)),
-        I::Env(env) => Ok(InstructionKind::Env(key_values(&env.arguments.value))),
-        I::Label(label) => Ok(InstructionKind::Label(key_values(&label.arguments.value))),
-        I::User(user) => Ok(InstructionKind::User(user.arguments.value.to_string())),
-        I::Workdir(workdir) => Ok(InstructionKind::Workdir(
+        I::Env(env) => one(InstructionKind::Env(key_values(&env.arguments.value))),
+        I::Label(label) => one(InstructionKind::Label(key_values(&label.arguments.value))),
+        I::User(user) => one(InstructionKind::User(user.arguments.value.to_string())),
+        I::Workdir(workdir) => one(InstructionKind::Workdir(
             workdir.arguments.value.to_string(),
         )),
-        I::Run(run) => accept_run(run, line),
-        I::Copy(copy) => accept_copy(copy, line),
-        I::Add(add) => accept_add(add, line),
-        I::Entrypoint(entrypoint) => Ok(InstructionKind::Entrypoint(upstream::command(
+        I::Run(run) => one(accept_run(run, line)?),
+        I::Copy(copy) => one(accept_copy(copy, line)?),
+        I::Add(add) => one(accept_add(add, line)?),
+        I::Entrypoint(entrypoint) => one(InstructionKind::Entrypoint(upstream::command(
             &entrypoint.arguments,
         ))),
-        I::Cmd(cmd) => Ok(InstructionKind::Cmd(upstream::command(&cmd.arguments))),
-        I::Shell(shell) => Ok(InstructionKind::Shell(strings(&shell.arguments))),
-        I::Expose(expose) => Ok(InstructionKind::Expose(strings(&expose.arguments))),
-        I::Volume(volume) => Ok(InstructionKind::Volume(volume_targets(&volume.arguments))),
+        I::Cmd(cmd) => one(InstructionKind::Cmd(upstream::command(&cmd.arguments))),
+        I::Shell(shell) => one(InstructionKind::Shell(strings(&shell.arguments))),
+        I::Expose(expose) => one(InstructionKind::Expose(strings(&expose.arguments))),
+        I::Volume(volume) => one(InstructionKind::Volume(volume_targets(&volume.arguments))),
         other => Err(unsupported(other, line)),
     }
+}
+
+fn one(kind: InstructionKind) -> Result<Vec<InstructionKind>, String> {
+    Ok(vec![kind])
 }
 
 fn unsupported(instruction: &parse_dockerfile::Instruction<'_>, line: usize) -> String {
@@ -195,17 +201,21 @@ fn accept_from(
     })
 }
 
-fn accept_arg(arguments: &str) -> InstructionKind {
-    match arguments.split_once('=') {
-        Some((name, default)) => InstructionKind::Arg {
-            name: name.trim().to_string(),
-            default: Some(unquote(default.trim()).to_string()),
-        },
-        None => InstructionKind::Arg {
-            name: arguments.trim().to_string(),
-            default: None,
-        },
-    }
+/// `ARG <name>[=<default>] [<name>[=<default>]...]` is one line naming several variables, and each is its own `Arg` so an expansion reads one name at a time.
+fn accept_arg(arguments: &str) -> Vec<InstructionKind> {
+    split_words(arguments)
+        .iter()
+        .map(|word| match word.split_once('=') {
+            Some((name, default)) => InstructionKind::Arg {
+                name: name.to_string(),
+                default: Some(unquote(default).to_string()),
+            },
+            None => InstructionKind::Arg {
+                name: word.to_string(),
+                default: None,
+            },
+        })
+        .collect()
 }
 
 fn accept_run(
@@ -629,6 +639,33 @@ mod tests {
                 name: "NO_DEFAULT".to_string(),
                 default: None
             }
+        );
+    }
+
+    #[test]
+    fn an_arg_naming_several_variables_records_one_arg_for_each_of_them() {
+        let built = built("FROM alpine\nARG NODE_VERSION=24 CLAUDE_CODE_VERSION=2.1.263 BARE\n");
+        assert_eq!(
+            arg_defaults(&built),
+            [
+                ("NODE_VERSION".to_string(), "24".to_string()),
+                ("CLAUDE_CODE_VERSION".to_string(), "2.1.263".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            "each name carries its own default, not the rest of the line"
+        );
+        assert_eq!(
+            built.instructions[3].kind,
+            InstructionKind::Arg {
+                name: "BARE".to_string(),
+                default: None
+            },
+            "and one without a default is its own ARG on the same line"
+        );
+        assert!(
+            built.instructions[1..].iter().all(|i| i.line == 2),
+            "every one of them was written on line 2: {built:?}"
         );
     }
 
