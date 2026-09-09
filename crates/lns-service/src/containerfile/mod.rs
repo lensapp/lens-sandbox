@@ -147,6 +147,66 @@ mod tests {
         );
     }
 
+    /// The paths a real `RUN npm install -g` leaves are far past the tar header's fields; the layer
+    /// must carry them and the ingest path must read them back.
+    #[tokio::test]
+    async fn a_long_path_and_a_long_symlink_target_survive_the_layer_and_the_reimport() {
+        let f = fixture();
+        let deep = "usr/local/lib/node_modules/@anthropic-ai/claude-code";
+        let long_file =
+            format!("{deep}/node_modules/@img/sharp-libvips-linuxmusl-arm64/lib/x.node");
+        let long_target = format!("../{long_file}");
+        assert!(long_file.len() > 100 && long_target.len() > 100);
+
+        let mut upper = FakeUpper::new();
+        for dir in dirs_of(&long_file) {
+            upper.dir(&dir, 0o755);
+        }
+        upper
+            .file(&long_file, 0o644, b"native\n")
+            .dir("usr/local/bin", 0o755)
+            .symlink("usr/local/bin/claude", &long_target);
+        let built = built_from(&f, &upper).await;
+
+        let store = crate::content_store::ContentStore::new(f.dir.path().join("content"));
+        let captured = f.layers.read(&built.layer_digest).unwrap();
+        let mut tree = build_filesystem_from_layer_bytes(&store, &[captured], &|_, _| {}).unwrap();
+
+        let mut dir = &mut tree.root;
+        let mut segments: Vec<&str> = long_file.split('/').collect();
+        let file = segments.pop().unwrap();
+        for name in segments {
+            dir = dir.get_directory_mut(OsStr::new(name)).unwrap();
+        }
+        assert!(
+            dir.leaf_id(OsStr::new(file)).is_ok(),
+            "a file whose path is past the tar name field must come back out of the layer",
+        );
+        let mut bin = &mut tree.root;
+        for name in ["usr", "local", "bin"] {
+            bin = bin.get_directory_mut(OsStr::new(name)).unwrap();
+        }
+        assert!(
+            bin.leaf_id(OsStr::new("claude")).is_ok(),
+            "the symlink whose target is past the link field must come back too",
+        );
+    }
+
+    fn dirs_of(path: &str) -> Vec<String> {
+        let mut segments: Vec<&str> = path.split('/').collect();
+        segments.pop();
+        let mut dirs = Vec::new();
+        let mut prefix = String::new();
+        for segment in segments {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            dirs.push(prefix.clone());
+        }
+        dirs
+    }
+
     fn base_layer_tar() -> Vec<u8> {
         let mut bytes = Vec::new();
         {

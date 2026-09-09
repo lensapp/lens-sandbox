@@ -40,6 +40,7 @@ pub(crate) fn tar_layer(changes: &ChangeSet) -> Result<LayerBlob> {
     })
 }
 
+/// `append_data` and `append_link` emit the GNU long-name entry a path or target past the header's fields needs; `set_path` would refuse one instead.
 fn append<W: std::io::Write>(builder: &mut tar::Builder<W>, change: &Change) -> Result<()> {
     match change {
         Change::Directory {
@@ -49,9 +50,7 @@ fn append<W: std::io::Write>(builder: &mut tar::Builder<W>, change: &Change) -> 
             gid,
         } => {
             let mut header = header(*mode, *uid, *gid, 0, tar::EntryType::Directory);
-            header.set_path(format!("{path}/"))?;
-            header.set_cksum();
-            builder.append(&header, std::io::empty())?;
+            builder.append_data(&mut header, format!("{path}/"), std::io::empty())?;
         }
         Change::Regular {
             path,
@@ -67,9 +66,7 @@ fn append<W: std::io::Write>(builder: &mut tar::Builder<W>, change: &Change) -> 
                 bytes.len() as u64,
                 tar::EntryType::Regular,
             );
-            header.set_path(path)?;
-            header.set_cksum();
-            builder.append(&header, std::io::Cursor::new(bytes))?;
+            builder.append_data(&mut header, path, std::io::Cursor::new(bytes))?;
         }
         Change::Symlink {
             path,
@@ -78,16 +75,11 @@ fn append<W: std::io::Write>(builder: &mut tar::Builder<W>, change: &Change) -> 
             gid,
         } => {
             let mut header = header(0o777, *uid, *gid, 0, tar::EntryType::Symlink);
-            header.set_path(path)?;
-            header.set_link_name(target)?;
-            header.set_cksum();
-            builder.append(&header, std::io::empty())?;
+            builder.append_link(&mut header, path, target)?;
         }
         Change::Removed { path } => {
             let mut header = header(0o644, 0, 0, 0, tar::EntryType::Regular);
-            header.set_path(whiteout_path(path))?;
-            header.set_cksum();
-            builder.append(&header, std::io::empty())?;
+            builder.append_data(&mut header, whiteout_path(path), std::io::empty())?;
         }
     }
     Ok(())
@@ -140,18 +132,21 @@ mod tests {
             .map(|entry| {
                 let mut entry = entry.unwrap();
                 let header = entry.header().clone();
+                // `Entry`, not `Header`: the entry resolves the GNU long-name and long-link entries the header field truncates.
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let link = entry
+                    .link_name()
+                    .unwrap()
+                    .map(|p| p.to_string_lossy().into_owned());
                 let mut body = Vec::new();
                 entry.read_to_end(&mut body).unwrap();
                 Entry {
-                    path: entry.path().unwrap().to_string_lossy().into_owned(),
+                    path,
                     kind: header.entry_type(),
                     mode: header.mode().unwrap(),
                     uid: header.uid().unwrap(),
                     gid: header.gid().unwrap(),
-                    link: header
-                        .link_name()
-                        .unwrap()
-                        .map(|p| p.to_string_lossy().into_owned()),
+                    link,
                     body,
                 }
             })
@@ -307,6 +302,70 @@ mod tests {
             format!("{err:#}").contains("writing bad\0path into the layer tar"),
             "{err:#}"
         );
+    }
+
+    /// `RUN npm install -g @anthropic-ai/claude-code`, #393's motivating example, leaves paths far
+    /// past the 100-byte tar name field; a capture that refuses them refuses the whole run.
+    #[test]
+    fn a_path_past_the_tar_name_field_is_carried_by_a_gnu_long_name_entry() {
+        let long = long_path();
+        assert!(long.len() > 100, "the path must overflow the name field");
+
+        let layer = tar_layer(&change_set(vec![Change::Regular {
+            path: long.clone(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            bytes: b"module.exports = {}\n".to_vec(),
+        }]))
+        .unwrap();
+
+        let entries = entries_of(&layer);
+        assert_eq!(entries.len(), 1, "the long name must not become an entry");
+        assert_eq!(entries[0].path, long);
+        assert_eq!(entries[0].body, b"module.exports = {}\n");
+    }
+
+    #[test]
+    fn a_symlink_target_past_the_link_field_keeps_the_target_it_pointed_at() {
+        let target = long_path();
+        assert!(
+            target.len() > 100,
+            "the target must overflow the link field"
+        );
+
+        let layer = tar_layer(&change_set(vec![Change::Symlink {
+            path: "usr/local/bin/claude".into(),
+            target: target.clone(),
+            uid: 0,
+            gid: 0,
+        }]))
+        .unwrap();
+
+        let entries = entries_of(&layer);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "usr/local/bin/claude");
+        assert_eq!(entries[0].link.as_deref(), Some(target.as_str()));
+    }
+
+    #[test]
+    fn a_deleted_file_whose_path_is_long_still_reads_back_as_the_removal() {
+        let long = format!("{}/gone", long_path());
+        let layer = tar_layer(&change_set(vec![Change::Removed { path: long.clone() }])).unwrap();
+
+        let entries = entries_of(&layer);
+        assert_eq!(
+            classify_path(std::path::Path::new(&entries[0].path)).unwrap(),
+            Some(PathChange::Remove(long.into())),
+        );
+    }
+
+    /// 150 bytes, shaped like the node_modules trees a real `RUN` leaves behind.
+    fn long_path() -> String {
+        let nested = "node_modules/@anthropic-ai/claude-code/".repeat(3);
+        let path = format!("usr/local/lib/{nested}sharp-libvipsx.node");
+        assert_eq!(path.len(), 150, "the fixture must be 150 bytes: {path}");
+        path
     }
 
     #[test]
