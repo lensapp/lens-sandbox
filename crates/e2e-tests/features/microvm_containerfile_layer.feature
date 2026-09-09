@@ -12,10 +12,14 @@ Feature: one guest's writes become one OCI layer a second guest boots from
   Like every @microvm scenario this boots a real guest and reaches a real registry
   for the base image, so it runs only via `make e2e-microvm`, never in CI's PR gate.
 
+  The command runs as root: the workload identity a run drops to owns nothing in
+  the base image's rootfs, so an unprivileged one can neither create a file at `/`
+  nor delete one from `/etc`, and this scenario is about capturing both.
+
   Scenario: the second guest sees the created file and not the deleted one
     Given a clean lns cache home
     And the LNS service is running in that home with the layer-capture hook
-    When the user runs a microVM command "/bin/sh -c 'echo built-by-lns > /spike-created; rm /etc/alpine-release'"
+    When the user runs a microVM command "/bin/sh -c 'echo built-by-lns > /spike-created; rm -f /etc/alpine-release'" as user "root"
     Then the exit code is 0
     And one OCI layer was captured from that run
     When the user runs a microVM command "/bin/sh -c 'cat /spike-created; test -e /etc/alpine-release || echo release-file-gone'" over the built image
