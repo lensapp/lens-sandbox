@@ -174,6 +174,22 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n      owner: {owner}"));
         }
     }
+    if let Some(containerfile) = &world.project_containerfile {
+        let context = root.join(CONTAINERFILE_IMAGE_PATH);
+        std::fs::create_dir_all(&context).expect("create the build context");
+        std::fs::write(
+            context.join("Dockerfile"),
+            containerfile.replace("{base}", &pinned_microvm_image()),
+        )
+        .expect("write the project Containerfile");
+        for (path, content) in &world.project_context_files {
+            let file = context.join(path);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).expect("create the context directory");
+            }
+            std::fs::write(file, content).expect("write the context file");
+        }
+    }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  mixins:\n    - ./{PROJECT_MIXIN}\n  image: {}{spec_tail}\n",
         world
@@ -1693,6 +1709,9 @@ fn policy_deny_all(world: &mut E2eWorld) {
 /// The mixin every e2e project declares, since §8.5 makes a rule apply only where a document names it.
 const PROJECT_MIXIN: &str = "project-egress.yaml";
 
+/// Where a scenario's Containerfile and its context sit beside the project's `lns.yaml`.
+const CONTAINERFILE_IMAGE_PATH: &str = "./image";
+
 const SUPERBLOCK_OFFSET: u64 = 1024;
 
 fn volume_image_path(world: &E2eWorld, name: &str) -> Result<std::path::PathBuf, String> {
@@ -1794,83 +1813,69 @@ fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
     }
 }
 
-#[given("the LNS service is running in that home with the layer-capture hook")]
-fn service_with_the_layer_capture_hook(world: &mut E2eWorld) {
-    assert!(
-        world.home.is_some(),
-        "Given a clean lns cache home before starting the service in it"
-    );
-    crate::steps::service::start_service_with(
-        world,
-        &[(lns_service::containerfile::real::CAPTURE_HOOK_ENV, "1")],
-    );
+/// Slice 3 of lensapp/lens-sandbox#393: the Containerfile the project's `spec.image` names, with
+/// `{base}` standing for the pinned base image every @microvm scenario boots.
+#[given("the project builds its image from this Containerfile")]
+fn project_builds_from_a_containerfile(world: &mut E2eWorld, step: &cucumber::gherkin::Step) {
+    let body = step
+        .docstring
+        .as_deref()
+        .expect("the Containerfile is this step's docstring");
+    world.project_containerfile = Some(format!("{}\n", body.trim()));
+    world.project_image = Some(CONTAINERFILE_IMAGE_PATH.to_string());
 }
 
-#[then("one OCI layer was captured from that run")]
-fn one_layer_was_captured(world: &mut E2eWorld) {
+#[given(regex = r#"^the build context holds "([^"]+)" containing "([^"]*)"$"#)]
+fn build_context_holds(world: &mut E2eWorld, path: String, content: String) {
+    world
+        .project_context_files
+        .push((path, format!("{content}\n")));
+}
+
+#[given(regex = r#"^the document allows egress to "([^"]+)"$"#)]
+fn document_allows_egress_to(world: &mut E2eWorld, host: String) {
+    world.project_egress.push(host);
+}
+
+/// What the run summary owes an approver, and what the run's own directory says it booted from.
+#[then(regex = r#"^the run reports the image it built from "([^"]+)"$"#)]
+fn the_run_reports_the_built_image(world: &mut E2eWorld, label: String) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    let line = combined
+        .lines()
+        .find(|line| line.contains(&format!("built from {label}")))
+        .ok_or_else(|| format!("the run must say what it built from:\n{combined}"))?;
+    if !line.contains("sha256:") {
+        return Err(format!("the built image must be named by digest: {line}"));
+    }
+    let reference = built_reference_of_last_run(world)?;
+    if !reference.contains("@sha256:") {
+        return Err(format!(
+            "the run's own directory must name the image it booted by digest, got {reference:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn built_reference_of_last_run(world: &mut E2eWorld) -> Result<String, String> {
     let home = world
         .home
         .as_ref()
-        .expect("Given a clean lns cache home first")
-        .path();
-    let run_id = last_run(world).expect("the run must have reported its id");
+        .map(|home| home.path().join(".lns"))
+        .ok_or("the service must run in a home this scenario owns")?;
+    let run_id = last_run(world)?;
     let path = home
-        .join(".lns")
         .join("runs")
         .join(&run_id)
         .join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
-    let reference = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| {
-            let run = world.result.as_ref();
-            panic!(
-                "the capture must name the image it built in {}: {e}\n--- run stderr ---\n{}\n--- run stdout ---\n{}\n--- service.log ---\n{}",
+    std::fs::read_to_string(&path)
+        .map(|reference| reference.trim().to_string())
+        .map_err(|e| {
+            format!(
+                "the build must name the image it produced in {}: {e}\n--- service.log ---\n{}",
                 path.display(),
-                run.map(|r| r.stderr.as_str()).unwrap_or("(no run)"),
-                run.map(|r| r.stdout.as_str()).unwrap_or("(no run)"),
                 crate::steps::service::read_service_log(world),
             )
         })
-        .trim()
-        .to_string();
-    assert!(
-        reference.contains("@sha256:"),
-        "the built image must be named by digest, got {reference:?}",
-    );
-    world.built_image = Some(reference);
-}
-
-#[when(regex = r#"^the user runs a microVM command "([^"]*)" over the built image$"#)]
-fn run_command_over_the_built_image(world: &mut E2eWorld, cmd_line: String) {
-    world.project_image = Some(
-        world
-            .built_image
-            .clone()
-            .expect("Then one OCI layer was captured from that run, before booting it"),
-    );
-    run_microvm(world, vec![], &cmd_line);
-}
-
-/// Slice 1 owes lensapp/lens-sandbox#393 the layer's size and the time from the workload's exit to
-/// the imported layer, so the scenario's own log carries what the capture reported.
-#[then("the capture reports the layer size and the time from the command's exit")]
-fn the_capture_reports_its_measurement(world: &mut E2eWorld) {
-    let run = world.result.as_ref().expect("a run must have happened");
-    let reported = format!("{}\n{}", run.stdout, run.stderr)
-        .lines()
-        .find(|line| line.contains("lns-build.local") && line.contains("from exit"))
-        .map(str::trim)
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            panic!(
-                "the capture must report what it built:\n{}\n{}",
-                run.stdout, run.stderr
-            )
-        });
-    println!("[slice-1 measurement] {reported}");
-    for expected in ["entries", "bytes", "from exit"] {
-        assert!(
-            reported.contains(expected),
-            "the report must name the {expected}: {reported}",
-        );
-    }
 }

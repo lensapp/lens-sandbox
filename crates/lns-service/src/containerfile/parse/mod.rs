@@ -484,6 +484,19 @@ mod tests {
         );
     }
 
+    /// The two shapes an assignment list can take that no Containerfile the parser accepts can
+    /// reach: an unbalanced quote, which shell splitting refuses, and no arguments at all.
+    #[test]
+    fn an_assignment_list_falls_back_to_words_when_a_quote_is_unbalanced_and_is_empty_for_nothing()
+    {
+        assert_eq!(
+            key_values("GREETING=\"unclosed value"),
+            vec![("GREETING".to_string(), "\"unclosed".to_string())],
+            "an unbalanced quote must still yield the assignments it can, not nothing",
+        );
+        assert_eq!(key_values("   "), Vec::new());
+    }
+
     #[test]
     fn a_second_from_is_refused_with_its_line_and_the_alternative() {
         let refusal = refusal("FROM alpine\nRUN echo one\nFROM node:24 AS build\n");

@@ -21,15 +21,17 @@ pub(crate) async fn import<F: Fs>(
     store: &LocalStore<'_>,
     reference: &str,
     built: &BuiltImage,
-    layer: &LayerBlob,
+    layer: Option<&LayerBlob>,
     pulled_unix_secs: u64,
 ) -> Result<String> {
     let pinned = pinned_reference(reference, &built.manifest_digest)?;
 
-    store
-        .layers
-        .install_from_bytes(&layer.digest, &layer.bytes)
-        .with_context(|| format!("installing the built layer {}", layer.digest))?;
+    if let Some(layer) = layer {
+        store
+            .layers
+            .install_from_bytes(&layer.digest, &layer.bytes)
+            .with_context(|| format!("installing the built layer {}", layer.digest))?;
+    }
 
     ManifestCache::new(&store.manifests)
         .put(
@@ -101,7 +103,14 @@ pub(crate) mod tests {
     }
 
     fn built() -> BuiltImage {
-        assemble(&parent(), &layer(), "RUN spike", "now").unwrap()
+        assemble(
+            &parent(),
+            Some(&layer()),
+            &crate::containerfile::executor::ConfigDraft::default(),
+            "RUN spike",
+            "now",
+        )
+        .unwrap()
     }
 
     fn recorded(f: &Fixture, pinned: &str) -> ImageRecord {
@@ -120,7 +129,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            &layer(),
+            Some(&layer()),
             1_757_000_000,
         )
         .await
@@ -193,7 +202,7 @@ pub(crate) mod tests {
             &f.store(),
             "NOT A REFERENCE",
             &built(),
-            &layer(),
+            Some(&layer()),
             0,
         )
         .await
@@ -216,7 +225,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            &layer(),
+            Some(&layer()),
             0,
         )
         .await
@@ -239,7 +248,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            &layer(),
+            Some(&layer()),
             0,
         )
         .await
@@ -262,7 +271,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            &layer(),
+            Some(&layer()),
             0,
         )
         .await

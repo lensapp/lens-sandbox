@@ -35,8 +35,10 @@ pub struct E2eWorld {
     /// `pre-start` script bodies the project definition declares, in run order.
     pub project_scripts: Vec<String>,
     pub project_image: Option<String>,
-    /// The image slice 1's layer capture built out of the last run, named by digest.
-    pub built_image: Option<String>,
+    /// The Containerfile a scenario's `spec.image` names, with `{base}` standing for the pinned base image.
+    pub project_containerfile: Option<String>,
+    /// What the build context holds beside the Containerfile, as (path inside the context, content).
+    pub project_context_files: Vec<(String, String)>,
     /// Raises the per-run budget for a tool whose upstream payload is far larger than the usual one.
     pub run_budget: Option<std::time::Duration>,
     /// Destinations the definition's own policy allows, so a scenario whose workload really fetches something is not left at an approval prompt.

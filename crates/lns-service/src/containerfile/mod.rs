@@ -1,13 +1,16 @@
 //! Slice 1 of the Containerfile executor (lensapp/lens-sandbox#393): what one guest wrote,
 //! captured as one OCI layer over its base image and imported where the boot path finds it.
 
+pub(crate) mod context;
 pub(crate) mod exclude;
 pub(crate) mod executor;
 pub(crate) mod ext4_upper;
 pub(crate) mod image;
 pub(crate) mod import;
+pub(crate) mod locate;
 pub(crate) mod parse;
 pub mod real;
+pub(crate) mod step;
 pub(crate) mod tar_layer;
 pub(crate) mod upper;
 
@@ -17,16 +20,17 @@ use crate::image_store::Fs;
 
 use image::ParentImage;
 use import::LocalStore;
-use tar_layer::tar_layer;
+use tar_layer::{LayerBlob, tar_layer};
 use upper::ChangeSet;
 
 /// The repository a built image is named under: a host no registry resolves, so a built digest can only ever be used locally.
 pub(crate) const BUILT_IMAGE_REPOSITORY: &str = "lns-build.local/built";
 
+/// One instruction's result in the local store: the image it produced, and the layer it produced if it produced one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltLayer {
     pub reference: String,
-    pub layer_digest: String,
+    pub layer_digest: Option<String>,
     pub layer_bytes: u64,
     pub entries: usize,
 }
@@ -43,32 +47,52 @@ pub(crate) fn refuse_unless_the_guest_stopped(stop: crate::run::GuestStop) -> Re
     }
 }
 
-pub(crate) async fn import_captured<F: Fs>(
+/// One instruction's commit: its layer, if it made one, and the config the Containerfile has
+/// declared so far, over the image the instruction before it produced.
+pub(crate) struct StepCommit<'a> {
+    pub changes: Option<&'a ChangeSet>,
+    pub parent: &'a ParentImage,
+    pub draft: &'a executor::ConfigDraft,
+    pub created_by: &'a str,
+    pub created: &'a str,
+    pub now_unix_secs: u64,
+}
+
+pub(crate) async fn commit_step<F: Fs>(
     fs: &F,
-    changes: &ChangeSet,
-    parent: &ParentImage,
     store: &LocalStore<'_>,
-    created_by: &str,
-    created: &str,
-    now_unix_secs: u64,
+    step: &StepCommit<'_>,
 ) -> Result<BuiltLayer> {
-    let layer = tar_layer(changes).context("writing the captured change set as an OCI layer")?;
-    let built = image::assemble(parent, &layer, created_by, created)
+    let StepCommit {
+        changes,
+        parent,
+        draft,
+        created_by,
+        created,
+        now_unix_secs,
+    } = *step;
+    let layer = match changes {
+        Some(changes) => {
+            Some(tar_layer(changes).context("writing the captured change set as an OCI layer")?)
+        }
+        None => None,
+    };
+    let built = image::assemble(parent, layer.as_ref(), draft, created_by, created)
         .context("assembling the built image's config and manifest")?;
     let reference = import::import(
         fs,
         store,
         BUILT_IMAGE_REPOSITORY,
         &built,
-        &layer,
+        layer.as_ref(),
         now_unix_secs,
     )
     .await?;
     Ok(BuiltLayer {
         reference,
-        layer_bytes: layer.size(),
-        layer_digest: layer.digest,
-        entries: layer.entries,
+        layer_bytes: layer.as_ref().map(LayerBlob::size).unwrap_or(0),
+        layer_digest: layer.as_ref().map(|layer| layer.digest.clone()),
+        entries: layer.as_ref().map(|layer| layer.entries).unwrap_or(0),
     })
 }
 
@@ -97,14 +121,17 @@ mod tests {
 
     async fn built_from(f: &Fixture, upper: &FakeUpper) -> BuiltLayer {
         let changes = capture(upper).unwrap();
-        import_captured(
+        commit_step(
             &RealFs,
-            &changes,
-            &parent(),
             &f.store(),
-            "RUN sh -c 'echo built-by-lns > /spike-created; rm /etc/alpine-release'",
-            "2026-09-09T00:00:00Z",
-            1_757_000_000,
+            &StepCommit {
+                changes: Some(&changes),
+                parent: &parent(),
+                draft: &executor::ConfigDraft::default(),
+                created_by: "RUN sh -c 'echo built-by-lns > /created; rm /etc/alpine-release'",
+                created: "2026-09-09T00:00:00Z",
+                now_unix_secs: 1_757_000_000,
+            },
         )
         .await
         .unwrap()
@@ -123,13 +150,13 @@ mod tests {
             parent_manifest().layers.len() + 1
         );
         assert_eq!(
-            cached.manifest.layers.last().unwrap().digest,
+            Some(cached.manifest.layers.last().unwrap().digest.clone()),
             built.layer_digest,
         );
         assert_eq!(built.entries, 3);
         assert_eq!(
             built.layer_bytes,
-            f.layers.read(&built.layer_digest).unwrap().len() as u64
+            f.layers.read(&digest_of(&built)).unwrap().len() as u64
         );
     }
 
@@ -141,7 +168,7 @@ mod tests {
         let f = fixture();
         let built = built_from(&f, &one_run_upper()).await;
         let base = base_layer_tar();
-        let captured = f.layers.read(&built.layer_digest).unwrap();
+        let captured = f.layers.read(&digest_of(&built)).unwrap();
 
         let store = crate::content_store::ContentStore::new(f.dir.path().join("content"));
         let mut tree =
@@ -184,7 +211,7 @@ mod tests {
         let built = built_from(&f, &upper).await;
 
         let store = crate::content_store::ContentStore::new(f.dir.path().join("content"));
-        let captured = f.layers.read(&built.layer_digest).unwrap();
+        let captured = f.layers.read(&digest_of(&built)).unwrap();
         let mut tree = build_filesystem_from_layer_bytes(&store, &[captured], &|_, _| {}).unwrap();
 
         let mut dir = &mut tree.root;
@@ -205,6 +232,13 @@ mod tests {
             bin.leaf_id(OsStr::new("claude")).is_ok(),
             "the symlink whose target is past the link field must come back too",
         );
+    }
+
+    fn digest_of(built: &BuiltLayer) -> String {
+        built
+            .layer_digest
+            .clone()
+            .expect("this build committed a layer")
     }
 
     fn dirs_of(path: &str) -> Vec<String> {
@@ -256,6 +290,42 @@ mod tests {
         bytes
     }
 
+    /// An instruction that writes only config commits an image and no layer, and the reference it
+    /// returns is what the next instruction stands on.
+    #[tokio::test]
+    async fn a_commit_with_no_layer_imports_an_image_and_installs_nothing() {
+        let f = fixture();
+        let built = commit_step(
+            &RealFs,
+            &f.store(),
+            &StepCommit {
+                changes: None,
+                parent: &parent(),
+                draft: &executor::ConfigDraft {
+                    user: Some("node".into()),
+                    ..executor::ConfigDraft::default()
+                },
+                created_by: "USER node",
+                created: "2026-09-09T00:00:00Z",
+                now_unix_secs: 1_757_000_000,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(built.layer_digest, None);
+        assert_eq!((built.layer_bytes, built.entries), (0, 0));
+        let cached = ManifestCache::new(f.dir.path().join("manifests"))
+            .get(&built.reference)
+            .expect("a config-only commit is cached under the reference it returned");
+        assert_eq!(cached.manifest.layers.len(), parent_manifest().layers.len());
+        assert!(
+            cached.config.contains("\"User\":\"node\""),
+            "{}",
+            cached.config
+        );
+    }
+
     #[tokio::test]
     async fn a_base_image_the_build_cannot_stand_on_is_refused_before_anything_is_imported() {
         let f = fixture();
@@ -263,14 +333,17 @@ mod tests {
         parent.config = "{}".into();
         let changes = capture(&one_run_upper()).unwrap();
 
-        let err = import_captured(
+        let err = commit_step(
             &RealFs,
-            &changes,
-            &parent,
             &f.store(),
-            "RUN spike",
-            "now",
-            0,
+            &StepCommit {
+                changes: Some(&changes),
+                parent: &parent,
+                draft: &executor::ConfigDraft::default(),
+                created_by: "RUN one",
+                created: "now",
+                now_unix_secs: 0,
+            },
         )
         .await
         .unwrap_err();
@@ -298,14 +371,17 @@ mod tests {
             }],
         };
 
-        let err = import_captured(
+        let err = commit_step(
             &RealFs,
-            &changes,
-            &parent(),
             &f.store(),
-            "RUN spike",
-            "now",
-            0,
+            &StepCommit {
+                changes: Some(&changes),
+                parent: &parent(),
+                draft: &executor::ConfigDraft::default(),
+                created_by: "RUN one",
+                created: "now",
+                now_unix_secs: 0,
+            },
         )
         .await
         .unwrap_err();

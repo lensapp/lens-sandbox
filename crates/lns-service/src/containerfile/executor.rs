@@ -459,6 +459,10 @@ mod tests {
         wrote: Mutex<Option<ChangeSet>>,
         fileset_paths: Vec<String>,
         run_fails_on_line: Option<usize>,
+        /// One way for each of the other three answers to fail, so no test needs a host of its own.
+        base_fails: bool,
+        copy_fails: bool,
+        commit_fails: bool,
     }
 
     impl FakeHost {
@@ -479,6 +483,21 @@ mod tests {
 
         fn failing_on_line(mut self, line: usize) -> Self {
             self.run_fails_on_line = Some(line);
+            self
+        }
+
+        fn with_no_base(mut self) -> Self {
+            self.base_fails = true;
+            self
+        }
+
+        fn with_no_context(mut self) -> Self {
+            self.copy_fails = true;
+            self
+        }
+
+        fn with_no_store(mut self) -> Self {
+            self.commit_fails = true;
             self
         }
 
@@ -509,6 +528,16 @@ mod tests {
                 .1
         }
 
+        fn copies(&self) -> Vec<CopyStep> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    Call::Copy(step) => Some(step),
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn runs(&self) -> Vec<RunStep> {
             self.calls()
                 .into_iter()
@@ -523,6 +552,9 @@ mod tests {
     impl BuildHost for FakeHost {
         async fn resolve_base(&self, image: &str) -> Result<String> {
             self.calls.lock().unwrap().push(Call::Base(image.into()));
+            if self.base_fails {
+                anyhow::bail!("no such image {image}");
+            }
             Ok(format!("registry.test/{image}@sha256:base"))
         }
 
@@ -539,6 +571,9 @@ mod tests {
 
         async fn copy(&self, step: &CopyStep) -> Result<ChangeSet> {
             self.calls.lock().unwrap().push(Call::Copy(step.clone()));
+            if self.copy_fails {
+                anyhow::bail!("no such file in the build context");
+            }
             Ok(ChangeSet {
                 changes: vec![Change::Regular {
                     path: step.destination.trim_start_matches('/').into(),
@@ -551,6 +586,9 @@ mod tests {
         }
 
         async fn commit(&self, commit: &Commit<'_>) -> Result<String> {
+            if self.commit_fails {
+                anyhow::bail!("the layer cache is not writable");
+            }
             let mut committed = self.commits.lock().unwrap();
             *committed += 1;
             self.calls.lock().unwrap().push(Call::Commit {
@@ -955,14 +993,7 @@ mod tests {
         let host = FakeHost::new();
         built(&host, "FROM alpine\nWORKDIR /srv\nCOPY app dist\n").await;
 
-        let Call::Copy(step) = host
-            .calls()
-            .into_iter()
-            .find(|call| matches!(call, Call::Copy(_)))
-            .expect("the COPY reached the host")
-        else {
-            unreachable!()
-        };
+        let step = host.copies().pop().expect("the COPY reached the host");
         assert_eq!(step.destination, "/srv/dist");
         assert_eq!(step.sources, vec!["app".to_string()]);
     }
@@ -976,15 +1007,74 @@ mod tests {
         )
         .await;
 
-        let Call::Copy(step) = host
-            .calls()
-            .into_iter()
-            .find(|call| matches!(call, Call::Copy(_)))
-            .expect("the COPY reached the host")
-        else {
-            unreachable!()
-        };
+        let step = host.copies().pop().expect("the COPY reached the host");
         assert_eq!(step.sources, vec!["dist/1.2.3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_braced_name_a_lone_dollar_and_an_unterminated_brace_each_expand_as_docker_does() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nARG V=1.2.3\nENV BRACED=x${V}y PLAIN=$V$ UNCLOSED=${V\n",
+        )
+        .await;
+
+        assert_eq!(
+            host.final_config().env,
+            vec![
+                ("BRACED".to_string(), "x1.2.3y".to_string()),
+                ("PLAIN".to_string(), "1.2.3$".to_string()),
+                ("UNCLOSED".to_string(), "${V".to_string()),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_nothing_declared_expands_to_nothing() {
+        let host = FakeHost::new();
+        built(&host, "FROM alpine\nWORKDIR /srv/$NOTHING\n").await;
+
+        assert_eq!(host.final_config().workdir, Some("/srv/".to_string()));
+    }
+
+    /// Docker keeps the shell form of `CMD` and `ENTRYPOINT`, so the config carries what the shell
+    /// in force would have run rather than the words the author wrote.
+    #[tokio::test]
+    async fn a_cmd_and_an_entrypoint_in_shell_form_are_run_through_the_shell_in_force() {
+        let host = FakeHost::new();
+        built(
+            &host,
+            "FROM alpine\nSHELL [\"/bin/bash\", \"-lc\"]\nENTRYPOINT /bin/agent --serve\nCMD --check\n",
+        )
+        .await;
+
+        let config = host.final_config();
+        assert_eq!(
+            config.entrypoint,
+            Some(vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "/bin/agent --serve".to_string()
+            ]),
+        );
+        assert_eq!(
+            config.cmd,
+            Some(vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "--check".to_string()
+            ]),
+        );
+        let created_by: Vec<String> = host
+            .commits()
+            .into_iter()
+            .map(|(_, _, created_by)| created_by)
+            .collect();
+        assert!(
+            created_by.contains(&"ENTRYPOINT /bin/agent --serve".to_string()),
+            "the history names the instruction as it was written: {created_by:?}",
+        );
     }
 
     #[tokio::test]
@@ -1112,59 +1202,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_base_the_build_cannot_resolve_stops_it_before_any_instruction_runs() {
-        struct NoBase;
-        impl BuildHost for NoBase {
-            async fn resolve_base(&self, image: &str) -> Result<String> {
-                anyhow::bail!("no such image {image}")
-            }
-            async fn run(&self, _step: &RunStep) -> Result<RunOutcome> {
-                unreachable!("the base is resolved first")
-            }
-            async fn copy(&self, _step: &CopyStep) -> Result<ChangeSet> {
-                unreachable!("the base is resolved first")
-            }
-            async fn commit(&self, _commit: &Commit<'_>) -> Result<String> {
-                unreachable!("the base is resolved first")
-            }
-        }
+        let host = FakeHost::new().with_no_base();
+        let refusal = refused(&host, "FROM missing:1\nRUN echo hi\n").await;
 
-        let refusal = format!(
-            "{:#}",
-            build(&NoBase, &containerfile("FROM missing:1\nRUN echo hi\n"))
-                .await
-                .unwrap_err()
-        );
         assert!(refusal.contains("line 1"), "{refusal}");
         assert!(refusal.contains("FROM missing:1"), "{refusal}");
+        assert!(
+            host.runs().is_empty(),
+            "an instruction must not run on an image the build has not got",
+        );
     }
 
     #[tokio::test]
     async fn a_copy_the_context_cannot_answer_stops_the_build_naming_its_line() {
-        struct NoContext;
-        impl BuildHost for NoContext {
-            async fn resolve_base(&self, image: &str) -> Result<String> {
-                Ok(image.to_string())
-            }
-            async fn run(&self, _step: &RunStep) -> Result<RunOutcome> {
-                unreachable!("this file has no RUN")
-            }
-            async fn copy(&self, _step: &CopyStep) -> Result<ChangeSet> {
-                anyhow::bail!("no such file in the build context")
-            }
-            async fn commit(&self, _commit: &Commit<'_>) -> Result<String> {
-                unreachable!("nothing is committed")
-            }
-        }
+        let host = FakeHost::new().with_no_context();
+        let refusal = refused(&host, "FROM alpine\nCOPY missing /srv\n").await;
 
-        let refusal = format!(
-            "{:#}",
-            build(
-                &NoContext,
-                &containerfile("FROM alpine\nCOPY missing /srv\n")
-            )
-            .await
-            .unwrap_err()
-        );
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("COPY missing /srv"), "{refusal}");
         assert!(refusal.contains("build context"), "{refusal}");
@@ -1172,29 +1225,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_commit_the_store_refuses_stops_the_build_naming_the_instruction() {
-        struct NoStore;
-        impl BuildHost for NoStore {
-            async fn resolve_base(&self, image: &str) -> Result<String> {
-                Ok(image.to_string())
-            }
-            async fn run(&self, _step: &RunStep) -> Result<RunOutcome> {
-                unreachable!("this file has no RUN")
-            }
-            async fn copy(&self, _step: &CopyStep) -> Result<ChangeSet> {
-                unreachable!("this file has no COPY")
-            }
-            async fn commit(&self, _commit: &Commit<'_>) -> Result<String> {
-                anyhow::bail!("the layer cache is not writable")
-            }
-        }
+        let host = FakeHost::new().with_no_store();
+        let refusal = refused(&host, "FROM alpine\nENV MODE=research\n").await;
 
-        let refusal = format!(
-            "{:#}",
-            build(&NoStore, &containerfile("FROM alpine\nENV MODE=research\n"))
-                .await
-                .unwrap_err()
-        );
         assert!(refusal.contains("line 2"), "{refusal}");
         assert!(refusal.contains("ENV MODE=research"), "{refusal}");
+        assert!(refusal.contains("layer cache"), "{refusal}");
     }
 }
