@@ -63,8 +63,13 @@ async fn run_session(
 
     let stop_for_reader = stop_tx.clone();
     let reader_handle = tokio::spawn(async move {
-        let outcome =
-            read_server_frames(read_half, frame_tx, params.expected_guest_addresses).await;
+        let outcome = read_server_frames(
+            read_half,
+            frame_tx,
+            params.expected_guest_addresses,
+            params.address_selection,
+        )
+        .await;
         // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
         let _ = stop_for_reader.send(());
         outcome
@@ -94,6 +99,7 @@ pub async fn capture_session_output(
         CAPTURE_TIMEOUT,
         MAX_CAPTURE_BYTES,
         None,
+        None,
     )
     .await?;
     anyhow::ensure!(code == 0, "capture command exited with code {code}");
@@ -108,6 +114,7 @@ pub async fn capture_session_exec(
     timeout: std::time::Duration,
     max_bytes: usize,
     expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
+    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 ) -> Result<(super::CapturedStreams, i32)> {
     let fd = connector
         .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(10))
@@ -124,6 +131,7 @@ pub async fn capture_session_exec(
         confine: false,
         dies_with_client: false,
         expected_guest_addresses,
+        address_selection,
     };
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(64);
     let (input_keepalive, input_rx) = mpsc::channel::<SessionInput>(1);

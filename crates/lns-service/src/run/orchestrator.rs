@@ -613,6 +613,7 @@ async fn orchestrate(
         confine: !SUPERVISED,
         dies_with_client: false,
         expected_guest_addresses: address.as_ref().map(|lease| lease.net.candidates.clone()),
+        address_selection: address.as_ref().map(vm::guest_addr::real::Lease::selection),
     };
 
     let frame_tx_for_session = frame_tx.clone();

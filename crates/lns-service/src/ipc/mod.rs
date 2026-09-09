@@ -1183,6 +1183,7 @@ pub(super) fn build_session_params(
         confine: true,
         dies_with_client: true,
         expected_guest_addresses: None,
+        address_selection: None,
     }
 }
 

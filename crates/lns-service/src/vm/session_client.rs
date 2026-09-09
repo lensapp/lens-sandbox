@@ -105,6 +105,7 @@ pub struct SessionParams {
     /// Tell the broker this session exists only for its host client, so a vanished stream hangs the child up.
     pub dies_with_client: bool,
     pub expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
+    pub address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 }
 
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
@@ -142,6 +143,7 @@ pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
     expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
+    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 ) -> Result<Option<i32>> {
     while let Some(frame) = read_one_frame(&mut reader).await? {
         match frame {
@@ -156,6 +158,9 @@ pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
                     expected.contains(&address),
                     "the guest reported unoffered assigned address {address}"
                 );
+                if let Some(selection) = &address_selection {
+                    selection.confirm(address)?;
+                }
                 log::info!("Address", "guest assigned {address}");
             }
             ServerFrame::StdoutBytes(bytes) => {
@@ -351,7 +356,7 @@ mod tests {
         bytes.extend(framed(&ServerFrame::StderrBytes(b"err".to_vec())));
         bytes.extend(framed(&ServerFrame::ExitStatus(42)));
         let (tx, mut rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
             .await
             .unwrap();
         assert!(matches!(rx.recv().await, Some(WireFrame::Stdout(b)) if b == b"out"));
@@ -375,6 +380,7 @@ mod tests {
             io::Cursor::new(bytes),
             tx,
             Some(vec!["192.168.64.254".parse().expect("address")]),
+            None,
         )
         .await
         .expect("offered address");
@@ -388,6 +394,7 @@ mod tests {
                 })),
                 tx,
                 Some(vec!["192.168.64.254".parse().expect("address")]),
+                None,
             )
             .await
             .expect_err("untrusted report");
@@ -399,7 +406,7 @@ mod tests {
     async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
         let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
         let (tx, _rx) = mpsc::channel(1);
-        let error = read_server_frames(io::Cursor::new(bytes), tx, None)
+        let error = read_server_frames(io::Cursor::new(bytes), tx, None, None)
             .await
             .expect_err("a refusal is not a workload exit");
         let refusal = error
@@ -417,7 +424,7 @@ mod tests {
     async fn returns_none_when_stream_closes_without_exit_status() {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, _rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
             .await
             .expect("EOF after a frame ends the loop cleanly");
         assert_eq!(
@@ -431,7 +438,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
             .await
             .expect("dropped stdout receiver ends the loop cleanly");
         assert_eq!(code, None);
@@ -442,7 +449,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StderrBytes(b"err".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
             .await
             .expect("dropped stderr receiver ends the loop cleanly");
         assert_eq!(code, None);

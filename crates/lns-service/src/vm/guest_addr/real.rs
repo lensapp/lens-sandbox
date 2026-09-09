@@ -37,6 +37,18 @@ impl Drop for Lease {
     }
 }
 
+#[derive(Clone)]
+pub struct AddressSelection {
+    owner: String,
+}
+
+impl AddressSelection {
+    pub fn confirm(&self, address: std::net::Ipv4Addr) -> Result<()> {
+        allocator().select(&self.owner, address)?;
+        Ok(())
+    }
+}
+
 pub struct ConflictMonitor {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -50,6 +62,12 @@ impl Drop for ConflictMonitor {
 }
 
 impl Lease {
+    pub fn selection(&self) -> AddressSelection {
+        AddressSelection {
+            owner: self.owner.clone(),
+        }
+    }
+
     pub fn monitor(&self) -> ConflictMonitor {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let report: Arc<dyn Fn(Conflict) + Send + Sync> = Arc::new(|conflict| {
