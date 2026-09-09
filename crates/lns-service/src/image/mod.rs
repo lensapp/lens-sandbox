@@ -1779,11 +1779,21 @@ mod tests {
         );
     }
 
+    /// A base a peek accepts has to be one this host would run, and the host running the suite is not fixed.
+    fn image_for_this_host() -> FakeImage {
+        let mut img = build_two_layer_image();
+        let mut config: ConfigFile =
+            serde_json::from_str(&img.config_json).expect("the fixture config reads");
+        config.architecture = want_arch();
+        img.config_json = serde_json::to_string(&config).expect("writing the fixture config");
+        img
+    }
+
     /// `lns push --dry-run` says it builds nothing, so the FROM it reads must cost a manifest and a config, never a layer.
     #[tokio::test]
     async fn peeking_a_base_reads_its_manifest_and_config_and_fetches_no_layer() {
         ensure_global_trace_subscriber();
-        let registry = build_two_layer_image().into_registry();
+        let registry = image_for_this_host().into_registry();
         let peeked = peek_base_with(&registry, "alpine:3.20").await.unwrap();
         assert_eq!(
             peeked.reference,
@@ -1797,7 +1807,7 @@ mod tests {
     #[tokio::test]
     async fn peeking_a_base_this_sandbox_cannot_run_is_refused_as_a_pull_of_it_would_be() {
         ensure_global_trace_subscriber();
-        let mut img = build_two_layer_image();
+        let mut img = image_for_this_host();
         let mut config: ConfigFile = serde_json::from_str(&img.config_json).unwrap();
         config.os = "windows".into();
         img.config_json = serde_json::to_string(&config).unwrap();
@@ -1813,7 +1823,7 @@ mod tests {
     #[tokio::test]
     async fn peeking_a_base_pinned_to_another_digest_is_refused() {
         ensure_global_trace_subscriber();
-        let registry = build_two_layer_image().into_registry();
+        let registry = image_for_this_host().into_registry();
         let err = peek_base_with(&registry, &format!("alpine@sha256:{}", "b".repeat(64)))
             .await
             .unwrap_err();
