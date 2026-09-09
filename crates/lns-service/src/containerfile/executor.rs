@@ -89,6 +89,8 @@ pub(crate) struct Base {
 pub(crate) trait BuildHost {
     /// The digest-pinned reference the `FROM` resolved to, pulled so the build can stand on its config.
     async fn resolve_base(&self, image: &str) -> Result<Base>;
+    /// The same reference and config, read off the registry with no layer fetched, for a caller that will build nothing.
+    async fn peek_base(&self, image: &str) -> Result<Base>;
     async fn run(&self, step: &RunStep) -> Result<RunOutcome>;
     /// Whether the image the build has so far holds a directory at this path, which is what decides where a single source lands.
     async fn holds_a_directory_at(&self, parent: &str, path: &str) -> Result<bool>;
@@ -162,8 +164,19 @@ pub(crate) struct Opening {
     after_from: usize,
 }
 
+/// Whether the base's layers have to be on this machine when the `FROM` is done: a build stands on them, a plan only needs the digest its key is taken over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseNeed {
+    Ingested,
+    PeekedOnly,
+}
+
 /// Read the file up to and including its `FROM`, resolve that base, and ask the key — everything a build and a plan agree on before they part.
-pub(crate) async fn open<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result<Opening> {
+pub(crate) async fn open<H: BuildHost>(
+    host: &H,
+    plan: &BuildPlan<'_>,
+    need: BaseNeed,
+) -> Result<Opening> {
     let mut global_args = Vec::new();
     let mut after_from = 0;
     let from = loop {
@@ -190,10 +203,11 @@ pub(crate) async fn open<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Result
     };
     let (line, image) = from;
     let image = expand(image, &global_args)?;
-    let base = host
-        .resolve_base(&image)
-        .await
-        .with_context(|| format!("line {line}: FROM {image}"))?;
+    let base = match need {
+        BaseNeed::Ingested => host.resolve_base(&image).await,
+        BaseNeed::PeekedOnly => host.peek_base(&image).await,
+    }
+    .with_context(|| format!("line {line}: FROM {image}"))?;
     let key = key::image_key(&base.reference, plan.text, plan.context_hash, plan.arch);
     let cached = match plan.rebuild {
         true => None,
@@ -217,7 +231,7 @@ pub(crate) struct Planned {
 
 /// What `lns push --dry-run` asks for: the key, and the digest only where the key already answers. Nothing is built.
 pub(crate) async fn plan<H: BuildHost>(host: &H, request: &BuildPlan<'_>) -> Result<Planned> {
-    let opening = open(host, request).await?;
+    let opening = open(host, request, BaseNeed::PeekedOnly).await?;
     Ok(Planned {
         key: opening.key,
         reference: opening.cached,
@@ -231,7 +245,7 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         cached,
         global_args,
         after_from,
-    } = open(host, plan).await?;
+    } = open(host, plan, BaseNeed::Ingested).await?;
     let instructions = plan.file.instructions[after_from..].iter();
     if let Some(reference) = cached {
         return Ok(Built {
@@ -717,6 +731,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
         Base(String),
+        Peek(String),
         Run(RunStep),
         Copy(CopyStep),
         Commit {
@@ -860,6 +875,17 @@ mod tests {
             })
         }
 
+        async fn peek_base(&self, image: &str) -> Result<Base> {
+            self.calls.lock().unwrap().push(Call::Peek(image.into()));
+            if self.base_fails {
+                anyhow::bail!("no such image {image}");
+            }
+            Ok(Base {
+                reference: format!("registry.test/{image}@sha256:base"),
+                env: self.base_env.clone(),
+            })
+        }
+
         async fn run(&self, step: &RunStep) -> Result<RunOutcome> {
             self.calls.lock().unwrap().push(Call::Run(step.clone()));
             if self.run_fails_on_line == Some(step.line) {
@@ -972,6 +998,7 @@ mod tests {
             .into_iter()
             .map(|call| match call {
                 Call::Base(image) => format!("base {image}"),
+                Call::Peek(image) => format!("peek {image}"),
                 Call::Run(step) => format!("run {}", step.argv.join(" ")),
                 Call::Copy(step) => format!("copy {}", step.destination),
                 Call::Commit { parent, .. } => format!("commit over {parent}"),
@@ -1814,6 +1841,21 @@ mod tests {
         );
         assert!(host.runs().is_empty(), "a plan boots no guest");
         assert!(host.commits().is_empty(), "a plan commits nothing");
+    }
+
+    /// A dry run says it builds nothing, so its FROM must cost a manifest read rather than the base's every layer.
+    #[tokio::test]
+    async fn a_plan_reads_its_base_without_ingesting_it() {
+        let host = FakeHost::new();
+
+        let planned = planned(&host, "FROM alpine\nRUN echo one\n").await;
+
+        assert!(planned.key.starts_with("sha256:"));
+        assert_eq!(
+            host.calls(),
+            vec![Call::Peek("alpine".to_string())],
+            "a plan peeks the base; only a build pulls it"
+        );
     }
 
     #[tokio::test]

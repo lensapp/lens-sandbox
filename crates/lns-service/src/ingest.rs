@@ -59,7 +59,10 @@ pub async fn run(
     }
 }
 
-fn ensure_runnable_here(config: &oci_client::config::ConfigFile, guest_arch: &Arch) -> Result<()> {
+pub(crate) fn ensure_runnable_here(
+    config: &oci_client::config::ConfigFile,
+    guest_arch: &Arch,
+) -> Result<()> {
     if config.architecture == *guest_arch && config.os == Os::Linux {
         return Ok(());
     }

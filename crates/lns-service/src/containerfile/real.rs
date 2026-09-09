@@ -489,6 +489,16 @@ impl BuildHost for RealBuildHost {
         })
     }
 
+    async fn peek_base(&self, image: &str) -> Result<Base> {
+        let peeked =
+            crate::image::peek_base_with(&crate::image::caching_registry_for(image)?, image)
+                .await?;
+        Ok(Base {
+            env: super::image::declared_env(&peeked.config)?,
+            reference: peeked.reference,
+        })
+    }
+
     async fn run(&self, step: &RunStep) -> Result<RunOutcome> {
         let ordinal = self.steps.fetch_add(1, Ordering::SeqCst) + 1;
         let run_id = crate::run_registry::allocate_run_id();

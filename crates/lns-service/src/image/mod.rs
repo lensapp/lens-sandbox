@@ -282,6 +282,28 @@ pub struct PulledMixin {
     pub tools: Vec<String>,
 }
 
+/// What a `FROM` costs a plan: the digest the key is taken over and the config its ENV comes from, with no layer fetched (`lns push --dry-run` builds nothing).
+#[derive(Debug)]
+pub(crate) struct PeekedBase {
+    pub reference: String,
+    pub config: String,
+}
+
+pub(crate) async fn peek_base_with<R: Registry>(client: &R, image: &str) -> Result<PeekedBase> {
+    let reference: Reference = image
+        .parse()
+        .with_context(|| format!("invalid image reference: {image}"))?;
+    let (_, manifest_digest, config) = client.pull_manifest_and_config(&reference).await?;
+    verify_digest_pin(&reference, &manifest_digest, image)?;
+    let parsed: oci_client::config::ConfigFile =
+        serde_json::from_str(&config).context("parsing image config")?;
+    crate::ingest::ensure_runnable_here(&parsed, &want_arch())?;
+    Ok(PeekedBase {
+        reference: reference.clone_with_digest(manifest_digest).whole(),
+        config,
+    })
+}
+
 pub(crate) async fn pull_artifact_with<R: Registry>(
     client: &R,
     image: &str,
@@ -1755,6 +1777,47 @@ mod tests {
             format!("{err:#}").contains("invalid image reference"),
             "got: {err:#}"
         );
+    }
+
+    /// `lns push --dry-run` says it builds nothing, so the FROM it reads must cost a manifest and a config, never a layer.
+    #[tokio::test]
+    async fn peeking_a_base_reads_its_manifest_and_config_and_fetches_no_layer() {
+        ensure_global_trace_subscriber();
+        let registry = build_two_layer_image().into_registry();
+        let peeked = peek_base_with(&registry, "alpine:3.20").await.unwrap();
+        assert_eq!(
+            peeked.reference,
+            format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)),
+            "the key is taken over the same spelling an ingest resolves to"
+        );
+        let calls: Vec<String> = registry.calls.lock().unwrap().clone();
+        assert_eq!(calls, vec!["manifest".to_string()], "no blob is fetched");
+    }
+
+    #[tokio::test]
+    async fn peeking_a_base_this_sandbox_cannot_run_is_refused_as_a_pull_of_it_would_be() {
+        ensure_global_trace_subscriber();
+        let mut img = build_two_layer_image();
+        let mut config: ConfigFile = serde_json::from_str(&img.config_json).unwrap();
+        config.os = "windows".into();
+        img.config_json = serde_json::to_string(&config).unwrap();
+        let err = peek_base_with(&img.into_registry(), "alpine:3.20")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("this sandbox runs linux"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peeking_a_base_pinned_to_another_digest_is_refused() {
+        ensure_global_trace_subscriber();
+        let registry = build_two_layer_image().into_registry();
+        let err = peek_base_with(&registry, &format!("alpine@sha256:{}", "b".repeat(64)))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("digest"), "{err:#}");
     }
 
     #[tokio::test]
