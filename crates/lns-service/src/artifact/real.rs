@@ -442,7 +442,7 @@ async fn fetch_build_source<R: crate::image::Registry>(
     reference: &Reference,
     manifest: &oci_client::manifest::OciImageManifest,
 ) -> Result<Option<lns_ipc::BuildSourceView>> {
-    let Some((title, descriptor)) = crate::artifact::inspect::build_source_layer(manifest) else {
+    let Some((title, descriptor)) = crate::artifact::inspect::build_source_layer(manifest)? else {
         return Ok(None);
     };
     let bytes = registry

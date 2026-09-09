@@ -88,23 +88,30 @@ fn declared_policy_flags(policy: &lns_policy::Policy) -> Vec<String> {
         .collect()
 }
 
-/// The layer a published artifact carries its Containerfile and context in, and the name to read it back under (`docs/sandbox-spec.md` §7.3).
+/// The layer a published artifact carries its Containerfile and context in, and the name to read it back under (`docs/sandbox-spec.md` §7.3); a layer whose declared size is over the ceiling is refused before a byte of it is fetched, as a packed fileset is.
 pub(crate) fn build_source_layer(
     manifest: &oci_client::manifest::OciImageManifest,
-) -> Option<(String, oci_client::manifest::OciDescriptor)> {
-    manifest
-        .layers
-        .iter()
-        .find(|layer| layer.media_type == lns_artifact::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE)
-        .map(|layer| {
-            let title = layer
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get("org.opencontainers.image.title"))
-                .cloned()
-                .unwrap_or_else(|| "Containerfile".to_string());
-            (title, layer.clone())
-        })
+) -> Result<Option<(String, oci_client::manifest::OciDescriptor)>> {
+    let Some(layer) = manifest.layers.iter().find(|layer| {
+        layer.media_type == lns_artifact::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE
+    }) else {
+        return Ok(None);
+    };
+    let declared = u64::try_from(layer.size).unwrap_or(u64::MAX);
+    if declared > lns_artifact::build::MAX_FILESET_BYTES {
+        anyhow::bail!(
+            "build source layer {} declares {declared} bytes, over the {}-byte limit",
+            layer.digest,
+            lns_artifact::build::MAX_FILESET_BYTES
+        );
+    }
+    let title = layer
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("org.opencontainers.image.title"))
+        .cloned()
+        .unwrap_or_else(|| "Containerfile".to_string());
+    Ok(Some((title, layer.clone())))
 }
 
 /// The packed build source as an approver reads it: the instructions themselves, and every context file with its size.
@@ -351,20 +358,52 @@ mod tests {
         }
     }
 
+    /// `lns inspect` is the read-only verb an approver runs against a stranger's artifact, so a layer's declared size decides whether it is fetched at all.
+    #[test]
+    fn a_build_source_layer_declared_over_the_ceiling_is_refused_before_it_is_fetched() {
+        let manifest = manifest_carrying(vec![oci_client::manifest::OciDescriptor {
+            size: i64::try_from(lns_artifact::build::MAX_FILESET_BYTES).unwrap_or(i64::MAX) + 1,
+            ..source_descriptor(Some("./image/Containerfile"))
+        }]);
+        let err = build_source_layer(&manifest).expect_err("a declared 20 GiB layer is not pulled");
+        assert!(
+            format!("{err:#}").contains("build source layer"),
+            "the refusal names what it refused: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_build_source_layer_at_the_ceiling_is_still_read() {
+        let manifest = manifest_carrying(vec![oci_client::manifest::OciDescriptor {
+            size: i64::try_from(lns_artifact::build::MAX_FILESET_BYTES).unwrap_or(i64::MAX),
+            ..source_descriptor(Some("./image/Containerfile"))
+        }]);
+        assert!(
+            build_source_layer(&manifest)
+                .expect("a layer at the ceiling still reads")
+                .is_some()
+        );
+    }
+
     #[test]
     fn an_artifact_carrying_no_build_source_layer_has_none_to_read() {
         let manifest = manifest_carrying(vec![oci_client::manifest::OciDescriptor {
             media_type: lns_artifact::build::FILESET_LAYER_MEDIA_TYPE.to_string(),
             ..Default::default()
         }]);
-        assert!(build_source_layer(&manifest).is_none());
+        assert!(
+            build_source_layer(&manifest)
+                .expect("no layer is no refusal")
+                .is_none()
+        );
     }
 
     #[test]
     fn the_build_source_layer_is_found_by_its_media_type_and_named_by_its_title() {
         let manifest = manifest_carrying(vec![source_descriptor(Some("./image/Dockerfile"))]);
-        let (title, descriptor) =
-            build_source_layer(&manifest).expect("§7.3: the artifact carries one");
+        let (title, descriptor) = build_source_layer(&manifest)
+            .expect("a layer within the ceiling reads")
+            .expect("§7.3: the artifact carries one");
         assert_eq!(title, "./image/Dockerfile");
         assert_eq!(descriptor.digest, packed_source().digest);
     }
@@ -372,7 +411,9 @@ mod tests {
     #[test]
     fn a_build_source_layer_with_no_title_is_read_under_the_name_podman_would_use() {
         let manifest = manifest_carrying(vec![source_descriptor(None)]);
-        let (title, _) = build_source_layer(&manifest).expect("the layer is still the layer");
+        let (title, _) = build_source_layer(&manifest)
+            .expect("a layer within the ceiling reads")
+            .expect("the layer is still the layer");
         assert_eq!(title, "Containerfile");
     }
 
