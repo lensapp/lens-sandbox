@@ -375,6 +375,36 @@ reaches is decided by the same rules a run's traffic is, and no Docker on the
 host is involved. A published document never carries a path — see
 [§6](#6-publish-time-transforms).
 
+**The instruction subset.** Because lns builds the file rather than handing it
+to another engine, it builds a defined subset of the instruction set. The subset
+below is what `lns.run/v1` accepts. Every other instruction MUST be refused by
+offline validation ([§5](#5-validation-summary)), naming the instruction, the line it
+sits on, and the alternative to write instead — a build MUST NOT silently skip
+an instruction it does not implement.
+
+| Accepted | Form |
+|---|---|
+| `FROM` | One stage, naming a digest or a tag. |
+| `ARG` | With or without a default; a default is part of the build. |
+| `ENV`, `LABEL` | Both the `KEY=value` and the legacy `KEY value` spellings. |
+| `USER`, `WORKDIR` | As written. |
+| `RUN` | Shell form, exec form, and here-documents. |
+| `COPY`, `ADD` | From the build context only. |
+| `ENTRYPOINT`, `CMD`, `SHELL` | Shell and exec form. |
+| `EXPOSE`, `VOLUME` | As written. |
+
+| Refused | Alternative the refusal MUST name |
+|---|---|
+| A second `FROM`, and `COPY --from` | One stage; build the earlier stage as its own image and name it in `FROM`. |
+| `RUN --mount` | `COPY` the file into the image and `RUN` against it. |
+| `ADD` from a URL | `RUN curl`, so the fetch is decided by the document's [`egress`](#316-egress). |
+| `ADD` of an archive it would unpack | `COPY` the archive and `RUN tar`. |
+| `ONBUILD`, `HEALTHCHECK`, `STOPSIGNAL` | None in v1; the refusal names where the subset grows. |
+| `MAINTAINER` | `LABEL org.opencontainers.image.authors`. |
+| A `COPY` or `ADD` source that leaves the context — a `..` segment or an absolute path | A path inside the context; the artifact ships the context, so a source outside it reaches nothing a consumer receives. |
+
+The subset grows by decision, never by accident.
+
 #### 3.1.2 `command` and `workdir`
 
 | Field | Type | Rules |
@@ -2115,8 +2145,9 @@ Offline validation (`lns artifact validate`, and every load path including
   one exception [§1.2](#12-strict-decoding) states — the body of a connector
   method's `auth` whose `kind` this reader does not know.
 - **Sandbox**: `image` present and non-empty, and, when it names a Containerfile
-  ([§3.1.1](#311-image)), relative and beside the document with no `..` segment;
-  `workdir` absolute with no `..`;
+  ([§3.1.1](#311-image)), relative and beside the document with no `..` segment,
+  naming a file this machine can read whose every instruction is in the subset
+  [§3.1.1](#311-image) states; `workdir` absolute with no `..`;
   `user` has at most one `:`, no empty segment, and no `=`, whitespace, control
   character, or quote.
 - **env**: every key is a legal environment-variable name; within one source, no
