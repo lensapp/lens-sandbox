@@ -45,9 +45,11 @@ a login agent, replace a separately installed CLI, or stop an existing service.
 An already-running service must be from the matching build of this branch.
 
 The helpers live in `LNS.app/Contents/Helpers/`. Use that `lns` executable to run
-workloads against the same socket. Do not run `lns update` on the bundled helper:
-the existing updater manages loose CLI/service binaries, not signed app bundles.
-Update this evaluation by replacing the entire app after stopping its service.
+workloads against the same socket. The bundled helper refuses `lns update` and
+`lns uninstall` before changing anything: those commands manage loose binaries,
+not signed app bundles. `lns update --dry-run` remains read-only and available.
+Update this evaluation by replacing the entire app after stopping its service;
+remove it by moving the entire app to Trash. Neither operation removes run data.
 
 Packaging signs helpers before the enclosing app and verifies the signatures
 before replacing an existing bundle. Each previous build is retained in a

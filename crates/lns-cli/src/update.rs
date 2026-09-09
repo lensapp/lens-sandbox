@@ -63,6 +63,7 @@ pub(in crate::update) async fn run_with(
     lns_path: &Path,
     service: &impl ServiceClient,
 ) -> Result<i32> {
+    crate::installation::require_loose_binaries(lns_path)?;
     let plat_key = platform_key(platform)?;
     let client = http_client(running_version, platform)?;
     let entry = fetch_manifest_entry(&client, cdn_base, plat_key).await?;

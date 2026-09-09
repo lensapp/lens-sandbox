@@ -3,6 +3,25 @@ import XCTest
 
 @MainActor
 final class DashboardRefreshTests: XCTestCase {
+    func testARefreshQueuedAtReadCompletionCannotReuseTheCompletedTask() async throws {
+        var reads = 0
+        var second: Task<DashboardData, Error>?
+        var refresh: DashboardRefresh?
+        defer { refresh = nil }
+        refresh = DashboardRefresh {
+            reads += 1
+            var data = DashboardData()
+            data.warnings = ["read \(reads)"]
+            if reads == 1 {
+                second = Task { try await XCTUnwrap(refresh).refresh() }
+            }
+            return data
+        }
+        _ = try await XCTUnwrap(refresh).refresh()
+        let snapshot = try await XCTUnwrap(second).value
+        XCTAssertEqual(snapshot.warnings, ["read 2"], "a refresh after a read completed needs a new read")
+    }
+
     final class Reader {
         var pending: [CheckedContinuation<DashboardData, Error>] = []
         var onRead: (() -> Void)?

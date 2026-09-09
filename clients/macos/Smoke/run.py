@@ -27,6 +27,9 @@ with tempfile.TemporaryDirectory(prefix="lns-ui-", dir="/tmp") as directory:
     }) + "\n")
     address = str(root / "service.sock")
     environment = dict(os.environ, LNS_HOME=directory, LNS_SOCKET_PATH=address, LNS_HEADLESS="1", LNS_NO_UPDATE_CHECK="1")
+    update_environment = dict(environment, HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", ALL_PROXY="http://127.0.0.1:9", NO_PROXY="")
+    update = subprocess.run([str(Path(service_binary).with_name("lns")), "update", "--force"], env=update_environment, capture_output=True, text=True, timeout=10)
+    assert update.returncode != 0 and "complete app" in update.stderr, "bundled updater did not refuse loose-binary replacement: " + update.stderr
     with (root / "service.log").open("w+") as log:
         service = subprocess.Popen([service_binary], env=environment, stdout=log, stderr=log)
         try:
