@@ -89,12 +89,21 @@ rewrite_auth_file() {
 }
 
 # The CLI owns the store, so only "no service" sends us to the file; every
-# other failure is the CLI's answer and stands.
+# other failure is the CLI's answer and stands, bar the one a caller names as
+# the state it asked for.
 fallback_after_cli() {
-  local what=$1 output=$2 status=$3
+  local what=$1 output=$2 status=$3 already=${4:-}
   if [ "$status" -eq 0 ]; then
     printf '%s\n' "$output"
     return 1
+  fi
+  if [ -n "$already" ]; then
+    case "$output" in
+      *"$already"*)
+        printf '%s\n' "$output"
+        return 1
+        ;;
+    esac
   fi
   case "$output" in
     *"$NO_SERVICE"*)
@@ -141,7 +150,7 @@ remove() {
   output=$(lns logout "$registry" 2>&1)
   status=$?
   set -e
-  if fallback_after_cli logout "$output" "$status"; then
+  if fallback_after_cli logout "$output" "$status" 'not logged in'; then
     # shellcheck disable=SC2016 # a jq program, not shell expansion
     rewrite_auth_file 'del(.[$registry])' --arg registry "$registry"
   fi
