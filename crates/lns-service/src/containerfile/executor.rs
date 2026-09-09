@@ -1146,6 +1146,14 @@ mod tests {
         );
     }
 
+    /// The delimiter ends the here-document only where it stands at the start of a line.
+    #[test]
+    fn a_body_the_author_left_unterminated_gets_the_newline_the_delimiter_stands_on() {
+        assert_eq!(ending_in_a_newline("echo hi"), "echo hi\n");
+        assert_eq!(ending_in_a_newline("echo hi\n"), "echo hi\n");
+        assert_eq!(ending_in_a_newline(""), "");
+    }
+
     #[tokio::test]
     async fn a_quoted_here_document_delimiter_keeps_the_shell_out_of_the_body() {
         let host = FakeHost::new();

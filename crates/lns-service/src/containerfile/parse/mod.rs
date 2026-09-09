@@ -204,7 +204,7 @@ fn accept_arg(arguments: &str) -> Vec<InstructionKind> {
         .map(|word| match word.split_once('=') {
             Some((name, default)) => InstructionKind::Arg {
                 name: name.to_string(),
-                default: Some(unquote(default).to_string()),
+                default: Some(default.to_string()),
             },
             None => InstructionKind::Arg {
                 name: word.to_string(),
@@ -404,18 +404,6 @@ fn volume_targets(arguments: &parse_dockerfile::JsonOrStringArray<'_, 1>) -> Vec
     }
 }
 
-fn unquote(value: &str) -> &str {
-    for quote in ['"', '\''] {
-        if let Some(inner) = value
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
-            return inner;
-        }
-    }
-    value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +528,27 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_arg_default_keeps_the_spaces_it_was_written_with() {
+        assert_eq!(
+            kinds("FROM alpine\nARG NOTE=\"two words\" LITERAL='a b' ESCAPED=a\\ b\n")[1..4],
+            [
+                InstructionKind::Arg {
+                    name: "NOTE".into(),
+                    default: Some("two words".into()),
+                },
+                InstructionKind::Arg {
+                    name: "LITERAL".into(),
+                    default: Some("a b".into()),
+                },
+                InstructionKind::Arg {
+                    name: "ESCAPED".into(),
+                    default: Some("a b".into()),
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn an_arg_with_no_default_carries_none() {
         assert_eq!(
             kinds("FROM alpine\nARG VERSION\n")[1],
@@ -586,18 +595,15 @@ mod tests {
     /// A quoted delimiter is Docker's spelling for "do not expand this body", and the build owes it.
     #[test]
     fn a_quoted_here_doc_delimiter_says_the_body_is_not_expanded() {
-        let InstructionKind::Run { here_docs, .. } =
-            kinds("FROM alpine\nRUN <<'EOF'\necho $HOME\nEOF\n")[1].clone()
-        else {
-            panic!("this is a RUN");
-        };
-
         assert_eq!(
-            here_docs,
-            vec![HereDoc {
-                expand: false,
-                body: "echo $HOME\n".into(),
-            }],
+            kinds("FROM alpine\nRUN <<'EOF'\necho $HOME\nEOF\n")[1],
+            InstructionKind::Run {
+                command: Command::Shell(String::new()),
+                here_docs: vec![HereDoc {
+                    expand: false,
+                    body: "echo $HOME\n".into(),
+                }],
+            },
         );
     }
 
