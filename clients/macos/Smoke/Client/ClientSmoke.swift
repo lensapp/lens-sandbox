@@ -10,11 +10,15 @@ struct ClientSmoke {
     static func main() async throws {
         if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--probe" {
             let client = ServiceConnection(path: CommandLine.arguments[2])
+            var updates = try client.replies(to: .watchDashboard).makeAsyncIterator()
+            try require(try await updates.next() != nil, "local transport subscription did not start")
             guard case .offer(nil) = try await client.send(.inspectOffer(id: "gone")) else {
                 throw ServiceError(message: "local transport probe returned an unexpected reply")
             }
-            let snapshot = try await client.dashboard()
-            try require(snapshot.warnings == ["local transport fixture"], "finite local read lost its data")
+            for _ in 0..<20 {
+                let snapshot = try await client.dashboard()
+                try require(snapshot.warnings == ["local transport fixture"], "finite local read lost its data")
+            }
             print("PASS: local transport")
             return
         }
