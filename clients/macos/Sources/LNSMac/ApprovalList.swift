@@ -23,6 +23,8 @@ struct ApprovalList: View {
                         .foregroundStyle(.secondary)
                     Text("Start the service with lns service start.")
                         .font(.callout)
+                    Button(model.startingService ? "Starting Service…" : "Start Service", action: model.startService)
+                        .disabled(!model.canStartService)
                 }
                 if let notice = model.notice {
                     Label(notice, systemImage: "exclamationmark.triangle")
@@ -67,6 +69,7 @@ struct ApprovalCard: View {
             }
             if let offer = approval.offer {
                 ConnectorGrant(offer: offer, respond: respond)
+                    .id(offer.digest)
             } else {
                 HStack {
                     Button("Allow Once") { respond(.allowOnce) }

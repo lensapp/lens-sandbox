@@ -87,6 +87,8 @@ struct HistoryRow: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(approval.entry.subject), \(approval.entry.answer)")
+            .accessibilityValue(model.selectedHistory == approval.id ? "Expanded" : "Collapsed")
+            .accessibilityHint("Shows the question and available answers")
             if model.selectedHistory == approval.id {
                 expansion
             }

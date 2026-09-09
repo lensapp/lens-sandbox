@@ -11,17 +11,38 @@ final class AppModel: ObservableObject {
     @Published var notice: String?
     @Published var connectionNotice: String?
     var onSnapshot: ((ApprovalSnapshot) -> Void)?
-    private let service: ServiceConnection
+    private let service: any ServiceClient
+    let socketPath: String
+    private let control: ServiceControl
+    var startingService: Bool { control.phase == .starting }
+    var stoppingService: Bool { control.phase == .stopping }
+    var canStartService: Bool { control.canStart && !connected }
     let dashboard: DashboardModel
     private var watching: Task<Void, Never>?
 
-    init() {
+    convenience init() {
         let path = ProcessInfo.processInfo.environment["LNS_SOCKET_PATH"]
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/run.lns/service.sock").path
         let connection = ServiceConnection(path: path)
+        let launch = ServiceLaunch(bundle: Bundle.main.bundleURL, socket: path, environment: ProcessInfo.processInfo.environment)
+        let available = FileManager.default.isExecutableFile(atPath: launch.executable.path)
+            && FileManager.default.isExecutableFile(atPath: launch.environment["LNS_SERVICE_BIN"] ?? "")
+        self.init(service: connection, socketPath: path,
+                  launchService: available ? { try await ServiceProcess.start(launch) } : nil,
+                  confirmStop: Self.confirmServiceStop,
+                  quit: { NSApplication.shared.terminate(nil) })
+    }
+
+    init(service connection: any ServiceClient, socketPath: String,
+         launchService: (() async throws -> Void)?, confirmStop: @escaping () -> Bool,
+         quit: @escaping () -> Void) {
         service = connection
+        self.socketPath = socketPath
+        control = ServiceControl(client: connection, launch: launchService, confirm: confirmStop, quit: quit)
         dashboard = DashboardModel(service: connection)
+        control.onChange = { [weak self] in self?.objectWillChange.send() }
+        control.onError = { [weak self] in self?.notice = $0 }
     }
 
     func start() {
@@ -30,7 +51,7 @@ final class AppModel: ObservableObject {
             var retry: UInt64 = 1
             while !Task.isCancelled {
                 do {
-                    for try await data in try service.replies(to: .watchApprovals) {
+                    for try await data in try service.replies(to: .watchApprovals, once: false, latestOnly: true) {
                         try Task.checkCancellation()
                         guard case let .snapshot(update) = try ServiceReply.decode(data) else {
                             throw ServiceError(message: "The service returned an unexpected approval update.")
@@ -53,7 +74,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func stop() { watching?.cancel(); watching = nil }
+    func stop() { watching?.cancel(); watching = nil; feed.disconnect(); onSnapshot?(.empty) }
 
     func respond(to approval: LiveApproval, with action: ApprovalAction) {
         guard connected, !busy.contains(approval.id) else { return }
@@ -72,14 +93,23 @@ final class AppModel: ObservableObject {
     }
 
     func quitService() {
-        Task {
-            do {
-                guard case .shuttingDown = try await service.send(.shutdown) else {
-                    throw ServiceError(message: "The service did not confirm shutdown.")
-                }
-                NSApplication.shared.terminate(nil)
-            } catch { notice = error.localizedDescription }
-        }
+        Task { await control.stop(connected: connected) }
+    }
+
+    func startService() {
+        guard canStartService else { return }
+        notice = nil
+        Task { await control.start() }
+    }
+
+    private static func confirmServiceStop() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Stop LNS and its running sandboxes?"
+        alert.informativeText = "This stops the background service and interrupts workloads. Quit Interface leaves them running."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Stop Service and Quit")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     func dismissNotices() {
