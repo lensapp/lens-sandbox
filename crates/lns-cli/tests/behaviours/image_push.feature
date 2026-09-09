@@ -85,6 +85,22 @@ Feature: publishing the image a Containerfile builds beside the document
     And the output contains "RUN npm install -g @anthropic-ai/claude-code"
     And the published sandbox was not uploaded
 
+  Scenario: a push of a document that declares a mixin resolves it before the build
+    Given the lns.yaml also declares a mixin
+    And the service merges that document's mixin
+    And the registry accepts the push
+    And the build answers with an image of 2 layers
+    When the user runs artifact command "push --yes ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the build was handed the resolved document and what its mixins authored
+
+  Scenario: a push of a document that declares no mixin is built without a resolution
+    Given the registry accepts the push
+    And the build answers with an image of 2 layers
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the builder was not asked to resolve the document
+
   Scenario: a document whose image is a reference never asks for a build
     Given a valid lns.yaml in the current directory
     And the registry accepts the push

@@ -621,12 +621,18 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition_dir,
             rebuild,
             plan_only,
+            authored_egress,
+            packed_filesets,
         } => image_response(
             crate::containerfile::real::build_image_for_push(
-                definition,
-                definition_dir,
-                *rebuild,
-                *plan_only,
+                &crate::containerfile::real::PushBuild {
+                    definition,
+                    definition_dir,
+                    rebuild: *rebuild,
+                    plan_only: *plan_only,
+                    authored_egress: authored_egress.as_deref(),
+                    packed_filesets,
+                },
             )
             .await,
         ),
@@ -3300,6 +3306,8 @@ mod tests {
                 definition_dir: "/work".into(),
                 rebuild: false,
                 plan_only: true,
+                authored_egress: None,
+                packed_filesets: Vec::new(),
             },
             Instant::now(),
         )

@@ -13,6 +13,7 @@ pub mod login;
 pub mod output;
 pub mod platform;
 pub mod raw_mode;
+pub mod resolve;
 pub mod run;
 pub mod sandbox;
 pub mod service;

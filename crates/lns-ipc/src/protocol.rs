@@ -99,6 +99,12 @@ pub enum Request {
         rebuild: bool,
         /// Answer with the key alone and build nothing, which is what `lns push --dry-run` asks for.
         plan_only: bool,
+        /// The egress the document's other sources authored, as `ResolveDefinition` answered it, so a build step is held to what a run of the same document would be.
+        #[serde(default)]
+        authored_egress: Option<String>,
+        /// Which artifact carries each packed fileset the resolution reached, so a build step seeds the same files a run would.
+        #[serde(default)]
+        packed_filesets: Vec<PackedFilesetSource>,
     },
     ListVolumes,
     CreateVolume {
@@ -1965,6 +1971,13 @@ mod tests {
             definition_dir: "/work".into(),
             rebuild: false,
             plan_only: false,
+            authored_egress: Some(r#"{"http":[]}"#.into()),
+            packed_filesets: vec![PackedFilesetSource {
+                guest_path: "/opt/skills".into(),
+                reference: format!("hub.lns.run/team/kit@sha256:{}", "d".repeat(64)),
+                digest: format!("sha256:{}", "e".repeat(64)),
+                size: 4096,
+            }],
         };
         let frame = crate::encode_frame(&req).unwrap();
         let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();

@@ -25,20 +25,38 @@ pub trait Producer {
 
 /// Builds the image a path-form `spec.image` names. The service owns the executor and the layer store; the CLI owns the registry login, so the image is built there and uploaded here.
 pub trait ImageBuilder {
+    /// Merge the document's mixins, so a build step reaches the plan as resolved as the run of the same document would be.
+    fn resolve<'a>(
+        &'a self,
+        document: &'a [u8],
+        project_dir: &'a Path,
+    ) -> LocalBoxFuture<'a, Result<ResolvedDefinition>>;
+
     fn build<'a>(&'a self, request: &'a ImageRequest<'a>)
     -> LocalBoxFuture<'a, Result<BuiltImage>>;
 }
 
 /// What one push asks the builder for.
 pub struct ImageRequest<'a> {
-    /// The document as canonical JSON, which carries the path `spec.image` names.
-    pub document: &'a [u8],
+    /// The document as canonical JSON, resolved, which carries the path `spec.image` names.
+    pub document: Vec<u8>,
     /// The document's directory, which roots that path.
     pub project_dir: &'a Path,
     /// Ignore every key this build would otherwise answer from (`--rebuild`).
     pub rebuild: bool,
     /// Answer with the key alone and build nothing (`--dry-run`).
     pub plan_only: bool,
+    /// The egress the document's other sources authored, so a build step reaches only what a run of the same document would.
+    pub authored_egress: Option<String>,
+    /// Which artifact carries each packed fileset the resolution reached, so a build step seeds the same files a run would.
+    pub packed_filesets: Vec<lns_ipc::PackedFilesetSource>,
+}
+
+/// What the service answered when it merged a document's mixins.
+pub struct ResolvedDefinition {
+    pub definition: Vec<u8>,
+    pub authored_egress: Option<String>,
+    pub packed_filesets: Vec<lns_ipc::PackedFilesetSource>,
 }
 
 /// What the builder answered: the key that names the build, and the image itself when this machine has one.
@@ -381,11 +399,28 @@ fn names_a_containerfile(doc: &[u8]) -> bool {
     )
 }
 
+/// A build step is the document's own run with one instruction in its place, so a push takes the same preflight a run takes: a document still declaring mixins reaches no plan.
+async fn resolve_before_building<B>(builder: &B, request: &mut ImageRequest<'_>) -> Result<()>
+where
+    B: ImageBuilder + ?Sized,
+{
+    if !crate::resolve::declares_a_mixin(&request.document) {
+        return Ok(());
+    }
+    let resolved = builder
+        .resolve(&request.document, request.project_dir)
+        .await?;
+    request.document = resolved.definition;
+    request.authored_egress = resolved.authored_egress;
+    request.packed_filesets = resolved.packed_filesets;
+    Ok(())
+}
+
 /// Build the image `spec.image` names and publish it into the artifact's own repository, before the document that will name its digest is uploaded — `lns push` never publishes a document whose image it does not have (§6).
 async fn publish_the_image<P, B, W>(
     producer: &P,
     builder: &B,
-    request: &ImageRequest<'_>,
+    request: &mut ImageRequest<'_>,
     reference: &str,
     limit: u64,
     out: &mut W,
@@ -395,9 +430,10 @@ where
     B: ImageBuilder + ?Sized,
     W: Write,
 {
-    if !names_a_containerfile(request.document) {
+    if !names_a_containerfile(&request.document) {
         return Ok(None);
     }
+    resolve_before_building(builder, request).await?;
     let built = builder.build(request).await?;
     writeln!(out, "key {}", built.key)?;
     let image = built
@@ -440,16 +476,17 @@ fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()
 /// What a dry run can say about the image without building it: the key always, and the digest only when this machine already answers that key.
 async fn preview_the_image<B, W>(
     builder: &B,
-    request: &ImageRequest<'_>,
+    request: &mut ImageRequest<'_>,
     out: &mut W,
 ) -> Result<Option<String>>
 where
     B: ImageBuilder + ?Sized,
     W: Write,
 {
-    if !names_a_containerfile(request.document) {
+    if !names_a_containerfile(&request.document) {
         return Ok(None);
     }
+    resolve_before_building(builder, request).await?;
     let planned = builder.build(request).await?;
     writeln!(out, "key {}", planned.key)?;
     match planned.image {
@@ -511,11 +548,13 @@ where
     let image = publish_the_image(
         producer,
         builder,
-        &ImageRequest {
-            document: doc,
+        &mut ImageRequest {
+            document: doc.to_vec(),
             project_dir: cwd,
             rebuild,
             plan_only: false,
+            authored_egress: None,
+            packed_filesets: Vec::new(),
         },
         reference,
         image_limit,
@@ -582,11 +621,13 @@ where
     preflight_readmes(fs, cwd, &plan)?;
     let digest = preview_the_image(
         builder,
-        &ImageRequest {
-            document: doc,
+        &mut ImageRequest {
+            document: doc.to_vec(),
             project_dir: cwd,
             rebuild,
             plan_only: true,
+            authored_egress: None,
+            packed_filesets: Vec::new(),
         },
         out,
     )
@@ -744,6 +785,9 @@ mod tests {
         image: Option<lns_ipc::PushableImage>,
         failure: Option<String>,
         asked: RefCell<Vec<bool>>,
+        /// What a resolution of the document answers with; `None` refuses it.
+        merged: Option<String>,
+        resolved: RefCell<Vec<String>>,
     }
 
     impl FakeBuilder {
@@ -760,7 +804,14 @@ mod tests {
                 image,
                 failure: None,
                 asked: RefCell::new(Vec::new()),
+                merged: None,
+                resolved: RefCell::new(Vec::new()),
             }
+        }
+
+        fn merging(mut self, definition: &str) -> Self {
+            self.merged = Some(definition.to_string());
+            self
         }
 
         fn built(layers: &[(&str, u64)]) -> Self {
@@ -805,6 +856,27 @@ mod tests {
     }
 
     impl ImageBuilder for FakeBuilder {
+        fn resolve<'a>(
+            &'a self,
+            document: &'a [u8],
+            _project_dir: &'a Path,
+        ) -> LocalBoxFuture<'a, Result<ResolvedDefinition>> {
+            self.resolved
+                .borrow_mut()
+                .push(String::from_utf8_lossy(document).into_owned());
+            let merged = self.merged.clone();
+            Box::pin(async move {
+                let definition = merged.ok_or_else(|| {
+                    anyhow::anyhow!("./project-egress.yaml: no such mixin beside the document")
+                })?;
+                Ok(ResolvedDefinition {
+                    definition: definition.into_bytes(),
+                    authored_egress: Some(r#"{"http":[]}"#.to_string()),
+                    packed_filesets: Vec::new(),
+                })
+            })
+        }
+
         fn build<'a>(
             &'a self,
             request: &'a ImageRequest<'a>,
@@ -1671,6 +1743,66 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("exited 1"), "got: {err:#}");
         assert!(producer.uploaded.borrow().is_empty());
+    }
+
+    /// The document a push builds an image for, with a mixin its build steps must be held to.
+    const WITH_A_CONTAINERFILE_AND_A_MIXIN: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"./image","mixins":["./project-egress.yaml"]}}"#;
+
+    fn fs_with_a_context_and_a_mixin() -> MapFs {
+        MapFs::with(&[
+            ("/work/image/Containerfile", "FROM alpine\nRUN true\n"),
+            ("/work/image/app/main.js", "console.log(1)\n"),
+            (
+                "/work/project-egress.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec: {}\n",
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_resolution_the_service_refuses_stops_the_push_before_it_publishes_anything() {
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context_and_a_mixin(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:aa", 64)]),
+            WITH_A_CONTAINERFILE_AND_A_MIXIN,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such mixin"), "got: {err:#}");
+        assert!(producer.uploaded.borrow().is_empty());
+        assert!(producer.images.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_a_document_with_a_mixin_plans_the_merged_document() {
+        let builder = FakeBuilder::built(&[("sha256:aa", 64)])
+            .reused()
+            .merging(r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"./image"}}"#);
+        let mut out = Vec::new();
+        let code = push_dry_run(
+            &fs_with_a_context_and_a_mixin(),
+            cwd(),
+            &builder,
+            WITH_A_CONTAINERFILE_AND_A_MIXIN,
+            "ghcr.io/team/hermes:1.4.0",
+            false,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            builder.resolved.borrow().len(),
+            1,
+            "a preview plans the document a build would run, not the one on disk"
+        );
     }
 
     #[tokio::test]

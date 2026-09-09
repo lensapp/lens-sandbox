@@ -218,24 +218,33 @@ pub async fn build_sandbox(request: &SandboxBuild<'_>) -> Result<lns_ipc::Respon
     })
 }
 
+/// What `lns push` was asked to build: the resolved document, the policy a step is held to, and whether a plan is all the caller wants.
+pub struct PushBuild<'a> {
+    pub definition: &'a str,
+    pub definition_dir: &'a str,
+    pub rebuild: bool,
+    pub plan_only: bool,
+    pub authored_egress: Option<&'a str>,
+    pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
+}
+
 /// `lns push`: build what `spec.image` names, or answer with the key alone, and hand the caller
 /// every blob of the image so the side that holds the registry login uploads it (§6).
-pub async fn build_image_for_push(
-    definition: &str,
-    definition_dir: &str,
-    rebuild: bool,
-    plan_only: bool,
-) -> Result<lns_ipc::Response> {
+pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Response> {
+    let definition = request.definition;
     let image = image_of(definition)?;
     let (frame_tx, mut frames) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move { while frames.recv().await.is_some() {} });
-    let mut args = args_for_a_build(definition, definition_dir);
+    let mut args = args_for_a_build(definition, request.definition_dir);
     args.image = Some(image.clone());
+    args.authored_egress = request.authored_egress.map(str::to_string);
+    args.packed_filesets = request.packed_filesets.to_vec();
+    let plan_only = request.plan_only;
     let request = BuildRequest {
         args: &args,
         definition,
         image: &image,
-        rebuild,
+        rebuild: request.rebuild,
     };
     let (key, label, reused, reference) = match plan_only {
         true => {

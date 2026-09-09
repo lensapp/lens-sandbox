@@ -515,10 +515,34 @@ impl distribute::Producer for StepProducer {
 /// The service's half of a push, as a scenario stages it: the key it answers, and the image behind that key when this machine has one.
 struct StepImageBuilder<'a> {
     staged: Option<&'a crate::world::StagedBuild>,
+    resolution: Option<&'a crate::world::StagedResolution>,
     asked: RefCell<Vec<crate::world::StagedRequest>>,
+    inputs: RefCell<Vec<crate::world::StagedBuildInput>>,
+    resolved: RefCell<Vec<String>>,
 }
 
 impl distribute::ImageBuilder for StepImageBuilder<'_> {
+    fn resolve<'a>(
+        &'a self,
+        document: &'a [u8],
+        _project_dir: &'a Path,
+    ) -> LocalBoxFuture<'a, anyhow::Result<distribute::ResolvedDefinition>> {
+        self.resolved
+            .borrow_mut()
+            .push(String::from_utf8_lossy(document).into_owned());
+        let answer = self.resolution.cloned();
+        Box::pin(async move {
+            let staged = answer.ok_or_else(|| {
+                anyhow::anyhow!("this scenario stages no resolution, so nothing may ask for one")
+            })?;
+            Ok(distribute::ResolvedDefinition {
+                definition: staged.definition.into_bytes(),
+                authored_egress: Some(staged.authored_egress),
+                packed_filesets: Vec::new(),
+            })
+        })
+    }
+
     fn build<'a>(
         &'a self,
         request: &'a distribute::ImageRequest<'a>,
@@ -527,6 +551,12 @@ impl distribute::ImageBuilder for StepImageBuilder<'_> {
             plan_only: request.plan_only,
             rebuild: request.rebuild,
         });
+        self.inputs
+            .borrow_mut()
+            .push(crate::world::StagedBuildInput {
+                definition: String::from_utf8_lossy(&request.document).into_owned(),
+                authored_egress: request.authored_egress.clone(),
+            });
         let answer = self.staged.cloned();
         Box::pin(async move {
             let staged = answer.ok_or_else(|| {
@@ -794,7 +824,10 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
     let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
     let builder = StepImageBuilder {
         staged: w.built_image.as_ref(),
+        resolution: w.staged_resolution.as_ref(),
         asked: RefCell::new(Vec::new()),
+        inputs: RefCell::new(Vec::new()),
+        resolved: RefCell::new(Vec::new()),
     };
     let result = match author::load_definition_json_at(&fs, &path) {
         Ok(doc) if push_args.dry_run => {
@@ -841,6 +874,8 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         Err(e) => Err(e),
     };
     w.build_requests = builder.asked.into_inner();
+    w.build_inputs = builder.inputs.into_inner();
+    w.resolve_requests = builder.resolved.into_inner();
     w.pushed_images = producer
         .images
         .into_inner()

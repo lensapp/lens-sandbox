@@ -162,6 +162,28 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
 struct ServiceImageBuilder;
 
 impl super::distribute::ImageBuilder for ServiceImageBuilder {
+    fn resolve<'a>(
+        &'a self,
+        document: &'a [u8],
+        project_dir: &'a std::path::Path,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<super::distribute::ResolvedDefinition>>
+    {
+        Box::pin(async move {
+            crate::service::require_running().await?;
+            let svc = RealSandboxService::new(crate::service::socket_path()?);
+            let definition = std::str::from_utf8(document)
+                .context("the definition being pushed is not utf-8")?;
+            let resolved =
+                crate::resolve::before_building(&svc, definition, &project_dir.to_string_lossy())
+                    .await?;
+            Ok(super::distribute::ResolvedDefinition {
+                definition: resolved.definition.into_bytes(),
+                authored_egress: resolved.authored_egress,
+                packed_filesets: resolved.packed_filesets,
+            })
+        })
+    }
+
     fn build<'a>(
         &'a self,
         request: &'a super::distribute::ImageRequest<'a>,
@@ -169,7 +191,7 @@ impl super::distribute::ImageBuilder for ServiceImageBuilder {
         Box::pin(async move {
             crate::service::require_running().await?;
             let svc = RealSandboxService::new(crate::service::socket_path()?);
-            let definition = String::from_utf8(request.document.to_vec())
+            let definition = String::from_utf8(request.document.clone())
                 .context("the definition being pushed is not utf-8")?;
             let response = crate::service::SandboxService::one_shot(
                 &svc,
@@ -178,6 +200,8 @@ impl super::distribute::ImageBuilder for ServiceImageBuilder {
                     definition_dir: request.project_dir.to_string_lossy().into_owned(),
                     rebuild: request.rebuild,
                     plan_only: request.plan_only,
+                    authored_egress: request.authored_egress.clone(),
+                    packed_filesets: request.packed_filesets.clone(),
                 },
             )
             .await?;

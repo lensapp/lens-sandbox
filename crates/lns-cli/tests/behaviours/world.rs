@@ -68,6 +68,12 @@ pub struct BehaviourWorld {
     pub pushed_build_source: Option<Vec<u8>>,
     /// Whether each build request the push made asked for a plan only.
     pub build_requests: Vec<StagedRequest>,
+    /// The document and the mixin-authored egress each build request carried.
+    pub build_inputs: Vec<StagedBuildInput>,
+    /// What the scripted service answers a push's resolution request with; `None` means the builder must never ask for one.
+    pub staged_resolution: Option<StagedResolution>,
+    /// Every document the push asked the builder to resolve.
+    pub resolve_requests: Vec<String>,
     pub tool_index: std::collections::HashMap<String, String>,
     /// Exact pins the scripted index answers "not listed" for at push verification.
     pub unlisted_pins: std::collections::HashSet<String>,
@@ -359,4 +365,18 @@ pub struct StagedBuild {
 pub struct StagedRequest {
     pub plan_only: bool,
     pub rebuild: bool,
+}
+
+/// What a scenario stages the service's resolution of a document as, so a push can be asserted to build the merged document rather than the one on disk.
+#[derive(Debug, Clone)]
+pub struct StagedResolution {
+    pub definition: String,
+    pub authored_egress: String,
+}
+
+/// The document one build request carried, and the egress the document's other sources authored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedBuildInput {
+    pub definition: String,
+    pub authored_egress: Option<String>,
 }

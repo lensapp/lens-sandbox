@@ -1,6 +1,6 @@
 use cucumber::{given, then};
 
-use crate::world::{BehaviourWorld, StagedBuild, StagedRequest};
+use crate::world::{BehaviourWorld, StagedBuild, StagedRequest, StagedResolution};
 
 /// The image config a staged build answers with: two history entries, so the size refusal has an instruction to name.
 const STAGED_CONFIG: &str = r#"{"history":[{"created_by":"FROM docker.io/library/node:24-bookworm"},{"created_by":"RUN npm install -g @anthropic-ai/claude-code"}]}"#;
@@ -138,6 +138,65 @@ fn the_build_ignored_the_cache(w: &mut BehaviourWorld) {
             plan_only: false,
             rebuild: true,
         }],
+    );
+}
+
+/// The egress a mixin authored, which a build step is held to exactly as the run of the same document would be.
+const AUTHORED_EGRESS: &str = r#"{"http":[{"match":"registry.npmjs.org","verdict":"allow"}]}"#;
+
+#[given("the lns.yaml also declares a mixin")]
+fn the_document_declares_a_mixin(w: &mut BehaviourWorld) {
+    let path = std::path::PathBuf::from("/work/lns.yaml");
+    let document = w
+        .author_files
+        .get(&path)
+        .expect("this scenario writes an lns.yaml")
+        .clone();
+    w.author_files.insert(
+        path,
+        format!("{document}  mixins:\n    - ./project-egress.yaml\n"),
+    );
+    w.author_files.insert(
+        std::path::PathBuf::from("/work/project-egress.yaml"),
+        "apiVersion: lns.run/v1\nkind: mixin\nname: project-egress\nspec: {}\n".to_string(),
+    );
+}
+
+#[given("the service merges that document's mixin")]
+fn the_service_resolves_that_document(w: &mut BehaviourWorld) {
+    w.staged_resolution = Some(StagedResolution {
+        definition: serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "sandbox",
+            "name": "hermes",
+            "spec": { "image": "./image" },
+        })
+        .to_string(),
+        authored_egress: AUTHORED_EGRESS.to_string(),
+    });
+}
+
+#[then("the build was handed the resolved document and what its mixins authored")]
+fn the_build_was_handed_the_resolution(w: &mut BehaviourWorld) {
+    let input = w
+        .build_inputs
+        .first()
+        .expect("the push asked the builder to build");
+    let document: serde_json::Value =
+        serde_json::from_str(&input.definition).expect("the build carried a json document");
+    assert!(
+        document["spec"].get("mixins").is_none(),
+        "a build step is the document's own run, so it never reaches the plan unresolved: {document}"
+    );
+    assert_eq!(input.authored_egress.as_deref(), Some(AUTHORED_EGRESS));
+}
+
+#[then("the builder was not asked to resolve the document")]
+fn the_builder_was_not_asked_to_resolve(w: &mut BehaviourWorld) {
+    assert!(
+        w.resolve_requests.is_empty(),
+        "a document declaring no mixin needs no resolution: {:?}",
+        w.resolve_requests
     );
 }
 
