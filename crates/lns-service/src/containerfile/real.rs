@@ -14,7 +14,7 @@ use super::{BuiltLayer, upper};
 /// The test-only hook that turns a run into slice 1's capture. Slice 3 replaces it with the executor, which decides per instruction instead of per run.
 pub const CAPTURE_HOOK_ENV: &str = "LNS_SPIKE_CONTAINERFILE_LAYER";
 
-/// Where the reference of the last built image lands, so the scenario that boots a second guest from it has something to read.
+/// Where the reference of the image a run built lands, in the run's own directory: two runs ending together would overwrite one pointer, and removing the run removes what it built from.
 pub const BUILT_REFERENCE_FILE: &str = "built-image";
 
 pub fn capture_hook_enabled() -> bool {
@@ -34,7 +34,8 @@ pub async fn capture_after_run(
     super::refuse_unless_the_guest_stopped(guest_stop)?;
     let started = std::time::Instant::now();
     let cache_dir = crate::cache::root()?;
-    let upper_image = crate::cache::run_dir(&cache_dir, run_id).join("upper.img");
+    let run_dir = crate::cache::run_dir(&cache_dir, run_id);
+    let upper_image = run_dir.join("upper.img");
     let manifests = cache_dir.join("manifests");
     let parent = parent_image(&manifests, parent_reference)?;
 
@@ -71,7 +72,7 @@ pub async fn capture_after_run(
     )
     .await?;
 
-    publish(&cache_dir, &built.reference);
+    publish(&run_dir, &built.reference);
     log::info!(
         "Built",
         "{} ({} entries, {} bytes, {:.2?} from exit, {:.2?} to read and import)",
@@ -100,8 +101,8 @@ fn parent_image(manifests: &PathBuf, reference: &str) -> Result<ParentImage> {
     })
 }
 
-fn publish(cache_dir: &std::path::Path, reference: &str) {
-    let path = cache_dir.join(BUILT_REFERENCE_FILE);
+fn publish(run_dir: &std::path::Path, reference: &str) {
+    let path = run_dir.join(BUILT_REFERENCE_FILE);
     if let Err(e) = std::fs::write(&path, format!("{reference}\n")) {
         log::warn!(
             "the built image reference was not written to {}: {e}",
