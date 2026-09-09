@@ -1976,3 +1976,130 @@ fn printed_key(world: &E2eWorld) -> Option<String> {
         .lines()
         .find_map(|line| line.strip_prefix("key ").map(|key| key.trim().to_string()))
 }
+
+/// Slice 5 of lensapp/lens-sandbox#393: what a push of a path-form `spec.image` publishes, and
+/// what a machine that never built it receives.
+#[when("the user pushes the sandbox definition to the local registry")]
+fn push_the_definition(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .as_ref()
+        .expect("Given a local registry before pushing to one")
+        .host();
+    let reference = format!("{host}/e2e-built-sandbox:1");
+    run_lns_microvm_as(world, &["push"], vec![reference.clone()]);
+    world.pushed_ref = Some(reference);
+}
+
+/// The repository the artifact was pushed to, which §6 says the image publishes into as well.
+fn pushed_repository(world: &E2eWorld) -> Result<String, String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    Ok(reference
+        .rsplit_once(':')
+        .map(|(repository, _)| repository.to_string())
+        .unwrap_or(reference))
+}
+
+#[then("the image was published into the artifact's own repository")]
+fn the_image_landed_beside_the_artifact(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("built ./image/Dockerfile as "))
+        .ok_or_else(|| format!("the push must name the image it published:\n{}", run.stdout))?;
+    match line.contains(&format!("{repository}@sha256:")) {
+        true => Ok(()),
+        false => Err(format!(
+            "§6: one grant covers both, so the image publishes into {repository}; got {line}"
+        )),
+    }
+}
+
+/// A second machine: the service that built and pushed is stopped, and a home that has never
+/// built anything takes its place, so what the run finds can only have come off the registry.
+#[when("the user pulls the pushed sandbox onto a machine that has never built it")]
+fn pull_onto_a_clean_machine(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    world.shutdown_service();
+    world.home = Some(tempfile::TempDir::new().expect("a home that has never built anything"));
+    world.service_dir = None;
+    world.service_socket = None;
+    crate::steps::service::start_service(world);
+    run_lns_microvm_as(world, &["pull"], vec![reference]);
+    Ok(())
+}
+
+#[when("the user inspects the pushed sandbox")]
+fn inspect_the_pushed_sandbox(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_lns_microvm_as(world, &["inspect"], vec![reference]);
+    Ok(())
+}
+
+#[then("the published document names its image by digest in the artifact's own repository")]
+fn the_published_image_is_a_digest(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("image: "))
+        .ok_or_else(|| format!("inspect must name the image:\n{}", run.stdout))?;
+    match line.contains(&format!("{repository}@sha256:")) {
+        true => Ok(()),
+        false => Err(format!(
+            "a consumer must never receive a document it would have to build; got {line}"
+        )),
+    }
+}
+
+#[then("the inspect booted no guest")]
+fn the_inspect_booted_no_guest(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    match combined.contains("Booted") || combined.contains("Building") {
+        true => Err(format!(
+            "inspect reads the artifact and runs nothing:\n{combined}"
+        )),
+        false => Ok(()),
+    }
+}
+
+#[when(regex = r#"^the user runs the pushed sandbox with "([^"]*)"$"#)]
+fn run_the_pushed_sandbox(world: &mut E2eWorld, cmd_line: String) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_microvm_of(world, vec![reference], &cmd_line);
+    Ok(())
+}
+
+/// The point of the slice for a kit: what a `pre-start` script used to install is in the image.
+#[then("the document that ran declared no pre-start script")]
+fn the_document_declared_no_script(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_lns_microvm_as(world, &["inspect"], vec![reference]);
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    match run.stdout.lines().any(|line| line.starts_with("script:")) {
+        true => Err(format!(
+            "a built image is what a pre-start script was standing in for:\n{}",
+            run.stdout
+        )),
+        false => Ok(()),
+    }
+}
