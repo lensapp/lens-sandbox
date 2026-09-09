@@ -6,7 +6,7 @@ use std::time::Duration;
 use lns_session::GuestNet;
 use serde::{Deserialize, Serialize};
 
-use super::host_net::{HostFiles, HostNetwork, Neighbors, read_active_leases, read_host_network};
+use super::host_net::{HostFiles, HostNetwork, Neighbors, read_active_leases};
 use crate::clock::Clock;
 
 pub mod real;
@@ -110,6 +110,7 @@ pub struct Allocator {
     neighbors: Arc<dyn Neighbors>,
     clock: Arc<dyn Clock>,
     store: Arc<dyn ReservationStore>,
+    network: Mutex<Option<HostNetwork>>,
     held: Mutex<HashMap<String, Reservation>>,
 }
 
@@ -133,13 +134,23 @@ impl Allocator {
             neighbors,
             clock,
             store,
+            network: Mutex::new(None),
             held: Mutex::new(held),
         }
     }
 
+    pub fn set_network(&self, network: HostNetwork) {
+        *self.network.lock().expect("host network poisoned") = Some(network);
+    }
+
     /// One lock spans the read of every exclusion and the write of the new record, so two guests booting together cannot pick the same address.
     pub fn reserve(&self, owner: &str, mac: &str) -> Result<GuestNet, AllocError> {
-        let network = read_host_network(self.files.as_ref());
+        let network = self
+            .network
+            .lock()
+            .expect("host network poisoned")
+            .clone()
+            .unwrap_or_default();
         let now = self.clock.now_unix();
         let leases = match read_active_leases(self.files.as_ref(), now) {
             Ok(leases) => leases,

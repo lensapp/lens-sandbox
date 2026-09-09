@@ -172,6 +172,7 @@ async fn run_provisioner(
     let argv = vec!["/bin/sh".to_string(), DRIVER.to_string()];
     let provisioner_owner = format!("{scratch_id}/tools");
     let address = vm::guest_addr::real::reserve(&provisioner_owner, &provisioner_owner)
+        .await
         .context("reserving an address on the host network for the tool provisioner")?;
     let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None)
         .with_guest_net(address.as_ref().map(|held| &held.net));

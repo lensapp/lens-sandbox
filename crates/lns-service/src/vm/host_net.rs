@@ -8,6 +8,10 @@ pub trait HostFiles: Send + Sync {
     fn read(&self, path: &str) -> std::io::Result<String>;
 }
 
+pub trait HostNetworkSource: Send + Sync {
+    fn observe(&self) -> std::io::Result<String>;
+}
+
 /// Who answered ARP on the shared network recently; an address in use with no lease is still in use.
 pub trait Neighbors: Send + Sync {
     fn observed(&self) -> Vec<Ipv4Addr>;
@@ -144,6 +148,38 @@ fn parse_expiry(value: &str) -> LeaseExpiry {
     u64::from_str_radix(digits, 16).map_or(LeaseExpiry::Unreadable, LeaseExpiry::At)
 }
 
+pub fn parse_host_network(text: &str) -> Option<HostNetwork> {
+    let inet = text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        while let Some(field) = fields.next() {
+            if field == "inet" {
+                let gateway = fields.next()?;
+                while let Some(field) = fields.next() {
+                    if field == "netmask" {
+                        return Some((gateway, fields.next()?));
+                    }
+                }
+            }
+        }
+        None
+    })?;
+    let gateway: Ipv4Addr = inet.0.parse().ok()?;
+    let mask: Ipv4Addr = parse_observed_mask(inet.1)?;
+    let prefix_len = prefix_len_of(mask)?;
+    Some(HostNetwork {
+        network: Ipv4Addr::from(u32::from(gateway) & mask_bits(prefix_len)),
+        prefix_len,
+        gateway,
+    })
+}
+
+fn parse_observed_mask(value: &str) -> Option<Ipv4Addr> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        return u32::from_str_radix(hex, 16).ok().map(Ipv4Addr::from);
+    }
+    value.parse().ok()
+}
+
 /// Apple's plist is XML and lns carries no plist parser, so the two keys it needs are read directly and anything else falls back.
 pub fn parse_bootpd_network(text: &str) -> Option<HostNetwork> {
     let network: Ipv4Addr = plist_string(text, "net_address")?.parse().ok()?;
@@ -185,13 +221,35 @@ pub fn parse_arp_neighbors(text: &str) -> Vec<Ipv4Addr> {
     seen.into_iter().collect()
 }
 
-/// The parameters lns allocates within. A missing or unreadable plist is the ordinary case, not a failure.
-pub fn read_host_network(files: &dyn HostFiles) -> HostNetwork {
-    files
-        .read(BOOTPD_PLIST_PATH)
-        .ok()
-        .and_then(|text| parse_bootpd_network(&text))
-        .unwrap_or_default()
+pub async fn observe_host_network(
+    source: &dyn HostNetworkSource,
+    attempts: usize,
+    retry: std::time::Duration,
+) -> std::io::Result<HostNetwork> {
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match source.observe() {
+            Ok(text) => match parse_host_network(&text) {
+                Some(network) => return Ok(network),
+                None => {
+                    last_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the active VZ shared network observation was malformed",
+                    ));
+                }
+            },
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(retry).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the active VZ shared network did not appear",
+        )
+    }))
 }
 
 /// An unreadable lease file is not an empty one: with no record to read, every candidate has to come from ARP and the reservation table.
@@ -205,6 +263,7 @@ pub fn read_active_leases(files: &dyn HostFiles, now: u64) -> Result<Vec<Lease>,
 pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     pub(crate) struct FakeHostFiles {
         files: HashMap<String, std::io::Result<String>>,
@@ -308,13 +367,71 @@ pub(crate) mod tests {
         assert_eq!(read_active_leases(&files, 0).expect("readable").len(), 2);
     }
 
-    #[test]
-    fn the_apple_default_network_is_used_when_the_plist_says_nothing() {
-        let files = FakeHostFiles::new();
-        assert_eq!(read_host_network(&files), HostNetwork::default());
+    #[tokio::test(start_paused = true)]
+    async fn active_vz_network_observation_retries_until_the_interface_appears() {
+        struct Source(Mutex<Vec<std::io::Result<String>>>);
+        impl HostNetworkSource for Source {
+            fn observe(&self) -> std::io::Result<String> {
+                self.0.lock().expect("source poisoned").remove(0)
+            }
+        }
+        let source = Source(Mutex::new(vec![
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00 broadcast 10.37.129.255\n".into()),
+        ]));
+        let observed = observe_host_network(&source, 2, std::time::Duration::from_secs(1));
+        tokio::pin!(observed);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
         assert_eq!(
-            HostNetwork::default().gateway,
-            Ipv4Addr::new(192, 168, 64, 1)
+            observed.await.expect("network appeared"),
+            HostNetwork {
+                network: Ipv4Addr::new(10, 37, 129, 0),
+                prefix_len: 24,
+                gateway: Ipv4Addr::new(10, 37, 129, 7),
+            },
+            "the observed interface address is the gateway; it is not inferred as network + 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_malformed_active_vz_network_is_an_error_not_a_default() {
+        struct Source(&'static str);
+        impl HostNetworkSource for Source {
+            fn observe(&self) -> std::io::Result<String> {
+                Ok(self.0.into())
+            }
+        }
+        for text in [
+            "",
+            "inet 192.168.64.1",
+            "inet 192.168.64.1 netmask nonsense",
+            "inet 192.168.64.1 netmask 255.0.255.0",
+        ] {
+            assert!(
+                observe_host_network(&Source(text), 1, std::time::Duration::ZERO)
+                    .await
+                    .is_err(),
+                "{text:?}"
+            );
+        }
+        assert!(
+            observe_host_network(
+                &Source("inet 192.168.64.1 netmask 255.255.255.0"),
+                0,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unrelated_plist_subnets_cannot_be_combined_into_an_active_network() {
+        let plist = "<dict><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.255.255.0</string></dict><dict><key>net_address</key><string>172.16.0.0</string><key>net_mask</key><string>255.255.0.0</string></dict>";
+        assert_eq!(
+            parse_bootpd_network(plist),
+            None,
+            "global key splitting cannot identify which Internet Sharing subnet belongs to VZ"
         );
     }
 
@@ -324,9 +441,8 @@ pub(crate) mod tests {
             <key>net_address</key><string>10.37.129.0</string>
             <key>net_mask</key><string>255.255.255.0</string>
             </dict></array></dict></plist>";
-        let files = FakeHostFiles::new().with(BOOTPD_PLIST_PATH, plist);
         assert_eq!(
-            read_host_network(&files),
+            parse_bootpd_network(plist).expect("valid plist fixture"),
             HostNetwork {
                 network: Ipv4Addr::new(10, 37, 129, 0),
                 prefix_len: 24,
@@ -336,7 +452,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_plist_lns_cannot_read_falls_back_instead_of_inventing_a_network() {
+    fn malformed_plist_does_not_invent_a_network() {
         for text in [
             "<plist><dict></dict></plist>",
             "<plist><key>net_address</key><string>nonsense</string><key>net_mask</key><string>255.255.255.0</string></plist>",
@@ -346,8 +462,7 @@ pub(crate) mod tests {
             "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key>",
             "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.255.255.0",
         ] {
-            let files = FakeHostFiles::new().with(BOOTPD_PLIST_PATH, text);
-            assert_eq!(read_host_network(&files), HostNetwork::default(), "{text}");
+            assert_eq!(parse_bootpd_network(text), None, "{text}");
         }
     }
 

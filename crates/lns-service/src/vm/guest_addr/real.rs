@@ -9,7 +9,7 @@ use lns_session::GuestNet;
 
 use super::{Allocator, Conflict, ReservationStore};
 use crate::log;
-use crate::vm::host_net::real::{RealHostFiles, RealNeighbors};
+use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors};
 
 struct FileStore {
     path: PathBuf,
@@ -97,10 +97,14 @@ impl Lease {
 }
 
 /// The only entry point a boot path uses: `None` means this build boots on DHCP, exactly as it did before.
-pub fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
+pub async fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
     if !SUPPORTED || !super::enabled(|k| std::env::var(k).ok()) {
         return Ok(None);
     }
+    let observed =
+        crate::vm::host_net::observe_host_network(&RealHostNetwork, 20, Duration::from_millis(250))
+            .await?;
+    allocator().set_network(observed);
     let mac = super::mac_for(vm_id);
     let net = allocator().reserve(owner, &mac)?;
     log::info!(

@@ -501,6 +501,7 @@ async fn orchestrate(
             .and_then(|c| c.user.as_deref()),
     );
     let address = vm::guest_addr::real::reserve(&run_id, &run_id)
+        .await
         .context("reserving an address on the host network for this guest")?;
     let exec = vm::ExecSpec::for_run(
         &run_as,

@@ -2,13 +2,31 @@
 
 use std::net::Ipv4Addr;
 
-use super::{HostFiles, Neighbors, parse_arp_neighbors};
+use super::{HostFiles, HostNetworkSource, Neighbors, parse_arp_neighbors};
 
 pub struct RealHostFiles;
 
 impl HostFiles for RealHostFiles {
     fn read(&self, path: &str) -> std::io::Result<String> {
         std::fs::read_to_string(path)
+    }
+}
+
+pub struct RealHostNetwork;
+
+impl HostNetworkSource for RealHostNetwork {
+    fn observe(&self) -> std::io::Result<String> {
+        let output = std::process::Command::new("/sbin/ifconfig")
+            .arg("bridge100")
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "ifconfig bridge100 exited with {}",
+                output.status
+            )));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 }
 
