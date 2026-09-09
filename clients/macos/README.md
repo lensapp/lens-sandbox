@@ -13,6 +13,55 @@ service's persistent answers, connector grants, and removal from the list.
 The release installer has not been migrated. This app remains a development
 evaluation, not the default shipping macOS interface.
 
+## Desktop controls
+
+Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (⌘3).
+⌘F focuses audit search and ⌘R refreshes the dashboard. Escape clears a focused
+search or closes focused event details. Standard macOS window controls and ⌘W
+close a window without stopping the service; the menu-bar interface stays open.
+⌘Q quits only the interface. Stopping the service is a separate, confirmed
+action because it interrupts running sandboxes.
+
+The interface clears actionable data when disconnected. Overlapping refreshes
+are coalesced into a fresh post-action read, and canceled reads cannot restore
+an old snapshot. A finite read that stops delivering complete frames times out;
+established subscriptions remain idle without polling.
+
+## Self-contained development bundle
+
+On macOS, build a bundle containing the native interface and release-built
+CLI/service helpers:
+
+```sh
+make -C clients/macos package
+make -C clients/macos smoke
+```
+
+This produces `clients/macos/dist/LNS.app` and `LNS-macos.zip`. Copy the app to
+your user-owned Applications directory, or run it from `dist`. Choose **Start
+Service** when disconnected. It explicitly runs the bundled `lns service start`
+against the interface's socket, with the Rust UI disabled. It does not register
+a login agent, replace a separately installed CLI, or stop an existing service.
+An already-running service must be from the matching build of this branch.
+
+The helpers live in `LNS.app/Contents/Helpers/`. Use that `lns` executable to run
+workloads against the same socket. Do not run `lns update` on the bundled helper:
+the existing updater manages loose CLI/service binaries, not signed app bundles.
+Update this evaluation by replacing the entire app after stopping its service.
+
+Packaging signs helpers before the enclosing app and verifies the signatures
+before replacing an existing bundle. Each previous build is retained in a
+printed `.lns-previous.*` directory under `dist` for recovery; remove those
+development backups when no longer needed. `VERSION` defaults to the CLI crate
+version and must agree with the packaged helper. `SIGN_IDENTITY` selects ad-hoc
+signing (the default) or a configured Developer ID identity with hardened runtime
+and timestamping. Notarization and automatic app updates are not configured.
+
+Branch pushes run a macOS build and bundle smoke check, then retain a zipped app
+as a GitHub Actions artifact for seven days. These are development artifacts,
+not notarized public releases. The smoke check uses an isolated temporary home
+and socket; it does not start a guest or touch installed service data.
+
 ## Build and run
 
 On a Mac with Xcode, from the repository root:

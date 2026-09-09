@@ -22,12 +22,12 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var connectionNotice: String?
     @Published var notice: String?
     @Published var archiveChoice: Bool?
-    private let service: ServiceConnection
+    private let service: any ServiceClient
     private var watching = false
     private let refreshes: DashboardRefresh
     private var offerTask: Task<Void, Never>?
 
-    init(service: ServiceConnection) {
+    init(service: any ServiceClient) {
         self.service = service
         refreshes = DashboardRefresh { try await service.dashboard() }
     }
@@ -52,7 +52,7 @@ final class DashboardModel: ObservableObject {
         var retry: UInt64 = 1
         while !Task.isCancelled {
             do {
-                for try await bytes in try service.replies(to: .watchDashboard) {
+                for try await bytes in try service.replies(to: .watchDashboard, once: false, latestOnly: true) {
                     try Task.checkCancellation()
                     guard case .changed = try JSONDecoder().decode(DashboardMessage.self, from: bytes) else {
                         throw ServiceError(message: "The service returned an unexpected dashboard notification.")

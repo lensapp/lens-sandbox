@@ -59,6 +59,7 @@ struct DashboardView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityValue(model.page == page ? "Selected" : "")
                 }
             }
             Section("Sandboxes") {
@@ -92,12 +93,28 @@ struct DashboardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(model.filters.sandbox == id ? "Selected" : "")
         .help(id ?? "Every sandbox's audit and approval history")
     }
 
     @ViewBuilder private var notices: some View {
         if let message = model.connectionNotice { notice(message) }
         if let message = model.notice { notice(message) }
+        if let message = live.notice { notice(message) }
+        if !live.connected {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(live.startingService ? "Starting the background service…" : "The interface is waiting for the background service.")
+                    Spacer()
+                    Button("Start Service", action: live.startService).disabled(!live.canStartService)
+                }
+                Text("Socket: \(live.socketPath)").font(.caption).textSelection(.enabled)
+                if !live.canStartService && !live.startingService {
+                    Text("This interface-only build needs a separately started service. Use the matching build of lns service start.").font(.caption)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }
         ForEach(Array(model.data.warnings.enumerated()), id: \.offset) { _, message in notice(message) }
         ForEach(Array(live.snapshot.notices.enumerated()), id: \.offset) { _, message in notice(message) }
         if !live.snapshot.notices.isEmpty {
@@ -116,11 +133,19 @@ struct DashboardView: View {
 @MainActor
 struct AuditTimeline: View {
     @ObservedObject var model: DashboardModel
+    @FocusState private var searchFocused: Bool
     private let kinds = ["launch", "egress", "env", "volume", "bind", "approval", "connection", "credential", "tool"]
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                Button { searchFocused = true } label: { Label("Search audit", systemImage: "magnifyingglass") }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless).keyboardShortcut("f")
+                    .help("Search all sandboxes (⌘F)")
+                TextField("Search all sandboxes’ audit events", text: $model.filters.search)
+                    .textFieldStyle(.roundedBorder).focused($searchFocused)
+                    .accessibilityLabel("Search all sandboxes’ audit events")
+                    .onExitCommand { model.filters.search = ""; searchFocused = false }
                 Menu {
                     Button("All event kinds") { model.filters.kinds = [] }
                     Divider()
@@ -143,6 +168,7 @@ struct AuditTimeline: View {
                     TableColumn("Kind", value: \.kind).width(min: 70, ideal: 90)
                     TableColumn("Event", value: \.detail)
                 }
+                .accessibilityLabel("Audit events")
                 .overlay {
                     if model.events.isEmpty {
                         Text(model.connected ? "No matching audit events." : "Waiting for the service…")
@@ -158,7 +184,6 @@ struct AuditTimeline: View {
                 }
             }
         }
-        .searchable(text: $model.filters.search, prompt: "Search all sandboxes' audit events")
         .onChange(of: model.filters.search) { _ in model.selectedEvent = nil }
         .onChange(of: model.filters.kinds) { _ in model.selectedEvent = nil }
     }
@@ -189,6 +214,7 @@ struct AuditDetail: View {
             .padding(16)
         }
         .background(.background)
+        .onExitCommand(perform: close)
     }
 
     private var fields: [(key: String, value: String)] {

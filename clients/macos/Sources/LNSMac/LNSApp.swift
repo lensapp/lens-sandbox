@@ -12,6 +12,8 @@ struct LNSApp: App {
             DashboardView(model: delegate.model.dashboard, live: delegate.model)
         }
         .defaultSize(width: 1100, height: 740)
+        .windowResizability(.contentMinSize)
+        .commands { DesktopCommands(model: delegate.model) }
         Window("LNS Approvals", id: "approvals") {
             ApprovalList(model: delegate.model)
                 .frame(minWidth: 440, minHeight: 320)
@@ -36,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) { model.stop() }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 @MainActor
@@ -53,9 +57,13 @@ struct MenuContent: View {
             openWindow(id: "approvals")
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
+        if !model.connected {
+            Button(model.startingService ? "Starting Service…" : "Start Service", action: model.startService)
+                .disabled(!model.canStartService)
+        }
         Divider()
-        Button("Stop Service and Quit LNS") { model.quitService() }
-            .disabled(!model.connected)
+        Button("Stop Service and Quit LNS…") { model.quitService() }
+            .disabled(!model.connected || model.stoppingService)
         Button("Quit Interface") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }

@@ -23,3 +23,24 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - run: make -C clients/macos verify
+
+  bundle:
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/install-cross-toolchain
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-shared-key: native-macos-bundle
+          cache-on-failure: true
+      - run: make -C clients/macos package
+      - run: make -C clients/macos smoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LNS-macos-${{ github.sha }}
+          path: clients/macos/dist/LNS-macos.zip
+          if-no-files-found: error
+          retention-days: 7

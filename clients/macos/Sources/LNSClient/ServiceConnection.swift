@@ -2,7 +2,7 @@
 import Foundation
 import Network
 
-public struct ServiceConnection {
+public struct ServiceConnection: ServiceClient {
     public let path: String
 
     public init(path: String) { self.path = path }
