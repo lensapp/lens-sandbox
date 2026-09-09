@@ -307,12 +307,34 @@ fn accept_add(
             .iter()
             .any(|suffix| source.ends_with(suffix))
         {
-            return Err(format!(
-                "line {line}: ADD source {source:?} is an archive ADD would unpack, which is not supported; COPY it and RUN tar to unpack it"
-            ));
+            return Err(unpacks_an_archive(line, source));
         }
     }
     Ok(InstructionKind::Add(moved))
+}
+
+/// A tar header carries its magic at byte 257, and a compressed stream carries its own in the first bytes, so a sniff needs this many.
+pub const ARCHIVE_SNIFF_BYTES: u64 = 262;
+
+/// The magic of every stream `ADD` would unpack, in the order a header carries it.
+const ARCHIVE_MAGIC: [&[u8]; 4] = [
+    &[0x1f, 0x8b],
+    b"BZh",
+    &[0xfd, b'7', b'z', b'X', b'Z', 0x00],
+    &[0x28, 0xb5, 0x2f, 0xfd],
+];
+
+/// Docker decides what `ADD` unpacks by content, not by name, so a build lns runs and a build Docker runs agree on an extension-less archive.
+pub fn looks_like_an_archive(head: &[u8]) -> bool {
+    let tar = head.len() >= 262 && &head[257..262] == b"ustar";
+    tar || ARCHIVE_MAGIC.iter().any(|magic| head.starts_with(magic))
+}
+
+/// The one wording an `ADD` of an archive is refused with, whether its name or its content gave it away.
+pub fn unpacks_an_archive(line: usize, source: &str) -> String {
+    format!(
+        "line {line}: ADD source {source:?} is an archive ADD would unpack, which is not supported; COPY it and RUN tar to unpack it"
+    )
 }
 
 fn is_remote(source: &str) -> bool {
@@ -531,6 +553,29 @@ mod tests {
             "got: {refusal}"
         );
         assert!(refusal.contains("RUN tar"), "got: {refusal}");
+    }
+
+    #[test]
+    fn an_archive_is_recognised_by_its_leading_bytes_whatever_it_is_called() {
+        let mut tar = vec![0u8; 512];
+        tar[257..262].copy_from_slice(b"ustar");
+        for (what, bytes) in [
+            ("gzip", vec![0x1f, 0x8b, 0x08, 0x00]),
+            ("bzip2", b"BZh9".to_vec()),
+            ("xz", vec![0xfd, b'7', b'z', b'X', b'Z', 0x00]),
+            ("zstd", vec![0x28, 0xb5, 0x2f, 0xfd]),
+            ("tar", tar),
+        ] {
+            assert!(looks_like_an_archive(&bytes), "{what} is one");
+        }
+        for (what, bytes) in [
+            ("a script", b"#!/bin/sh\nexit 0\n".to_vec()),
+            ("an empty file", Vec::new()),
+            ("a short file", b"BZ".to_vec()),
+            ("a zip, which ADD does not unpack", b"PK\x03\x04".to_vec()),
+        ] {
+            assert!(!looks_like_an_archive(&bytes), "{what} is not one");
+        }
     }
 
     #[test]

@@ -66,18 +66,46 @@ fn resolve<F: Fs + ?Sized>(fs: &F, project_dir: &Path, path: &str) -> Result<(St
 
 /// The offline validate/inspect guard: a path-form image must name a Containerfile this machine can read and lns can build, so a typo and an unbuildable instruction are both found before a push.
 pub fn image_problems<F: Fs + ?Sized>(fs: &F, project_dir: &Path, image: &str) -> Vec<String> {
-    let (containerfile, _, text) = match containerfile_text(fs, project_dir, image) {
+    let (containerfile, at, text) = match containerfile_text(fs, project_dir, image) {
         Ok(None) => return Vec::new(),
         Ok(Some(read)) => read,
         Err(e) => return vec![format!("{e:#}")],
     };
-    match lns_artifact::containerfile::parse(&text) {
-        Ok(_) => Vec::new(),
-        Err(refusals) => refusals
-            .iter()
-            .map(|refusal| format!("{containerfile} {refusal}"))
-            .collect(),
+    let refusals = match lns_artifact::containerfile::parse(&text) {
+        Ok(built) => archives_an_add_would_unpack(fs, at.parent().unwrap_or(project_dir), &built),
+        Err(refusals) => refusals,
+    };
+    refusals
+        .iter()
+        .map(|refusal| format!("{containerfile} {refusal}"))
+        .collect()
+}
+
+/// Docker decides what `ADD` unpacks by content, so a source that is an archive under any name is refused where the file can still be read — the parse-time suffix check is what is left when it cannot.
+fn archives_an_add_would_unpack<F: Fs + ?Sized>(
+    fs: &F,
+    context: &Path,
+    built: &lns_artifact::containerfile::Containerfile,
+) -> Vec<String> {
+    use lns_artifact::containerfile::{
+        ARCHIVE_SNIFF_BYTES, InstructionKind, looks_like_an_archive, unpacks_an_archive,
+    };
+    let mut refusals = Vec::new();
+    for instruction in &built.instructions {
+        let InstructionKind::Add(transfer) = &instruction.kind else {
+            continue;
+        };
+        for source in &transfer.sources {
+            let at = lns_artifact::sandbox::fold_path(&context.join(source));
+            let Ok(head) = fs.read_limited(&at, ARCHIVE_SNIFF_BYTES) else {
+                continue;
+            };
+            if looks_like_an_archive(&head) {
+                refusals.push(unpacks_an_archive(instruction.line, source));
+            }
+        }
     }
+    refusals
 }
 
 /// The Containerfile a path-form `spec.image` names, as written and as read; the subset gate needs no more than this, and the context walk is `inspect`'s alone.
@@ -227,6 +255,45 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    #[test]
+    fn an_add_of_an_archive_with_no_archive_extension_is_refused_by_what_it_holds() {
+        let mut tar = vec![b'0'; 512];
+        tar[257..262].copy_from_slice(b"ustar");
+        let fs = MapFs::with(&[
+            (
+                "/p/image/Containerfile",
+                "FROM alpine\nADD ./toolchain /opt/toolchain\n",
+            ),
+            (
+                "/p/image/toolchain",
+                &String::from_utf8(tar).expect("the fake holds text"),
+            ),
+        ]);
+        let problems = image_problems(&fs, Path::new("/p"), "./image");
+        assert_eq!(problems.len(), 1, "got: {problems:?}");
+        assert!(
+            problems[0].contains("line 2")
+                && problems[0].contains("./toolchain")
+                && problems[0].contains("RUN tar"),
+            "docker build would unpack it and lns would copy one file: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_add_of_an_ordinary_file_is_left_alone() {
+        let fs = MapFs::with(&[
+            (
+                "/p/image/Containerfile",
+                "FROM alpine\nADD ./entrypoint.sh /entrypoint.sh\n",
+            ),
+            ("/p/image/entrypoint.sh", "#!/bin/sh\nexec node .\n"),
+        ]);
+        assert_eq!(
+            image_problems(&fs, Path::new("/p"), "./image"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

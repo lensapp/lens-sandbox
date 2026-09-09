@@ -407,7 +407,7 @@ an instruction it does not implement.
 | A second `FROM`, and `COPY --from` | One stage; build the earlier stage as its own image and name it in `FROM`. |
 | `RUN --mount` | `COPY` the file into the image and `RUN` against it. |
 | `ADD` from a URL | `RUN curl`, so the fetch is decided by the document's [`egress`](#316-egress). |
-| `ADD` of an archive it would unpack | `COPY` the archive and `RUN tar`. |
+| `ADD` of an archive it would unpack — decided by the source's content where offline validation can read it, and by its name otherwise | `COPY` the archive and `RUN tar`. |
 | `ONBUILD`, `HEALTHCHECK`, `STOPSIGNAL` | None in v1; the refusal names where the subset grows. |
 | `MAINTAINER` | `LABEL org.opencontainers.image.authors`. |
 | A `SHELL` in shell form | The exec form: `SHELL ["/bin/bash", "-c"]`. |
