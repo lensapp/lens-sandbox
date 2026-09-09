@@ -361,6 +361,31 @@ An author SHOULD pin the image by digest before publishing. A tag makes the
 published sandbox mutable underneath its consumers, which defeats the digest the
 consumer approved.
 
+**What a build is keyed by.** When `image` names a Containerfile beside the
+document, the image it builds to is a function of four inputs and of nothing
+else:
+
+| Input | Why |
+|---|---|
+| The digest the `FROM` resolved to | The build stands on that image, not on the tag that named it. |
+| The Containerfile's text, as written | Comments and whitespace included: the key measures the file, not the parse, so no reuse needs explaining. |
+| The content hash of the build context | Every file's path, mode and bytes, and every symlink's target. A file rewritten with the bytes it already had is the same context. |
+| The guest architecture | An arm64 image is not an amd64 one. |
+
+Same key, same image: a build whose key this machine already answers runs
+nothing. The key changes when the Containerfile, a context file, the `FROM`
+digest or the architecture changes, and only then.
+
+One instruction is keyed the same way, by the image it stands on and by what it
+resolved to: the parent image's digest, the instruction as it runs (a `RUN`'s
+command, environment, user and working directory; a config instruction's
+resulting config), and, for `COPY` and `ADD`, the content hash of the files
+copied. A build reuses every leading instruction whose key still answers and
+runs the rest, beginning with the first that differs.
+
+Nothing but a key decides reuse. An implementation MUST NOT reuse a build on a
+timestamp, a file's modification time, or the path a document sits at.
+
 #### 3.1.2 `command` and `workdir`
 
 | Field | Type | Rules |
