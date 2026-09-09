@@ -8,6 +8,14 @@ func require(_ condition: Bool, _ message: String) throws {
 @main
 struct ClientSmoke {
     static func main() async throws {
+        if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--probe" {
+            let client = ServiceConnection(path: CommandLine.arguments[2])
+            guard case .offer(nil) = try await client.send(.inspectOffer(id: "gone")) else {
+                throw ServiceError(message: "local transport probe returned an unexpected reply")
+            }
+            print("PASS: local transport")
+            return
+        }
         try require(CommandLine.arguments.count == 3, "usage: LNSClientSmoke <socket> <entry-id>")
         let client = ServiceConnection(path: CommandLine.arguments[1])
         let id = CommandLine.arguments[2]
