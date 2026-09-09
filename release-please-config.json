@@ -31,6 +31,7 @@
         ".github",
         ".vscode",
         "docs",
+        "CODEOWNERS",
         "scripts/lns-install",
         "actions",
         "crates/e2e-tests",
