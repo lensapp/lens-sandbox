@@ -175,6 +175,16 @@ pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result
     }
 }
 
+/// A run says which entry of the image index it booted, because an index holds one image per architecture and only the run picked one (§6.2). A pull or a build step ingests the same way and reports nothing: neither is a run.
+pub(super) fn report_the_booted_image(
+    image: Option<&str>,
+    config: Option<&oci_client::config::ConfigFile>,
+) {
+    if let (Some(image), Some(config)) = (image, config) {
+        crate::log::info!("Image", "{image}, {}/{}", config.os, config.architecture);
+    }
+}
+
 /// The rootfs-assembly progress sink: `span` is the run span captured before `spawn_blocking`, since the blocking thread has no ambient span for the frame forwarder to find the run's channel through.
 fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     move |current, total| {
@@ -406,6 +416,37 @@ mod assembling_progress_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// §6.2: an index holds one image per architecture, so the run says which entry it booted; a pull and a build step ingest the same way and say nothing.
+    #[test]
+    fn the_run_reports_the_image_it_booted_and_the_architecture_it_booted_it_on() {
+        let config: oci_client::config::ConfigFile = serde_json::from_str(
+            r#"{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#,
+        )
+        .expect("a config the registry could serve");
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(Some("alpine:3.20"), Some(&config));
+        });
+        let reported = format!("{frames:?}");
+        assert!(
+            reported.contains("Image")
+                && reported.contains("linux/arm64")
+                && reported.contains("alpine:3.20"),
+            "the summary says which entry of the index booted: {reported}"
+        );
+    }
+
+    #[test]
+    fn an_imageless_run_reports_no_image_it_booted() {
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(None, None);
+        });
+        assert!(
+            format!("{frames:?}").is_empty() || !format!("{frames:?}").contains("Image"),
+            "there is no image to name"
+        );
+    }
+
     const TEST_HOST: lns_artifact::resources::HostCapacity =
         lns_artifact::resources::HostCapacity {
             cpus: 10,
