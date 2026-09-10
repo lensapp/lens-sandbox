@@ -21,12 +21,12 @@ pub(crate) async fn import<F: Fs>(
     store: &LocalStore<'_>,
     reference: &str,
     built: &BuiltImage,
-    layer: Option<&LayerBlob>,
+    layers: &[LayerBlob],
     pulled_unix_secs: u64,
 ) -> Result<String> {
     let pinned = pinned_reference(reference, &built.manifest_digest)?;
 
-    if let Some(layer) = layer {
+    for layer in layers {
         store
             .layers
             .install_from_bytes(&layer.digest, &layer.bytes)
@@ -128,7 +128,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            Some(&layer()),
+            std::slice::from_ref(&layer()),
             1_757_000_000,
         )
         .await
@@ -201,7 +201,7 @@ pub(crate) mod tests {
             &f.store(),
             "NOT A REFERENCE",
             &built(),
-            Some(&layer()),
+            std::slice::from_ref(&layer()),
             0,
         )
         .await
@@ -224,7 +224,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            Some(&layer()),
+            std::slice::from_ref(&layer()),
             0,
         )
         .await
@@ -247,7 +247,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            Some(&layer()),
+            std::slice::from_ref(&layer()),
             0,
         )
         .await
@@ -270,7 +270,7 @@ pub(crate) mod tests {
             &f.store(),
             "lns-build.local/spike",
             &built(),
-            Some(&layer()),
+            std::slice::from_ref(&layer()),
             0,
         )
         .await

@@ -20,6 +20,17 @@ pub(crate) struct Located {
     pub label: String,
 }
 
+impl Located {
+    /// The Containerfile's path inside the context, which is how another engine is told where to find it.
+    pub(crate) fn in_context(&self) -> String {
+        self.containerfile
+            .strip_prefix(&self.context)
+            .unwrap_or(&self.containerfile)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// A value beginning `.`, `/` or `~` is a path — no OCI reference starts that way — so one predicate decides the form.
 pub(crate) fn names_a_containerfile(image: &str) -> bool {
     matches!(image.trim_start().chars().next(), Some('.' | '/' | '~'))
@@ -223,5 +234,20 @@ mod tests {
 
         let refusal = refusal(&context, "./image");
         assert!(refusal.contains("permission denied"), "{refusal}");
+    }
+
+    /// A daemon reads the file out of the context tar, so it is named relative to that context and never by this machine's path.
+    #[test]
+    fn the_file_is_named_inside_the_context_for_an_engine_that_reads_only_the_tar() {
+        let mut context = FakeContext::new();
+        context.file("image/Containerfile", 0o644, b"FROM alpine\n");
+        assert_eq!(located(&context, "./image").in_context(), "Containerfile");
+
+        let mut beside = FakeContext::new();
+        beside.file("Dockerfile.web", 0o644, b"FROM alpine\n");
+        assert_eq!(
+            located(&beside, "./Dockerfile.web").in_context(),
+            "Dockerfile.web"
+        );
     }
 }

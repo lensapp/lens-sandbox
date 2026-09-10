@@ -56,12 +56,14 @@ pub(crate) fn manifest_bytes(manifest: &OciImageManifest, digest: &str) -> Resul
 pub(crate) fn pushable(
     reference: String,
     cached: &crate::image::manifest_cache::CachedManifest,
+    built_outside_the_gate: bool,
     path_for: impl Fn(&str) -> Result<String>,
 ) -> Result<lns_ipc::PushableImage> {
     let (os, architecture) = declared_platform(&cached.config)?;
     Ok(lns_ipc::PushableImage {
         os,
         architecture,
+        built_outside_the_gate,
         digest: cached.manifest_digest.clone(),
         manifest: manifest_bytes(&cached.manifest, &cached.manifest_digest)?,
         manifest_media_type: cached
@@ -521,12 +523,24 @@ pub(crate) mod tests {
         }
     }
 
+    /// A push publishes the record with the image, so what a daemon built is disclosed on the entry the index holds.
+    #[test]
+    fn an_image_the_host_daemon_built_is_handed_to_the_uploader_saying_so() {
+        let built = built();
+        let image = pushable("built".into(), &cached_from(&built), true, |_| {
+            Ok(String::new())
+        })
+        .expect("projecting");
+        assert!(image.built_outside_the_gate);
+    }
+
     #[test]
     fn a_pushable_image_names_every_layer_the_manifest_does_and_where_this_machine_holds_it() {
         let built = built();
         let image = pushable(
             "lns-build.local/built@sha256:abc".into(),
             &cached_from(&built),
+            false,
             |digest| Ok(format!("/layers/{digest}")),
         )
         .expect("the manifest this machine holds projects as it stands");
@@ -550,8 +564,10 @@ pub(crate) mod tests {
             "sha256:{}",
             hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
         );
-        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
-            .expect("a manifest with no media type still publishes");
+        let image = pushable("built".into(), &cached_from(&built), false, |_| {
+            Ok(String::new())
+        })
+        .expect("a manifest with no media type still publishes");
         assert_eq!(
             image.manifest_media_type,
             oci_client::manifest::OCI_IMAGE_MEDIA_TYPE
@@ -567,16 +583,20 @@ pub(crate) mod tests {
             "sha256:{}",
             hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
         );
-        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
-            .expect("projecting");
+        let image = pushable("built".into(), &cached_from(&built), false, |_| {
+            Ok(String::new())
+        })
+        .expect("projecting");
         assert_eq!(image.layers[0].size, 0);
     }
 
     #[test]
     fn a_pushable_image_carries_the_platform_the_index_will_publish_it_under() {
         let built = built();
-        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
-            .expect("projecting");
+        let image = pushable("built".into(), &cached_from(&built), false, |_| {
+            Ok(String::new())
+        })
+        .expect("projecting");
         assert_eq!(
             (image.os.as_str(), image.architecture.as_str()),
             ("linux", "arm64"),
@@ -588,8 +608,10 @@ pub(crate) mod tests {
     fn an_image_whose_config_declares_no_platform_is_not_one_an_index_can_hold() {
         let mut built = built();
         built.config = r#"{"rootfs":{"type":"layers","diff_ids":[]}}"#.to_string();
-        let err =
-            pushable("built".into(), &cached_from(&built), |_| Ok(String::new())).unwrap_err();
+        let err = pushable("built".into(), &cached_from(&built), false, |_| {
+            Ok(String::new())
+        })
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("declares no"),
             "an entry a pull selects by platform cannot be assembled without one: {err:#}"
@@ -599,7 +621,7 @@ pub(crate) mod tests {
     #[test]
     fn a_layer_this_machine_cannot_place_stops_the_projection() {
         let built = built();
-        let err = pushable("built".into(), &cached_from(&built), |digest| {
+        let err = pushable("built".into(), &cached_from(&built), false, |digest| {
             anyhow::bail!("no cache entry for {digest}")
         })
         .unwrap_err();

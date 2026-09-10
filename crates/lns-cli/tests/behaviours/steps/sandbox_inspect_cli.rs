@@ -49,12 +49,28 @@ fn inspects_sandbox_built_for_two_architectures(
         lns_ipc::BuiltArchitecture {
             architecture: "arm64".into(),
             digest: "sha256:aaaa".into(),
+            built_outside_the_gate: false,
         },
         lns_ipc::BuiltArchitecture {
             architecture: "amd64".into(),
             digest: "sha256:bbbb".into(),
+            built_outside_the_gate: false,
         },
     ];
+}
+
+/// One architecture may be built by a daemon while another was built in a guest, and the index says which (`docs/sandbox-spec.md` §6.2).
+#[given(regex = r#"^the index says "([^"]+)" was built outside the gate$"#)]
+fn the_index_marks_an_architecture(world: &mut BehaviourWorld, architecture: String) {
+    let Some(Response::ImageInspected {
+        inspection: ArtifactInspection::Sandbox(view),
+    }) = world.sandbox.inspect_image_response.as_mut()
+    else {
+        unreachable!("a step above staged a sandbox inspection")
+    };
+    for built in view.image_architectures.iter_mut() {
+        built.built_outside_the_gate = built.architecture == architecture;
+    }
 }
 
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox built from "([^"]+)"$"#)]

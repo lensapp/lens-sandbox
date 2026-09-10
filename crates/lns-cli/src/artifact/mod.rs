@@ -656,7 +656,15 @@ fn image_line(view: &lns_ipc::SandboxView) -> String {
         false => view
             .image_architectures
             .iter()
-            .map(|built| format!("{} {}", built.architecture, built.digest))
+            .map(|built| match built.built_outside_the_gate {
+                true => format!(
+                    "{} {} ({})",
+                    built.architecture,
+                    built.digest,
+                    lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE
+                ),
+                false => format!("{} {}", built.architecture, built.digest),
+            })
             .collect::<Vec<_>>()
             .join(", "),
     };

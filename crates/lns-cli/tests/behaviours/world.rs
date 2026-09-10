@@ -63,6 +63,8 @@ pub struct BehaviourWorld {
     pub built_image: Option<StagedBuild>,
     /// What this machine lets a built image weigh, in bytes.
     pub image_limit: Option<u64>,
+    /// Whether this machine's `build.engine` points the build at the host Docker daemon.
+    pub built_outside_the_gate: bool,
     /// Every image the push uploaded, and the repository it landed in.
     pub pushed_images: Vec<(String, lns_ipc::PushableImage)>,
     /// What the registry already holds under each per-architecture image tag, as a scenario stages it.

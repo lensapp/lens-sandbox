@@ -23,11 +23,11 @@ pub use paths::{
 };
 pub use protocol::{
     ApprovalAnswer, ApprovalEntryKind, ApprovalInfo, ArtifactInspection, BindMount, BindSpec,
-    BuildContextFile, BuildSourceView, BuiltArchitecture, CachedKind, ConnectorConnectionView,
-    ConnectorMethodView, ConnectorView, ContributionBlock, DisplacedEntry, ExecImageArgs,
-    ImageInfo, ImageView, LogLevel, MixinView, MountSpec, PackedFilesetSource, PortPublish,
-    Protocol, PushableImage, PushableLayer, RegistryLoginSummary, Request, Response, RunConfig,
-    RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset,
+    BuildContextFile, BuildEngine, BuildSourceView, BuiltArchitecture, CachedKind,
+    ConnectorConnectionView, ConnectorMethodView, ConnectorView, ContributionBlock, DisplacedEntry,
+    ExecImageArgs, ImageInfo, ImageView, LogLevel, MixinView, MountSpec, PackedFilesetSource,
+    PortPublish, Protocol, PushableImage, PushableLayer, RegistryLoginSummary, Request, Response,
+    RunConfig, RunDetails, RunImageArgs, RunStatsInfo, RunStatus, RunSummary, SandboxFileset,
     SandboxFilesetOwner, SandboxMount, SandboxMountKind, SandboxPort, SandboxScript, SandboxView,
     SaveKind, SecretValues, SessionTarget, SignalKind, SourceContribution, StatusInfo, VolumeInfo,
     VolumeMount, VolumePruneFailure, cmdline_unsafe_char, validate_bind_source, validate_run_name,

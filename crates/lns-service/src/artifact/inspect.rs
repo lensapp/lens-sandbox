@@ -155,6 +155,7 @@ pub(crate) fn built_architectures(
         .map(|entry| lns_ipc::BuiltArchitecture {
             architecture: entry.architecture.clone(),
             digest: entry.digest.clone(),
+            built_outside_the_gate: entry.built_outside_the_gate,
         })
         .collect()
 }
@@ -570,6 +571,7 @@ mod tests {
 
     fn index_entry(architecture: &str, digest: &str) -> lns_artifact::image_index::IndexEntry {
         lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: false,
             digest: digest.to_string(),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -680,6 +682,7 @@ mod tests {
             vec![lns_ipc::BuiltArchitecture {
                 architecture: "arm64".to_string(),
                 digest: "sha256:aa".to_string(),
+                built_outside_the_gate: false,
             }],
         );
     }

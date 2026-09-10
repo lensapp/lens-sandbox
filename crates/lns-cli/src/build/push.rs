@@ -162,6 +162,8 @@ pub(crate) async fn image_at(
         );
     };
     Ok(Some(lns_artifact::image_index::IndexEntry {
+        // A tag says who wrote a manifest and never how; the index the repository holds is the record, and held_entries carries it forward.
+        built_outside_the_gate: false,
         digest,
         size: bytes.len() as u64,
         media_type: manifest

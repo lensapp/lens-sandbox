@@ -1974,6 +1974,7 @@ mod tests {
             .find(|held| **held != architecture)
             .expect("lns builds for more than one architecture");
         an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: false,
             digest: format!("sha256:{}", "ab".repeat(32)),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".into(),
@@ -2065,6 +2066,7 @@ mod tests {
         let mut registry = build_two_layer_image().into_registry();
         registry.manifest_failure = Some("blob unknown to registry".into());
         registry.index = Some(an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: false,
             digest: format!("sha256:{}", "ab".repeat(32)),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".into(),
@@ -2091,6 +2093,7 @@ mod tests {
         ensure_global_trace_subscriber();
         let mut registry = build_two_layer_image().into_registry();
         let held = an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: false,
             digest: registry.manifest_digest.clone(),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".into(),
@@ -2114,6 +2117,7 @@ mod tests {
         ensure_global_trace_subscriber();
         let mut registry = build_two_layer_image().into_registry();
         let held = an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: false,
             digest: format!("sha256:{}", "cd".repeat(32)),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".into(),

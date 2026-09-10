@@ -16,7 +16,9 @@ pub struct ConfigArgs {
 
 #[derive(clap::Subcommand)]
 pub enum ConfigCommand {
-    #[command(about = "Set a default (run.cpus, run.mem, run.registry, push.imageLimit).")]
+    #[command(
+        about = "Set a default (run.cpus, run.mem, run.registry, push.imageLimit, build.engine, build.dockerSocket)."
+    )]
     Set(ConfigSetArgs),
     #[command(about = "Print a default's value(s); exits 1 when the key is not set.")]
     Get(ConfigKeyArgs),
@@ -26,7 +28,7 @@ pub enum ConfigCommand {
     List(crate::output::OutputArgs),
 }
 
-const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.registry, or push.imageLimit.";
+const CONFIG_KEY_HELP: &str = "Config key: run.cpus, run.mem, run.registry, push.imageLimit, build.engine, or build.dockerSocket.";
 
 #[derive(clap::Args)]
 pub struct ConfigSetArgs {
@@ -59,17 +61,21 @@ pub enum ConfigKey {
     RunMem,
     RunRegistry,
     PushImageLimit,
+    BuildEngine,
+    BuildDockerSocket,
 }
 
 /// The `run.env` / `run.volume` / `run.publish` keys the sandbox definition now owns; a hand-edited file may still carry them, so `config list` warns and ignores them rather than erroring.
 pub const LEGACY_KEYS: [&str; 3] = ["run.env", "run.volume", "run.publish"];
 
 impl ConfigKey {
-    pub const ALL: [ConfigKey; 4] = [
+    pub const ALL: [ConfigKey; 6] = [
         ConfigKey::RunCpus,
         ConfigKey::RunMem,
         ConfigKey::RunRegistry,
         ConfigKey::PushImageLimit,
+        ConfigKey::BuildEngine,
+        ConfigKey::BuildDockerSocket,
     ];
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -78,8 +84,10 @@ impl ConfigKey {
             "run.mem" => Ok(ConfigKey::RunMem),
             "run.registry" => Ok(ConfigKey::RunRegistry),
             "push.imageLimit" => Ok(ConfigKey::PushImageLimit),
+            "build.engine" => Ok(ConfigKey::BuildEngine),
+            "build.dockerSocket" => Ok(ConfigKey::BuildDockerSocket),
             other => Err(format!(
-                "unknown key {other:?}; the settable defaults are run.cpus, run.mem, run.registry, push.imageLimit (env, volumes, and ports now live in the sandbox definition)"
+                "unknown key {other:?}; the settable defaults are run.cpus, run.mem, run.registry, push.imageLimit, build.engine, build.dockerSocket (env, volumes, and ports now live in the sandbox definition)"
             )),
         }
     }
@@ -90,6 +98,8 @@ impl ConfigKey {
             ConfigKey::RunMem => "run.mem",
             ConfigKey::RunRegistry => "run.registry",
             ConfigKey::PushImageLimit => "push.imageLimit",
+            ConfigKey::BuildEngine => "build.engine",
+            ConfigKey::BuildDockerSocket => "build.dockerSocket",
         }
     }
 }
@@ -101,7 +111,33 @@ pub struct ConfigFile {
     pub run: RunSection,
     #[serde(default, skip_serializing_if = "PushSection::is_empty")]
     pub push: PushSection,
+    #[serde(default, skip_serializing_if = "BuildSection::is_empty")]
+    pub build: BuildSection,
 }
+
+/// What builds a Containerfile on this machine, rather than in the document that names one.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BuildSection {
+    /// `lns`, the build guest, or `docker`, the host daemon; unset is `lns` (`docs/sandbox-spec.md` §3.1.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// The Unix socket the `docker` engine is reached at; unset lets the machine that connects find its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_socket: Option<String>,
+}
+
+impl BuildSection {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// The engine `build.engine` names lns's own build guest by.
+pub const ENGINE_LNS: &str = "lns";
+
+/// The engine `build.engine` names the host Docker daemon by.
+pub const ENGINE_DOCKER: &str = "docker";
 
 /// What `lns push` reads off this machine rather than out of the document.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +332,19 @@ fn store(cfg: &mut ConfigFile, key: ConfigKey, values: &[String]) -> Result<()> 
         ConfigKey::PushImageLimit => {
             cfg.push.image_limit = Some(parse_mem(key, single(key, values)?)?)
         }
+        ConfigKey::BuildEngine => {
+            cfg.build.engine = Some(parse_engine(single(key, values)?)?.to_string())
+        }
+        ConfigKey::BuildDockerSocket => {
+            let value = single(key, values)?;
+            if !value.starts_with('/') {
+                bail!(
+                    "invalid {} value {value:?}: a Docker socket is an absolute path, such as /var/run/docker.sock",
+                    key.name()
+                );
+            }
+            cfg.build.docker_socket = Some(value.to_string());
+        }
     }
     Ok(())
 }
@@ -334,6 +383,8 @@ fn value_of(cfg: &ConfigFile, key: ConfigKey) -> Option<String> {
         ConfigKey::RunMem => cfg.run.mem.map(|v| v.to_string()),
         ConfigKey::RunRegistry => cfg.run.registry.clone(),
         ConfigKey::PushImageLimit => cfg.push.image_limit.map(|v| v.to_string()),
+        ConfigKey::BuildEngine => cfg.build.engine.clone(),
+        ConfigKey::BuildDockerSocket => cfg.build.docker_socket.clone(),
     }
 }
 
@@ -343,6 +394,8 @@ fn clear(cfg: &mut ConfigFile, key: ConfigKey) {
         ConfigKey::RunMem => cfg.run.mem = None,
         ConfigKey::RunRegistry => cfg.run.registry = None,
         ConfigKey::PushImageLimit => cfg.push.image_limit = None,
+        ConfigKey::BuildEngine => cfg.build.engine = None,
+        ConfigKey::BuildDockerSocket => cfg.build.docker_socket = None,
     }
 }
 
@@ -369,6 +422,8 @@ pub struct RunDefaults {
     pub cpus: Option<u8>,
     pub mem: Option<usize>,
     pub registry: Option<String>,
+    /// Which engine a path-form `spec.image` is built with on this machine.
+    pub build_engine: lns_ipc::BuildEngine,
 }
 
 impl RunDefaults {
@@ -382,8 +437,39 @@ pub fn load_run_defaults(path: &Path) -> Result<RunDefaults> {
     Ok(RunDefaults {
         cpus: nonzero_default(ConfigKey::RunCpus, cfg.run.cpus, path)?,
         mem: nonzero_default(ConfigKey::RunMem, cfg.run.mem, path)?,
+        build_engine: build_engine_of(&cfg, path)?,
         registry: cfg.run.registry,
     })
+}
+
+/// Which engine builds a path-form `spec.image` on this machine (`docs/sandbox-spec.md` §3.1.1).
+pub fn load_build_engine(path: &Path) -> Result<lns_ipc::BuildEngine> {
+    build_engine_of(&load(path)?, path)
+}
+
+fn build_engine_of(cfg: &ConfigFile, path: &Path) -> Result<lns_ipc::BuildEngine> {
+    let engine = match cfg.build.engine.as_deref() {
+        None => ENGINE_LNS,
+        Some(engine) => parse_engine(engine).with_context(|| format!("in {}", path.display()))?,
+    };
+    Ok(match engine {
+        ENGINE_DOCKER => lns_ipc::BuildEngine::Docker {
+            socket: cfg.build.docker_socket.clone(),
+        },
+        _ => lns_ipc::BuildEngine::Lns,
+    })
+}
+
+/// The two engines `build.engine` accepts; anything else is refused where it is written and where it is read.
+fn parse_engine(value: &str) -> Result<&'static str> {
+    match value {
+        ENGINE_LNS => Ok(ENGINE_LNS),
+        ENGINE_DOCKER => Ok(ENGINE_DOCKER),
+        other => bail!(
+            "invalid {} value {other:?}: the engines lns builds with are {ENGINE_LNS} (a build guest, the default) and {ENGINE_DOCKER} (the host Docker daemon)",
+            ConfigKey::BuildEngine.name()
+        ),
+    }
 }
 
 /// What a built image may weigh before this machine's `lns push` refuses it (`docs/sandbox-spec.md` §6).
@@ -416,6 +502,7 @@ where
 pub fn apply_run_defaults(mut args: RunArgs, defaults: RunDefaults) -> RunArgs {
     args.cpus_config = defaults.cpus;
     args.mem_config = defaults.mem;
+    args.build_engine = defaults.build_engine;
     args.registry = args.registry.or(defaults.registry);
     let registry = args.registry.clone();
     if let Some(image) = args.image.take() {
@@ -653,11 +740,13 @@ mod tests {
     fn every_key_survives_a_set_get_list_unset_lifecycle() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
-        let seeds: [(ConfigKey, &[&str]); 4] = [
+        let seeds: [(ConfigKey, &[&str]); 6] = [
             (ConfigKey::RunCpus, &["4"]),
             (ConfigKey::RunMem, &["2048"]),
             (ConfigKey::RunRegistry, &["ghcr.io"]),
             (ConfigKey::PushImageLimit, &["8192"]),
+            (ConfigKey::BuildEngine, &["docker"]),
+            (ConfigKey::BuildDockerSocket, &["/var/run/docker.sock"]),
         ];
         for (key, values) in seeds {
             let (code, _) = run_ok(&set_cmd(key, values), &path);
@@ -669,6 +758,8 @@ mod tests {
             "run.mem = 2048",
             "run.registry = ghcr.io",
             "push.imageLimit = 8192",
+            "build.engine = docker",
+            "build.dockerSocket = /var/run/docker.sock",
         ] {
             assert!(
                 listing.lines().any(|l| l == needle),
@@ -728,6 +819,109 @@ mod tests {
         assert!(err.contains("push.imageLimit"), "got: {err}");
     }
 
+    /// A run of a path-form document builds it, so the engine reaches the run the way `run.cpus` does.
+    #[test]
+    fn a_run_carries_the_engine_this_machine_builds_with() {
+        let args = apply_run_defaults(
+            bare_run_args(),
+            RunDefaults {
+                build_engine: lns_ipc::BuildEngine::Docker {
+                    socket: Some("/run/docker.sock".into()),
+                },
+                ..RunDefaults::default()
+            },
+        );
+        assert_eq!(
+            args.build_engine,
+            lns_ipc::BuildEngine::Docker {
+                socket: Some("/run/docker.sock".into()),
+            },
+        );
+    }
+
+    #[test]
+    fn a_machine_that_says_nothing_about_the_engine_builds_in_a_guest() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            load_build_engine(&dir.path().join("config.yaml")).unwrap(),
+            lns_ipc::BuildEngine::Lns,
+            "the gate applies unless this machine has said otherwise",
+        );
+    }
+
+    #[test]
+    fn a_machine_that_prefers_its_daemon_builds_through_the_socket_it_names() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        run_ok(&set_cmd(ConfigKey::BuildEngine, &["docker"]), &path);
+        assert_eq!(
+            load_build_engine(&path).unwrap(),
+            lns_ipc::BuildEngine::Docker { socket: None },
+            "a switch with no socket lets the machine find its own",
+        );
+        run_ok(
+            &set_cmd(
+                ConfigKey::BuildDockerSocket,
+                &["/run/user/1000/docker.sock"],
+            ),
+            &path,
+        );
+        assert_eq!(
+            load_build_engine(&path).unwrap(),
+            lns_ipc::BuildEngine::Docker {
+                socket: Some("/run/user/1000/docker.sock".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn a_socket_named_beside_the_default_engine_changes_nothing_about_where_a_build_runs() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        run_ok(
+            &set_cmd(ConfigKey::BuildDockerSocket, &["/var/run/docker.sock"]),
+            &path,
+        );
+        assert_eq!(
+            load_build_engine(&path).unwrap(),
+            lns_ipc::BuildEngine::Lns,
+            "only build.engine moves a build off the guest",
+        );
+    }
+
+    #[test]
+    fn an_engine_lns_does_not_have_is_refused_naming_the_two_it_does() {
+        let mut cfg = ConfigFile::default();
+        let err = store(&mut cfg, ConfigKey::BuildEngine, &["podman".to_string()]).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("build.engine"), "{message}");
+        assert!(
+            message.contains("lns") && message.contains("docker"),
+            "the refusal names what can be written: {message}",
+        );
+    }
+
+    #[test]
+    fn an_engine_a_hand_edited_file_invented_is_refused_where_a_build_reads_it() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "build:\n  engine: buildah\n").unwrap();
+        let err = load_build_engine(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("build.engine"), "{err:#}");
+    }
+
+    #[test]
+    fn a_docker_socket_that_is_no_path_is_refused_where_it_is_set() {
+        let mut cfg = ConfigFile::default();
+        let err = store(
+            &mut cfg,
+            ConfigKey::BuildDockerSocket,
+            &["tcp://docker:2375".to_string()],
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("build.dockerSocket"), "{err:#}");
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn the_defaults_file_lives_in_the_one_directory_lns_keeps_everything_in() {
@@ -743,6 +937,7 @@ mod tests {
 
     fn bare_run_args() -> RunArgs {
         RunArgs {
+            build_engine: lns_ipc::BuildEngine::default(),
             scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
