@@ -511,7 +511,7 @@ lns config list
 | `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the LNS hub, `hub.lns.run`. |
 | `push.imageLimit` | —         | What `lns push` lets a built image weigh, in MiB. Unset means 4096. |
 | `build.engine` | —          | Which engine builds a Containerfile your `spec.image` names: `lns`, a build guest, which is the default; or `docker`, this machine's own Docker daemon over the Docker Engine API. |
-| `build.dockerSocket` | —    | The Unix socket the `docker` engine is reached at. Unset means `$DOCKER_HOST` when it names a `unix://` socket, else `/var/run/docker.sock`. |
+| `build.dockerSocket` | —    | The Unix socket the `docker` engine is reached at. Unset means `$DOCKER_HOST` when it names a `unix://` socket, else `/var/run/docker.sock`. `lns` reads `$DOCKER_HOST` from your own shell and sends the socket to the service, so a shell-started service and a tray-started one build the same way. |
 
 **What `build.engine docker` changes.** The Containerfile and its context go to
 your Docker daemon, and the image it builds is imported into lns's own layer

@@ -454,7 +454,10 @@ fn build_engine_of(cfg: &ConfigFile, path: &Path) -> Result<lns_ipc::BuildEngine
     };
     Ok(match engine {
         ENGINE_DOCKER => lns_ipc::BuildEngine::Docker {
-            socket: cfg.build.docker_socket.clone(),
+            socket: Some(lns_ipc::docker_socket(
+                cfg.build.docker_socket.as_deref(),
+                std::env::var("DOCKER_HOST").ok().as_deref(),
+            )),
         },
         _ => lns_ipc::BuildEngine::Lns,
     })
@@ -849,15 +852,20 @@ mod tests {
         );
     }
 
+    /// The service is tray-resident and the shell that set `DOCKER_HOST` is the user's, so the socket is resolved here and travels on the request (§3.1.1).
     #[test]
+    #[serial_test::serial(env)]
     fn a_machine_that_prefers_its_daemon_builds_through_the_socket_it_names() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
+        let _docker_host = crate::test_env::EnvScope::unset("DOCKER_HOST");
         run_ok(&set_cmd(ConfigKey::BuildEngine, &["docker"]), &path);
         assert_eq!(
             load_build_engine(&path).unwrap(),
-            lns_ipc::BuildEngine::Docker { socket: None },
-            "a switch with no socket lets the machine find its own",
+            lns_ipc::BuildEngine::Docker {
+                socket: Some(lns_ipc::DEFAULT_DOCKER_SOCKET.to_string()),
+            },
+            "a switch naming no socket carries the one a daemon listens on by default",
         );
         run_ok(
             &set_cmd(
@@ -866,6 +874,24 @@ mod tests {
             ),
             &path,
         );
+        assert_eq!(
+            load_build_engine(&path).unwrap(),
+            lns_ipc::BuildEngine::Docker {
+                socket: Some("/run/user/1000/docker.sock".to_string()),
+            },
+        );
+    }
+
+    /// A shell that points at Colima or Rancher Desktop is the user's, not the service's, so the CLI reads it.
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_machine_whose_environment_names_a_socket_sends_that_one() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        let _docker_host =
+            crate::test_env::EnvScope::set("DOCKER_HOST", "unix:///run/user/1000/docker.sock");
+        run_ok(&set_cmd(ConfigKey::BuildEngine, &["docker"]), &path);
+
         assert_eq!(
             load_build_engine(&path).unwrap(),
             lns_ipc::BuildEngine::Docker {

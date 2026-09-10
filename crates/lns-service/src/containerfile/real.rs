@@ -208,9 +208,12 @@ struct RealDaemon {
 }
 
 impl RealDaemon {
+    /// The socket is resolved where `build.engine` is read, so a tray-resident service never depends on the environment that started it.
     fn at(configured: Option<&str>) -> Self {
         Self {
-            socket: docker::socket_of(configured, std::env::var("DOCKER_HOST").ok().as_deref()),
+            socket: configured
+                .unwrap_or(lns_ipc::DEFAULT_DOCKER_SOCKET)
+                .to_string(),
         }
     }
 }

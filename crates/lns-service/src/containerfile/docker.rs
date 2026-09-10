@@ -20,9 +20,6 @@ use super::tar_layer::LayerBlob;
 /// The Docker Engine API version every request here is pinned to: 1.43 is Docker 24's, old enough for every daemon in use and new enough for `platform` on a build.
 pub(crate) const API_VERSION: &str = "v1.43";
 
-/// The socket a daemon answers on when neither `build.dockerSocket` nor `DOCKER_HOST` names one.
-pub(crate) const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
-
 /// The repository a daemon build is tagged under before it is exported: a host no registry resolves, so the tag can only ever be read back on this machine.
 pub(crate) const BUILD_TAG_REPOSITORY: &str = "lns-build.local/docker";
 
@@ -579,17 +576,6 @@ fn continues_on_the_next_line(line: &str) -> bool {
     line.trim_end().ends_with('\\')
 }
 
-/// The socket the daemon is reached at: what `build.dockerSocket` names, else the `unix://` socket `DOCKER_HOST` names, else the one a daemon listens on by default.
-pub(crate) fn socket_of(configured: Option<&str>, docker_host: Option<&str>) -> String {
-    if let Some(configured) = configured {
-        return configured.to_string();
-    }
-    match docker_host.and_then(|host| host.strip_prefix("unix://")) {
-        Some(path) if !path.is_empty() => path.to_string(),
-        _ => DEFAULT_SOCKET.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,7 +594,7 @@ mod tests {
             Self {
                 answers: RefCell::new(answers.iter().rev().map(|a| a.to_vec()).collect()),
                 sent: RefCell::new(Vec::new()),
-                socket: DEFAULT_SOCKET.to_string(),
+                socket: lns_ipc::DEFAULT_DOCKER_SOCKET.to_string(),
                 unreachable: false,
             }
         }
@@ -1123,21 +1109,6 @@ mod tests {
     fn a_tag_is_derived_from_the_key_so_two_builds_never_collide() {
         assert_eq!(build_tag("sha256:aabb"), "lns-build.local/docker:aabb");
         assert_eq!(build_tag("aabb"), "lns-build.local/docker:aabb");
-    }
-
-    #[test]
-    fn the_socket_is_what_this_machine_names_then_what_the_environment_does_then_the_default() {
-        assert_eq!(
-            socket_of(Some("/run/mine.sock"), Some("unix:///other")),
-            "/run/mine.sock"
-        );
-        assert_eq!(
-            socket_of(None, Some("unix:///run/user/1000/docker.sock")),
-            "/run/user/1000/docker.sock"
-        );
-        assert_eq!(socket_of(None, Some("tcp://docker:2375")), DEFAULT_SOCKET);
-        assert_eq!(socket_of(None, Some("unix://")), DEFAULT_SOCKET);
-        assert_eq!(socket_of(None, None), DEFAULT_SOCKET);
     }
 
     #[derive(Default)]
