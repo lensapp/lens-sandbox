@@ -365,6 +365,7 @@ struct BuiltImageReport {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PushReport {
     reference: String,
     digest: String,
@@ -2951,7 +2952,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
         assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
-        assert_eq!(json["dry_run"], false);
+        assert_eq!(json["dryRun"], false);
         assert_eq!(json["mixins"].as_array().unwrap().len(), 1);
         assert!(
             json["mixins"][0]["reference"]
@@ -3009,7 +3010,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
         assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
-        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["dryRun"], true);
         assert_eq!(json["mixins"], serde_json::json!([]));
         assert_eq!(json["readme"]["size"], 9);
         assert_eq!(
@@ -3088,7 +3089,7 @@ mod tests {
         .unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["dryRun"], true);
         assert_eq!(
             json["image"]["digest"],
             format!("sha256:{}", "cc".repeat(32))
