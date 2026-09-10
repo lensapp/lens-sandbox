@@ -175,6 +175,32 @@ pub(crate) async fn image_at(
     }))
 }
 
+/// The digest of the index one reference's document names today, or nothing where no push has written one yet.
+pub(crate) async fn index_at(repository: &str, tag: &str) -> Result<Option<String>> {
+    let target = format!("{repository}:{tag}");
+    let reference: Reference = target
+        .parse()
+        .with_context(|| format!("invalid image index target {target}"))?;
+    let client = oci_client::Client::new(super::push_client_config(reference.registry()));
+    let auth = registry_auth_for(&reference)?;
+    if client
+        .auth(&reference, &auth, RegistryOperation::Pull)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+    Ok(client
+        .pull_manifest_raw(
+            &reference,
+            &auth,
+            &[lns_artifact::image_index::INDEX_MEDIA_TYPE],
+        )
+        .await
+        .ok()
+        .map(|(_, digest)| digest))
+}
+
 /// Upload the assembled image index, which the published document names by digest, under a tag so the manifests it holds stay reachable from one.
 pub(crate) async fn push_index(repository: &str, tag: &str, index: &[u8]) -> Result<()> {
     let target = format!("{repository}:{tag}");

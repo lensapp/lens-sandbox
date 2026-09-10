@@ -2118,6 +2118,133 @@ fn run_the_pushed_sandbox(world: &mut E2eWorld, cmd_line: String) -> Result<(), 
     Ok(())
 }
 
+/// Slice 6 of lensapp/lens-sandbox#393: what this host builds for, spelled as an index entry does.
+fn host_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    }
+}
+
+/// The architecture nobody here can build for, which is the one the scenario writes into the registry itself.
+fn other_architecture() -> &'static str {
+    match host_architecture() {
+        "arm64" => "amd64",
+        _ => "arm64",
+    }
+}
+
+/// The tag part of the reference this scenario pushed, which every image tag beside it derives from.
+fn pushed_tag(world: &E2eWorld) -> Result<String, String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    Ok(lns_artifact::image_index::tag_of(&reference).to_string())
+}
+
+/// What the index the published document names holds, read straight off the registry.
+fn published_index(world: &E2eWorld) -> Result<Vec<String>, String> {
+    let repository = pushed_repository(world)?;
+    let tag = lns_artifact::image_index::index_tag(&pushed_tag(world)?);
+    let name = repository
+        .split_once('/')
+        .map(|(_, name)| name.to_string())
+        .ok_or_else(|| format!("{repository} names no repository"))?;
+    let registry = world
+        .registry
+        .as_ref()
+        .ok_or("Given a local registry before reading its index")?;
+    let bytes = registry
+        .manifest_at(&name, &tag)
+        .ok_or_else(|| format!("the push published no index at {name}:{tag}"))?;
+    let entries = lns_artifact::image_index::parse(&bytes)
+        .map_err(|e| format!("the index at {name}:{tag} does not read back: {e:#}"))?;
+    Ok(lns_artifact::image_index::platforms(&entries))
+}
+
+#[then("the index holds only this host's architecture")]
+fn the_index_holds_only_this_host(world: &mut E2eWorld) -> Result<(), String> {
+    let held = published_index(world)?;
+    match held == vec![format!("linux/{}", host_architecture())] {
+        true => Ok(()),
+        false => Err(format!(
+            "the first push publishes an index over what it built and nothing else; got {held:?}"
+        )),
+    }
+}
+
+#[given("another architecture has pushed its image for the pushed sandbox")]
+fn another_architecture_has_pushed(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let name = repository
+        .split_once('/')
+        .map(|(_, name)| name.to_string())
+        .ok_or_else(|| format!("{repository} names no repository"))?;
+    let tag = lns_artifact::image_index::architecture_tag(
+        &pushed_tag(world)?,
+        lns_artifact::image_index::OS,
+        other_architecture(),
+    );
+    let registry = world
+        .registry
+        .as_ref()
+        .ok_or("Given a local registry before another host pushes to it")?;
+    registry.publish_architecture_image(&name, &tag, other_architecture());
+    Ok(())
+}
+
+#[then("the index holds this host's architecture and the other one")]
+fn the_index_holds_both(world: &mut E2eWorld) -> Result<(), String> {
+    let held = published_index(world)?;
+    let wanted = [
+        format!("linux/{}", host_architecture()),
+        format!("linux/{}", other_architecture()),
+    ];
+    match wanted.iter().all(|platform| held.contains(platform)) && held.len() == 2 {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: a second architecture adds an entry rather than replacing the image; got {held:?}"
+        )),
+    }
+}
+
+#[then("inspect prints one built digest per architecture")]
+fn inspect_prints_one_digest_per_architecture(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("image: built from "))
+        .ok_or_else(|| {
+            format!(
+                "inspect must name what the image was built from:\n{}",
+                run.stdout
+            )
+        })?;
+    let named = [host_architecture(), other_architecture()]
+        .iter()
+        .all(|architecture| line.contains(&format!("{architecture} sha256:")));
+    match named {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: an approver reads one digest per architecture the index holds; got {line}"
+        )),
+    }
+}
+
+#[then("the run booted this host's architecture")]
+fn the_run_booted_this_hosts_architecture(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    match combined.contains(&format!("linux/{}", host_architecture())) {
+        true => Ok(()),
+        false => Err(format!(
+            "the summary says which entry of the index booted:\n{combined}"
+        )),
+    }
+}
+
 /// The point of the slice for a kit: what a `pre-start` script used to install is in the image.
 #[then("the document that ran declared no pre-start script")]
 fn the_document_declared_no_script(world: &mut E2eWorld) -> Result<(), String> {

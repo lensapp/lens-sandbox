@@ -360,6 +360,14 @@ impl super::distribute::Producer for RealProducer {
         Box::pin(async move { crate::build::push::image_at(repository, tag).await })
     }
 
+    fn index_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<Option<String>>> {
+        Box::pin(async move { crate::build::push::index_at(repository, tag).await })
+    }
+
     fn push_index<'a>(
         &'a self,
         repository: &'a str,
