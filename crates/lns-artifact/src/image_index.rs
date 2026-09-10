@@ -34,6 +34,30 @@ pub struct AssembledIndex {
     pub digest: String,
 }
 
+/// An index as a registry served it: the digest a document pins it by, taken over the bytes that arrived, and the entries those bytes hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldIndex {
+    pub digest: String,
+    pub entries: Vec<IndexEntry>,
+}
+
+/// What one manifest document is, read from the bytes a registry served: an index a pull selects an entry from, or a plain manifest, which is nothing an index holds.
+pub fn held(bytes: &[u8]) -> Result<Option<HeldIndex>> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("reading the manifest a registry served")?;
+    if !value["manifests"].is_array() {
+        return Ok(None);
+    }
+    Ok(Some(HeldIndex {
+        digest: digest_of(bytes),
+        entries: parse(bytes)?,
+    }))
+}
+
+fn digest_of(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
 /// The tag one architecture's image manifest publishes under, beside the artifact that names it: only that architecture's push writes it, so the index stays derivable from the tags after any race (§6).
 pub fn architecture_tag(artifact_tag: &str, os: &str, architecture: &str) -> String {
     format!("{artifact_tag}-image-{os}-{architecture}")
@@ -94,7 +118,7 @@ pub fn assemble(entries: &[IndexEntry]) -> Result<AssembledIndex> {
         "manifests": manifests,
     });
     let bytes = serde_json::to_vec(&index).context("serializing the image index")?;
-    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let digest = digest_of(&bytes);
     Ok(AssembledIndex { bytes, digest })
 }
 
@@ -205,6 +229,31 @@ mod tests {
             serde_json::from_slice(&assembled.bytes).expect("the index is json");
         assert_eq!(value["mediaType"], INDEX_MEDIA_TYPE);
         assert_eq!(value["schemaVersion"], 2);
+    }
+
+    #[test]
+    fn an_index_a_registry_served_is_read_back_with_the_digest_a_document_pins_it_by() {
+        let entries = vec![entry("amd64", "sha256:bb"), entry("arm64", "sha256:aa")];
+        let assembled = assemble(&entries).expect("assembling");
+        let held = held(&assembled.bytes)
+            .expect("reading the index")
+            .expect("an index is what these bytes are");
+        assert_eq!(
+            held.digest, assembled.digest,
+            "the pin a document names is taken over the bytes that arrived, not over a header"
+        );
+        assert_eq!(held.entries, entries);
+    }
+
+    #[test]
+    fn a_plain_manifest_is_no_index_and_holds_no_entry() {
+        let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:cc"},"layers":[]}"#;
+        assert_eq!(
+            held(manifest).expect("reading the manifest"),
+            None,
+            "a pull of a plain manifest has no index to verify a pin against"
+        );
+        assert!(held(b"not json").is_err());
     }
 
     #[test]

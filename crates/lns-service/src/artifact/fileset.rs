@@ -1417,7 +1417,7 @@ mod tests {
         async fn pull_index(
             &self,
             _reference: &oci_client::Reference,
-        ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+        ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
             Self::refuse(
                 "read an index: a packed layer is addressed by its own artifact's manifest",
             )

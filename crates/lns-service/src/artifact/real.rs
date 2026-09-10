@@ -455,7 +455,9 @@ async fn built_architectures_of<R: crate::image::Registry>(
         return Vec::new();
     };
     match registry.pull_index(&reference).await {
-        Ok(entries) => crate::artifact::inspect::built_architectures(&entries),
+        Ok(held) => held
+            .map(|held| crate::artifact::inspect::built_architectures(&held.entries))
+            .unwrap_or_default(),
         Err(error) => {
             crate::log::warn!("this artifact discloses no image index: {error:#}");
             Vec::new()
