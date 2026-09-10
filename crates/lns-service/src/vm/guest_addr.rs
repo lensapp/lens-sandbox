@@ -480,6 +480,33 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn every_reason_a_host_cannot_address_a_guest_has_its_own_audit_name() {
+        let network = ReserveError::Network(std::io::Error::other("no bridge, no declaration"));
+        assert_eq!(network.as_str(), "host_network_undiscoverable");
+        let exhausted = ReserveError::Alloc(AllocError::Exhausted {
+            network: HostNetwork::default(),
+        });
+        assert_eq!(exhausted.as_str(), "host_addresses_exhausted");
+        let unreadable = ReserveError::Alloc(AllocError::Neighbors(std::io::Error::other(
+            "arp: no such file",
+        )));
+        assert_eq!(
+            unreadable.as_str(),
+            "host_address_state_unreadable",
+            "an unobservable host is not an exhausted one, and the audit must not conflate them"
+        );
+        assert!(
+            unreadable.to_string().contains("arp: no such file"),
+            "{unreadable}"
+        );
+        assert!(
+            unreadable.explain().contains(ENABLE_ENV),
+            "the remedy names the setting that turned this path on: {}",
+            unreadable.explain()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_reservation_on_an_undiscoverable_network_refuses_by_name() {
         use crate::vm::host_net::HostNetworkSource;
