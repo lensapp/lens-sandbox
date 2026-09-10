@@ -10,6 +10,9 @@ pub const INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 /// The architectures lns builds for, so a push knows which per-architecture tags to look under and a refusal knows which hosts could add one.
 pub const ARCHITECTURES: [&str; 2] = ["amd64", "arm64"];
 
+/// The annotation an entry carries when a host Docker daemon built it rather than a build guest, so the digest a consumer verifies covers the record (`docs/sandbox-spec.md` §6.2).
+pub const BUILT_OUTSIDE_THE_GATE_ANNOTATION: &str = "run.lns.built-outside-the-gate";
+
 /// One architecture's image, as the index addresses it (`docs/sandbox-spec.md` §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
@@ -18,6 +21,8 @@ pub struct IndexEntry {
     pub media_type: String,
     pub os: String,
     pub architecture: String,
+    /// True when a host Docker daemon built this architecture, so the document's egress decided nothing about what it fetched (§3.1.1).
+    pub built_outside_the_gate: bool,
 }
 
 impl IndexEntry {
@@ -104,12 +109,17 @@ pub fn assemble(entries: &[IndexEntry]) -> Result<AssembledIndex> {
     let manifests: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
-            serde_json::json!({
+            let mut descriptor = serde_json::json!({
                 "mediaType": entry.media_type,
                 "digest": entry.digest,
                 "size": entry.size,
                 "platform": { "architecture": entry.architecture, "os": entry.os },
-            })
+            });
+            if entry.built_outside_the_gate {
+                descriptor["annotations"] =
+                    serde_json::json!({ BUILT_OUTSIDE_THE_GATE_ANNOTATION: "true" });
+            }
+            descriptor
         })
         .collect();
     let index = serde_json::json!({
@@ -138,6 +148,9 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
                 media_type: manifest["mediaType"].as_str()?.to_string(),
                 os: manifest["platform"]["os"].as_str()?.to_string(),
                 architecture: manifest["platform"]["architecture"].as_str()?.to_string(),
+                built_outside_the_gate: manifest["annotations"]
+                    [BUILT_OUTSIDE_THE_GATE_ANNOTATION]
+                    == "true",
             })
         })
         .collect())
@@ -184,7 +197,65 @@ mod tests {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             os: OS.to_string(),
             architecture: architecture.to_string(),
+            built_outside_the_gate: false,
         }
+    }
+
+    fn outside_the_gate(architecture: &str, digest: &str) -> IndexEntry {
+        IndexEntry {
+            built_outside_the_gate: true,
+            ..entry(architecture, digest)
+        }
+    }
+
+    #[test]
+    fn an_image_the_host_daemon_built_is_annotated_on_the_entry_the_index_holds() {
+        let assembled =
+            assemble(&[outside_the_gate("arm64", "sha256:aa")]).expect("assembling the index");
+        let value: serde_json::Value =
+            serde_json::from_slice(&assembled.bytes).expect("the index is json");
+        assert_eq!(
+            value["manifests"][0]["annotations"][BUILT_OUTSIDE_THE_GATE_ANNOTATION],
+            "true",
+            "the record rides on the entry, so the digest a consumer verifies covers it"
+        );
+    }
+
+    #[test]
+    fn an_image_a_build_guest_built_carries_no_annotation_at_all() {
+        let assembled = assemble(&[entry("arm64", "sha256:aa")]).expect("assembling the index");
+        let value: serde_json::Value =
+            serde_json::from_slice(&assembled.bytes).expect("the index is json");
+        assert!(
+            value["manifests"][0]["annotations"].is_null(),
+            "a gated build says nothing rather than saying false: {}",
+            String::from_utf8_lossy(&assembled.bytes),
+        );
+    }
+
+    #[test]
+    fn what_the_index_records_about_the_gate_reads_back_per_architecture() {
+        let entries = vec![
+            outside_the_gate("amd64", "sha256:bb"),
+            entry("arm64", "sha256:aa"),
+        ];
+        let assembled = assemble(&entries).expect("assembling the index");
+        assert_eq!(
+            parse(&assembled.bytes).expect("parsing"),
+            entries,
+            "one host may build through its daemon while another builds in a guest"
+        );
+    }
+
+    #[test]
+    fn an_entry_annotated_with_anything_but_true_is_not_one_built_outside_the_gate() {
+        let entries = parse(
+            br#"{"manifests":[
+                {"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:aa","size":1,"platform":{"os":"linux","architecture":"arm64"},"annotations":{"run.lns.built-outside-the-gate":"false"}}
+            ]}"#,
+        )
+        .expect("parsing");
+        assert!(!entries[0].built_outside_the_gate);
     }
 
     #[test]
