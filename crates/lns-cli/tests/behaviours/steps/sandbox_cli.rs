@@ -924,7 +924,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
     };
     let result = match author::load_definition_json_at(&fs, &path) {
         Ok(doc) if push_args.dry_run => {
-            distribute::push_dry_run(
+            distribute::push_dry_run_formatted(
                 distribute::DryRunPorts {
                     fs: &fs,
                     cwd: &project_dir,
@@ -938,6 +938,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                 },
                 &doc,
                 &push_args.reference,
+                push_args.output.format,
                 &mut out,
             )
             .await
@@ -949,7 +950,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
             };
             let answer = w.sandbox.prompt_answer.clone().unwrap_or_default();
             let mut terminal = terminal_for(w, &answer);
-            distribute::push(
+            distribute::push_formatted(
                 distribute::PushPorts {
                     fs: &fs,
                     cwd: &project_dir,
@@ -968,6 +969,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                     assume_yes: push_args.assume_yes,
                     terminal: &mut terminal,
                 },
+                push_args.output.format,
                 &mut out,
             )
             .await

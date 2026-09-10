@@ -65,6 +65,7 @@ pub enum LoginOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogoutOutcome {
     LoggedOut,
+    LoggedOutFromFile,
     Failed(String),
     ServiceUnavailable,
 }
@@ -76,7 +77,7 @@ pub enum ListLoginsOutcome {
     ServiceUnavailable,
 }
 
-/// The service owns the registry login store, so every credential operation goes through it.
+/// Manages registry credentials through the running service or the local auth file.
 pub trait RegistryAuthClient {
     fn available<'a>(&'a self) -> LocalBoxFuture<'a, Result<bool>>;
     fn login<'a>(
@@ -188,10 +189,21 @@ pub async fn logout(
     let registry = target_registry(args.registry.as_deref(), default_registry)?;
     match client.logout(&registry).await? {
         LogoutOutcome::ServiceUnavailable => bail!("{SERVICE_REQUIRED}"),
+        LogoutOutcome::Failed(reason) if reason == format!("not logged in to {registry}") => {}
         LogoutOutcome::Failed(reason) => bail!("{reason}"),
         LogoutOutcome::LoggedOut => {}
+        LogoutOutcome::LoggedOutFromFile => {
+            writeln!(
+                out,
+                "The background service was not running; removed {registry} from ~/.lns/registry-auth.json."
+            )?;
+            return Ok(0);
+        }
     }
-    writeln!(out, "Logged out of {registry}.")?;
+    writeln!(
+        out,
+        "Logged out of {registry} through the background service."
+    )?;
     Ok(0)
 }
 
@@ -689,14 +701,56 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("Logged out of ghcr.io")
+                .contains("Logged out of ghcr.io through the background service")
         );
     }
 
     #[tokio::test]
-    async fn logout_surfaces_the_services_not_logged_in_answer() {
+    async fn logout_succeeds_when_the_service_has_no_stored_entry() {
         let client =
             FakeClient::for_logout(LogoutOutcome::Failed("not logged in to ghcr.io".into()));
+        let mut out = Vec::new();
+        let code = logout(
+            &LogoutArgs {
+                registry: Some("ghcr.io".into()),
+            },
+            "docker.io",
+            &client,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Logged out of ghcr.io through the background service.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_reports_that_it_removed_the_file_without_a_running_service() {
+        let client = FakeClient::for_logout(LogoutOutcome::LoggedOutFromFile);
+        let mut out = Vec::new();
+        let code = logout(
+            &LogoutArgs {
+                registry: Some("ghcr.io".into()),
+            },
+            "docker.io",
+            &client,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "The background service was not running; removed ghcr.io from ~/.lns/registry-auth.json.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_surfaces_other_service_failures() {
+        let client = FakeClient::for_logout(LogoutOutcome::Failed("store is unreadable".into()));
         let err = logout(
             &LogoutArgs {
                 registry: Some("ghcr.io".into()),
@@ -707,7 +761,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("not logged in to ghcr.io"));
+        assert!(format!("{err:#}").contains("store is unreadable"));
     }
 
     #[tokio::test]

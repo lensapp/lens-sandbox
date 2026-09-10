@@ -23,6 +23,7 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
                     dry_run: push.dry_run,
                     rebuild: push.rebuild,
                     assume_yes: push.assume_yes,
+                    format: push.output.format,
                     file: push.file.clone().as_deref(),
                 },
                 cwd,
@@ -67,6 +68,7 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
                 dry_run: args.dry_run,
                 rebuild: args.rebuild,
                 assume_yes: args.assume_yes,
+                format: args.output.format,
                 file: args.file.as_deref(),
             },
             ctx.cwd()?,
@@ -112,11 +114,12 @@ async fn run_after_gate(command: ArtifactCommand) -> Result<i32> {
     dispatch(command).await
 }
 
-/// What `lns push` was asked for beyond the reference, so the composition root passes one value rather than four.
+/// What `lns push` was asked for beyond the reference, so the composition root passes one value rather than five.
 pub(crate) struct PushOptions<'a> {
     pub dry_run: bool,
     pub rebuild: bool,
     pub assume_yes: bool,
+    pub format: crate::output::Format,
     pub file: Option<&'a std::path::Path>,
 }
 
@@ -126,7 +129,7 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
     let doc = super::author::load_definition_json_at(&RealFs, &path)?;
     let mut out = std::io::stdout();
     if options.dry_run {
-        return super::distribute::push_dry_run(
+        return super::distribute::push_dry_run_formatted(
             super::distribute::DryRunPorts {
                 fs: &RealFs,
                 cwd: &project_dir,
@@ -142,11 +145,12 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
             },
             &doc,
             reference,
+            options.format,
             &mut out,
         )
         .await;
     }
-    super::distribute::push(
+    super::distribute::push_formatted(
         super::distribute::PushPorts {
             fs: &RealFs,
             cwd: &project_dir,
@@ -163,6 +167,7 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
             assume_yes: options.assume_yes,
             terminal: &mut crate::terminal::RealTerminal::open(),
         },
+        options.format,
         &mut out,
     )
     .await

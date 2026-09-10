@@ -98,6 +98,8 @@ pub struct PublishedImage {
     pub key: String,
     pub label: String,
     pub reference: String,
+    /// This architecture's own manifest, which the index the document names holds one entry for.
+    pub digest: String,
 }
 
 /// Resolves a declared tool's (possibly fuzzy) version to the exact version the published artifact pins, by consulting the tool's public version index; a fake scripts it offline.
@@ -335,6 +337,43 @@ pub struct Confirm<'a> {
 /// What each local mixin published as, keyed by its document so every entry naming it pins the same digest.
 type PublishedMixins = Vec<(std::path::PathBuf, String)>;
 
+#[derive(Debug, serde::Serialize)]
+struct PublishedMixin {
+    reference: String,
+    digest: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReadmeLayer {
+    digest: String,
+    size: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ToolVersion {
+    name: String,
+    requested: String,
+    resolved: Option<String>,
+}
+
+/// What a path-form `spec.image` published, or would: this architecture's manifest and the index the document names (§6).
+#[derive(Debug, serde::Serialize)]
+struct BuiltImageReport {
+    digest: String,
+    index: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PushReport {
+    reference: String,
+    digest: String,
+    mixins: Vec<PublishedMixin>,
+    readme: Option<ReadmeLayer>,
+    tools: Vec<ToolVersion>,
+    image: Option<BuiltImageReport>,
+    dry_run: bool,
+}
+
 /// Publish each planned mixin under its own repository, children first, so every digest exists before the document that pins it is built.
 async fn publish_planned_mixins<F, P, R, W>(
     fs: &F,
@@ -342,7 +381,7 @@ async fn publish_planned_mixins<F, P, R, W>(
     resolver: &R,
     plan: &super::mixin_plan::MixinPlan,
     out: &mut W,
-) -> Result<PublishedMixins>
+) -> Result<(PublishedMixins, Vec<PublishedMixin>, Vec<ToolVersion>)>
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
@@ -350,9 +389,17 @@ where
     W: Write,
 {
     let mut published: PublishedMixins = Vec::new();
+    let mut reports = Vec::new();
+    let mut tools = Vec::new();
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
-        let (doc, _) = pin_declared_tools(resolver, &doc).await?;
+        let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
+        tools.extend(
+            pinned_tools
+                .iter()
+                .map(tool_version)
+                .collect::<Result<Vec<_>>>()?,
+        );
         let (built, packed) = build(fs, &node.root, &doc, None)?;
         report_packed(out, "packed", &built, &packed)?;
         let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
@@ -374,8 +421,12 @@ where
             node.document.clone(),
             format!("{}@{}", node.repository, built.manifest_digest),
         ));
+        reports.push(PublishedMixin {
+            reference: format!("{}:{tag}", node.repository),
+            digest: built.manifest_digest,
+        });
     }
-    Ok(published)
+    Ok((published, reports, tools))
 }
 
 /// The same walk offline: each digest is computable without the network, so the preview names what every artifact would publish as.
@@ -383,16 +434,18 @@ fn preview_planned_mixins<F, W>(
     fs: &F,
     plan: &super::mixin_plan::MixinPlan,
     out: &mut W,
-) -> Result<PublishedMixins>
+) -> Result<(PublishedMixins, Vec<PublishedMixin>)>
 where
     F: Fs + ?Sized,
     W: Write,
 {
     let mut published: PublishedMixins = Vec::new();
+    let mut reports = Vec::new();
     for node in &plan.nodes {
         let doc = super::mixin_plan::pin_local_mixins(fs, &node.root, &node.bytes, &published)?;
         let (built, packed) = build(fs, &node.root, &doc, None)?;
         report_packed(out, "would pack", &built, &packed)?;
+        let tag = super::mixin_plan::digest_derived_tag(&built.manifest_digest);
         writeln!(
             out,
             "would publish mixin {} → {}@{} ({})",
@@ -405,8 +458,12 @@ where
             node.document.clone(),
             format!("{}@{}", node.repository, built.manifest_digest),
         ));
+        reports.push(PublishedMixin {
+            reference: format!("{}:{tag}", node.repository),
+            digest: built.manifest_digest,
+        });
     }
-    Ok(published)
+    Ok((published, reports))
 }
 
 /// A mixin rides along as its own artifact, so it faces the same gate as the document that names it — otherwise a tool no consumer can provision publishes just by being layered on.
@@ -595,6 +652,7 @@ where
         key: built.key,
         label: built.label,
         reference: published,
+        digest: mine.digest,
     }))
 }
 
@@ -630,6 +688,12 @@ fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()
     lns_artifact::image::refuse_an_image_over(limit, &layers, &image.config)
 }
 
+/// What a dry run says it would publish: this architecture's manifest, and the index the document would then name.
+pub struct PreviewedImage {
+    pub index: String,
+    pub digest: String,
+}
+
 /// What a dry run can say about the image without building it: the key always, which architectures the index holds, and the digest only when this machine already answers that key.
 async fn preview_the_image<P, B, W>(
     producer: &P,
@@ -638,7 +702,7 @@ async fn preview_the_image<P, B, W>(
     reference: &str,
     limit: u64,
     out: &mut W,
-) -> Result<Option<String>>
+) -> Result<Option<PreviewedImage>>
 where
     P: Producer + ?Sized,
     B: ImageBuilder + ?Sized,
@@ -688,7 +752,10 @@ where
                     mine.digest
                 )?;
             }
-            Ok(Some(lns_artifact::image_index::assemble(&entries)?.digest))
+            Ok(Some(PreviewedImage {
+                index: lns_artifact::image_index::assemble(&entries)?.digest,
+                digest: mine.digest,
+            }))
         }
         None => {
             writeln!(
@@ -701,6 +768,23 @@ where
     }
 }
 
+fn tool_version(tool: &PinnedTool) -> Result<ToolVersion> {
+    let declared = lns_artifact::tools::parse(&tool.declared)?;
+    let published = lns_artifact::tools::parse(&tool.published)?;
+    Ok(ToolVersion {
+        name: declared.name,
+        requested: declared.version,
+        resolved: Some(published.version),
+    })
+}
+
+fn readme_layer(built: &BuiltArtifact) -> Option<ReadmeLayer> {
+    built.readme_layer().map(|layer| ReadmeLayer {
+        digest: layer.digest.clone(),
+        size: layer.data.len(),
+    })
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, B, W>(
     ports: PushPorts<'_, F, P, R, B>,
@@ -709,6 +793,60 @@ pub async fn push<F, P, R, B, W>(
     confirm: Confirm<'_>,
     out: &mut W,
 ) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    push_formatted(
+        ports,
+        doc,
+        reference,
+        confirm,
+        crate::output::Format::Table,
+        out,
+    )
+    .await
+}
+
+pub async fn push_formatted<F, P, R, B, W>(
+    ports: PushPorts<'_, F, P, R, B>,
+    doc: &[u8],
+    reference: &str,
+    confirm: Confirm<'_>,
+    format: crate::output::Format,
+    out: &mut W,
+) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    R: ToolResolver + ?Sized,
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    match format {
+        crate::output::Format::Table => {
+            push_collect(ports, doc, reference, confirm, out).await?;
+            Ok(0)
+        }
+        crate::output::Format::Json => {
+            let mut table = Vec::new();
+            let report = push_collect(ports, doc, reference, confirm, &mut table).await?;
+            crate::output::emit_object(&report, out)?;
+            Ok(0)
+        }
+    }
+}
+
+async fn push_collect<F, P, R, B, W>(
+    ports: PushPorts<'_, F, P, R, B>,
+    doc: &[u8],
+    reference: &str,
+    confirm: Confirm<'_>,
+    out: &mut W,
+) -> Result<PushReport>
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
@@ -755,7 +893,8 @@ where
         out,
     )
     .await?;
-    let published = publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
+    let (published, mixins, mut tools) =
+        publish_planned_mixins(fs, producer, resolver, &plan, out).await?;
     let doc = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
     let (doc, pinned_tools) = pin_declared_tools(resolver, &doc).await?;
     let doc = match &image {
@@ -763,6 +902,7 @@ where
         None => lns_artifact::image::forget_source(&doc)?,
     };
     let (built, packed) = build(fs, cwd, &doc, source.as_ref())?;
+    let readme = readme_layer(&built);
     report_packed(out, "packed", &built, &packed)?;
     report_build_source(out, "packed", source.as_ref(), &built)?;
     for tool in &pinned_tools {
@@ -775,6 +915,12 @@ where
         }
         writeln!(out, "pinned {} → {}", tool.declared, tool.published)?;
     }
+    tools.extend(
+        pinned_tools
+            .iter()
+            .map(tool_version)
+            .collect::<Result<Vec<_>>>()?,
+    );
     producer
         .push_built(&built, reference)
         .await
@@ -789,7 +935,18 @@ where
         "built and pushed {reference}@{}",
         built.manifest_digest
     )?;
-    Ok(0)
+    Ok(PushReport {
+        reference: reference.to_string(),
+        digest: built.manifest_digest,
+        mixins,
+        readme,
+        tools,
+        image: image.map(|image| BuiltImageReport {
+            digest: image.digest,
+            index: image.reference,
+        }),
+        dry_run: false,
+    })
 }
 
 /// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — printing the digests that would publish; nothing is built and nothing is uploaded.
@@ -799,6 +956,48 @@ pub async fn push_dry_run<F, P, B, W>(
     reference: &str,
     out: &mut W,
 ) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    push_dry_run_formatted(ports, doc, reference, crate::output::Format::Table, out).await
+}
+
+pub async fn push_dry_run_formatted<F, P, B, W>(
+    ports: DryRunPorts<'_, F, P, B>,
+    doc: &[u8],
+    reference: &str,
+    format: crate::output::Format,
+    out: &mut W,
+) -> Result<i32>
+where
+    F: Fs + ?Sized,
+    P: Producer + ?Sized,
+    B: ImageBuilder + ?Sized,
+    W: Write,
+{
+    match format {
+        crate::output::Format::Table => {
+            push_dry_run_collect(ports, doc, reference, out).await?;
+            Ok(0)
+        }
+        crate::output::Format::Json => {
+            let mut table = Vec::new();
+            let report = push_dry_run_collect(ports, doc, reference, &mut table).await?;
+            crate::output::emit_object(&report, out)?;
+            Ok(0)
+        }
+    }
+}
+
+async fn push_dry_run_collect<F, P, B, W>(
+    ports: DryRunPorts<'_, F, P, B>,
+    doc: &[u8],
+    reference: &str,
+    out: &mut W,
+) -> Result<PushReport>
 where
     F: Fs + ?Sized,
     P: Producer + ?Sized,
@@ -820,7 +1019,7 @@ where
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
-    let digest = preview_the_image(
+    let preview = preview_the_image(
         producer,
         builder,
         &mut ImageRequest {
@@ -837,16 +1036,21 @@ where
         out,
     )
     .await?;
-    let published = preview_planned_mixins(fs, &plan, out)?;
+    let (published, mixins) = preview_planned_mixins(fs, &plan, out)?;
     let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
-    let pinned = match &digest {
-        Some(digest) => lns_artifact::image::rewrite_to_built(
+    let pinned = match &preview {
+        Some(preview) => lns_artifact::image::rewrite_to_built(
             &pinned,
-            &format!("{}@{digest}", super::mixin_plan::repository_of(reference)),
+            &format!(
+                "{}@{}",
+                super::mixin_plan::repository_of(reference),
+                preview.index
+            ),
         )?,
         None => lns_artifact::image::forget_source(&pinned)?,
     };
     let (built, packed) = build(fs, cwd, &pinned, source.as_ref())?;
+    let readme = readme_layer(&built);
     report_packed(out, "would pack", &built, &packed)?;
     report_build_source(out, "would pack", source.as_ref(), &built)?;
     let mut docs: Vec<&[u8]> = vec![&pinned];
@@ -865,7 +1069,41 @@ where
         built.manifest_digest
     )?;
     writeln!(out, "dry run — built and validated; nothing uploaded")?;
-    Ok(0)
+    Ok(PushReport {
+        reference: reference.to_string(),
+        digest: built.manifest_digest,
+        mixins,
+        readme,
+        tools: preview_tool_versions(&docs),
+        image: preview.map(|preview| BuiltImageReport {
+            digest: preview.digest,
+            index: format!(
+                "{}@{}",
+                super::mixin_plan::repository_of(reference),
+                preview.index
+            ),
+        }),
+        dry_run: true,
+    })
+}
+
+fn preview_tool_versions(docs: &[&[u8]]) -> Vec<ToolVersion> {
+    docs.iter()
+        .filter_map(|doc| serde_json::from_slice::<serde_json::Value>(doc).ok())
+        .filter_map(|value| value["spec"]["tools"].as_array().cloned())
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .and_then(|entry| lns_artifact::tools::parse(entry).ok())
+        })
+        .map(|tool| ToolVersion {
+            name: tool.name,
+            resolved: lns_artifact::tools::is_exact_version(&tool.version)
+                .then(|| tool.version.clone()),
+            requested: tool.version,
+        })
+        .collect()
 }
 
 /// Only a fuzzy entry can change the published bytes; an exact pin is short-circuited, so counting it would promise a difference that cannot happen.
@@ -2624,5 +2862,189 @@ mod tests {
             "a dry run says what would publish, and the layer digest is part of what the manifest would carry: {text}"
         );
         assert!(text.contains("nothing uploaded"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn json_push_reports_every_published_part() {
+        let fs = MapFs::with(&[
+            ("/work/README.md", "# Hermes\n"),
+            (
+                "/work/mixins/pg/lns.yaml",
+                "apiVersion: lns.run/v1\nkind: mixin\nname: postgres-tools\nspec:\n  env:\n    MODE: research\n",
+            ),
+        ]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","mixins":["./mixins/pg/"],"tools":["node@22"]}}"#;
+        let producer = FakeProducer::ok();
+        let resolver = FakeResolver::with(&[("node@22", "22.11.0")]);
+        let mut out = Vec::new();
+        push_formatted(
+            PushPorts {
+                fs: &fs,
+                cwd: cwd(),
+                producer: &producer,
+                resolver: &resolver,
+                builder: &FakeBuilder::unconsultable(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
+            },
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            Confirm {
+                assume_yes: true,
+                terminal: &mut crate::terminal::ScriptedTerminal::answering(&[]),
+            },
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
+        assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(json["dry_run"], false);
+        assert_eq!(json["mixins"].as_array().unwrap().len(), 1);
+        assert!(
+            json["mixins"][0]["reference"]
+                .as_str()
+                .unwrap()
+                .starts_with("ghcr.io/team/postgres-tools:sha256-")
+        );
+        assert!(
+            json["mixins"][0]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            json["readme"]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(json["readme"]["size"], 9);
+        assert_eq!(
+            json["tools"],
+            serde_json::json!([{"name":"node","requested":"22","resolved":"22.11.0"}])
+        );
+        assert_eq!(
+            json["image"],
+            serde_json::Value::Null,
+            "a document whose image is a reference builds nothing, so it publishes no image"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_dry_run_is_one_object_with_preview_digests() {
+        let fs = MapFs::with(&[("/work/README.md", "# Hermes\n")]);
+        let doc = br#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/base:1","tools":["node@22.11.0"]}}"#;
+        let mut out = Vec::new();
+        push_dry_run_formatted(
+            DryRunPorts {
+                fs: &fs,
+                cwd: cwd(),
+                producer: &FakeProducer::ok(),
+                builder: &FakeBuilder::unconsultable(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
+            },
+            doc,
+            "ghcr.io/team/hermes:1.4.0",
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["reference"], "ghcr.io/team/hermes:1.4.0");
+        assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["mixins"], serde_json::json!([]));
+        assert_eq!(json["readme"]["size"], 9);
+        assert_eq!(
+            json["tools"],
+            serde_json::json!([{"name":"node","requested":"22.11.0","resolved":"22.11.0"}])
+        );
+    }
+
+    /// A JSON push must report what a table push reports, and a path-form `spec.image` publishes an image the table names and the object has to name too (§6).
+    #[tokio::test]
+    async fn a_json_push_of_a_containerfile_document_names_the_image_and_the_index() {
+        let producer = FakeProducer::ok();
+        let mut out = Vec::new();
+        push_formatted(
+            PushPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &producer,
+                resolver: &unconsultable(),
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            Confirm {
+                assume_yes: true,
+                terminal: &mut crate::terminal::ScriptedTerminal::answering(&[]),
+            },
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let index = lns_artifact::image_index::assemble(&producer.published_index()).unwrap();
+        assert_eq!(
+            json["image"]["index"],
+            format!("ghcr.io/team/hermes@{}", index.digest),
+            "the object names the index the published document names"
+        );
+        assert_eq!(
+            json["image"]["digest"],
+            format!("sha256:{}", "cc".repeat(32)),
+            "and this architecture's own manifest inside it"
+        );
+    }
+
+    /// The preview says the same in JSON as it says in the table: what it would publish, without publishing it.
+    #[tokio::test]
+    async fn a_json_dry_run_of_a_containerfile_document_names_the_image_it_would_publish() {
+        let mut out = Vec::new();
+        push_dry_run_formatted(
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &FakeProducer::ok(),
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(
+            json["image"]["digest"],
+            format!("sha256:{}", "cc".repeat(32))
+        );
+        assert!(
+            json["image"]["index"]
+                .as_str()
+                .unwrap()
+                .starts_with("ghcr.io/team/hermes@sha256:")
+        );
     }
 }
