@@ -455,6 +455,14 @@ Same key, same image: a build whose key this machine already answers runs
 nothing. The key changes when the Containerfile, a context file, the `FROM`
 digest or the architecture changes, and only then.
 
+The engine is not one of the four inputs, so a key one engine filled is a key
+the other answers with. The gate record above is therefore a property of the
+image and not of the switch that is set now: an implementation MUST record which
+engine built the image beside the key it is remembered under, and MUST take
+every disclosure from the image the key answers with. A machine that builds
+through the daemon and then turns the switch off still reports and publishes
+`built outside the gate by the host Docker daemon` for that image.
+
 One instruction is keyed the same way, by the image it stands on and by what it
 resolved to: the parent image's digest, the instruction as it runs (a `RUN`'s
 command, environment, user and working directory; a config instruction's

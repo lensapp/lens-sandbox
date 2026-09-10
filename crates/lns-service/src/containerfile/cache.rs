@@ -35,13 +35,16 @@ pub(crate) struct Entry {
     pub reference: String,
     /// Every Containerfile absolute path this key has answered for, so one copy leaving the machine does not drop the image the others need.
     pub sources: Vec<String>,
+    /// Whether the host Docker daemon built this image, because both engines take the key over the same four inputs and only the entry says which one answered (§3.1.1).
+    pub built_outside_the_gate: bool,
 }
 
 impl Entry {
-    pub(crate) fn built_from(reference: &str, source: &str) -> Self {
+    pub(crate) fn built_from(reference: &str, source: &str, built_outside_the_gate: bool) -> Self {
         Self {
             reference: reference.to_string(),
             sources: vec![source.to_string()],
+            built_outside_the_gate,
         }
     }
 }
@@ -96,6 +99,7 @@ impl<'a, F: CacheFs> BuildCache<'a, F> {
         let merged = match self.entry_at(&path) {
             Some(held) if held.reference == entry.reference => {
                 let mut merged = held;
+                merged.built_outside_the_gate = entry.built_outside_the_gate;
                 let added: Vec<String> = entry
                     .sources
                     .iter()
@@ -285,7 +289,58 @@ pub(crate) mod tests {
     }
 
     fn entry(reference: &str, source: &str) -> Entry {
-        Entry::built_from(reference, source)
+        Entry::built_from(reference, source, false)
+    }
+
+    /// The key both engines take over the same four inputs, so what the key answers with says which engine filled it (§3.1.1).
+    #[test]
+    fn an_entry_remembers_the_engine_that_built_it() {
+        let fs = FakeCacheFs::default();
+        let cache = BuildCache::new(&fs, Path::new("/cache"));
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &Entry::built_from("built@sha256:one", "/work/Containerfile", true),
+            )
+            .unwrap();
+
+        let hit = cache
+            .get(Kind::Image, "sha256:aa", "/work/Containerfile", &everything)
+            .expect("the key answers");
+
+        assert!(
+            hit.built_outside_the_gate,
+            "a reuse of a daemon build has to say the gate did not apply",
+        );
+    }
+
+    /// A rebuild through the other engine writes the same key, and the record follows the build that wrote it last.
+    #[test]
+    fn a_rebuild_in_a_guest_takes_the_gate_record_back_from_the_daemon() {
+        let fs = FakeCacheFs::default();
+        let cache = BuildCache::new(&fs, Path::new("/cache"));
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &Entry::built_from("built@sha256:one", "/work/Containerfile", true),
+            )
+            .unwrap();
+
+        cache
+            .remember(
+                Kind::Image,
+                "sha256:aa",
+                &Entry::built_from("built@sha256:one", "/work/Containerfile", false),
+            )
+            .unwrap();
+
+        let hit = cache
+            .get(Kind::Image, "sha256:aa", "/work/Containerfile", &everything)
+            .expect("the key answers");
+
+        assert!(!hit.built_outside_the_gate);
     }
 
     fn everything(_: &str) -> bool {
@@ -484,7 +539,7 @@ pub(crate) mod tests {
             unwritable: true,
             ..FakeCacheFs::with(&[(
                 "/cache/containerfile-builds/images/sha256-aa",
-                r#"{"reference":"built@sha256:one","sources":["/work/a/Containerfile"]}"#,
+                r#"{"reference":"built@sha256:one","sources":["/work/a/Containerfile"],"built_outside_the_gate":false}"#,
             )])
         };
         let mut hit = None;

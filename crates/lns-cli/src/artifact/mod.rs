@@ -658,9 +658,10 @@ fn image_line(view: &lns_ipc::SandboxView) -> String {
             .iter()
             .map(|built| match built.built_outside_the_gate {
                 true => format!(
-                    "{} {} ({})",
+                    "{} {} ({} was {})",
                     built.architecture,
                     built.digest,
+                    built.architecture,
                     lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE
                 ),
                 false => format!("{} {}", built.architecture, built.digest),

@@ -13,15 +13,12 @@ use sha2::{Digest, Sha256};
 
 use super::cache::Kind;
 use super::context::{ContextFs, EntryKind};
-use super::executor::{self, Base, BuildPlan, Built};
+use super::executor::{self, Base, BuildPlan, Built, Cached};
 use super::image::BuiltImage;
 use super::tar_layer::LayerBlob;
 
 /// The Docker Engine API version every request here is pinned to: 1.43 is Docker 24's, old enough for every daemon in use and new enough for `platform` on a build.
 pub(crate) const API_VERSION: &str = "v1.43";
-
-/// The socket a daemon answers on when neither `build.dockerSocket` nor `DOCKER_HOST` names one.
-pub(crate) const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 
 /// The repository a daemon build is tagged under before it is exported: a host no registry resolves, so the tag can only ever be read back on this machine.
 pub(crate) const BUILD_TAG_REPOSITORY: &str = "lns-build.local/docker";
@@ -30,11 +27,11 @@ pub(crate) const BUILD_TAG_REPOSITORY: &str = "lns-build.local/docker";
 pub(crate) const SWITCH_OFF_RECIPE: &str =
     "run `lns config set build.engine lns` to build in a guest instead";
 
-/// One HTTP exchange with the daemon: the caller writes the whole request and reads until the daemon closes, so no framing decision lives in the transport.
+/// One HTTP exchange with the daemon: the caller writes the head and the body and reads until the daemon closes, so no framing decision lives in the transport and a context is never copied into a request buffer.
 pub(crate) trait Daemon {
     /// The socket this daemon was reached at, which every refusal names.
     fn socket(&self) -> &str;
-    async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>>;
+    async fn round_trip(&self, head: &[u8], body: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// One request to the Engine API, as the daemon reads it off the socket.
@@ -67,6 +64,16 @@ impl ApiRequest {
         }
     }
 
+    fn delete(path: &str) -> Self {
+        Self {
+            method: "DELETE",
+            path: format!("/{API_VERSION}{path}"),
+            query: Vec::new(),
+            content_type: None,
+            body: Vec::new(),
+        }
+    }
+
     fn with(mut self, key: &str, value: impl Into<String>) -> Self {
         self.query.push((key.to_string(), value.into()));
         self
@@ -80,8 +87,8 @@ pub(crate) struct ApiResponse {
     pub body: Vec<u8>,
 }
 
-/// The bytes one request is on the wire: `Connection: close` so the whole answer is what the transport reads to EOF.
-pub(crate) fn encode(request: &ApiRequest) -> Vec<u8> {
+/// The head one request is on the wire, its body written after it: `Connection: close` so the whole answer is what the transport reads to EOF.
+pub(crate) fn encode_head(request: &ApiRequest) -> Vec<u8> {
     let query = form_urlencoded::Serializer::new(String::new())
         .extend_pairs(request.query.iter())
         .finish();
@@ -97,9 +104,7 @@ pub(crate) fn encode(request: &ApiRequest) -> Vec<u8> {
         head.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n\r\n", request.body.len()));
-    let mut bytes = head.into_bytes();
-    bytes.extend_from_slice(&request.body);
-    bytes
+    head.into_bytes()
 }
 
 /// The status and the body of a whole HTTP/1.1 answer, chunked or not; a daemon that answered nothing at all is not an answer.
@@ -160,7 +165,7 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>> {
 async fn call<D: Daemon>(daemon: &D, request: ApiRequest) -> Result<ApiResponse> {
     let path = request.path.clone();
     let answer = daemon
-        .round_trip(&encode(&request))
+        .round_trip(&encode_head(&request), &request.body)
         .await
         .with_context(|| refuse_an_unreachable_daemon(daemon.socket()))?;
     decode(&answer).with_context(|| format!("reading what the Docker daemon answered to {path}"))
@@ -206,7 +211,7 @@ pub(crate) fn build_tag(key: &str) -> String {
 }
 
 /// `POST /build`: the context goes up as a tar, and the daemon answers a stream of JSON lines whose last word on failure is the build's own.
-pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Result<String> {
+pub(crate) async fn build<D: Daemon>(daemon: &D, request: DockerBuild) -> Result<String> {
     let args = serde_json::to_string(
         &request
             .build_args
@@ -215,10 +220,11 @@ pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Resul
             .collect::<serde_json::Map<String, serde_json::Value>>(),
     )
     .context("serializing the build arguments the Containerfile declares")?;
-    let call_request = ApiRequest::post("/build", "application/x-tar", request.context_tar.clone())
-        .with("dockerfile", request.containerfile.clone())
-        .with("t", request.tag.clone())
-        .with("platform", request.platform.clone())
+    let tag = request.tag;
+    let call_request = ApiRequest::post("/build", "application/x-tar", request.context_tar)
+        .with("dockerfile", request.containerfile)
+        .with("t", tag.clone())
+        .with("platform", request.platform)
         .with("buildargs", args)
         .with("rm", "1")
         .with(
@@ -237,7 +243,7 @@ pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Resul
         );
     }
     refuse_a_failed_build(&answer.body)?;
-    Ok(request.tag.clone())
+    Ok(tag)
 }
 
 /// The daemon answers a build with 200 before it runs it, so a failure is a line of the stream and not a status.
@@ -267,14 +273,24 @@ pub(crate) async fn export<D: Daemon>(daemon: &D, tag: &str) -> Result<Vec<u8>> 
 }
 
 /// The build context as the daemon reads it: every regular file and directory, and, as §3.1.1 says of a context, no symlink.
-pub(crate) fn context_tar<F: ContextFs>(fs: &F, context: &Path) -> Result<Vec<u8>> {
+pub(crate) fn context_tar<F: ContextFs>(
+    fs: &F,
+    context: &Path,
+    pinned: &PinnedContainerfile<'_>,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut bytes);
-        pack(fs, context, "", &mut builder)?;
+        pack(fs, context, "", &mut builder, pinned)?;
         builder.finish().context("closing the build context tar")?;
     }
     Ok(bytes)
+}
+
+/// The Containerfile as the daemon reads it out of the context: named where it sits inside the tar, and written with the `FROM` the key stands on.
+pub(crate) struct PinnedContainerfile<'a> {
+    pub path: &'a str,
+    pub text: &'a str,
 }
 
 fn pack<F: ContextFs, W: std::io::Write>(
@@ -282,6 +298,7 @@ fn pack<F: ContextFs, W: std::io::Write>(
     directory: &Path,
     prefix: &str,
     builder: &mut tar::Builder<W>,
+    pinned: &PinnedContainerfile<'_>,
 ) -> Result<()> {
     let mut names = fs
         .entries(directory)
@@ -305,12 +322,15 @@ fn pack<F: ContextFs, W: std::io::Write>(
                 builder
                     .append_data(&mut header, format!("{relative}/"), std::io::empty())
                     .with_context(|| format!("writing {relative} into the build context tar"))?;
-                pack(fs, &path, &relative, builder)?;
+                pack(fs, &path, &relative, builder, pinned)?;
             }
             EntryKind::Regular => {
-                let content = fs
-                    .read(&path)
-                    .with_context(|| format!("reading {} in the build context", path.display()))?;
+                let content = match relative == pinned.path {
+                    true => pinned.text.as_bytes().to_vec(),
+                    false => fs.read(&path).with_context(|| {
+                        format!("reading {} in the build context", path.display())
+                    })?,
+                };
                 let mut header =
                     entry_header(meta.mode, content.len() as u64, tar::EntryType::Regular);
                 builder
@@ -460,8 +480,8 @@ fn layer_media_type(bytes: &[u8]) -> &'static str {
 pub(crate) trait DockerHost {
     /// The digest-pinned reference the `FROM` resolves to, read off the registry with no layer fetched — the daemon pulls its own base.
     async fn peek_base(&self, image: &str) -> Result<Base>;
-    async fn cached(&self, kind: Kind, key: &str) -> Option<String>;
-    async fn remember(&self, kind: Kind, key: &str, reference: &str);
+    async fn cached(&self, kind: Kind, key: &str) -> Option<Cached>;
+    async fn remember(&self, kind: Kind, key: &str, built: &Cached);
     /// Take an image another engine built into the local store, with every layer it carries, and answer with the reference the store holds it under.
     async fn adopt(&self, built: &BuiltImage, layers: &[LayerBlob]) -> Result<String>;
 }
@@ -488,22 +508,30 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
         .with_context(|| format!("line {}: FROM {}", preamble.line, preamble.image))?;
     let key = super::key::image_key(&base.reference, plan.text, plan.context_hash, plan.arch);
     if !plan.rebuild
-        && let Some(reference) = host.cached(Kind::Image, &key).await
+        && let Some(cached) = host.cached(Kind::Image, &key).await
     {
         return Ok(Built {
-            reference,
+            reference: cached.reference,
             layers: 0,
             key,
             reused: true,
             reused_steps: plan.file.instructions.len(),
+            built_outside_the_gate: cached.built_outside_the_gate,
         });
     }
     ping(daemon).await?;
     let tag = build_tag(&key);
     build(
         daemon,
-        &DockerBuild {
-            context_tar: context_tar(fs, where_from.context)?,
+        DockerBuild {
+            context_tar: context_tar(
+                fs,
+                where_from.context,
+                &PinnedContainerfile {
+                    path: &where_from.containerfile,
+                    text: &pin_the_base(plan.text, preamble.line, &base.reference),
+                },
+            )?,
             containerfile: where_from.containerfile.clone(),
             build_args: executor::arg_defaults(plan.file)?,
             platform: format!("{}/{}", lns_artifact::image_index::OS, plan.arch),
@@ -513,27 +541,64 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
     )
     .await?;
     let saved = read_saved_image(&export(daemon, &tag).await?)?;
+    untag(daemon, &tag).await;
     let built = as_oci_image(&saved)?;
     let reference = host.adopt(&built, &saved.layers).await?;
-    host.remember(Kind::Image, &key, &reference).await;
+    let outside_the_gate = Cached {
+        reference,
+        built_outside_the_gate: true,
+    };
+    host.remember(Kind::Image, &key, &outside_the_gate).await;
     Ok(Built {
         layers: saved.layers.len(),
-        reference,
+        reference: outside_the_gate.reference,
         key,
         reused: false,
         reused_steps: 0,
+        built_outside_the_gate: true,
     })
 }
 
-/// The socket the daemon is reached at: what `build.dockerSocket` names, else the `unix://` socket `DOCKER_HOST` names, else the one a daemon listens on by default.
-pub(crate) fn socket_of(configured: Option<&str>, docker_host: Option<&str>) -> String {
-    if let Some(configured) = configured {
-        return configured.to_string();
+/// `DELETE /images/{name}`: the tag is lns's own leftover inside a daemon `lns sandbox prune` cannot see, so it goes as soon as the export is in hand; a daemon that keeps it is said so and stops nothing.
+async fn untag<D: Daemon>(daemon: &D, tag: &str) {
+    let kept = match call(
+        daemon,
+        ApiRequest::delete(&format!("/images/{tag}")).with("force", "1"),
+    )
+    .await
+    {
+        Ok(answer) if answer.status == 200 => return,
+        Ok(answer) => format!("it answered {}", answer.status),
+        Err(e) => format!("{e:#}"),
+    };
+    crate::log::warn!("the Docker daemon still holds its own copy of {tag}: {kept}");
+}
+
+/// The daemon resolves a `FROM` itself and may hold an older image behind the tag, so the file it is handed names the digest lns keyed the build over (§3.1.1).
+pub(crate) fn pin_the_base(text: &str, from_line: usize, reference: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropping = false;
+    for (index, line) in text.lines().enumerate() {
+        if index + 1 == from_line {
+            kept.push(format!("FROM {reference}"));
+            dropping = continues_on_the_next_line(line);
+            continue;
+        }
+        if dropping {
+            dropping = continues_on_the_next_line(line);
+            continue;
+        }
+        kept.push(line.to_string());
     }
-    match docker_host.and_then(|host| host.strip_prefix("unix://")) {
-        Some(path) if !path.is_empty() => path.to_string(),
-        _ => DEFAULT_SOCKET.to_string(),
+    let mut pinned = kept.join("\n");
+    if text.ends_with('\n') {
+        pinned.push('\n');
     }
+    pinned
+}
+
+fn continues_on_the_next_line(line: &str) -> bool {
+    line.trim_end().ends_with('\\')
 }
 
 #[cfg(test)]
@@ -554,7 +619,7 @@ mod tests {
             Self {
                 answers: RefCell::new(answers.iter().rev().map(|a| a.to_vec()).collect()),
                 sent: RefCell::new(Vec::new()),
-                socket: DEFAULT_SOCKET.to_string(),
+                socket: lns_ipc::DEFAULT_DOCKER_SOCKET.to_string(),
                 unreachable: false,
             }
         }
@@ -574,13 +639,15 @@ mod tests {
             &self.socket
         }
 
-        async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>> {
+        async fn round_trip(&self, head: &[u8], body: &[u8]) -> Result<Vec<u8>> {
             if self.unreachable {
                 bail!("No such file or directory (os error 2)");
             }
-            self.sent
-                .borrow_mut()
-                .push(String::from_utf8_lossy(request).to_string());
+            self.sent.borrow_mut().push(format!(
+                "{}{}",
+                String::from_utf8_lossy(head),
+                String::from_utf8_lossy(body),
+            ));
             self.answers
                 .borrow_mut()
                 .pop()
@@ -598,12 +665,12 @@ mod tests {
 
     #[test]
     fn a_request_carries_its_body_length_and_asks_the_daemon_to_close() {
-        let bytes = encode(&ApiRequest::post(
-            "/build",
-            "application/x-tar",
-            b"tar".to_vec(),
-        ));
-        let text = String::from_utf8(bytes).unwrap();
+        let request = ApiRequest::post("/build", "application/x-tar", b"tar".to_vec());
+        let text = format!(
+            "{}{}",
+            String::from_utf8(encode_head(&request)).unwrap(),
+            String::from_utf8(request.body.clone()).unwrap(),
+        );
         assert!(text.starts_with("POST /v1.43/build HTTP/1.1\r\n"), "{text}");
         assert!(
             text.contains("Content-Type: application/x-tar\r\n"),
@@ -616,7 +683,7 @@ mod tests {
 
     #[test]
     fn every_query_value_is_escaped_so_a_build_argument_cannot_forge_one() {
-        let bytes = encode(
+        let bytes = encode_head(
             &ApiRequest::get("/build")
                 .with("t", "lns-build.local/docker:aa")
                 .with("buildargs", r#"{"V":"1 2&3"}"#),
@@ -699,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn a_build_sends_the_context_the_file_inside_it_and_the_arg_defaults() {
         let daemon = FakeDaemon::answering(&[&ok(r#"{"stream":"Step 1/2"}"#)]);
-        let tag = build(&daemon, &a_build()).await.expect("building");
+        let tag = build(&daemon, a_build()).await.expect("building");
 
         assert_eq!(tag, "lns-build.local/docker:aabb");
         let sent = daemon.sent.borrow()[0].clone();
@@ -720,7 +787,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[&ok("{}")]);
         build(
             &daemon,
-            &DockerBuild {
+            DockerBuild {
                 rebuild: true,
                 ..a_build()
             },
@@ -736,7 +803,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[&ok(
             "not json at all\n{\"stream\":\"Step 1/2\"}\n{\"errorDetail\":{\"code\":1},\"error\":\"The command '/bin/sh -c npm i' returned a non-zero code: 1\"}\n",
         )]);
-        let err = build(&daemon, &a_build()).await.unwrap_err();
+        let err = build(&daemon, a_build()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("returned a non-zero code: 1"),
             "{err:#}"
@@ -748,7 +815,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 22\r\n\r\n{\"message\":\"no build\"}\n",
         ]);
-        let err = build(&daemon, &a_build()).await.unwrap_err();
+        let err = build(&daemon, a_build()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("refused the build with 400"),
             "{err:#}"
@@ -944,6 +1011,68 @@ mod tests {
         assert!(format!("{err:#}").contains("no layer"), "{err:#}");
     }
 
+    /// The daemon pulls its own base, so the file it reads must name the digest the key was taken over rather than the tag that named it (§3.1.1).
+    #[test]
+    fn the_from_the_daemon_reads_is_the_digest_the_key_stands_on() {
+        assert_eq!(
+            pin_the_base(
+                "ARG V=1.2.3\nFROM node:$V\nRUN npm i\n",
+                2,
+                "docker.io/library/node@sha256:base",
+            ),
+            "ARG V=1.2.3\nFROM docker.io/library/node@sha256:base\nRUN npm i\n",
+        );
+    }
+
+    #[test]
+    fn a_from_written_over_more_than_one_line_is_pinned_whole() {
+        assert_eq!(
+            pin_the_base("FROM \\\n  node:24\nRUN npm i\n", 1, "node@sha256:base"),
+            "FROM node@sha256:base\nRUN npm i\n",
+        );
+    }
+
+    #[test]
+    fn a_file_that_ends_without_a_newline_is_pinned_without_one() {
+        assert_eq!(
+            pin_the_base("FROM node:24", 1, "node@sha256:base"),
+            "FROM node@sha256:base",
+        );
+    }
+
+    #[test]
+    fn the_containerfile_the_daemon_reads_out_of_the_context_is_the_pinned_one() {
+        let mut context = FakeContext::new();
+        context
+            .file("Containerfile", 0o644, b"FROM node:24\n")
+            .file("app.js", 0o644, b"console.log(1)\n");
+
+        let bytes = context_tar(
+            &context,
+            Path::new("/ctx"),
+            &PinnedContainerfile {
+                path: "Containerfile",
+                text: "FROM node@sha256:base\n",
+            },
+        )
+        .expect("packing");
+
+        let held = tar_entries(&bytes).expect("reading the context back");
+        assert_eq!(
+            held.iter()
+                .find(|(name, _)| name == "Containerfile")
+                .map(|(_, bytes)| bytes.clone()),
+            Some(b"FROM node@sha256:base\n".to_vec()),
+        );
+        assert_eq!(
+            held.iter()
+                .find(|(name, _)| name == "app.js")
+                .map(|(_, bytes)| bytes.clone()),
+            Some(b"console.log(1)\n".to_vec()),
+            "every other file goes up as it is on the host",
+        );
+    }
+
     #[test]
     fn the_context_goes_up_as_a_tar_of_its_files_and_directories() {
         let mut context = FakeContext::new();
@@ -953,7 +1082,7 @@ mod tests {
             .file("app/main.js", 0o755, b"console.log(1)\n")
             .symlink("app/link", "main.js");
 
-        let bytes = context_tar(&context, Path::new("/ctx")).expect("packing");
+        let bytes = context_tar(&context, Path::new("/ctx"), &no_pin()).expect("packing");
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
         let names: Vec<String> = archive
             .entries()
@@ -973,7 +1102,7 @@ mod tests {
         context
             .file("Containerfile", 0o644, b"FROM alpine\n")
             .unreadable_bytes("Containerfile");
-        let err = context_tar(&context, Path::new("/ctx")).unwrap_err();
+        let err = context_tar(&context, Path::new("/ctx"), &no_pin()).unwrap_err();
         assert!(
             format!("{err:#}").contains("in the build context"),
             "{err:#}"
@@ -987,7 +1116,7 @@ mod tests {
             .file("Containerfile", 0o644, b"FROM alpine\n")
             .dir("app", 0o755)
             .ghost("app", "gone");
-        let bytes = context_tar(&context, Path::new("/ctx")).expect("packing");
+        let bytes = context_tar(&context, Path::new("/ctx"), &no_pin()).expect("packing");
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
         assert_eq!(archive.entries().unwrap().count(), 2);
     }
@@ -996,7 +1125,7 @@ mod tests {
     fn a_context_directory_that_cannot_be_listed_names_it() {
         let mut context = FakeContext::new();
         context.dir("app", 0o755).unlistable("app");
-        let err = context_tar(&context, Path::new("/ctx")).unwrap_err();
+        let err = context_tar(&context, Path::new("/ctx"), &no_pin()).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading the build context"),
             "{err:#}"
@@ -1009,26 +1138,11 @@ mod tests {
         assert_eq!(build_tag("aabb"), "lns-build.local/docker:aabb");
     }
 
-    #[test]
-    fn the_socket_is_what_this_machine_names_then_what_the_environment_does_then_the_default() {
-        assert_eq!(
-            socket_of(Some("/run/mine.sock"), Some("unix:///other")),
-            "/run/mine.sock"
-        );
-        assert_eq!(
-            socket_of(None, Some("unix:///run/user/1000/docker.sock")),
-            "/run/user/1000/docker.sock"
-        );
-        assert_eq!(socket_of(None, Some("tcp://docker:2375")), DEFAULT_SOCKET);
-        assert_eq!(socket_of(None, Some("unix://")), DEFAULT_SOCKET);
-        assert_eq!(socket_of(None, None), DEFAULT_SOCKET);
-    }
-
     #[derive(Default)]
     struct FakeDockerHost {
         base: Option<Base>,
-        held: Option<String>,
-        remembered: RefCell<Vec<(String, String)>>,
+        held: Option<Cached>,
+        remembered: RefCell<Vec<(String, Cached)>>,
         adopted: RefCell<Vec<(String, usize)>>,
     }
 
@@ -1039,14 +1153,14 @@ mod tests {
                 .with_context(|| format!("no registry answers for {image}"))
         }
 
-        async fn cached(&self, _kind: Kind, _key: &str) -> Option<String> {
+        async fn cached(&self, _kind: Kind, _key: &str) -> Option<Cached> {
             self.held.clone()
         }
 
-        async fn remember(&self, _kind: Kind, key: &str, reference: &str) {
+        async fn remember(&self, _kind: Kind, key: &str, built: &Cached) {
             self.remembered
                 .borrow_mut()
-                .push((key.to_string(), reference.to_string()));
+                .push((key.to_string(), built.clone()));
         }
 
         async fn adopt(&self, built: &BuiltImage, layers: &[LayerBlob]) -> Result<String> {
@@ -1075,7 +1189,8 @@ mod tests {
         rebuild: bool,
     ) -> Result<Built> {
         let file = lns_artifact::containerfile::parse(TEXT).expect("a Containerfile lns builds");
-        let context = FakeContext::new();
+        let mut context = FakeContext::new();
+        context.file("Containerfile", 0o644, TEXT.as_bytes());
         build_image(
             host,
             daemon,
@@ -1102,7 +1217,12 @@ mod tests {
             &ok("OK"),
             &ok(r#"{"stream":"Successfully built"}"#),
             &ok_bytes(&a_saved_image()),
+            &ok("[]"),
         ])
+    }
+
+    fn no_pin() -> PinnedContainerfile<'static> {
+        PinnedContainerfile { path: "", text: "" }
     }
 
     fn ok_bytes(body: &[u8]) -> Vec<u8> {
@@ -1143,11 +1263,18 @@ mod tests {
             Some(built.key.clone()),
         );
         assert_eq!(host.adopted.borrow().len(), 1);
-        assert_eq!(built.reference, host.remembered.borrow()[0].1);
+        assert_eq!(built.reference, host.remembered.borrow()[0].1.reference);
         assert_eq!(
             daemon.sent.borrow().len(),
-            3,
-            "a ping, a build and an export, and nothing else",
+            4,
+            "a ping, a build, an export and the removal of the tag, and nothing else",
+        );
+        assert!(
+            daemon.sent.borrow()[3].starts_with("DELETE /v1.43/images/lns-build.local%2Fdocker%3A")
+                || daemon.sent.borrow()[3]
+                    .starts_with("DELETE /v1.43/images/lns-build.local/docker:"),
+            "the daemon's own copy is not left behind: {}",
+            daemon.sent.borrow()[3],
         );
         assert!(
             daemon.sent.borrow()[1].contains("platform=linux%2Farm64"),
@@ -1157,12 +1284,53 @@ mod tests {
             daemon.sent.borrow()[1].contains("buildargs=%7B%22V%22%3A%221.2.3%22%7D"),
             "the ARG defaults are stated rather than left to the daemon",
         );
+        assert!(
+            daemon.sent.borrow()[1].contains("FROM docker.io/library/node@sha256:base"),
+            "the daemon builds on the digest the key was taken over, not on the tag: {}",
+            daemon.sent.borrow()[1],
+        );
+    }
+
+    /// Nothing else on this machine records which engine filled a key, so the entry the reuse answers with is where the disclosure comes from (§3.1.1).
+    #[tokio::test]
+    async fn a_daemon_build_is_remembered_as_one_the_gate_did_not_apply_to() {
+        let host = a_host();
+        let built = built_through(&host, &a_daemon_that_builds(), false)
+            .await
+            .expect("building");
+
+        assert!(built.built_outside_the_gate);
+        assert!(
+            host.remembered.borrow()[0].1.built_outside_the_gate,
+            "the next build to answer this key has to read the daemon off it",
+        );
+    }
+
+    /// The switch says `docker`, but this key was filled in a build guest, so the gate did apply to the image it answers with.
+    #[tokio::test]
+    async fn a_key_a_guest_filled_answers_the_daemon_switch_and_says_the_gate_applied() {
+        let host = FakeDockerHost {
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
+            ..a_host()
+        };
+        let built = built_through(&host, &FakeDaemon::answering(&[]), false)
+            .await
+            .expect("building");
+
+        assert!(built.reused);
+        assert!(!built.built_outside_the_gate);
     }
 
     #[tokio::test]
     async fn a_key_this_machine_already_answers_runs_no_daemon_at_all() {
         let host = FakeDockerHost {
-            held: Some("lns-build.local/built@sha256:held".to_string()),
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
             ..a_host()
         };
         let daemon = FakeDaemon::answering(&[]);
@@ -1181,13 +1349,71 @@ mod tests {
     #[tokio::test]
     async fn a_rebuild_ignores_the_key_this_machine_holds_and_builds_again() {
         let host = FakeDockerHost {
-            held: Some("lns-build.local/built@sha256:held".to_string()),
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
             ..a_host()
         };
         let built = built_through(&host, &a_daemon_that_builds(), true)
             .await
             .expect("building");
         assert!(!built.reused);
+    }
+
+    /// The image is in lns's layer store by then, so a daemon that will not drop its copy is said so and the build stands.
+    #[test]
+    fn a_daemon_that_will_not_drop_its_copy_says_so_and_finishes_the_build() {
+        let daemon = FakeDaemon::answering(&[
+            &ok("OK"),
+            &ok(r#"{"stream":"Successfully built"}"#),
+            &ok_bytes(&a_saved_image()),
+            b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n".as_ref(),
+        ]);
+        let mut built = None;
+        let messages = crate::test_env::captured_messages(|| {
+            built = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("a runtime for one build")
+                    .block_on(built_through(&a_host(), &daemon, false)),
+            );
+        });
+
+        assert!(built.expect("the build was run").is_ok());
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("still holds its own copy")),
+            "{messages:?}",
+        );
+    }
+
+    /// A daemon that stops answering once the export is in hand has already given lns the image, so the build stands and the leftover is named.
+    #[test]
+    fn a_daemon_that_stops_answering_after_the_export_still_finishes_the_build() {
+        let daemon = FakeDaemon::answering(&[
+            &ok("OK"),
+            &ok(r#"{"stream":"Successfully built"}"#),
+            &ok_bytes(&a_saved_image()),
+        ]);
+        let mut built = None;
+        let messages = crate::test_env::captured_messages(|| {
+            built = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("a runtime for one build")
+                    .block_on(built_through(&a_host(), &daemon, false)),
+            );
+        });
+
+        assert!(built.expect("the build was run").is_ok());
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("still holds its own copy")),
+            "{messages:?}",
+        );
     }
 
     #[tokio::test]

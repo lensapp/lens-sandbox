@@ -176,6 +176,36 @@ fn the_service_was_asked_to_build(w: &mut BehaviourWorld, path: String) -> Resul
     Ok(())
 }
 
+/// §3.1.1: the switch is a property of the machine, and only the request pins that it reached the service.
+#[then("the build request names the host Docker daemon")]
+fn the_build_request_names_the_daemon(w: &mut BehaviourWorld) -> Result<(), String> {
+    match engine_asked_for(w)? {
+        lns_ipc::BuildEngine::Docker { .. } => Ok(()),
+        other => Err(format!("the build asked for {other:?}")),
+    }
+}
+
+#[then("the build request names a build guest")]
+fn the_build_request_names_a_guest(w: &mut BehaviourWorld) -> Result<(), String> {
+    match engine_asked_for(w)? {
+        lns_ipc::BuildEngine::Lns => Ok(()),
+        other => Err(format!("the build asked for {other:?}")),
+    }
+}
+
+fn engine_asked_for(w: &BehaviourWorld) -> Result<lns_ipc::BuildEngine, String> {
+    w.sandbox
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|request| match request {
+            Request::BuildSandbox { build_engine, .. } => Some(build_engine.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "no build reached the service".to_string())
+}
+
 #[then("the build request ignores the cache")]
 fn the_build_ignores_the_cache(w: &mut BehaviourWorld) -> Result<(), String> {
     match build_request(w)?.2 {

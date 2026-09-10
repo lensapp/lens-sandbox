@@ -73,6 +73,8 @@ pub struct ImageRequest<'a> {
     pub authored_egress: Option<String>,
     /// Which artifact carries each packed fileset the resolution reached, so a build step seeds the same files a run would.
     pub packed_filesets: Vec<lns_ipc::PackedFilesetSource>,
+    /// The engine this machine builds with, read off its own configuration before the build is asked for (§3.1.1).
+    pub build_engine: lns_ipc::BuildEngine,
 }
 
 /// What the service answered when it merged a document's mixins.
@@ -301,6 +303,8 @@ pub struct DryRunPorts<'a, F: Fs + ?Sized, P: Producer + ?Sized, B: ImageBuilder
     pub builder: &'a B,
     pub image_limit: u64,
     pub rebuild: bool,
+    /// The engine this machine builds a Containerfile with (§3.1.1).
+    pub build_engine: lns_ipc::BuildEngine,
 }
 
 /// What one push drives: the author's files, the directory that roots them, the registry, the version index, the builder behind a path-form `spec.image`, and what this machine lets a built image weigh.
@@ -318,6 +322,8 @@ pub struct PushPorts<
     pub builder: &'a B,
     pub image_limit: u64,
     pub rebuild: bool,
+    /// The engine this machine builds a Containerfile with (§3.1.1).
+    pub build_engine: lns_ipc::BuildEngine,
 }
 
 /// How a push may accept publishing the local mixins a document names.
@@ -506,6 +512,14 @@ fn was_built_outside_the_gate(
     })
 }
 
+/// The push publishes the record, so the line that says what it published says it in words too (§3.1.1).
+fn the_gate_it_was_built_outside(image: &lns_ipc::PushableImage) -> String {
+    match image.built_outside_the_gate {
+        true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+        false => String::new(),
+    }
+}
+
 /// How every line that lists an index names what it holds.
 fn holdings(entries: &[lns_artifact::image_index::IndexEntry]) -> String {
     entries
@@ -560,12 +574,13 @@ where
         publish_one_architecture(producer, &image, repository, artifact_tag, &mine).await?;
         writeln!(
             out,
-            "{} {} as {repository}@{} ({} layer{})",
+            "{} {} as {repository}@{} ({} layer{}){}",
             if built.reused { "reused" } else { "built" },
             built.label,
             image.digest,
             image.layers.len(),
             if image.layers.len() == 1 { "" } else { "s" },
+            the_gate_it_was_built_outside(&image),
         )?;
     }
     // The entries are the record and the index is derived from them, so an index that is not the one they assemble to is republished even where this push added no entry.
@@ -709,6 +724,7 @@ where
         builder,
         image_limit,
         rebuild,
+        build_engine,
     } = ports;
     let Confirm {
         assume_yes,
@@ -732,6 +748,7 @@ where
             plan_only: false,
             authored_egress: None,
             packed_filesets: Vec::new(),
+            build_engine,
         },
         reference,
         image_limit,
@@ -795,6 +812,7 @@ where
         builder,
         image_limit,
         rebuild,
+        build_engine,
     } = ports;
     refuse_unpushable_tools(doc)?;
     pack_path_filesets(fs, cwd, doc)?;
@@ -812,6 +830,7 @@ where
             plan_only: true,
             authored_egress: None,
             packed_filesets: Vec::new(),
+            build_engine,
         },
         reference,
         image_limit,
@@ -927,6 +946,7 @@ mod tests {
                 builder,
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             doc,
             reference,
@@ -959,6 +979,7 @@ mod tests {
                 builder: &FakeBuilder::unconsultable(),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             doc,
             reference,
@@ -2134,6 +2155,7 @@ mod tests {
                 builder: &builder,
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             WITH_A_CONTAINERFILE_AND_A_MIXIN,
             "ghcr.io/team/hermes:1.4.0",
@@ -2381,6 +2403,7 @@ mod tests {
                 builder: &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             WITH_A_CONTAINERFILE,
             "ghcr.io/team/hermes:1.4.0",
@@ -2419,6 +2442,7 @@ mod tests {
                 builder: &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             WITH_A_CONTAINERFILE,
             "ghcr.io/team/hermes:1.4.0",
@@ -2444,6 +2468,7 @@ mod tests {
                 builder: &FakeBuilder::built(&[("sha256:base", 10)]),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             WITH_A_CONTAINERFILE,
             "ghcr.io/team/hermes:1.4.0",
@@ -2566,6 +2591,7 @@ mod tests {
                 builder: &FakeBuilder::built(&[("sha256:base", 10)]),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
             },
             WITH_A_CONTAINERFILE,
             "ghcr.io/team/hermes:1.4.0",

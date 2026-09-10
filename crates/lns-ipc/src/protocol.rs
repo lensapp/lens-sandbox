@@ -976,16 +976,23 @@ pub enum BuildEngine {
     #[default]
     Lns,
     Docker {
-        /// The Unix socket the daemon answers on; absent lets the machine that connects find its own.
+        /// The Unix socket the daemon answers on, resolved where the switch is read, because the side that starts the service is not the side that sets `DOCKER_HOST`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         socket: Option<String>,
     },
 }
 
-impl BuildEngine {
-    /// Whether a build through this engine happens where the document's egress and credentials decide nothing.
-    pub fn is_outside_the_gate(&self) -> bool {
-        matches!(self, BuildEngine::Docker { .. })
+/// The socket a daemon answers on when neither `build.dockerSocket` nor `DOCKER_HOST` names one.
+pub const DEFAULT_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+
+/// What this machine names, then what its environment does, then the one a daemon listens on by default.
+pub fn docker_socket(configured: Option<&str>, docker_host: Option<&str>) -> String {
+    if let Some(configured) = configured {
+        return configured.to_string();
+    }
+    match docker_host.and_then(|host| host.strip_prefix("unix://")) {
+        Some(path) if !path.is_empty() => path.to_string(),
+        _ => DEFAULT_DOCKER_SOCKET.to_string(),
     }
 }
 
@@ -1373,18 +1380,23 @@ mod tests {
         }
     }
 
-    /// Only a daemon build happens where the document's own rules decide nothing, and one string decides every line that says so.
+    /// The socket travels on the request, so the side that resolves it is the side with the user's environment (§3.1.1).
     #[test]
-    fn only_a_daemon_build_is_one_the_gate_did_not_apply_to() {
-        assert!(!BuildEngine::default().is_outside_the_gate());
-        assert!(!BuildEngine::Lns.is_outside_the_gate());
-        assert!(BuildEngine::Docker { socket: None }.is_outside_the_gate());
-        assert!(
-            BuildEngine::Docker {
-                socket: Some("/var/run/docker.sock".into())
-            }
-            .is_outside_the_gate()
+    fn the_socket_is_what_this_machine_names_then_what_its_environment_does_then_the_default() {
+        assert_eq!(
+            docker_socket(Some("/run/mine.sock"), Some("unix:///other")),
+            "/run/mine.sock"
         );
+        assert_eq!(
+            docker_socket(None, Some("unix:///run/user/1000/docker.sock")),
+            "/run/user/1000/docker.sock"
+        );
+        assert_eq!(
+            docker_socket(None, Some("tcp://docker:2375")),
+            DEFAULT_DOCKER_SOCKET
+        );
+        assert_eq!(docker_socket(None, Some("unix://")), DEFAULT_DOCKER_SOCKET);
+        assert_eq!(docker_socket(None, None), DEFAULT_DOCKER_SOCKET);
     }
 
     #[test]

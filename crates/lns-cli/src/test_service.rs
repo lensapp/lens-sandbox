@@ -19,6 +19,8 @@ pub(crate) struct CannedService {
     list_prunable_response: Option<Response>,
     list_images_response: Option<Response>,
     frames: Vec<Vec<u8>>,
+    /// The engine this machine builds a Containerfile with, so a unit test can pin that a verb sends it (§3.1.1).
+    build_engine: lns_ipc::BuildEngine,
     pub requests: Arc<Mutex<Vec<Request>>>,
 }
 
@@ -33,6 +35,7 @@ impl CannedService {
             list_prunable_response: None,
             list_images_response: None,
             frames: Vec::new(),
+            build_engine: lns_ipc::BuildEngine::default(),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -193,6 +196,10 @@ impl SandboxService for CannedService {
 
     fn write_document(&self, _path: &std::path::Path, _contents: &str) -> std::io::Result<()> {
         Ok(())
+    }
+
+    fn build_engine(&self) -> Result<lns_ipc::BuildEngine> {
+        Ok(self.build_engine.clone())
     }
 
     fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)> {

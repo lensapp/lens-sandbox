@@ -97,8 +97,15 @@ pub(crate) trait BuildHost {
     async fn copy(&self, step: &CopyStep) -> Result<ChangeSet>;
     async fn commit(&self, commit: &Commit<'_>) -> Result<String>;
     /// The image this machine built for the key and still holds, if it built one.
-    async fn cached(&self, kind: Kind, key: &str) -> Option<String>;
-    async fn remember(&self, kind: Kind, key: &str, reference: &str);
+    async fn cached(&self, kind: Kind, key: &str) -> Option<Cached>;
+    async fn remember(&self, kind: Kind, key: &str, built: &Cached);
+}
+
+/// What this machine already built for a key: the image, and whether the engine that built it stood outside the gate (§3.1.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Cached {
+    pub reference: String,
+    pub built_outside_the_gate: bool,
 }
 
 /// What one build is asked for: the file, the bytes behind it, and whether the cache may answer.
@@ -125,6 +132,8 @@ pub(crate) struct Built {
     pub reused: bool,
     /// How many leading instructions stood on an image this machine already had.
     pub reused_steps: usize,
+    /// True when the image this build answers with was built by the host Docker daemon, whichever engine this build was asked for.
+    pub built_outside_the_gate: bool,
 }
 
 /// What the instructions have decided so far: the image to stand on, the scopes a `RUN` is given, and the config the next commit writes.
@@ -158,7 +167,7 @@ pub(crate) struct Opening {
     pub key: String,
     pub base: Base,
     /// What this machine built for the key and still holds; a `--rebuild` never reads one.
-    pub cached: Option<String>,
+    pub cached: Option<Cached>,
     global_args: Vec<(String, String)>,
     /// How far into the file the `FROM` sat, so the loop resumes after it.
     after_from: usize,
@@ -266,6 +275,8 @@ pub(crate) async fn open<H: BuildHost>(
 pub(crate) struct Planned {
     pub key: String,
     pub reference: Option<String>,
+    /// Whether the image the key already answers with was built outside the gate; a key nothing answers records nothing.
+    pub built_outside_the_gate: bool,
 }
 
 /// What `lns push --dry-run` asks for: the key, and the digest only where the key already answers. Nothing is built.
@@ -273,7 +284,11 @@ pub(crate) async fn plan<H: BuildHost>(host: &H, request: &BuildPlan<'_>) -> Res
     let opening = open(host, request, BaseNeed::PeekedOnly).await?;
     Ok(Planned {
         key: opening.key,
-        reference: opening.cached,
+        built_outside_the_gate: opening
+            .cached
+            .as_ref()
+            .is_some_and(|cached| cached.built_outside_the_gate),
+        reference: opening.cached.map(|cached| cached.reference),
     })
 }
 
@@ -286,13 +301,14 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
         after_from,
     } = open(host, plan, BaseNeed::Ingested).await?;
     let instructions = plan.file.instructions[after_from..].iter();
-    if let Some(reference) = cached {
+    if let Some(cached) = cached {
         return Ok(Built {
-            reference,
+            reference: cached.reference,
             layers: 0,
             key,
             reused: true,
             reused_steps: plan.file.instructions.len(),
+            built_outside_the_gate: cached.built_outside_the_gate,
         });
     }
 
@@ -326,14 +342,24 @@ pub(crate) async fn build<H: BuildHost>(host: &H, plan: &BuildPlan<'_>) -> Resul
             .await
             .with_context(|| format!("line {}: {created_by}", instruction.line))?;
     }
-    host.remember(Kind::Image, &key, &build.parent).await;
+    host.remember(Kind::Image, &key, &built_in_a_guest(&build.parent))
+        .await;
     Ok(Built {
         reference: build.parent,
         layers: build.layers,
         key,
         reused: false,
         reused_steps: build.reused_steps,
+        built_outside_the_gate: false,
     })
+}
+
+/// Every key the executor writes was filled by a build the document's egress and credentials decided.
+fn built_in_a_guest(reference: &str) -> Cached {
+    Cached {
+        reference: reference.to_string(),
+        built_outside_the_gate: false,
+    }
 }
 
 async fn step<H: BuildHost>(
@@ -444,10 +470,10 @@ async fn reuse<H: BuildHost>(host: &H, build: &mut Build, key: &str, layer: bool
     if build.rebuild {
         return false;
     }
-    let Some(reference) = host.cached(Kind::Step, key).await else {
+    let Some(cached) = host.cached(Kind::Step, key).await else {
         return false;
     };
-    build.parent = reference;
+    build.parent = cached.reference;
     build.reused_steps += 1;
     if layer {
         build.layers += 1;
@@ -470,7 +496,8 @@ async fn commit<H: BuildHost>(
             created_by: &label(kind),
         })
         .await?;
-    host.remember(Kind::Step, key, &build.parent).await;
+    host.remember(Kind::Step, key, &built_in_a_guest(&build.parent))
+        .await;
     if layer.is_some() {
         build.layers += 1;
     }
@@ -790,7 +817,7 @@ mod tests {
         calls: Mutex<Vec<Call>>,
         commits: Mutex<usize>,
         /// What this machine remembers, which survives from one build to the next of the same host.
-        remembered: Mutex<std::collections::BTreeMap<(String, String), String>>,
+        remembered: Mutex<std::collections::BTreeMap<(String, String), Cached>>,
         /// What the context answers a COPY with, so a test can edit a file between two builds.
         copied_bytes: Mutex<Vec<u8>>,
         wrote: Mutex<Option<ChangeSet>>,
@@ -975,7 +1002,7 @@ mod tests {
             Ok(format!("lns-build.local/built@sha256:step{committed}"))
         }
 
-        async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+        async fn cached(&self, kind: Kind, key: &str) -> Option<Cached> {
             self.remembered
                 .lock()
                 .unwrap()
@@ -983,11 +1010,11 @@ mod tests {
                 .cloned()
         }
 
-        async fn remember(&self, kind: Kind, key: &str, reference: &str) {
-            self.remembered.lock().unwrap().insert(
-                (format!("{kind:?}"), key.to_string()),
-                reference.to_string(),
-            );
+        async fn remember(&self, kind: Kind, key: &str, built: &Cached) {
+            self.remembered
+                .lock()
+                .unwrap()
+                .insert((format!("{kind:?}"), key.to_string()), built.clone());
         }
     }
 
@@ -2162,10 +2189,58 @@ mod tests {
 
         assert!(key.starts_with("sha256:"), "{key}");
         assert_eq!(
-            host.cached(Kind::Image, &key).await.as_deref(),
-            Some("lns-build.local/built@sha256:step1"),
+            host.cached(Kind::Image, &key)
+                .await
+                .map(|cached| cached.reference),
+            Some("lns-build.local/built@sha256:step1".to_string()),
         );
     }
+    /// The switch says `lns` again, but the image this key answers with is the daemon's, so the build reports the engine that made it (§3.1.1).
+    #[tokio::test]
+    async fn a_key_the_daemon_filled_answers_a_build_in_a_guest_and_still_says_so() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        let file = containerfile(text);
+        let key = key::image_key(
+            "registry.test/alpine@sha256:base",
+            text,
+            "sha256:context",
+            "arm64",
+        );
+        host.remember(
+            Kind::Image,
+            &key,
+            &Cached {
+                reference: "lns-build.local/built@sha256:daemon".to_string(),
+                built_outside_the_gate: true,
+            },
+        )
+        .await;
+
+        let reused = build(&host, &build_plan(&file, text)).await.unwrap();
+
+        assert!(reused.reused, "the key answers, so nothing is run");
+        assert!(
+            reused.built_outside_the_gate,
+            "the gate did not apply to the image this run boots",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_build_in_a_guest_is_remembered_as_one_the_gate_applied_to() {
+        let host = FakeHost::new();
+        let text = "FROM alpine\nRUN echo one\n";
+        let built = built(&host, text).await;
+
+        assert!(!built.built_outside_the_gate);
+        assert_eq!(
+            host.cached(Kind::Image, &built.key)
+                .await
+                .map(|cached| cached.built_outside_the_gate),
+            Some(false),
+        );
+    }
+
     /// Another engine is handed what the file declares, not what it happens to default to, and a later default may stand on an earlier one.
     #[test]
     fn every_arg_with_a_default_is_a_build_argument_expanded_against_the_ones_before_it() {
