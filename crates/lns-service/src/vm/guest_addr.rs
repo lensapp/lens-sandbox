@@ -1248,11 +1248,8 @@ pub(crate) mod tests {
         .await
         .expect_err("a run whose reservation is gone cannot be given an address");
         assert!(
-            matches!(
-                error,
-                AddressError::Reserve(ReserveError::Select(SelectError::UnknownOwner))
-            ),
-            "{error:?}"
+            error.to_string().contains("not the one the host holds"),
+            "{error}"
         );
         assert!(allocator.reserved().is_empty());
     }

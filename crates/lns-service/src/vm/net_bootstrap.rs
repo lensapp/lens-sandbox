@@ -241,19 +241,28 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_that_is_not_an_answer_to_the_plan_is_refused_by_name() {
-        let (host, server) = tokio::io::duplex(4096);
-        tokio::spawn(guest(
-            server,
-            Some(ServerFrame::StdoutBytes(b"hello".to_vec())),
-        ));
-        let error = configure(host, &plan(), Duration::from_secs(5))
-            .await
-            .expect_err("workload output is not an address");
-        assert!(
-            matches!(error, BootstrapError::Unexpected(what) if what == "workload output"),
-            "{error:?}"
-        );
-        assert!(error.to_string().contains("before it reported"), "{error}");
+        for (frame, named) in [
+            (
+                ServerFrame::StdoutBytes(b"hello".to_vec()),
+                "workload output",
+            ),
+            (
+                ServerFrame::StderrBytes(b"oops".to_vec()),
+                "workload output",
+            ),
+            (ServerFrame::ExitStatus(0), "a workload exit"),
+        ] {
+            let (host, server) = tokio::io::duplex(4096);
+            tokio::spawn(guest(server, Some(frame)));
+            let error = configure(host, &plan(), Duration::from_secs(5))
+                .await
+                .expect_err("a workload frame is not an address");
+            assert!(
+                matches!(error, BootstrapError::Unexpected(what) if what == named),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("before it reported"), "{error}");
+        }
     }
 
     #[tokio::test]

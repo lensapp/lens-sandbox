@@ -79,6 +79,14 @@ mod tests {
     use super::*;
     use lns_session::{BrokerExitReason, ClientFrame, GuestNet, ServerFrame};
 
+    /// What the guest would tell the host about this outcome, in one string.
+    fn answer(outcome: &Bootstrap) -> String {
+        match outcome {
+            Bootstrap::Applied(applied) => applied.address.to_string(),
+            Bootstrap::Refused(reason) => format!("{} {}", reason.as_str(), reason.summary()),
+        }
+    }
+
     /// An apply the test can hold to account for: it reports how many times the guest touched its interface, so "nothing was applied" is asserted rather than assumed.
     fn counted(calls: &Cell<usize>) -> impl FnOnce(&GuestNet) -> Result<Applied, BrokerExitReason> {
         move |_| {
@@ -136,13 +144,11 @@ mod tests {
             0,
             "a frame that carries no plan must configure nothing"
         );
-        let Bootstrap::Refused(reason) = &outcome else {
-            panic!("a workload frame must never reach an unaddressed guest: {outcome:?}");
-        };
-        assert_eq!(reason.as_str(), "network_setup_failed");
+        let said = answer(&outcome);
+        assert!(said.starts_with("network_setup_failed"), "{said}");
         assert!(
-            reason.summary().contains("before the network plan"),
-            "{reason:?}"
+            said.contains("before the network plan"),
+            "a workload frame must never reach an unaddressed guest: {said}"
         );
     }
 
@@ -150,10 +156,8 @@ mod tests {
     fn a_host_that_hangs_up_before_it_sends_a_plan_leaves_a_refusal_not_a_wait() {
         let calls = Cell::new(0);
         let outcome = respond(None, counted(&calls));
-        let Bootstrap::Refused(reason) = &outcome else {
-            panic!("{outcome:?}");
-        };
-        assert!(reason.summary().contains("closed"), "{reason:?}");
+        let said = answer(&outcome);
+        assert!(said.contains("closed"), "{said}");
         assert_eq!(calls.get(), 0, "no plan arrived, so nothing was configured");
     }
 
@@ -163,13 +167,8 @@ mod tests {
         broken.candidates.clear();
         let calls = Cell::new(0);
         let outcome = respond(Some(ClientFrame::ConfigureNetwork(broken)), counted(&calls));
-        let Bootstrap::Refused(reason) = &outcome else {
-            panic!("{outcome:?}");
-        };
-        assert!(
-            reason.summary().contains("no candidate address"),
-            "{reason:?}"
-        );
+        let said = answer(&outcome);
+        assert!(said.contains("no candidate address"), "{said}");
         assert_eq!(
             calls.get(),
             0,
@@ -182,6 +181,7 @@ mod tests {
         let calls = Cell::new(0);
         let applied = respond(Some(ClientFrame::ConfigureNetwork(plan())), counted(&calls));
         assert_eq!(calls.get(), 1, "the plan the host sent was applied");
+        assert_eq!(answer(&applied), "192.168.64.254");
         assert!(
             narrate(&applied).contains("192.168.64.254/24"),
             "{applied:?}"
@@ -220,10 +220,8 @@ mod tests {
         ] {
             let calls = Cell::new(0);
             let outcome = respond(Some(frame), counted(&calls));
-            let Bootstrap::Refused(reason) = &outcome else {
-                panic!("{outcome:?}");
-            };
-            assert!(reason.summary().contains(named), "{reason:?}");
+            let said = answer(&outcome);
+            assert!(said.contains(named), "{said}");
             assert_eq!(calls.get(), 0);
         }
         assert_eq!(
