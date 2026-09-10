@@ -179,9 +179,19 @@ pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result
 pub(super) fn report_the_booted_image(
     image: Option<&str>,
     config: Option<&oci_client::config::ConfigFile>,
+    built_outside_the_gate: bool,
 ) {
     if let (Some(image), Some(config)) = (image, config) {
-        crate::log::info!("Image", "{image}, {}/{}", config.os, config.architecture);
+        crate::log::info!(
+            "Image",
+            "{image}, {}/{}{}",
+            config.os,
+            config.architecture,
+            match built_outside_the_gate {
+                true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+                false => String::new(),
+            },
+        );
     }
 }
 
@@ -425,7 +435,7 @@ mod tests {
         )
         .expect("a config the registry could serve");
         let frames = crate::log::testing::capture_run_frames(|| {
-            report_the_booted_image(Some("alpine:3.20"), Some(&config));
+            report_the_booted_image(Some("alpine:3.20"), Some(&config), false);
         });
         let reported = format!("{frames:?}");
         assert!(
@@ -436,10 +446,26 @@ mod tests {
         );
     }
 
+    /// §3.1.1: the gate did not apply to a daemon build, and a consumer booting one is told in words.
+    #[test]
+    fn a_run_of_an_image_built_outside_the_gate_says_so_in_the_line_it_prints() {
+        let config: oci_client::config::ConfigFile = serde_json::from_str(
+            r#"{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#,
+        )
+        .expect("a config the registry could serve");
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(Some("ghcr.io/team/agent:1.4.0"), Some(&config), true);
+        });
+        assert!(
+            format!("{frames:?}").contains(lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+            "{frames:?}"
+        );
+    }
+
     #[test]
     fn an_imageless_run_reports_no_image_it_booted() {
         let frames = crate::log::testing::capture_run_frames(|| {
-            report_the_booted_image(None, None);
+            report_the_booted_image(None, None, false);
         });
         assert!(
             format!("{frames:?}").is_empty() || !format!("{frames:?}").contains("Image"),

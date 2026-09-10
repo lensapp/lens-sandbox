@@ -13,6 +13,8 @@ pub struct IngestedImage {
     pub config_media_type: Option<String>,
     /// The digest-pinned spelling of what the pull resolved, which is how the manifest cache keys it.
     pub manifest_reference: Option<String>,
+    /// Whether the index this image came out of records that the host Docker daemon built it (§6.2).
+    pub built_outside_the_gate: bool,
 }
 
 pub async fn run(
@@ -33,6 +35,7 @@ pub async fn run(
                 .collect();
             let manifest_reference = pulled.reference.clone_with_digest(pulled.digest).whole();
             Ok(IngestedImage {
+                built_outside_the_gate: pulled.built_outside_the_gate,
                 digests: pulled.layer_digests,
                 bytes,
                 config: Some(pulled.config),
@@ -48,6 +51,7 @@ pub async fn run(
                 );
             }
             Ok(IngestedImage {
+                built_outside_the_gate: false,
                 digests: Vec::new(),
                 bytes: Vec::new(),
                 config: None,
@@ -99,6 +103,7 @@ mod tests {
             ..Default::default()
         };
         PulledImage {
+            built_outside_the_gate: false,
             reference,
             digest: "sha256:deadbeef".to_string(),
             layers: vec![

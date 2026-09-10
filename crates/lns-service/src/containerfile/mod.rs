@@ -26,6 +26,9 @@ use import::LocalStore;
 use tar_layer::{LayerBlob, tar_layer};
 use upper::ChangeSet;
 
+/// The host a built image is named under, which no registry resolves — so nothing a build produced is ever asked of a network.
+pub(crate) const BUILT_IMAGE_REGISTRY: &str = "lns-build.local";
+
 /// The repository a built image is named under: a host no registry resolves, so a built digest can only ever be used locally.
 pub(crate) const BUILT_IMAGE_REPOSITORY: &str = "lns-build.local/built";
 

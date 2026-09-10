@@ -1643,6 +1643,7 @@ mod tests {
             tools: Vec::new(),
         };
         let base_image = PulledImage {
+            built_outside_the_gate: false,
             reference: base_reference.parse().unwrap(),
             digest: format!("sha256:{}", "a".repeat(64)),
             layers: Vec::new(),
@@ -1672,6 +1673,7 @@ mod tests {
     fn record_for_normalizes_the_reference_and_measures_layers() {
         let reference: oci_client::Reference = "some-image:1.0".parse().unwrap();
         let pulled = PulledImage {
+            built_outside_the_gate: false,
             reference,
             digest: "sha256:manifest".into(),
             layers: vec![oci_client::client::ImageLayer::new(
@@ -2845,6 +2847,7 @@ mod tests {
         let reference: oci_client::Reference =
             "registry.example.test/cov/lifecycle:1".parse().unwrap();
         let pulled = PulledImage {
+            built_outside_the_gate: false,
             reference,
             digest: format!("sha256:{}", "c".repeat(64)),
             layers: vec![oci_client::client::ImageLayer::new(

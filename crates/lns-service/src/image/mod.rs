@@ -238,6 +238,8 @@ pub(crate) fn enforce_manifest_doc_size(
 #[derive(Debug)]
 pub struct PulledImage {
     pub reference: Reference,
+    /// Whether the index this pull resolved through records that the host Docker daemon built this manifest (§6.2).
+    pub built_outside_the_gate: bool,
     pub digest: String,
     pub layers: Vec<oci_client::client::ImageLayer>,
     pub config: oci_client::config::ConfigFile,
@@ -621,6 +623,23 @@ async fn explain_architecture<R: Registry>(
     ))
 }
 
+/// The index entry is the only place a published image says the host Docker daemon built it, so a run that boots one can disclose it (§3.1.1, §6.2); a reference naming no index, or a registry that will not serve one, records nothing.
+async fn what_the_index_records<R: Registry>(
+    client: &R,
+    reference: &Reference,
+    manifest_digest: &str,
+) -> bool {
+    if reference.registry() == crate::containerfile::BUILT_IMAGE_REGISTRY {
+        return false;
+    }
+    let Ok(Some(held)) = client.pull_index(reference).await else {
+        return false;
+    };
+    held.entries
+        .iter()
+        .any(|entry| entry.built_outside_the_gate && ct_digest_eq(&entry.digest, manifest_digest))
+}
+
 pub(crate) async fn pull_inner<R: Registry>(
     client: &R,
     image: &str,
@@ -637,6 +656,8 @@ pub(crate) async fn pull_inner<R: Registry>(
 
     // Compare against the registry-reported content digest, not a re-serialization of the parsed manifest — serde's byte layout differs from the registry's, so re-hashing would false-mismatch every real digest-pinned pull.
     verify_the_pin(client, &reference, &manifest_digest, image).await?;
+
+    let built_outside_the_gate = what_the_index_records(client, &reference, &manifest_digest).await;
 
     let total_bytes = refuse_a_manifest_no_pull_may_fetch(image, &manifest, &config)?;
     let mut was_cached = Vec::with_capacity(manifest.layers.len());
@@ -732,6 +753,7 @@ pub(crate) async fn pull_inner<R: Registry>(
 
     Ok(PulledImage {
         reference,
+        built_outside_the_gate,
         digest: manifest_digest,
         layers,
         config,
@@ -2154,6 +2176,83 @@ mod tests {
         );
     }
 
+    /// The index entry is where a published image records that the host Docker daemon built it, and a run that boots the image has to say so (§6.2).
+    #[tokio::test]
+    async fn a_pull_of_an_image_the_index_says_a_daemon_built_carries_the_record() {
+        ensure_global_trace_subscriber();
+        let image = build_two_layer_image();
+        let digest = image.manifest_digest.clone();
+        let mut registry = image.into_registry();
+        registry.index = Some(an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: true,
+            digest,
+            size: 512,
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            os: lns_artifact::image_index::OS.into(),
+            architecture: want_arch().to_string(),
+        }]));
+        let (_dir, cache) = cache();
+
+        let pulled = pull_inner(&registry, "ghcr.io/team/agent:1.4.0", &cache)
+            .await
+            .unwrap();
+
+        assert!(pulled.built_outside_the_gate);
+    }
+
+    /// An image this machine built is named under a host nothing resolves, and what built it is the build cache's record, not an index's.
+    #[tokio::test]
+    async fn a_pull_of_an_image_this_machine_built_asks_no_registry_for_an_index() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.index_failure = Some("no such host".into());
+        let (_dir, cache) = cache();
+
+        let pulled = pull_inner(
+            &registry,
+            &format!(
+                "{}@sha256:{}",
+                crate::containerfile::BUILT_IMAGE_REPOSITORY,
+                "a".repeat(64)
+            ),
+            &cache,
+        )
+        .await
+        .unwrap();
+
+        assert!(!pulled.built_outside_the_gate);
+        assert!(
+            !registry
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"index".to_string()),
+            "a built image is not published, so no index holds it",
+        );
+    }
+
+    /// A record is about one manifest, so an entry naming another digest says nothing about this one.
+    #[tokio::test]
+    async fn a_pull_of_an_image_no_entry_names_records_no_daemon() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.index = Some(an_index(vec![lns_artifact::image_index::IndexEntry {
+            built_outside_the_gate: true,
+            digest: format!("sha256:{}", "cd".repeat(32)),
+            size: 512,
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            os: lns_artifact::image_index::OS.into(),
+            architecture: want_arch().to_string(),
+        }]));
+        let (_dir, cache) = cache();
+
+        let pulled = pull_inner(&registry, "ghcr.io/team/agent:1.4.0", &cache)
+            .await
+            .unwrap();
+
+        assert!(!pulled.built_outside_the_gate);
+    }
+
     #[tokio::test]
     async fn pull_inner_happy_path_returns_layers_in_manifest_order() {
         ensure_global_trace_subscriber();
@@ -2165,8 +2264,12 @@ mod tests {
         assert_eq!(pulled.layers.len(), 2, "both layers present");
         assert_eq!(pulled.layer_digests.len(), 2, "digests parallel to layers");
         assert_eq!(calls[0], "manifest", "manifest fetch happens first");
-        assert!(calls[1].starts_with("blob:"));
+        assert_eq!(
+            calls[1], "index",
+            "the entry the index holds is what says whether the gate applied",
+        );
         assert!(calls[2].starts_with("blob:"));
+        assert!(calls[3].starts_with("blob:"));
     }
 
     #[tokio::test]
