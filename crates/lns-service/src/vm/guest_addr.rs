@@ -112,14 +112,13 @@ impl std::error::Error for ReserveError {}
 /// The one reservation path both boot paths take: discover the network the guest will be attached to, then reserve on it.
 pub async fn reserve_on(
     allocator: &Allocator,
-    source: &dyn crate::vm::host_net::HostNetworkSource,
-    files: &dyn HostFiles,
+    host: &crate::vm::host_net::HostView<'_>,
     owner: &str,
     mac: &str,
     attempts: usize,
     retry: Duration,
 ) -> Result<GuestNet, ReserveError> {
-    let network = crate::vm::host_net::host_network_for_boot(source, files, attempts, retry)
+    let network = crate::vm::host_net::host_network_for_boot(host, attempts, retry)
         .await
         .map_err(ReserveError::Network)?;
     allocator.set_network(network);
@@ -317,7 +316,10 @@ impl ConflictSource for Allocator {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::vm::host_net::{LEASES_PATH, tests::FakeHostFiles};
+    use crate::vm::host_net::{
+        HostView, LEASES_PATH,
+        tests::{FakeHostFiles, FakeNetworkMemory},
+    };
 
     struct FixedClock(u64);
     impl Clock for FixedClock {
@@ -441,8 +443,11 @@ pub(crate) mod tests {
 
         let workload = reserve_on(
             &allocator,
-            &AbsentBridge,
-            &files,
+            &HostView {
+                live: &AbsentBridge,
+                files: &files,
+                memory: &FakeNetworkMemory::empty(),
+            },
             "run-a",
             "52:54:00:00:00:01",
             20,
@@ -452,8 +457,11 @@ pub(crate) mod tests {
         .expect("the very first guest is the one that creates bridge100");
         let provisioner = reserve_on(
             &allocator,
-            &AbsentBridge,
-            &files,
+            &HostView {
+                live: &AbsentBridge,
+                files: &files,
+                memory: &FakeNetworkMemory::empty(),
+            },
             "run-a/tools",
             "52:54:00:00:00:11",
             20,
@@ -478,6 +486,48 @@ pub(crate) mod tests {
                 .all(|a| !workload.candidates.contains(a)),
             "{provisioner:?} vs {workload:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_first_static_boot_is_addressed_when_the_declaration_is_root_only() {
+        use crate::vm::host_net::{HostNetwork, HostNetworkSource, VMNET_PLIST_PATH};
+
+        struct AbsentBridge;
+        impl HostNetworkSource for AbsentBridge {
+            fn observe(&self) -> std::io::Result<String> {
+                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
+            }
+        }
+
+        let files = FakeHostFiles::new().with(LEASES_PATH, "").failing(
+            VMNET_PLIST_PATH,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        let memory = FakeNetworkMemory::holding(HostNetwork {
+            network: Ipv4Addr::new(192, 168, 66, 0),
+            prefix_len: 24,
+            gateway: Ipv4Addr::new(192, 168, 66, 1),
+        });
+        let net = reserve_on(
+            &allocator_with(
+                FakeHostFiles::new().with(LEASES_PATH, ""),
+                Vec::new(),
+                1_000,
+            ),
+            &HostView {
+                live: &AbsentBridge,
+                files: &files,
+                memory: &memory,
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            3,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("a stock macOS host keeps the declaration to root, and the guest still needs one");
+        assert_eq!(net.candidates[0], Ipv4Addr::new(192, 168, 66, 254));
+        assert_eq!(net.gateway, Ipv4Addr::new(192, 168, 66, 1));
     }
 
     #[test]
@@ -520,8 +570,11 @@ pub(crate) mod tests {
 
         let error = reserve_on(
             &empty_host(),
-            &AbsentBridge,
-            &FakeHostFiles::new(),
+            &HostView {
+                live: &AbsentBridge,
+                files: &FakeHostFiles::new(),
+                memory: &FakeNetworkMemory::empty(),
+            },
             "run-a",
             "52:54:00:00:00:01",
             2,

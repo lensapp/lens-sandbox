@@ -392,6 +392,7 @@ pub async fn boot_with_owner<T: Send + 'static>(
 ) -> Result<()> {
     let backend = backend.unwrap_or_else(detect_backend);
     log::debug!("starting microVM via {} backend", backend.name());
+    host_net::real::learn_shared_network();
     let handle = tokio::task::spawn_blocking(move || {
         let _owner = owner;
         backend.run(spec)

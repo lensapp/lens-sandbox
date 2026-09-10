@@ -1071,13 +1071,19 @@ LNS_STATIC_GUEST_NET=1 lns service start
 What the host does, per booting guest:
 
 - reads the shared network's own parameters — the address and netmask of the
-  live `bridge100` interface when a guest is already running, and otherwise the
+  live `bridge100` interface when a guest is already running; otherwise the
   `Shared_Net_Address` / `Shared_Net_Mask` that
   `/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist` declares the
-  network will be created with, so the very first guest (which is the one that
-  creates the bridge) is addressed too. If the network is neither running nor
-  declared, the run stops; lns never assumes a subnet, and it never writes
-  either source;
+  network will be created with, when the user `lns-service` runs as may read it
+  (on a stock macOS host that file is `root:wheel` and mode `0640`, so usually
+  it may not); and otherwise the parameters this host was last seen running,
+  which lns records in `~/.lns/host-network` whenever a guest brings the shared
+  network up — including the ordinary DHCP runs, so one normal run is enough to
+  teach a host that has never run a static one. That last source is what
+  addresses the first guest after the shared network has been torn down. If the
+  network is not running, not readable and never observed, the run stops with
+  all three named; lns never assumes a subnet, and it never writes any of
+  Apple's files;
 - excludes the network and broadcast addresses, the gateway, every unexpired
   lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
   address already reserved for another guest. The lease file and the neighbour

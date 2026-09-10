@@ -8,7 +8,7 @@ use lns_session::GuestNet;
 
 use super::{Allocator, Conflict};
 use crate::log;
-use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors};
+use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors, RealNetworkMemory};
 
 fn allocator() -> &'static Arc<Allocator> {
     static ALLOCATOR: OnceLock<Arc<Allocator>> = OnceLock::new();
@@ -110,8 +110,11 @@ pub async fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
     let mac = super::mac_for(vm_id);
     let net = super::reserve_on(
         allocator(),
-        &RealHostNetwork,
-        &RealHostFiles,
+        &crate::vm::host_net::HostView {
+            live: &RealHostNetwork,
+            files: &RealHostFiles,
+            memory: &RealNetworkMemory,
+        },
         owner,
         &mac,
         BRIDGE_ATTEMPTS,
