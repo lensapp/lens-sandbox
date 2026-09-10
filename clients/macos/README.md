@@ -128,8 +128,15 @@ coordinated app/service updates are still required before shipping it.
   An acknowledgment reports handling, not proof a grant persisted; refreshed
   history and live notices carry the outcome.
 - `WatchApprovals` streams complete `LiveApprovals` snapshots, including an
-  initial snapshot. Slow clients can skip intermediate snapshots without
+  initial snapshot. The JSON for each snapshot travels in bounded
+  `LiveApprovalsChunk` frames with UTF-8 byte offsets and a final `complete`
+  marker. Clients reassemble before publishing or coalescing snapshots; a
+  missing, reordered, or interrupted chunk cannot publish partial state.
+  Slow clients can skip intermediate completed snapshots without
   missing the current state. Reconnecting starts with current state again.
+  Notice dismissal uses bounded batches of exactly the notices observed.
+  A single notice too large for a dismissal request is reported without sending
+  any batches; it does not prevent receiving or answering approvals.
 - Each approval has a stable `id` for view identity and an opaque `token` for
   responding to its current presentation. Hold expiry changes the token but
   preserves the form's identity.
@@ -145,6 +152,8 @@ coordinated app/service updates are still required before shipping it.
 - Closing the panel hides it. **Dismiss Request** explicitly fails the held
   request without recording a decision. **Quit Interface** leaves the service
   running; **Stop Service and Quit LNS** sends `Shutdown`.
+  New failure notices also raise the panel, even after the last request is gone;
+  unchanged notices do not repeatedly bring a manually hidden panel forward.
 
 ## Verification
 

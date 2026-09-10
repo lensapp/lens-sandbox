@@ -3,7 +3,7 @@ import Foundation
 public struct FrameDecoder {
     private var buffer = Data()
     private static let magic = Data([76, 78, 83, 50])
-    private static let maximumLength = 1_048_576
+    static let maximumLength = 1_048_576
 
     public init() {}
 
