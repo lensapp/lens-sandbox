@@ -342,24 +342,24 @@ connector declares more than one method this version can offer — `lns` refuses
 rather than choosing for you.
 
 ```console
-$ lns connector grant github --run task-42 --yes
-granting github to task-42 would give it:
+$ lns connector grant forge --run task-42 --yes
+granting forge to task-42 would give it:
   method   Personal access token
-  opens    github.com, api.github.com, codeload.github.com
+  opens    forge.example, api.forge.example, codeload.forge.example
   writes   nothing
-  sets     GH_TOKEN
-  connection gh auth token (no authority reported)
+  sets     FORGE_TOKEN
+  connection forge auth token (no authority reported)
   no run is named task-42. This reserves the decision for the run you next create with that name.
-reserved github with token as gh auth token for task-42
+reserved forge with token as forge auth token for task-42
 ```
 
 Without a terminal and without the flag, `grant` refuses and names both ways
 out:
 
 ```console
-$ lns connector grant github --run task-45
-error: granting github shows what it opens and asks you to confirm, and there is no terminal to ask at.
-       Run `lns connector grant github --run task-45` from a terminal, or pass --yes to answer here.
+$ lns connector grant forge --run task-45
+error: granting forge shows what it opens and asks you to confirm, and there is no terminal to ask at.
+       Run `lns connector grant forge --run task-45` from a terminal, or pass --yes to answer here.
 ```
 
 You do not have to grant anything ahead of time. When a run reaches a destination

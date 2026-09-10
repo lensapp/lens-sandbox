@@ -717,6 +717,31 @@ mod tests {
         assert!(rendered.contains("unarmed"), "{rendered}");
     }
 
+    /// The one connector this repository ships is the document a reader copies, so a format move that stopped accepting it must fail here rather than in their hands.
+    #[test]
+    fn the_github_connector_this_repository_ships_is_a_document_this_version_accepts() {
+        let shipped: serde_json::Value =
+            serde_yaml::from_str(include_str!("../../../connectors/github/lns.yaml"))
+                .expect("the shipped document is YAML");
+        let parsed = parse(&serde_json::to_vec(&shipped).expect("a document re-encodes"))
+            .expect("the shipped document is a connector this version accepts");
+        let auth = parsed.spec.methods[0].auth.as_ref().expect("an auth");
+        let code = auth.code().expect("a code auth").expect("a valid one");
+        // What the grant card discloses about it, which no edit to the example may quietly widen.
+        assert_eq!(code.hosts, ["github.com"]);
+        assert!(!code.exec);
+        // The file the wasm suite runs by literal path, so renaming one side without the other fails here rather than at install.
+        assert_eq!(code.component.as_deref(), Some("./sign-in.wasm"));
+        assert_eq!(code.limits().call_seconds, 15);
+        assert_eq!(code.limits().session_seconds, 900);
+        // The join between the two halves of the example: dropping an output the component still produces parses, and then stores a connection with a hole nothing reports until a renewal fails.
+        assert_eq!(
+            code.outputs,
+            ["access_token", "refresh_token", "client_id"],
+            "the outputs the shipped component is pinned to produce"
+        );
+    }
+
     fn code_method(auth: &str, credentials: &str) -> Vec<u8> {
         with_methods(&format!(
             r#"[{{"name":"sign-in","auth":{auth},"credentials":[{credentials}]}}]"#

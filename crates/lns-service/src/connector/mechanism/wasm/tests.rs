@@ -601,3 +601,210 @@ fn bytes_that_are_not_a_component_are_refused_when_the_connector_is_read() {
             .contains("the component this method connects with")
     );
 }
+
+/// The one connector this repository ships, driven as a user drives it. Committed bytes prove nothing by being byte-equal to their source; these prove they run.
+mod the_shipped_github_connector {
+    use super::*;
+    use crate::connector::mechanism::Field;
+
+    fn shipped() -> (Runtime, Component) {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../connectors/github/sign-in.wasm"
+        );
+        let runtime = Runtime::new().expect("the component runtime starts");
+        let bytes = std::fs::read(path).expect("the committed component");
+        let component = runtime.compile(&bytes).expect("it compiles");
+        (runtime, component)
+    }
+
+    const NAMED_A_CODE: &str = r#"{"device_code":"dc-1","user_code":"WDJB-MJHT","verification_uri":"https://github.com/login/device","interval":5}"#;
+    const NOT_YET: &str = r#"{"error":"authorization_pending"}"#;
+    const ACCEPTED: &str =
+        r#"{"access_token":"ghu_first","refresh_token":"ghr_first","expires_in":28800}"#;
+
+    fn asked(step: &Step) -> (&str, &[Field], &[u8]) {
+        let Step::Ask {
+            message,
+            fields,
+            state,
+        } = step
+        else {
+            panic!("a round that asks, not {step:?}");
+        };
+        (message, fields, state)
+    }
+
+    fn answering(script: &[(u16, &str)]) -> (Parts, Bounds) {
+        (Parts::answering(script), reaching(&["github.com"]))
+    }
+
+    #[test]
+    fn a_sign_in_asks_for_a_client_id_shows_a_code_waits_and_then_produces_every_output() {
+        let (_runtime, component) = shipped();
+        let (parts, bounds) = answering(&[(200, NAMED_A_CODE), (200, NOT_YET), (200, ACCEPTED)]);
+        let host = parts.host(bounds);
+
+        let first = component.connect(&host, 1_000).expect("a first round");
+        let (_, fields, state) = asked(&first);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "client_id");
+        assert!(!fields[0].secret, "a client id is not a secret");
+
+        let answers = Answers::from([("client_id".to_string(), "Iv1.abc".to_string())]);
+        let showing = component
+            .resume(&host, state, &answers, 1_000)
+            .expect("a second round");
+        let (message, fields, state) = asked(&showing);
+        assert!(fields.is_empty(), "a device-code round collects nothing");
+        assert!(message.contains("WDJB-MJHT"), "{message}");
+        assert!(
+            message.contains("https://github.com/login/device"),
+            "{message}"
+        );
+
+        let still_waiting = component
+            .resume(&host, state, &Answers::new(), 1_000)
+            .expect("a third round");
+        let (again, _, state) = asked(&still_waiting);
+        assert_eq!(again, message, "a pending poll shows the same code again");
+
+        let finished = component
+            .resume(&host, state, &Answers::new(), 1_000)
+            .expect("a fourth round");
+        let Step::Done(outcome) = finished else {
+            panic!("an accepted code finishes the connect, not {finished:?}");
+        };
+        assert_eq!(
+            outcome.values,
+            Answers::from([
+                ("access_token".to_string(), "ghu_first".to_string()),
+                ("refresh_token".to_string(), "ghr_first".to_string()),
+                ("client_id".to_string(), "Iv1.abc".to_string()),
+            ]),
+            "every output the method declares, so lns stores the connection whole"
+        );
+        assert_eq!(outcome.expires_at_millis, Some(1_000 + 28_800_000));
+        assert_eq!(
+            *parts.http.seen.lock().expect("http lock"),
+            [
+                "https://github.com/login/device/code",
+                "https://github.com/login/oauth/access_token",
+                "https://github.com/login/oauth/access_token",
+            ],
+            "nothing but github.com, and one poll per round the user pressed through"
+        );
+    }
+
+    #[test]
+    fn an_app_that_does_not_expire_its_tokens_fails_the_connect_and_names_the_setting() {
+        // Without a refresh token the connection could never be renewed, so the component refuses rather than storing a connection with a hole in it.
+        let (_runtime, component) = shipped();
+        let (parts, bounds) = answering(&[
+            (200, NAMED_A_CODE),
+            (200, r#"{"access_token":"ghu_first","expires_in":28800}"#),
+        ]);
+        let host = parts.host(bounds);
+
+        let showing = component
+            .resume(
+                &host,
+                asked(&component.connect(&host, 0).expect("a first round")).2,
+                &Answers::from([("client_id".to_string(), "Iv1.abc".to_string())]),
+                0,
+            )
+            .expect("a second round");
+        let refusal = component
+            .resume(&host, asked(&showing).2, &Answers::new(), 0)
+            .expect("a third round");
+
+        let Step::Failed(why) = refusal else {
+            panic!("a missing refresh token fails the connect, not {refusal:?}");
+        };
+        assert!(why.contains("Expire user authorization tokens"), "{why}");
+    }
+
+    #[test]
+    fn a_renewal_of_a_connection_holding_no_client_id_fails_before_anything_leaves_the_machine() {
+        // GitHub needs no client secret to renew a device-flow token, but it does need the client id, and lns keeps only what the method declared.
+        let (_runtime, component) = shipped();
+        let (parts, bounds) = answering(&[]);
+        let host = parts.host(bounds);
+
+        let refusal = component
+            .refresh(
+                &host,
+                &Answers::from([("refresh_token".to_string(), "ghr_first".to_string())]),
+                0,
+            )
+            .expect_err("a renewal with nothing to renew from");
+
+        assert!(format!("{refusal:#}").contains("client_id"), "{refusal:#}");
+        assert!(
+            parts.http.seen.lock().expect("http lock").is_empty(),
+            "nothing is asked of github before the component knows what to ask with"
+        );
+    }
+
+    #[test]
+    fn a_renewal_rotates_both_tokens_and_still_produces_every_output() {
+        // The renewal runs unattended and its failure is only a log line, so what it produces is pinned here or nowhere.
+        let (_runtime, component) = shipped();
+        let (parts, bounds) = answering(&[(
+            200,
+            r#"{"access_token":"ghu_second","refresh_token":"ghr_second","expires_in":28800}"#,
+        )]);
+        let host = parts.host(bounds);
+
+        let renewed = component
+            .refresh(
+                &host,
+                &Answers::from([
+                    ("access_token".to_string(), "ghu_first".to_string()),
+                    ("refresh_token".to_string(), "ghr_first".to_string()),
+                    ("client_id".to_string(), "Iv1.abc".to_string()),
+                ]),
+                2_000,
+            )
+            .expect("the connection renews");
+
+        assert_eq!(
+            renewed.values,
+            Answers::from([
+                ("access_token".to_string(), "ghu_second".to_string()),
+                ("refresh_token".to_string(), "ghr_second".to_string()),
+                ("client_id".to_string(), "Iv1.abc".to_string()),
+            ]),
+            "a renewal keeping the spent refresh token would work once and never again"
+        );
+        assert_eq!(renewed.expires_at_millis, Some(2_000 + 28_800_000));
+        assert_eq!(
+            *parts.http.seen.lock().expect("http lock"),
+            ["https://github.com/login/oauth/access_token"],
+            "a renewal asks the token endpoint, not the one that names a device code"
+        );
+    }
+
+    #[test]
+    fn a_renewal_github_refuses_is_an_error_and_never_a_connection_of_empty_values() {
+        let (_runtime, component) = shipped();
+        let (parts, bounds) = answering(&[(200, r#"{"error":"bad_refresh_token"}"#)]);
+        let host = parts.host(bounds);
+
+        let refusal = component
+            .refresh(
+                &host,
+                &Answers::from([
+                    ("refresh_token".to_string(), "ghr_first".to_string()),
+                    ("client_id".to_string(), "Iv1.abc".to_string()),
+                ]),
+                2_000,
+            )
+            .expect_err("GitHub refused the renewal");
+
+        assert!(
+            format!("{refusal:#}").contains("bad_refresh_token"),
+            "{refusal:#}"
+        );
+    }
+}
