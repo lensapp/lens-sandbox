@@ -500,10 +500,10 @@ pub(crate) mod tests {
             unreadable.to_string().contains("arp: no such file"),
             "{unreadable}"
         );
+        let explained = unreadable.explain();
         assert!(
-            unreadable.explain().contains(ENABLE_ENV),
-            "the remedy names the setting that turned this path on: {}",
-            unreadable.explain()
+            explained.contains(ENABLE_ENV),
+            "no remedy named: {explained}"
         );
     }
 

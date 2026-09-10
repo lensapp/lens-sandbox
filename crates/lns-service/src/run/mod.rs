@@ -644,18 +644,11 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
         let code = emit_completion(&tx, exhausted).await;
         assert_eq!(code, 125, "lns failed before the workload started");
-        match rx.recv().await {
-            Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
-                assert!(matches!(level, lns_ipc::LogLevel::Error));
-                assert!(message.contains("192.168.64.0/24"), "{message}");
-                assert!(message.contains("remedy:"), "{message}");
-                assert!(
-                    !message.contains("reserving an address on the host network"),
-                    "the user reads the cause and the remedy, not the host's call stack: {message}"
-                );
-            }
-            other => panic!("expected the host-rendered refusal, got {other:?}"),
-        }
+        let refusal = format!("{:?}", rx.recv().await);
+        assert!(refusal.contains("level: Error"), "{refusal}");
+        assert!(refusal.contains("192.168.64.0/24"), "{refusal}");
+        assert!(refusal.contains("remedy:"), "{refusal}");
+        assert!(!refusal.contains("reserving an address"), "{refusal}");
 
         let undiscoverable = Err(
             anyhow::Error::new(ReserveError::Network(std::io::Error::other(
@@ -669,12 +662,9 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
         assert_eq!(emit_completion(&tx, undiscoverable).await, 125);
-        match rx.recv().await {
-            Some(WireFrame::Json(Response::RunLog { message, .. })) => {
-                assert!(message.contains("neither active nor declared"), "{message}");
-            }
-            other => panic!("expected the host-rendered refusal, got {other:?}"),
-        }
+        let undiscoverable = format!("{:?}", rx.recv().await);
+        let said = undiscoverable.contains("neither active nor declared");
+        assert!(said, "{undiscoverable}");
     }
 
     #[tokio::test]
