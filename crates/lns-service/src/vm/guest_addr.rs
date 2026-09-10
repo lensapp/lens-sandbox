@@ -1172,6 +1172,11 @@ pub(crate) mod tests {
         host
     }
 
+    /// A guest the host cannot reach; a run that reaches this has already discovered its network.
+    async fn no_guest() -> std::io::Result<tokio::io::DuplexStream> {
+        Err(std::io::Error::other("vsock connect refused"))
+    }
+
     fn timing() -> BootTiming {
         BootTiming {
             attempts: 2,
@@ -1218,6 +1223,41 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn an_address_the_host_no_longer_holds_starts_no_workload() {
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let taken = Ipv4Addr::new(192, 168, 66, 253);
+        let error = address_guest(
+            &allocator,
+            &Bridge(LIVE),
+            || async {
+                allocator.release("run-a");
+                Ok(scripted_guest(Some(
+                    lns_session::ServerFrame::NetworkApplied {
+                        address: taken.to_string(),
+                    },
+                )))
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            timing(),
+        )
+        .await
+        .expect_err("a run whose reservation is gone cannot be given an address");
+        assert!(
+            matches!(
+                error,
+                AddressError::Reserve(ReserveError::Select(SelectError::UnknownOwner))
+            ),
+            "{error:?}"
+        );
+        assert!(allocator.reserved().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_guest_that_never_answers_gives_the_address_back_instead_of_holding_it() {
         let allocator = allocator_with(
             FakeHostFiles::new().with(LEASES_PATH, ""),
@@ -1238,13 +1278,8 @@ pub(crate) mod tests {
         .await
         .expect_err("a guest that reports nothing has taken nothing");
         assert!(
-            matches!(
-                error,
-                AddressError::Reserve(ReserveError::Bootstrap(
-                    crate::vm::net_bootstrap::BootstrapError::Disconnected
-                ))
-            ),
-            "{error:?}"
+            error.to_string().contains("closed the bootstrap channel"),
+            "{error}"
         );
         assert!(
             allocator.reserved().is_empty(),
@@ -1302,9 +1337,7 @@ pub(crate) mod tests {
         let error = address_guest(
             &allocator,
             &Bridge(LIVE),
-            || async {
-                Err::<tokio::io::DuplexStream, _>(std::io::Error::other("vsock connect refused"))
-            },
+            no_guest,
             "run-a",
             "52:54:00:00:00:01",
             timing(),
@@ -1329,11 +1362,7 @@ pub(crate) mod tests {
         let error = address_guest(
             &empty_host(),
             &AbsentBridge,
-            || async {
-                panic!("nothing is sent to a guest before the host knows what to send it");
-                #[allow(unreachable_code)]
-                Ok::<tokio::io::DuplexStream, std::io::Error>(unreachable!())
-            },
+            no_guest,
             "run-a",
             "52:54:00:00:00:01",
             timing(),

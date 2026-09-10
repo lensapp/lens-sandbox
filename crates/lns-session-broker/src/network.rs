@@ -1044,10 +1044,11 @@ mod static_tests {
             matches!(result, NetworkResult::AwaitingBootstrap),
             "{result:?}"
         );
+        let calls = runner.calls();
+        let untouched = calls.is_empty();
         assert!(
-            runner.calls().is_empty(),
-            "a guest the host addresses touches no interface before the host sends it a plan: {:?}",
-            runner.calls()
+            untouched,
+            "a guest the host addresses touches no interface before the host sends it a plan: {calls:?}"
         );
     }
 

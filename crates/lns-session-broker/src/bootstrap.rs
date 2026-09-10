@@ -78,6 +78,14 @@ fn frame_name(frame: &ClientFrame) -> &'static str {
 mod tests {
     use super::*;
     use lns_session::{BrokerExitReason, ClientFrame, GuestNet, ServerFrame};
+
+    /// An apply the test can hold to account for: it reports how many times the guest touched its interface, so "nothing was applied" is asserted rather than assumed.
+    fn counted(calls: &Cell<usize>) -> impl FnOnce(&GuestNet) -> Result<Applied, BrokerExitReason> {
+        move |_| {
+            calls.set(calls.get() + 1);
+            Ok(applied())
+        }
+    }
     use std::cell::Cell;
     use std::net::Ipv4Addr;
 
@@ -118,11 +126,15 @@ mod tests {
 
     #[test]
     fn nothing_but_a_plan_opens_this_channel() {
+        let calls = Cell::new(0);
         let outcome = respond(
             Some(ClientFrame::StdinBytes(b"whoami".to_vec())),
-            |_| -> Result<crate::network::Applied, BrokerExitReason> {
-                panic!("the guest configured its network for a frame that carried no plan")
-            },
+            counted(&calls),
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "a frame that carries no plan must configure nothing"
         );
         let Bootstrap::Refused(reason) = &outcome else {
             panic!("a workload frame must never reach an unaddressed guest: {outcome:?}");
@@ -136,28 +148,21 @@ mod tests {
 
     #[test]
     fn a_host_that_hangs_up_before_it_sends_a_plan_leaves_a_refusal_not_a_wait() {
-        let outcome = respond(
-            None,
-            |_| -> Result<crate::network::Applied, BrokerExitReason> {
-                panic!("no plan arrived, so nothing may be configured")
-            },
-        );
+        let calls = Cell::new(0);
+        let outcome = respond(None, counted(&calls));
         let Bootstrap::Refused(reason) = &outcome else {
             panic!("{outcome:?}");
         };
         assert!(reason.summary().contains("closed"), "{reason:?}");
+        assert_eq!(calls.get(), 0, "no plan arrived, so nothing was configured");
     }
 
     #[test]
     fn a_plan_the_guest_cannot_use_is_refused_before_the_interface_is_touched() {
         let mut broken = plan();
         broken.candidates.clear();
-        let outcome = respond(
-            Some(ClientFrame::ConfigureNetwork(broken)),
-            |_| -> Result<crate::network::Applied, BrokerExitReason> {
-                panic!("an unusable plan must never be applied")
-            },
-        );
+        let calls = Cell::new(0);
+        let outcome = respond(Some(ClientFrame::ConfigureNetwork(broken)), counted(&calls));
         let Bootstrap::Refused(reason) = &outcome else {
             panic!("{outcome:?}");
         };
@@ -165,24 +170,67 @@ mod tests {
             reason.summary().contains("no candidate address"),
             "{reason:?}"
         );
+        assert_eq!(
+            calls.get(),
+            0,
+            "an unusable plan is refused before the interface is touched"
+        );
     }
 
     #[test]
     fn each_outcome_gets_one_console_line() {
-        let applied = respond(Some(ClientFrame::ConfigureNetwork(plan())), |_| {
-            Ok(applied())
-        });
+        let calls = Cell::new(0);
+        let applied = respond(Some(ClientFrame::ConfigureNetwork(plan())), counted(&calls));
+        assert_eq!(calls.get(), 1, "the plan the host sent was applied");
         assert!(
             narrate(&applied).contains("192.168.64.254/24"),
             "{applied:?}"
         );
-        let refused = respond(
-            None,
-            |_| -> Result<crate::network::Applied, BrokerExitReason> {
-                unreachable!("no plan arrived")
-            },
-        );
+        let refused = respond(None, counted(&calls));
         assert!(narrate(&refused).contains("refusing"), "{refused:?}");
+    }
+
+    #[test]
+    fn every_frame_the_host_could_send_too_early_is_named_in_the_refusal() {
+        for (frame, named) in [
+            (ClientFrame::StdinClose, "an input close"),
+            (
+                ClientFrame::Resize(lns_session::Winsize { rows: 1, cols: 1 }),
+                "a resize",
+            ),
+            (
+                ClientFrame::Signal(lns_session::SignalKind::Term),
+                "a signal",
+            ),
+            (ClientFrame::Detach, "a detach"),
+            (
+                ClientFrame::OpenSession {
+                    argv: Vec::new(),
+                    env: Vec::new(),
+                    cwd: None,
+                    hostname: None,
+                    tty: false,
+                    stdin: false,
+                    winsize: None,
+                    confine: false,
+                    dies_with_client: false,
+                },
+                "a session request",
+            ),
+        ] {
+            let calls = Cell::new(0);
+            let outcome = respond(Some(frame), counted(&calls));
+            let Bootstrap::Refused(reason) = &outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(reason.summary().contains(named), "{reason:?}");
+            assert_eq!(calls.get(), 0);
+        }
+        assert_eq!(
+            frame_name(&ClientFrame::ConfigureNetwork(plan())),
+            "a network plan",
+            "the one frame this channel is for is named too, for the log that reports it"
+        );
     }
 
     #[test]
